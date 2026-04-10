@@ -1,0 +1,87 @@
+# 深度实验配置（更接近“投稿级证据链”）
+# 使用方式:
+#   python launch_scientist_zhipu.py ... --bfts-config bfts_config_deep.yaml
+#
+# 说明:
+# - 该配置符合当前 BFTS/AgentManager 的真实 schema（可直接生效），不是示意/套壳配置。
+# - 并行度会在运行时自动按 GPU 数量裁剪（ParallelAgent 会限制 num_workers <= num_gpus）。
+# - 多 seed 会在每个 main stage 完成后对 best node 进行复测，并写入 logs/<N-run>/results.tsv。
+
+# path to the task data directory (mostly unused for HF datasets; kept for compatibility)
+data_dir: "data"
+preprocess_data: False
+
+goal: null
+eval: null
+
+log_dir: logs
+workspace_dir: workspaces
+
+# prefer symlinks over full copies when a local data_dir is provided
+copy_data: False
+
+exp_name: run
+
+# settings for code execution
+exec:
+  timeout: 3600
+  agent_file_name: runfile.py
+  format_tb_ipython: False
+
+generate_report: True
+# LLM settings for final report from journal
+report:
+  model: glm-4-flash
+  temp: 0.8
+
+experiment:
+  # Encourage evaluation on multiple dataset variants when the agent chooses to do so.
+  num_syn_datasets: 3
+
+debug:
+  stage4: False
+
+agent:
+  type: parallel
+  # Upper bound; will be capped to GPU count automatically if GPUs are present.
+  num_workers: 4
+
+  # Main-stage budgets (sub-stages reuse the same budget for the same main stage).
+  stages:
+    stage1_max_iters: 25
+    stage2_max_iters: 20
+    stage3_max_iters: 22
+    stage4_max_iters: 18
+
+  # Fallback budget used when a stage budget key is missing
+  steps: 12
+  k_fold_validation: 1
+
+  multi_seed_eval:
+    num_seeds: 5
+    seeds: [42, 123, 456, 789, 2024]
+
+  expose_prediction: False
+  data_preview: False
+
+  # LLM settings for coding
+  code:
+    model: glm-4-plus
+    temp: 0.8
+    max_tokens: 8192
+
+  # LLM settings for evaluating program output / tracebacks / metric parsing prompts
+  feedback:
+    model: glm-4-flash
+    temp: 0.3
+    max_tokens: 4096
+
+  vlm_feedback:
+    model: glm-4-flash
+    temp: 0.3
+    max_tokens: null
+
+  search:
+    max_debug_depth: 3
+    debug_prob: 0.35
+    num_drafts: 2

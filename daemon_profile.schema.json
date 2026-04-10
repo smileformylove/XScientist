@@ -1,0 +1,443 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/daemon_profile.schema.json",
+  "title": "AI Scientist Daemon Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "research_dir": {
+      "type": "string"
+    },
+    "daemon_name": {
+      "type": "string"
+    },
+    "source_config": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "topic": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ideas": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "topic_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ideas_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_rotation": {
+      "type": "string",
+      "enum": [
+        "fixed",
+        "round_robin"
+      ]
+    },
+    "duration_hours": {
+      "type": [
+        "number",
+        "integer"
+      ]
+    },
+    "run_forever": {
+      "type": "boolean"
+    },
+    "max_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "sleep_minutes": {
+      "type": [
+        "number",
+        "integer"
+      ]
+    },
+    "failure_backoff_minutes": {
+      "type": [
+        "number",
+        "integer"
+      ]
+    },
+    "cycle_timeout_minutes": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "day_start_hour": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 23
+    },
+    "night_start_hour": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 23
+    },
+    "serve_dashboard": {
+      "type": "boolean"
+    },
+    "dashboard_host": {
+      "type": "string"
+    },
+    "dashboard_port": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dashboard_refresh_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "enable_rewrite_followup": {
+      "type": "boolean"
+    },
+    "rewrite_followup_top_k": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rewrite_followup_include_ready": {
+      "type": "boolean"
+    },
+    "rewrite_followup_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rewrite_followup_quality_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rewrite_followup_preset": {
+      "type": "string",
+      "enum": [
+        "balanced",
+        "high",
+        "publishable"
+      ]
+    },
+    "rewrite_followup_max_rounds": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "rewrite_followup_quality_threshold": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "rewrite_followup_rigor_threshold": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "guardrail_submission_target": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_min_followup_gain": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "guardrail_stagnation_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_empty_rewrite_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_strong_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_default_num_ideas": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_num_ideas_step": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_min_num_ideas": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_max_num_ideas": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_generate_sleep_minutes": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "guardrail_focus_sleep_minutes": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "phase_warmup_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "phase_cold_start_submission_target": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "phase_hot_polish_submission_target": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "summary_every_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "daily_summary_every_cycles": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "python": {
+      "type": "string"
+    },
+    "default_submission_mode": {
+      "type": "boolean"
+    },
+    "submission_board_top": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "submission_board_min_priority": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "submission_board_max_blockers": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "submission_board_min_rewrite_gain": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "submission_board_require_gate": {
+      "type": "boolean"
+    },
+    "rewrite_board_top": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "rewrite_board_venue": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "neurips",
+        "iclr",
+        "cvpr",
+        "journal",
+        "nature"
+      ]
+    },
+    "rewrite_board_min_priority": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "rewrite_board_min_gain": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "rewrite_board_max_blockers": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "rewrite_board_require_gate": {
+      "type": "boolean"
+    },
+    "rewrite_board_include_ready": {
+      "type": "boolean"
+    },
+    "shortlist_top": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "shortlist_venue": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "neurips",
+        "iclr",
+        "cvpr",
+        "journal",
+        "nature"
+      ]
+    },
+    "shortlist_min_priority": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "shortlist_max_blockers": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "shortlist_min_rewrite_gain": {
+      "type": [
+        "number",
+        "integer",
+        "null"
+      ]
+    },
+    "shortlist_require_gate": {
+      "type": "boolean"
+    },
+    "shortlist_require_ready": {
+      "type": "boolean"
+    },
+    "generator_args": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "source_config"
+      ]
+    },
+    {
+      "required": [
+        "topic"
+      ]
+    },
+    {
+      "required": [
+        "ideas"
+      ]
+    },
+    {
+      "required": [
+        "topic_files"
+      ]
+    },
+    {
+      "required": [
+        "ideas_files"
+      ]
+    }
+  ]
+}

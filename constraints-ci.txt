@@ -1,0 +1,50 @@
+# CI-oriented dependency constraints.
+#
+# Goal:
+# - reduce upstream drift risk in GitHub Actions
+# - keep ranges broad enough for open-source contributors
+# - avoid forcing strict pinning for local development
+#
+# Usage:
+#   pip install -r requirements.txt -c constraints-ci.txt
+
+# LLM APIs
+anthropic>=0.25,<1
+backoff>=2,<3
+openai>=1.40,<3
+zhipuai>=2,<3
+
+# Viz / document processing
+matplotlib>=3.8,<4
+pillow>=10,<12
+pandas>=2,<3
+pypdf>=4,<7
+pymupdf>=1.24,<2
+pymupdf4llm>=0.0.20,<1
+seaborn>=0.13,<1
+
+# Common dependencies
+numpy>=1.26,<3
+psutil>=5.9,<8
+PyYAML>=6,<7
+requests>=2.31,<3
+scikit-learn>=1.4,<2
+transformers>=4.40,<5
+datasets>=2.19,<5
+tiktoken>=0.7,<1
+wandb>=0.17,<1
+tqdm>=4.66,<5
+rich>=13,<15
+humanize>=4,<5
+dataclasses-json>=0.6,<1
+funcy>=2,<3
+black>=24,<26
+genson>=1.2,<2
+shutup>=0.2,<1
+python-igraph>=0.11,<1
+coolname>=2,<3
+jsonschema>=4.22,<5
+omegaconf>=2.3,<3
+botocore>=1.34,<2
+boto3>=1.34,<2
+huggingface-hub>=0.23,<2

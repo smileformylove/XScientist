@@ -1,0 +1,370 @@
+# ⚠️ 注意: 该文件目前不被 BFTS 配置加载器使用（结构与当前运行时 schema 不一致），属于“规划草案/套壳配置”。
+# 推荐使用已经实际接入的深度配置: `bfts_config_deep.yaml`，并通过 `--bfts-config` 传入。
+#
+# 增强的实验配置（草案）
+# 用于记录未来可能接入的更复杂配置维度（阶段预算/统计检验/架构搜索等）。
+
+# ============================================
+# 实验阶段配置
+# ============================================
+experiment:
+  # 阶段迭代次数（增强版）
+  stages:
+    initial_implementation:
+      max_iters: 20          # 增加初始实现轮次
+      description: "初始实现和验证"
+
+    baseline_tuning:
+      max_iters: 15          # 增加基线调优轮次
+      description: "基线方法优化"
+
+    creative_research:
+      max_iters: 20          # 增加创新研究轮次
+      description: "创新方法探索"
+
+    ablation_studies:
+      max_iters: 15          # 增加消融研究轮次
+      description: "消融实验分析"
+
+    comparison_studies:
+      max_iters: 12          # 新增：对比研究
+      description: "与SOTA方法对比"
+
+  # 多种子评估
+  multi_seed_eval:
+    enabled: true
+    num_seeds: 5            # 增加随机种子数量
+    seeds: [42, 123, 456, 789, 2024]
+
+  # 自适应预算
+  adaptive_budget:
+    enabled: true
+    initial_budget: 100
+    budget_increase_factor: 1.5
+    max_budget: 500
+
+# ============================================
+# 基线方法配置
+# ============================================
+baselines:
+  # 自动检测和包含SOTA方法
+  auto_sota_detection:
+    enabled: true
+    sources:
+      - "papers_with_code"
+      - "github_trending"
+      - "arxiv_recent"
+
+  # 预定义基线方法库
+  methods:
+    - name: "standard_baseline"
+      type: "classical"
+      description: "标准基线方法"
+
+    - name: "recent_sota_1"
+      type: "neural"
+      description: "最新SOTA方法1"
+      year: 2024
+
+    - name: "recent_sota_2"
+      type: "neural"
+      description: "最新SOTA方法2"
+      year: 2024
+
+    - name: "lightweight_variant"
+      type: "efficient"
+      description: "轻量级变体"
+
+# ============================================
+# 评估指标配置
+# ============================================
+evaluation:
+  # 主要指标
+  primary_metric: "accuracy"
+
+  # 次要指标（多维度评估）
+  secondary_metrics:
+    - "precision"
+    - "recall"
+    - "f1_score"
+    - "auc_roc"
+    - "inference_time"
+    - "memory_usage"
+    - "training_time"
+    - "parameter_count"
+
+  # 不确定性量化
+  uncertainty_quantification:
+    enabled: true
+    methods:
+      - "bootstrap"
+      - "monte_carlo_dropout"
+      - "ensemble"
+
+  # 统计显著性检验
+  statistical_tests:
+    enabled: true
+    tests:
+      - "t_test"
+      - "wilcoxon"
+      - "mann_whitney"
+    significance_level: 0.05
+
+# ============================================
+# 数据集配置
+# ============================================
+datasets:
+  # 主数据集
+  primary:
+    name: "primary_dataset"
+    train_split: 0.7
+    val_split: 0.15
+    test_split: 0.15
+
+  # 额外数据集（用于泛化性测试）
+  additional:
+    - name: "ood_dataset_1"
+      type: "out_of_distribution"
+      description: "分布外数据集1"
+
+    - name: "ood_dataset_2"
+      type: "out_of_distribution"
+      description: "分布外数据集2"
+
+    - name: "noise_robustness"
+      type: "noise"
+      noise_levels: [0.1, 0.2, 0.3]
+
+# ============================================
+# 模型架构探索
+# ============================================
+architecture_search:
+  enabled: true
+
+  # 架构变体
+  variants:
+    - name: "baseline_arch"
+      description: "基线架构"
+
+    - name: "wide_variant"
+      description: "更宽版本"
+      width_multiplier: 1.5
+
+    - name: "deep_variant"
+      description: "更深版本"
+      depth_multiplier: 1.5
+
+    - name: "efficient_variant"
+      description: "高效版本"
+      efficiency_target: "low_flops"
+
+# ============================================
+# 超参数优化
+# ============================================
+hyperparameter_optimization:
+  enabled: true
+
+  # 优化方法
+  method: "bayesian"  # bayesian, random, grid
+
+  # 搜索空间
+  search_space:
+    learning_rate:
+      type: "log_uniform"
+      min: 1e-5
+      max: 1e-1
+
+    batch_size:
+      type: "categorical"
+      values: [16, 32, 64, 128]
+
+    hidden_dim:
+      type: "categorical"
+      values: [128, 256, 512, 1024]
+
+    dropout:
+      type: "uniform"
+      min: 0.0
+      max: 0.5
+
+    weight_decay:
+      type: "log_uniform"
+      min: 1e-6
+      max: 1e-3
+
+  # 优化轮次
+  max_trials: 50
+
+# ============================================
+# 早停配置
+# ============================================
+early_stopping:
+  enabled: true
+
+  patience: 10
+  min_delta: 0.001
+  monitor_metric: "val_loss"
+  mode: "min"
+
+# ============================================
+# 日志和可视化
+# ============================================
+logging:
+  # 实验跟踪
+  experiment_tracking:
+    enabled: true
+    backend: "wandb"  # wandb, tensorboard, mlflow
+
+  # 详细日志级别
+  verbosity: "debug"
+
+  # 可视化
+  visualizations:
+    - "loss_curves"
+    - "accuracy_curves"
+    - "confusion_matrix"
+    - "roc_curve"
+    - "precision_recall_curve"
+    - "training_speed"
+    - "memory_usage"
+
+# ============================================
+# 模型选择策略
+# ============================================
+llm_strategy:
+  # 推理任务
+  reasoning:
+    model: "o1-2024-12-17"  # 最强推理模型
+    fallback: "claude-3-5-sonnet"
+    temperature: 0.1
+
+  # 代码生成
+  coding:
+    model: "glm-4-flash"
+    fallback: "gpt-4o-mini"
+    temperature: 0.3
+
+  # 论文写作
+  writing:
+    model: "claude-3-5-sonnet"
+    fallback: "gpt-4o"
+    temperature: 0.7
+
+  # 数据分析
+  analysis:
+    model: "gpt-4o"
+    fallback: "claude-3-5-sonnet"
+    temperature: 0.2
+
+  # 文献检索
+  literature:
+    model: "glm-4-air"
+    fallback: "glm-4-flash"
+    temperature: 0.1
+
+# ============================================
+# 提示词优化
+# ============================================
+prompt_optimization:
+  # Few-shot学习
+  few_shot_examples: 3
+
+  # 思维链
+  chain_of_thought: true
+
+  # 自我一致性
+  self_consistency:
+    enabled: true
+    num_samples: 5
+
+  # 专家角色
+  expert_role: "Senior ML Researcher with 10+ years of experience"
+
+  # 结构化输出
+  structured_output: true
+
+# ============================================
+# 创新性配置
+# ============================================
+innovation:
+  # 突破性想法生成
+  breakthrough_mode:
+    enabled: false  # 可选启用
+    prompts:
+      - "从跨学科角度提出全新方法"
+      - "挑战现有假设并验证"
+      - "探索问题的根本原因"
+
+  # 创新性评估
+  innovation_scoring:
+    enabled: true
+    dimensions:
+      - name: "novelty"
+        weight: 0.3
+        description: "创新性和新颖程度"
+
+      - name: "feasibility"
+        weight: 0.3
+        description: "可行性和实现难度"
+
+      - name: "impact"
+        weight: 0.2
+        description: "潜在影响力"
+
+      - name: "clarity"
+        weight: 0.2
+        description: "想法清晰度"
+
+# ============================================
+# 质量控制
+# ============================================
+quality_control:
+  # 代码质量检查
+  code_quality:
+    enabled: true
+    checks:
+      - "pep8"
+      - "type_hints"
+      - "docstrings"
+      - "unit_tests"
+
+  # 实验可重复性
+  reproducibility:
+    enabled: true
+    requirements:
+      - "fixed_random_seed"
+      - "detailed_logging"
+      - "environment_info"
+      - "dependency_tracking"
+
+  # 结果验证
+  result_validation:
+    enabled: true
+    checks:
+      - "sanity_checks"
+      - "outlier_detection"
+      - "statistical_significance"
+      - "reproducibility_test"
+
+# ============================================
+# 资源限制
+# ============================================
+resources:
+  # 时间限制
+  time_limits:
+    stage1: 3600      # 1小时
+    stage2: 5400      # 1.5小时
+    stage3: 7200      # 2小时
+    stage4: 3600      # 1小时
+    stage5: 5400      # 1.5小时
+
+  # GPU内存限制
+  gpu_memory:
+    max_gb: 24
+    check_frequency: 100
+
+  # 并行配置
+  parallel:
+    enabled: true
+    max_workers: 4
+    per_worker_gpu_memory: 6  # GB

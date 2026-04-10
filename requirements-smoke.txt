@@ -1,0 +1,44 @@
+# Minimal dependency set for GitHub smoke checks.
+#
+# Goal:
+# - keep CI focused on validator / preflight / unit-test coverage
+# - avoid pulling in heavyweight optional research extras that are not needed
+#   for repository smoke checks
+#
+# Full local development still uses requirements.txt.
+
+# LLM APIs
+anthropic
+backoff
+openai
+zhipuai
+
+# Viz / document processing
+matplotlib
+pillow
+pandas
+pypdf
+pymupdf
+pymupdf4llm
+seaborn
+
+# Common runtime / validation dependencies
+numpy
+psutil
+PyYAML
+requests
+scikit-learn
+tiktoken
+tqdm
+rich
+humanize
+dataclasses-json
+funcy
+black
+genson
+shutup
+python-igraph
+coolname
+jsonschema
+omegaconf
+huggingface-hub

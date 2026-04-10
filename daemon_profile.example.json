@@ -1,0 +1,32 @@
+{
+  "research_dir": "./research_output",
+  "daemon_name": "stable_submission_daemon",
+  "source_config": "source_priority.example.json",
+  "source_rotation": "round_robin",
+  "duration_hours": 24,
+  "sleep_minutes": 10,
+  "failure_backoff_minutes": 20,
+  "serve_dashboard": true,
+  "dashboard_port": 8000,
+  "dashboard_refresh_seconds": 20,
+  "enable_rewrite_followup": true,
+  "rewrite_followup_top_k": 2,
+  "rewrite_followup_preset": "publishable",
+  "submission_board_min_priority": 75,
+  "rewrite_board_min_gain": 0.5,
+  "shortlist_min_priority": 75,
+  "generator_args": [
+    "--submission-mode",
+    "--paper-types",
+    "normal",
+    "journal",
+    "--num-ideas",
+    "4"
+  ],
+  "adaptive_rewrite_followup": true,
+  "rewrite_followup_skip_blocker_threshold": 6,
+  "rewrite_followup_blocker_reduction_threshold": 4,
+  "rewrite_followup_ready_max_rounds": 1,
+  "rewrite_followup_publishable_priority_threshold": 85.0,
+  "rewrite_followup_publishable_gain_threshold": 1.25
+}

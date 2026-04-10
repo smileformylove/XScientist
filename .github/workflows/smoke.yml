@@ -1,0 +1,96 @@
+name: Smoke Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      RESEARCH_OUTPUT_DIR: ${{ github.workspace }}/.ci-output/ai-scientist-output
+      AI_SCIENTIST_AUTH_FILE: ${{ github.workspace }}/.ci-output/auth/session.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-smoke.txt
+            constraints-ci.txt
+
+      - name: Prepare CI logs
+        run: mkdir -p .ci-output/logs
+
+      - name: Install smoke dependencies
+        run: |
+          set -o pipefail
+          python -m pip install --upgrade pip setuptools wheel 2>&1 | tee .ci-output/logs/pip-bootstrap.log
+          python -m pip install --retries 5 --timeout 60 -r requirements-smoke.txt -c constraints-ci.txt 2>&1 | tee .ci-output/logs/pip-install.log
+
+      - name: Seed login session for CI
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          auth_file = Path(os.environ["AI_SCIENTIST_AUTH_FILE"]).resolve()
+          auth_file.parent.mkdir(parents=True, exist_ok=True)
+          issued_at = datetime.now(timezone.utc)
+          payload = {
+              "username": "ci-bot",
+              "session_id": "ci-seeded-session",
+              "issued_at": issued_at.isoformat(),
+              "expires_at": (issued_at + timedelta(hours=24)).isoformat(),
+              "last_seen_at": issued_at.isoformat(),
+              "extra": {"source": "github-actions"},
+          }
+          auth_file.write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(f"seeded auth session at: {auth_file}")
+          PY
+
+      - name: Run syntax checks
+        run: |
+          set -o pipefail
+          python -m compileall -q ai_scientist *.py tests 2>&1 | tee .ci-output/logs/syntax.log
+          bash -n run_stable_daemon.sh 2>&1 | tee .ci-output/logs/run_stable_daemon_syntax.log
+          bash -n start_research.sh 2>&1 | tee .ci-output/logs/start_research_syntax.log
+
+      - name: Run open-source hygiene tests
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -p "test_*.py" 2>&1 | tee .ci-output/logs/unittest.log
+
+      - name: Run repository validator
+        run: |
+          set -o pipefail
+          python validate_repo.py --full-import-smoke 2>&1 | tee .ci-output/logs/validate_repo.log
+
+      - name: Run preflight
+        run: |
+          set -o pipefail
+          python preflight_check.py --strict 2>&1 | tee .ci-output/logs/preflight.log
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-checks-artifacts
+          path: .ci-output/
+          retention-days: 7

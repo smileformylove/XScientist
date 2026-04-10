@@ -1,0 +1,26 @@
+{
+  "paused": false,
+  "stop_after_cycle": false,
+  "force_phase": null,
+  "force_mode": null,
+  "source_priority_overrides": {
+    "broad_impact_day": 12,
+    "fast_iterate_night": 6
+  },
+  "disabled_sources": [],
+  "source_commands": {
+    "broad_impact_day": {
+      "force_next_cycle": true,
+      "priority_boost_next": 5,
+      "cooldown_cycles_once": 2,
+      "expires_after_cycles": 2
+    },
+    "fast_iterate_night": {
+      "disable_once": true,
+      "expires_after_cycles": 1
+    }
+  },
+  "sleep_override_minutes": null,
+  "dashboard_refresh_seconds": 15,
+  "expires_after_cycles": null
+}

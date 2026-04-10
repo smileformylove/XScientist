@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/source_queue.schema.json",
+  "title": "AI Scientist Source Queue",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "type": {"type": "string", "enum": ["topic", "ideas"]},
+          "value": {"type": "string"},
+          "topic": {"type": "string"},
+          "ideas": {"type": "string"},
+          "priority": {"type": ["number", "integer"]},
+          "target_venue": {"type": ["string", "null"], "enum": [null, "neurips", "iclr", "cvpr", "journal", "nature"]},
+          "paper_types": {"type": ["array", "string"], "items": {"type": "string", "enum": ["icbinb", "normal", "journal", "extended"]}},
+          "num_ideas": {"type": ["integer", "null"], "minimum": 0},
+          "submission_mode": {"type": ["boolean", "null"]},
+          "breakthrough_mode": {"type": ["boolean", "null"]},
+          "cooldown_cycles": {"type": "integer", "minimum": 0},
+          "max_cycles_per_day": {"type": "integer", "minimum": 0},
+          "success_budget": {"type": "integer", "minimum": 0},
+          "time_of_day_preference": {"type": "string", "enum": ["any", "day", "night"]},
+          "workflow_mode": {"type": ["string", "null"], "enum": [null, "adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]},
+          "day_workflow_mode": {"type": ["string", "null"], "enum": [null, "adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]},
+          "night_workflow_mode": {"type": ["string", "null"], "enum": [null, "adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]},
+          "workflow_modes": {"type": ["array", "string"], "items": {"type": "string", "enum": ["adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]}},
+          "day_workflow_modes": {"type": ["array", "string"], "items": {"type": "string", "enum": ["adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]}},
+          "night_workflow_modes": {"type": ["array", "string"], "items": {"type": "string", "enum": ["adaptive", "classic_pipeline", "agentic_tree", "program_driven", "writing_studio", "review_board"]}},
+          "source_archetype": {"type": ["string", "null"], "enum": [null, "adaptive", "template_first", "frontier_exploration", "program_guarded", "writing_polish", "review_hardening"]},
+          "day_source_archetype": {"type": ["string", "null"], "enum": [null, "adaptive", "template_first", "frontier_exploration", "program_guarded", "writing_polish", "review_hardening"]},
+          "night_source_archetype": {"type": ["string", "null"], "enum": [null, "adaptive", "template_first", "frontier_exploration", "program_guarded", "writing_polish", "review_hardening"]},
+          "batch_profile": {"type": ["string", "null"], "enum": [null, "adaptive", "discovery_sprint", "exploration_sprint", "submission_push", "evidence_pack", "review_hardening"]},
+          "day_batch_profile": {"type": ["string", "null"], "enum": [null, "adaptive", "discovery_sprint", "exploration_sprint", "submission_push", "evidence_pack", "review_hardening"]},
+          "night_batch_profile": {"type": ["string", "null"], "enum": [null, "adaptive", "discovery_sprint", "exploration_sprint", "submission_push", "evidence_pack", "review_hardening"]},
+          "alignment_tags": {"type": ["array", "string"], "items": {"type": "string"}},
+          "day_alignment_tags": {"type": ["array", "string"], "items": {"type": "string"}},
+          "night_alignment_tags": {"type": ["array", "string"], "items": {"type": "string"}},
+          "planning_notes": {"type": "string"},
+          "day_target_venue": {"type": ["string", "null"], "enum": [null, "neurips", "iclr", "cvpr", "journal", "nature"]},
+          "night_target_venue": {"type": ["string", "null"], "enum": [null, "neurips", "iclr", "cvpr", "journal", "nature"]},
+          "day_paper_types": {"type": ["array", "string"], "items": {"type": "string", "enum": ["icbinb", "normal", "journal", "extended"]}},
+          "night_paper_types": {"type": ["array", "string"], "items": {"type": "string", "enum": ["icbinb", "normal", "journal", "extended"]}},
+          "day_num_ideas": {"type": ["integer", "null"], "minimum": 0},
+          "night_num_ideas": {"type": ["integer", "null"], "minimum": 0},
+          "day_submission_mode": {"type": ["boolean", "null"]},
+          "night_submission_mode": {"type": ["boolean", "null"]},
+          "day_breakthrough_mode": {"type": ["boolean", "null"]},
+          "night_breakthrough_mode": {"type": ["boolean", "null"]},
+          "generator_args": {"type": ["array", "string"], "items": {"type": "string"}},
+          "day_generator_args": {"type": ["array", "string"], "items": {"type": "string"}},
+          "night_generator_args": {"type": ["array", "string"], "items": {"type": "string"}}
+        },
+        "anyOf": [
+          {"required": ["value"]},
+          {"required": ["topic"]},
+          {"required": ["ideas"]}
+        ]
+      }
+    }
+  },
+  "required": ["sources"]
+}

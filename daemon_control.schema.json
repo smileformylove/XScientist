@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/daemon_control.schema.json",
+  "title": "AI Scientist Daemon Control",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "paused": {"type": "boolean"},
+    "stop_after_cycle": {"type": "boolean"},
+    "force_phase": {"type": ["string", "null"], "enum": [null, "cold_start", "steady_state", "hot_polish"]},
+    "force_mode": {"type": ["string", "null"], "enum": [null, "balanced", "generate_more", "focus_rewrite"]},
+    "source_priority_overrides": {
+      "type": "object",
+      "additionalProperties": {"type": ["number", "integer"]}
+    },
+    "disabled_sources": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "source_commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "force_next_cycle": {"type": "boolean"},
+          "priority_boost_next": {"type": ["number", "integer"]},
+          "disable_once": {"type": "boolean"},
+          "cooldown_cycles_once": {"type": "integer", "minimum": 0},
+          "expires_after_cycles": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "sleep_override_minutes": {"type": ["number", "integer", "null"], "minimum": 0},
+    "dashboard_refresh_seconds": {"type": ["integer", "null"], "minimum": 1},
+    "expires_after_cycles": {"type": ["integer", "null"], "minimum": 0}
+  }
+}

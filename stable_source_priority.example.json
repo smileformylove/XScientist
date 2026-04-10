@@ -1,0 +1,48 @@
+{
+  "sources": [
+    {
+      "name": "journal_day_focus",
+      "type": "topic",
+      "value": "example_topic.md",
+      "priority": 10,
+      "time_of_day_preference": "day",
+      "source_archetype": "writing_polish",
+      "batch_profile": "evidence_pack",
+      "workflow_modes": ["writing_studio", "review_board"],
+      "day_workflow_mode": "writing_studio",
+      "alignment_tags": ["journal", "evidence-pack", "stable"],
+      "planning_notes": "Turn stable daytime cycles into stronger evidence packaging and polished journal-ready writing.",
+      "day_target_venue": "journal",
+      "day_paper_types": [
+        "journal"
+      ],
+      "day_num_ideas": 2,
+      "submission_mode": true,
+      "cooldown_cycles": 1,
+      "max_cycles_per_day": 3,
+      "success_budget": 1
+    },
+    {
+      "name": "conference_night_watch",
+      "type": "topic",
+      "value": "example_topic.md",
+      "priority": 6,
+      "time_of_day_preference": "night",
+      "source_archetype": "template_first",
+      "batch_profile": "discovery_sprint",
+      "workflow_modes": ["classic_pipeline", "program_driven"],
+      "night_workflow_mode": "classic_pipeline",
+      "alignment_tags": ["conference", "stable-throughput", "night-watch"],
+      "planning_notes": "Keep conference-targeted throughput stable without opening too many exploratory branches.",
+      "night_target_venue": "neurips",
+      "night_paper_types": [
+        "normal"
+      ],
+      "night_num_ideas": 3,
+      "submission_mode": true,
+      "cooldown_cycles": 1,
+      "max_cycles_per_day": 4,
+      "success_budget": 2
+    }
+  ]
+}

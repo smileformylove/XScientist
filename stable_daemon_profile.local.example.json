@@ -1,0 +1,17 @@
+{
+  "research_dir": "./research_output_local",
+  "dashboard_port": 8010,
+  "sleep_minutes": 25,
+  "source_config": "stable_source_priority.example.json",
+  "generator_args": [
+    "--submission-mode",
+    "--paper-types",
+    "normal",
+    "journal",
+    "--num-ideas",
+    "1",
+    "--rank-ideas",
+    "--top-k-ideas",
+    "1"
+  ]
+}
