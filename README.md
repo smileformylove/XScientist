@@ -1,4 +1,4 @@
-# AI Scientist Autonomous Research Lab
+# XScientist
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Smoke](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml/badge.svg)](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml)
@@ -287,8 +287,8 @@ Apache-2.0，详见 `LICENSE`。
 如果你在研究中使用了本仓库的工程方案，建议引用本仓库（并注明使用的 commit hash 便于复现）：
 
 ```bibtex
-@software{ai_scientist_autonomous_research_lab,
-  title  = {AI Scientist Autonomous Research Lab},
+@software{xscientist,
+  title  = {XScientist},
   author = {smileformylove and contributors},
   year   = {2026},
   url    = {https://github.com/smileformylove/ai_scientist}
