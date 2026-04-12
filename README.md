@@ -3,6 +3,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Smoke](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml/badge.svg)](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml)
 
+English README: [README.en.md](README.en.md)
+
 > 面向"可持续自我迭代"的 AI 科研系统：从想法生成、实验执行、论文写作，到自评审闭环、策略调度与长期运行（daemon）。
 
 本仓库的目标不是一次性"生成一篇论文"，而是把自动科研系统做成**可长期运行、可观测、可回放、可交接**的研究流水线：每次运行都产出结构化工件（计划、证据、评审、修复任务、质量门禁与报告），便于持续改进与协作。
@@ -284,7 +286,7 @@ Apache-2.0，详见 `LICENSE`。
 
 ## Acknowledgements
 
-感谢以下开源工作提供的经验与启发（按相关性排序）：
+感谢以下开源工作提供的经验与启发：
 
 - [Sakana AI: AI Scientist](https://github.com/SakanaAI/AI-Scientist)
 - [karpathy/autoresearch](https://github.com/karpathy/autoresearch)
