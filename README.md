@@ -17,19 +17,31 @@
 
 ## 目录 (Contents)
 
-- [项目概览](#项目概览)
-- [核心能力](#核心能力)
-- [快速开始](#快速开始)
-- [配置](#配置)
-- [使用方法](#使用方法)
-- [输出与可观测性](#输出与可观测性)
-- [文档索引](#文档索引)
-- [开发与测试](#开发与测试)
-- [路线图](#路线图)
-- [贡献与社区](#贡献与社区)
-- [License](#license)
-- [Acknowledgements](#acknowledgements)
-- [Citation](#citation)
+- [XScientist](#xscientist)
+  - [目录 (Contents)](#目录-contents)
+  - [项目概览](#项目概览)
+  - [核心能力](#核心能力)
+  - [快速开始](#快速开始)
+    - [0) 依赖说明](#0-依赖说明)
+    - [1) 安装（推荐 conda）](#1-安装推荐-conda)
+    - [2) 配置 API Key（按需）](#2-配置-api-key按需)
+    - [3) 登录（必需）](#3-登录必需)
+    - [4) 预检（推荐）](#4-预检推荐)
+  - [配置](#配置)
+    - [输出目录（默认不写入仓库）](#输出目录默认不写入仓库)
+    - [严格兜底策略（调试提示）](#严格兜底策略调试提示)
+  - [使用方法](#使用方法)
+    - [A) 从 Topic 跑一个项目（最常用）](#a-从-topic-跑一个项目最常用)
+    - [B) 连续运行/批量生成（适合跑一段时间）](#b-连续运行批量生成适合跑一段时间)
+    - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
+  - [输出与可观测性](#输出与可观测性)
+  - [文档索引](#文档索引)
+  - [开发与测试](#开发与测试)
+  - [路线图](#路线图)
+  - [贡献与社区](#贡献与社区)
+  - [License](#license)
+  - [Acknowledgements](#acknowledgements)
+  - [Citation](#citation)
 
 ---
 
@@ -88,8 +100,8 @@ flowchart LR
 ### 1) 安装（推荐 conda）
 
 ```bash
-conda create -n ai_scientist python=3.11 -y
-conda activate ai_scientist
+conda create -n xscientist python=3.11 -y
+conda activate xscientist
 
 pip install -r requirements.txt
 ```
@@ -284,7 +296,20 @@ Apache-2.0，详见 `LICENSE`。
 
 ## Citation
 
-如果你在研究中使用了本仓库的工程方案，建议引用本仓库（并注明使用的 commit hash 便于复现）：
+如果你在研究中使用了 XScientist，建议引用（并注明使用的 commit hash 便于复现）：
+
+XScientist Board（论文，使用本系统写作/打磨）：
+
+```bibtex
+@misc{xscientist_board,
+  title  = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
+  author = {Anonymous Authors},
+  year   = {2026},
+  note   = {NeurIPS 2026 submission (under review)}
+}
+```
+
+XScientist（软件/代码仓库）：
 
 ```bibtex
 @software{xscientist,
