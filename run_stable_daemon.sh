@@ -78,9 +78,9 @@ Usage:
 
 Launch modes:
   auto       Use the day profile from 08:00-19:59 and the night profile otherwise.
-  balanced   Use stable_daemon_profile.example.json.
-  day        Use stable_day_daemon_profile.example.json.
-  night      Use stable_night_daemon_profile.example.json.
+  balanced   Use configs/daemon/stable_daemon_profile.example.json.
+  day        Use configs/daemon/stable_day_daemon_profile.example.json.
+  night      Use configs/daemon/stable_night_daemon_profile.example.json.
 
 Ops commands:
   rehearsal            Run run_daemon_rehearsal.py.
@@ -145,16 +145,16 @@ EOF
 pick_profile() {
   local mode="$1"
   case "$mode" in
-    balanced) echo "stable_daemon_profile.example.json" ;;
-    day) echo "stable_day_daemon_profile.example.json" ;;
-    night) echo "stable_night_daemon_profile.example.json" ;;
+    balanced) echo "configs/daemon/stable_daemon_profile.example.json" ;;
+    day) echo "configs/daemon/stable_day_daemon_profile.example.json" ;;
+    night) echo "configs/daemon/stable_night_daemon_profile.example.json" ;;
     auto)
       local hour
       hour="$(date +%H)"
       if ((10#$hour >= 8 && 10#$hour < 20)); then
-        echo "stable_day_daemon_profile.example.json"
+        echo "configs/daemon/stable_day_daemon_profile.example.json"
       else
-        echo "stable_night_daemon_profile.example.json"
+        echo "configs/daemon/stable_night_daemon_profile.example.json"
       fi
       ;;
     *)

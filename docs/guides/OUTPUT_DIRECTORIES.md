@@ -58,16 +58,15 @@ ai_scientist/
 
 ### 新增的文件
 
-1. **[ai_scientist/config/paths.py](ai_scientist/config/paths.py)** - 路径配置模块
-2. **[ai_scientist/config/__init__.py](ai_scientist/config/__init__.py)** - 配置模块初始化
-3. **[test_output_config.py](test_output_config.py)** - 配置测试脚本
+1. **[ai_scientist/config/paths.py](../../ai_scientist/config/paths.py)** - 路径配置模块
+2. **[ai_scientist/config/__init__.py](../../ai_scientist/config/__init__.py)** - 配置模块初始化
 
 ### 修改的文件
 
-1. **[launch_scientist_zhipu.py](launch_scientist_zhipu.py)** - 使用新的路径配置
-2. **[launch_scientist_bfts.py](launch_scientist_bfts.py)** - 使用新的路径配置
-3. **[run_project.py](run_project.py)** - 使用新的路径配置
-4. **[.gitignore](.gitignore)** - 添加 `_outputs/` 到忽略列表
+1. **[launch_scientist_zhipu.py](../../launch_scientist_zhipu.py)** - 使用新的路径配置
+2. **[launch_scientist_bfts.py](../../launch_scientist_bfts.py)** - 使用新的路径配置
+3. **[run_project.py](../../run_project.py)** - 使用新的路径配置
+4. **[.gitignore](../../.gitignore)** - 添加 `_outputs/` 到忽略列表
 
 ### 新增的API
 
@@ -164,10 +163,10 @@ mv projects/* _outputs/projects/
 
 ## 验证配置
 
-运行测试脚本验证配置是否正确：
+运行仓库校验验证配置是否正确：
 
 ```bash
-python test_output_config.py
+python validate_repo.py
 ```
 
 ## 优势

@@ -14,7 +14,7 @@
 
 ## ✨ 新增功能
 
-### 1. 增强的实验配置系统 ([`bfts_config_enhanced.yaml`](bfts_config_enhanced.yaml))
+### 1. 增强的实验配置系统 ([`bfts_config_enhanced.yaml`](../../bfts_config_enhanced.yaml))
 
 **核心改进**：
 - **增加迭代次数**: 20→15→20→15→12（原来是10→8→8→10）
@@ -42,7 +42,7 @@ experiment:
     num_seeds: 5             # 多种子评估
 ```
 
-### 2. 多层次写作架构 ([`writing_strategies.py`](ai_scientist/writing_strategies.py))
+### 2. 多层次写作架构 ([`writing_strategies.py`](../../ai_scientist/writing_strategies.py))
 
 **写作策略**：
 - `CONFERENCE_PAPER`: 8页会议论文（侧重创新性和贡献）
@@ -75,7 +75,7 @@ class WritingQualityAssessor:
     - assess_clarity()              # 评估清晰度
 ```
 
-### 3. 创新性评估和突破性想法生成 ([`innovation_enhancer.py`](ai_scientist/innovation_enhancer.py))
+### 3. 创新性评估和突破性想法生成 ([`innovation_enhancer.py`](../../ai_scientist/innovation_enhancer.py))
 
 **创新性评估器**：
 ```python
@@ -115,7 +115,7 @@ class DepthEnhancer:
     5. 实际应用验证
 ```
 
-### 4. 增强的基线对比系统 ([`baseline_system.py`](ai_scientist/baseline_system.py))
+### 4. 增强的基线对比系统 ([`baseline_system.py`](../../ai_scientist/baseline_system.py))
 
 **基线管理器**：
 ```python
@@ -336,10 +336,10 @@ print(f"效应量: {test_result['effect_size']} ({test_result['cohen_d']:.2f})")
 
 | 文件 | 功能 | 行数 |
 |------|------|------|
-| [bfts_config_enhanced.yaml](bfts_config_enhanced.yaml) | 增强实验配置 | 300+ |
-| [writing_strategies.py](ai_scientist/writing_strategies.py) | 多层次写作架构 | 800+ |
-| [innovation_enhancer.py](ai_scientist/innovation_enhancer.py) | 创新性评估和生成 | 600+ |
-| [baseline_system.py](ai_scientist/baseline_system.py) | 基线对比系统 | 700+ |
+| [bfts_config_enhanced.yaml](../../bfts_config_enhanced.yaml) | 增强实验配置 | 300+ |
+| [writing_strategies.py](../../ai_scientist/writing_strategies.py) | 多层次写作架构 | 800+ |
+| [innovation_enhancer.py](../../ai_scientist/innovation_enhancer.py) | 创新性评估和生成 | 600+ |
+| [baseline_system.py](../../ai_scientist/baseline_system.py) | 基线对比系统 | 700+ |
 
 ## 🎯 完整工作流示例
 
@@ -512,4 +512,4 @@ llm_strategy:
 - [RESEARCH_GENERATOR_README.md](RESEARCH_GENERATOR_README.md) - 研究生成器文档
 - [PROFESSIONAL_WRITING_README.md](PROFESSIONAL_WRITING_README.md) - 专业写作系统文档
 - [ADAPTIVE_LEARNING_README.md](ADAPTIVE_LEARNING_README.md) - 自适应学习系统文档
-- [bfts_config_enhanced.yaml](bfts_config_enhanced.yaml) - 增强配置文件
+- [bfts_config_enhanced.yaml](../../bfts_config_enhanced.yaml) - 增强配置文件

@@ -9,10 +9,10 @@ This checklist is meant for running the daemon in a practical, repeatable way.
 - Run a dry-run rehearsal:
   - `python run_daemon_rehearsal.py`
 - Prefer the conservative preset for a first real 24-hour run:
-  - `python run_daemon_profile.py stable_daemon_profile.example.json --dry-run --print-command`
+  - `python run_daemon_profile.py configs/daemon/stable_daemon_profile.example.json --dry-run --print-command`
 - If you want a simpler operator path, use the wrapper:
   - `bash run_stable_daemon.sh auto --dry-run --print-command`
-- If the machine needs local-only settings, copy `stable_daemon_profile.local.example.json` to `stable_daemon_profile.local.json` and edit that file instead of changing the checked-in preset.
+- If the machine needs local-only settings, copy `configs/daemon/stable_daemon_profile.local.example.json` to `configs/daemon/stable_daemon_profile.local.json` and edit that file instead of changing the checked-in preset.
 - Open the dashboard or generated HTML.
 - Check that `source_queue` and `daemon_control` files are valid and match the intended schedule.
 

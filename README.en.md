@@ -161,17 +161,17 @@ Most scripts support stricter quality gates. During local debugging you may choo
 ```bash
 python3 run_project.py my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic example_topic.md
+  --topic examples/example_topic.md
 ```
 
-More usage: `PROJECT_USAGE.md`
+More usage: `docs/guides/PROJECT_USAGE.md`
 
 ### B) Continuous/batch generation
 
 ```bash
 python3 continuous_paper_generator.py \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic example_topic.md \
+  --topic examples/example_topic.md \
   --paper-types icbinb
 ```
 
@@ -179,7 +179,7 @@ python3 continuous_paper_generator.py \
 
 ```bash
 python3 continuous_research_daemon.py \
-  --source-config stable_source_priority.example.json \
+  --source-config configs/sources/stable_source_priority.example.json \
   --duration-hours 24 \
   --enable-rewrite-followup \
   --auto-source-quality-feedback \
@@ -229,11 +229,11 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ## Docs
 
-- `PROJECT_USAGE.md`: `run_project.py` usage and flags
+- `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
 - `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
 - `docs/SOURCE_ORCHESTRATION.md`: source queue orchestration and recommended run postures
 - `docs/LOGIN_GUARDRAIL.md`: login guard and session management
-- `OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
+- `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
 
 Note: some docs are currently Chinese-first.
 

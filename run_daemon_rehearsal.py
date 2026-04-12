@@ -39,7 +39,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--profile",
-        default=str(PROJECT_ROOT / "stable_daemon_profile.example.json"),
+        default=str(
+            PROJECT_ROOT / "configs" / "daemon" / "stable_daemon_profile.example.json"
+        ),
     )
     parser.add_argument(
         "--overlay",

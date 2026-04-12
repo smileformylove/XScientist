@@ -26,7 +26,7 @@ ideation:
   model: "glm-4-flash"
 
   # 主题文件路径（如果使用文件输入）
-  topic_file: "example_topic.md"
+  topic_file: "examples/example_topic.md"
 
   # 或使用已有想法文件
   ideas_file: null  # 例如: "existing_ideas.json"

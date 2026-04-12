@@ -3,7 +3,7 @@
     {
       "name": "broad_impact_day",
       "type": "topic",
-      "value": "example_topic.md",
+      "value": "examples/example_topic.md",
       "priority": 10,
       "time_of_day_preference": "day",
       "source_archetype": "program_guarded",
@@ -24,7 +24,7 @@
     {
       "name": "fast_iterate_night",
       "type": "topic",
-      "value": "example_topic.md",
+      "value": "examples/example_topic.md",
       "priority": 7,
       "time_of_day_preference": "night",
       "source_archetype": "frontier_exploration",

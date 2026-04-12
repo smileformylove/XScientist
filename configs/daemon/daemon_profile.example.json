@@ -1,7 +1,7 @@
 {
   "research_dir": "./research_output",
   "daemon_name": "stable_submission_daemon",
-  "source_config": "source_priority.example.json",
+  "source_config": "../sources/source_priority.example.json",
   "source_rotation": "round_robin",
   "duration_hours": 24,
   "sleep_minutes": 10,

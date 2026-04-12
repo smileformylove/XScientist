@@ -12,8 +12,8 @@ Purpose:
 - Pause work, force a phase or mode, tune sleep, and issue temporary per-source commands.
 
 Reference files:
-- Example: `daemon_control.example.json`
-- Schema: `daemon_control.schema.json`
+- Example: `configs/daemon/daemon_control.example.json`
+- Schema: `configs/daemon/daemon_control.schema.json`
 
 ### Top-level fields
 
@@ -104,10 +104,10 @@ Purpose:
 
 Reference files:
 - Examples:
-  - `source_queue.example.toml`
-  - `source_priority.example.json`
+  - `configs/sources/source_queue.example.toml`
+  - `configs/sources/source_priority.example.json`
 - Schema:
-  - `source_queue.schema.json`
+  - `configs/sources/source_queue.schema.json`
 
 ### Per-source common fields
 
@@ -257,7 +257,7 @@ Use a broad-impact source in the day and a faster exploratory source at night:
 [[sources]]
 name = "broad_impact_day"
 type = "topic"
-value = "example_topic.md"
+value = "examples/example_topic.md"
 priority = 10
 time_of_day_preference = "day"
 source_archetype = "program_guarded"
@@ -277,7 +277,7 @@ success_budget = 2
 [[sources]]
 name = "fast_iterate_night"
 type = "topic"
-value = "example_topic.md"
+value = "examples/example_topic.md"
 priority = 7
 time_of_day_preference = "night"
 source_archetype = "frontier_exploration"
@@ -317,11 +317,11 @@ Purpose:
 - Store a reusable set of daemon arguments for long-running operation.
 
 Reference files:
-- Balanced example: `daemon_profile.example.json`
-- Stable example: `stable_daemon_profile.example.json`
-- Stable day example: `stable_day_daemon_profile.example.json`
-- Stable night example: `stable_night_daemon_profile.example.json`
-- Schema: `daemon_profile.schema.json`
+- Balanced example: `configs/daemon/daemon_profile.example.json`
+- Stable example: `configs/daemon/stable_daemon_profile.example.json`
+- Stable day example: `configs/daemon/stable_day_daemon_profile.example.json`
+- Stable night example: `configs/daemon/stable_night_daemon_profile.example.json`
+- Schema: `configs/daemon/daemon_profile.schema.json`
 - Launcher: `run_daemon_profile.py`
 
 Typical fields:
@@ -353,7 +353,7 @@ Typical fields:
 Quick start:
 
 ```bash
-python run_daemon_profile.py daemon_profile.example.json --dry-run
+python run_daemon_profile.py configs/daemon/daemon_profile.example.json --dry-run
 ```
 
 Relative path behavior:
@@ -361,23 +361,23 @@ Relative path behavior:
 - If a relative path is not found there, the launcher falls back to the repository root.
 
 Local overlay behavior:
-- If a sibling local override exists, such as `stable_daemon_profile.local.json`, it is applied automatically after the base profile.
+- If a sibling local override exists, such as `configs/daemon/stable_daemon_profile.local.json`, it is applied automatically after the base profile.
 - You can also pass `--overlay /path/to/override.json` to `run_daemon_profile.py` or `run_stable_daemon.sh`; wrapper ops commands will use it when resolving `--target-mode`.
-- Example local override: `stable_daemon_profile.local.example.json`.
+- Example local override: `configs/daemon/stable_daemon_profile.local.example.json`.
 
 Recommended presets:
-- `daemon_profile.example.json`: balanced example for normal experimentation.
-- `stable_daemon_profile.example.json`: conservative 24-hour profile with slower sleep cadence, smaller rewrite follow-up fan-out, tighter board thresholds, and a dedicated stable source queue.
-- `stable_day_daemon_profile.example.json`: shorter daytime polishing profile with stronger rewrite follow-up and tighter shortlist thresholds.
-- `stable_night_daemon_profile.example.json`: shorter nighttime generation profile with broader idea search and rewrite follow-up disabled by default.
+- `configs/daemon/daemon_profile.example.json`: balanced example for normal experimentation.
+- `configs/daemon/stable_daemon_profile.example.json`: conservative 24-hour profile with slower sleep cadence, smaller rewrite follow-up fan-out, tighter board thresholds, and a dedicated stable source queue.
+- `configs/daemon/stable_day_daemon_profile.example.json`: shorter daytime polishing profile with stronger rewrite follow-up and tighter shortlist thresholds.
+- `configs/daemon/stable_night_daemon_profile.example.json`: shorter nighttime generation profile with broader idea search and rewrite follow-up disabled by default.
 
 ## `source_config` examples
 
 Reference files:
-- `source_queue.example.toml`: general source queue example
-- `source_priority.example.json`: more aggressive multi-source example
-- `stable_source_priority.example.json`: conservative long-run queue with smaller idea counts and daily budgets
-- `source_queue.schema.json`: schema for JSON/TOML source queues
+- `configs/sources/source_queue.example.toml`: general source queue example
+- `configs/sources/source_priority.example.json`: more aggressive multi-source example
+- `configs/sources/stable_source_priority.example.json`: conservative long-run queue with smaller idea counts and daily budgets
+- `configs/sources/source_queue.schema.json`: schema for JSON/TOML source queues
 
 ## `run_stable_daemon.sh`
 

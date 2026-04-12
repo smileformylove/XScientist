@@ -2036,7 +2036,7 @@ Results are preliminary.
                         {
                             "name": "validate_topic",
                             "type": "topic",
-                            "value": str(PROJECT_ROOT / "example_topic.md"),
+                            "value": str(PROJECT_ROOT / "examples" / "example_topic.md"),
                             "priority": 10,
                             "time_of_day_preference": "any",
                             "day_target_venue": "nature",
@@ -2153,25 +2153,40 @@ Results are preliminary.
         assert archived_daily_md.exists()
         assert archived_daily_json.exists()
         schema = json.loads(
-            (PROJECT_ROOT / "daemon_control.schema.json").read_text(encoding="utf-8")
+            (
+                PROJECT_ROOT
+                / "configs"
+                / "daemon"
+                / "daemon_control.schema.json"
+            ).read_text(encoding="utf-8")
         )
         assert schema.get("title") == "AI Scientist Daemon Control"
         source_schema = json.loads(
-            (PROJECT_ROOT / "source_queue.schema.json").read_text(encoding="utf-8")
+            (
+                PROJECT_ROOT
+                / "configs"
+                / "sources"
+                / "source_queue.schema.json"
+            ).read_text(encoding="utf-8")
         )
         assert source_schema.get("title") == "AI Scientist Source Queue"
         daemon_profile_schema = json.loads(
-            (PROJECT_ROOT / "daemon_profile.schema.json").read_text(encoding="utf-8")
+            (
+                PROJECT_ROOT
+                / "configs"
+                / "daemon"
+                / "daemon_profile.schema.json"
+            ).read_text(encoding="utf-8")
         )
         assert daemon_profile_schema.get("title") == "AI Scientist Daemon Profile"
-        assert (PROJECT_ROOT / "stable_source_priority.example.json").exists()
-        assert (PROJECT_ROOT / "stable_daemon_profile.local.example.json").exists()
+        assert (PROJECT_ROOT / "configs" / "sources" / "stable_source_priority.example.json").exists()
+        assert (PROJECT_ROOT / "configs" / "daemon" / "stable_daemon_profile.local.example.json").exists()
         assert (PROJECT_ROOT / "docs" / "CONFIG_REFERENCE.md").exists()
         profile_run = subprocess.run(
             [
                 sys.executable,
                 str(PROJECT_ROOT / "run_daemon_profile.py"),
-                str(PROJECT_ROOT / "daemon_profile.example.json"),
+                str(PROJECT_ROOT / "configs" / "daemon" / "daemon_profile.example.json"),
                 "--dry-run",
                 "--print-command",
             ],
@@ -2185,7 +2200,7 @@ Results are preliminary.
             [
                 sys.executable,
                 str(PROJECT_ROOT / "run_daemon_profile.py"),
-                str(PROJECT_ROOT / "stable_daemon_profile.example.json"),
+                str(PROJECT_ROOT / "configs" / "daemon" / "stable_daemon_profile.example.json"),
                 "--dry-run",
                 "--print-command",
             ],
@@ -2204,7 +2219,7 @@ Results are preliminary.
             [
                 sys.executable,
                 str(PROJECT_ROOT / "run_daemon_profile.py"),
-                str(PROJECT_ROOT / "stable_day_daemon_profile.example.json"),
+                str(PROJECT_ROOT / "configs" / "daemon" / "stable_day_daemon_profile.example.json"),
                 "--dry-run",
                 "--print-command",
             ],
@@ -2218,7 +2233,7 @@ Results are preliminary.
             [
                 sys.executable,
                 str(PROJECT_ROOT / "run_daemon_profile.py"),
-                str(PROJECT_ROOT / "stable_night_daemon_profile.example.json"),
+                str(PROJECT_ROOT / "configs" / "daemon" / "stable_night_daemon_profile.example.json"),
                 "--dry-run",
                 "--print-command",
             ],
@@ -2229,7 +2244,7 @@ Results are preliminary.
         )
         assert "stable_night_generate_daemon" in stable_night_run.stdout
         assert (
-            str(PROJECT_ROOT / "stable_source_priority.example.json")
+            str(PROJECT_ROOT / "configs" / "sources" / "stable_source_priority.example.json")
             in stable_night_run.stdout
         )
         portable_dir = root / "portable_profile"
@@ -2242,7 +2257,7 @@ Results are preliminary.
                         {
                             "name": "portable",
                             "type": "topic",
-                            "value": str(PROJECT_ROOT / "example_topic.md"),
+                            "value": str(PROJECT_ROOT / "examples" / "example_topic.md"),
                         }
                     ]
                 },
@@ -2351,8 +2366,8 @@ Results are preliminary.
         )
         assert '"status": "ok"' in rehearsal_run.stdout
         assert (PROJECT_ROOT / "docs" / "OPERATIONS_CHECKLIST.md").exists()
-        assert (PROJECT_ROOT / "stable_day_daemon_profile.example.json").exists()
-        assert (PROJECT_ROOT / "stable_night_daemon_profile.example.json").exists()
+        assert (PROJECT_ROOT / "configs" / "daemon" / "stable_day_daemon_profile.example.json").exists()
+        assert (PROJECT_ROOT / "configs" / "daemon" / "stable_night_daemon_profile.example.json").exists()
         assert (PROJECT_ROOT / "run_stable_daemon.sh").exists()
         shellcheck_run = subprocess.run(
             ["bash", "-n", str(PROJECT_ROOT / "run_stable_daemon.sh")],

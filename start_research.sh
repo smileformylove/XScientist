@@ -179,8 +179,8 @@ show_menu() {
 
 resolve_topic_file() {
     local topic_file=""
-    if [[ -f "$PROJECT_ROOT/example_topic.md" ]]; then
-        topic_file="$PROJECT_ROOT/example_topic.md"
+    if [[ -f "$PROJECT_ROOT/examples/example_topic.md" ]]; then
+        topic_file="$PROJECT_ROOT/examples/example_topic.md"
     else
         read -r -p "请输入主题文件路径: " topic_file
     fi

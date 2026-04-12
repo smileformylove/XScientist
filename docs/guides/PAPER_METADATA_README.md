@@ -491,7 +491,7 @@ print(f"有 {len(papers)} 篇论文需要改进")
 
 - [AUTONOMOUS_EVOLUTION_README.md](AUTONOMOUS_EVOLUTION_README.md) - 自主进化系统
 - [ADAPTIVE_LEARNING_README.md](ADAPTIVE_LEARNING_README.md) - 自适应学习
-- [agent_interface.py](ai_scientist/agent_interface.py) - Agent接口规范
+- [agent_interface.py](../../ai_scientist/agent_interface.py) - Agent接口规范
 
 ## 🎉 总结
 

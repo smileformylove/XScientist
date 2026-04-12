@@ -54,11 +54,11 @@
    - 依赖检查
    - 常用操作快捷方式
 
-5. **`example_topic.md`** - 示例主题文件
+5. **`examples/example_topic.md`** - 示例主题文件
    - 研究主题模板
    - 快速开始示例
 
-6. **`RESEARCH_GENERATOR_README.md`** - 详细文档
+6. **`docs/guides/RESEARCH_GENERATOR_README.md`** - 详细文档
    - 完整使用说明
    - 示例工作流
    - 故障排除
@@ -91,7 +91,7 @@ cd <repo_root>
 
 # 或者直接运行命令
 python continuous_paper_generator.py \
-  --topic example_topic.md \
+  --topic examples/example_topic.md \
   --num-ideas 3 \
   --paper-types icbinb
 ```
@@ -100,7 +100,7 @@ python continuous_paper_generator.py \
 
 ```bash
 python continuous_paper_generator.py \
-  --topic example_topic.md \
+  --topic examples/example_topic.md \
   --num-ideas 5 \
   --all-types \
   --num-workers 2

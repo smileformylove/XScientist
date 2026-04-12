@@ -2,7 +2,7 @@
   "research_dir": "./research_output_local",
   "dashboard_port": 8010,
   "sleep_minutes": 25,
-  "source_config": "stable_source_priority.example.json",
+  "source_config": "../sources/stable_source_priority.example.json",
   "generator_args": [
     "--submission-mode",
     "--paper-types",

@@ -7843,7 +7843,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Example:
   python continuous_research_daemon.py \
-    --topic example_topic.md \
+    --topic examples/example_topic.md \
     --duration-hours 24 \
     --sleep-minutes 10 \
     -- --paper-types normal journal --num-ideas 4 --submission-mode

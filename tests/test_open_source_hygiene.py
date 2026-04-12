@@ -17,12 +17,11 @@ class OpenSourceHygieneTests(unittest.TestCase):
         cls.smoke_requirements_path = cls.repo_root / "requirements-smoke.txt"
         portable_sources = [
             cls.readme_path,
-            cls.repo_root / "PROJECT_USAGE.md",
-            cls.repo_root / "RESEARCH_GENERATOR_README.md",
             *sorted((cls.repo_root / "docs").glob("**/*.md")),
-            *sorted(cls.repo_root.glob("*.example.json")),
-            *sorted(cls.repo_root.glob("*.example.yaml")),
-            *sorted(cls.repo_root.glob("*.example.yml")),
+            *sorted((cls.repo_root / "configs").glob("**/*.example.json")),
+            *sorted((cls.repo_root / "configs").glob("**/*.example.yaml")),
+            *sorted((cls.repo_root / "configs").glob("**/*.example.yml")),
+            *sorted((cls.repo_root / "configs").glob("**/*.example.toml")),
         ]
         cls.path_sensitive_sources = [
             path for path in dict.fromkeys(portable_sources) if path.exists()

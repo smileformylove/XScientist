@@ -173,17 +173,17 @@ export RESEARCH_OUTPUT_DIR="/path/to/my_ai_scientist_outputs"
 ```bash
 python3 run_project.py my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic example_topic.md
+  --topic examples/example_topic.md
 ```
 
-更多用法：`PROJECT_USAGE.md`
+更多用法：`docs/guides/PROJECT_USAGE.md`
 
 ### B) 连续运行/批量生成（适合跑一段时间）
 
 ```bash
 python3 continuous_paper_generator.py \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic example_topic.md \
+  --topic examples/example_topic.md \
   --paper-types icbinb
 ```
 
@@ -191,7 +191,7 @@ python3 continuous_paper_generator.py \
 
 ```bash
 python3 continuous_research_daemon.py \
-  --source-config stable_source_priority.example.json \
+  --source-config configs/sources/stable_source_priority.example.json \
   --duration-hours 24 \
   --enable-rewrite-followup \
   --auto-source-quality-feedback \
@@ -241,11 +241,11 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ## 文档索引
 
-- `PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
+- `docs/guides/PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
 - `docs/CONFIG_REFERENCE.md`：更细的配置/参数参考
 - `docs/SOURCE_ORCHESTRATION.md`：source queue 编排与运行姿态建议
 - `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
-- `OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
+- `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
 
 ---
 

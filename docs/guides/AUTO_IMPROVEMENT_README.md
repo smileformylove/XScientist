@@ -434,10 +434,10 @@ report_file = reporter.generate_improvement_report(
 
 | 文件 | 功能 |
 |------|------|
-| [perform_auto_improvement.py](ai_scientist/perform_auto_improvement.py) | 自动改进核心引擎 |
-| [review_strategies.py](ai_scientist/review_strategies.py) | 审查策略和迭代控制 |
-| [improvement_reporter.py](ai_scientist/improvement_reporter.py) | 报告生成和可视化 |
-| [continuous_paper_generator.py](continuous_paper_generator.py) | 集成自动改进的论文生成器 |
+| [perform_auto_improvement.py](../../ai_scientist/perform_auto_improvement.py) | 自动改进核心引擎 |
+| [review_strategies.py](../../ai_scientist/review_strategies.py) | 审查策略和迭代控制 |
+| [improvement_reporter.py](../../ai_scientist/improvement_reporter.py) | 报告生成和可视化 |
+| [continuous_paper_generator.py](../../continuous_paper_generator.py) | 集成自动改进的论文生成器 |
 
 ## 🎉 总结
 
