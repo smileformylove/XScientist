@@ -123,6 +123,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.local
 .venv
 .venv*/
 .venv_jax
@@ -188,6 +189,10 @@ experiments/
 aisci_outputs/
 slurm_logs/
 .out
+*.log
+cron.log
+monitoring.log
+monitor_progress.log
 
 # final papers
 final_papers/

@@ -63,6 +63,7 @@ flowchart LR
 - Self-review loop: multi-round self-review produces structured issues + repair plans, and enforces regression/coverage gates.
 - Measurable experiment TODO closure: turns "missing evidence" into explicit TODOs and tracks closure progress.
 - Long-running daemon: continuous execution, failure protection, source scheduling, trend reports, handoff briefs, and strategy feedback.
+- Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
 
@@ -202,6 +203,25 @@ bash run_stable_daemon.sh report-trends
 bash run_stable_daemon.sh source-plan
 ```
 
+### D) Feedback system monitoring (NEW)
+
+```bash
+# Check system health
+python3 feedback_cli.py --feedback-dir ./feedback status
+
+# View recommended actions
+python3 feedback_cli.py --feedback-dir ./feedback actions
+
+# Analyze trends
+python3 feedback_cli.py --feedback-dir ./feedback trends \
+  --metrics quality_score success_rate error_rate
+
+# Export report
+python3 feedback_cli.py --feedback-dir ./feedback report
+```
+
+More usage: `docs/guides/FEEDBACK_QUICKSTART.md`
+
 ---
 
 ## Outputs & Observability
@@ -230,10 +250,15 @@ python3 research_manager.py process-board --status blocked --top 30
 ## Docs
 
 - `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
+- `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide (NEW)
 - `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
 - `docs/SOURCE_ORCHESTRATION.md`: source queue orchestration and recommended run postures
+- `docs/LONG_RUNNING_GUIDE.md`: Long-running operations guide (NEW)
 - `docs/LOGIN_GUARDRAIL.md`: login guard and session management
 - `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
+- `ARCHITECTURE.md`: System architecture documentation (NEW)
+- `OPTIMIZATION_SUMMARY.md`: Optimization summary (NEW)
+- `OPTIMIZATION_UPDATE_PHASE2.md`: Phase 2 updates (NEW)
 
 Note: some docs are currently Chinese-first.
 
@@ -260,11 +285,25 @@ Note: some docs are currently Chinese-first.
 
 ---
 
+## System Architecture
+
+For detailed architecture documentation, see: [ARCHITECTURE.md](ARCHITECTURE.md)
+
+Core components:
+- **Ideation Engine**: Idea generation and ranking
+- **Experiments Engine**: Experiment execution and evidence collection
+- **Writeup Engine**: Paper writing and compilation
+- **Self-Review Engine**: Self-review and repair
+- **Autonomous Evolution Engine**: Autonomous evolution and strategy optimization
+- **Adaptive Learning Engine**: Adaptive learning and recommendations
+- **Enhanced Feedback System**: Enhanced feedback and monitoring
+
 ## Contributing & Community
 
 - Contributing guide: `CONTRIBUTING.md`
 - Code of conduct: `CODE_OF_CONDUCT.md`
 - Security policy: `SECURITY.md`
+- Architecture docs: `ARCHITECTURE.md`
 
 ---
 

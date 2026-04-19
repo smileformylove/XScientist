@@ -75,6 +75,7 @@ flowchart LR
 - **自评审闭环**：多轮 self-review 生成结构化 issue 与修复计划，并将修复覆盖率/回归检查纳入门禁。
 - **实验 TODO 可度量闭环**：把"还差什么实验/证据"显式落成 TODO，并持续跟踪 closure 进度。
 - **长期自治运行（Daemon）**：支持持续运行、失败保护、来源调度、趋势报告、交接简报与策略反馈。
+- **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
 
@@ -214,6 +215,25 @@ bash run_stable_daemon.sh report-trends
 bash run_stable_daemon.sh source-plan
 ```
 
+### D) 反馈系统监控（新增）
+
+```bash
+# 查看系统健康状态
+python3 feedback_cli.py --feedback-dir ./feedback status
+
+# 查看推荐行动
+python3 feedback_cli.py --feedback-dir ./feedback actions
+
+# 分析趋势
+python3 feedback_cli.py --feedback-dir ./feedback trends \
+  --metrics quality_score success_rate error_rate
+
+# 导出报告
+python3 feedback_cli.py --feedback-dir ./feedback report
+```
+
+更多用法：`docs/guides/FEEDBACK_QUICKSTART.md`
+
 ---
 
 ## 输出与可观测性
@@ -242,10 +262,15 @@ python3 research_manager.py process-board --status blocked --top 30
 ## 文档索引
 
 - `docs/guides/PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
+- `docs/guides/FEEDBACK_QUICKSTART.md`：反馈系统快速入门指南（新增）
 - `docs/CONFIG_REFERENCE.md`：更细的配置/参数参考
 - `docs/SOURCE_ORCHESTRATION.md`：source queue 编排与运行姿态建议
+- `docs/LONG_RUNNING_GUIDE.md`：长时运行操作指南（新增）
 - `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
 - `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
+- `ARCHITECTURE.md`：系统架构文档（新增）
+- `OPTIMIZATION_SUMMARY.md`：优化总结（新增）
+- `OPTIMIZATION_UPDATE_PHASE2.md`：第二阶段更新（新增）
 
 ---
 
@@ -270,11 +295,25 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ---
 
+## 系统架构
+
+详细架构文档请参阅：[ARCHITECTURE.md](ARCHITECTURE.md)
+
+核心组件：
+- **Ideation Engine**: 想法生成与排序
+- **Experiments Engine**: 实验执行与证据收集
+- **Writeup Engine**: 论文写作与编译
+- **Self-Review Engine**: 自评审与修复
+- **Autonomous Evolution Engine**: 自主进化与策略优化
+- **Adaptive Learning Engine**: 自适应学习与推荐
+- **Enhanced Feedback System**: 增强反馈与监控
+
 ## 贡献与社区
 
 - 贡献指南：`CONTRIBUTING.md`
 - 行为准则：`CODE_OF_CONDUCT.md`
 - 安全策略：`SECURITY.md`
+- 架构文档：`ARCHITECTURE.md`
 
 ---
 
