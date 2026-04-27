@@ -25,13 +25,14 @@ Important notes:
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Outputs & Observability](#outputs--observability)
+- [Example Papers](#example-papers)
 - [Docs](#docs)
 - [Development](#development)
 - [Roadmap](#roadmap)
 - [Contributing & Community](#contributing--community)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
-- [Citation](#citation)
+- [Citation and References](#citation-and-references)
 
 ---
 
@@ -247,6 +248,21 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ---
 
+## Example Papers
+
+Example papers and related submission artifacts are collected in `example/` for checking paper formatting, supplementary material organization, and final delivery structure.
+
+Currently organized example files:
+
+- `example/icml2026_arxiv_paper.pdf`: ICML 2026 arXiv paper PDF.
+
+To add the NeurIPS 2026 test1 paper and supplementary material, place the corresponding PDFs in `example/` with the following recommended names:
+
+- `example/nips2026_test1_paper.pdf`
+- `example/nips2026_test1_supplementary.pdf`
+
+---
+
 ## Docs
 
 - `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
@@ -275,13 +291,28 @@ Note: some docs are currently Chinese-first.
 
 ## Roadmap
 
-> Issues and PRs welcome (see `CONTRIBUTING.md`).
+XScientist's roadmap focuses on moving autonomous research from "one-shot paper generation" toward long-running, reproducible, reviewable, and submission-ready research infrastructure. Issues and PRs are welcome (see `CONTRIBUTING.md`).
 
-- [ ] Integrate TODO closure signals into governor phase switching and regression detection
-- [ ] Strengthen evidence metrics and binding to experiment outputs (figure/table/metrics)
-- [ ] Add consistency/regression checks for a "submission-ready" dossier
-- [ ] Wire self-evolution/playbook more directly into automatic rewrite / follow-up executors
-- [ ] Provide more complete English docs and API-style docs for external contributors
+**Near Term: Stable Delivery and Reproducibility**
+
+- [ ] Complete the `example/` paper and supplementary-material set as submission-ready reference outputs.
+- [ ] Expand preflight / smoke checks for API keys, LaTeX, output directories, login state, and dependency versions.
+- [ ] Add a paper delivery checklist covering PDFs, figures, tables, citations, experiment logs, and reproducibility configs.
+- [ ] Integrate TODO closure signals into quality gates so each paper exposes unresolved experiments and evidence gaps.
+
+**Mid Term: Self-Review, Repair, and Quality Improvement**
+
+- [ ] Strengthen bidirectional binding between evidence metrics and experiment outputs (figures, tables, and metrics).
+- [ ] Add consistency and regression checks for submission-ready dossiers.
+- [ ] Wire self-evolution / playbook signals more directly into automatic rewrite, repair, and follow-up executors.
+- [ ] Add multi-reviewer aggregation across novelty, soundness, clarity, reproducibility, and ethics risks.
+
+**Long Term: Continuous Autonomous Research**
+
+- [ ] Let the daemon adapt research strategy from historical success rate, cost, quality scores, and failure modes.
+- [ ] Build a cross-project knowledge base for strong ideas, failure cases, reusable experiment templates, and writing lessons.
+- [ ] Provide more complete English docs, API docs, and plugin interfaces for external collaboration and extension.
+- [ ] Support standard benchmarks / leaderboards for evaluating long-running autonomous research systems.
 
 ---
 
@@ -325,28 +356,35 @@ Thanks to the open-source projects that inspired parts of this work:
 
 ---
 
-## Citation
+## Citation and References
 
-If you use XScientist in research, please cite it (and include a commit hash for reproducibility):
+If you use XScientist in research, please cite this project and the generated paper you used. For papers or reports, include the commit hash, experiment configuration, model versions, and output directory for reproducibility.
 
-XScientist Board (paper, authored with this system):
-
-```bibtex
-@misc{xscientist_board,
-  title  = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
-  author = {Anonymous Authors},
-  year   = {2026},
-  note   = {NeurIPS 2026 submission (under review)}
-}
-```
+### XScientist
 
 XScientist (software / repository):
 
 ```bibtex
 @software{xscientist,
-  title  = {XScientist},
-  author = {smileformylove and contributors},
-  year   = {2026},
-  url    = {https://github.com/smileformylove/ai_scientist}
+  title        = {XScientist: A Long-Running Autonomous Scientific Research System},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/ai_scientist}
 }
 ```
+
+XScientist Board (paper or report authored/refined with this system):
+
+```bibtex
+@misc{xscientist_board,
+  title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/ai_scientist}
+}
+```
+
+### Citation Notes
+
+- When citing papers generated by XScientist, cite both this repository and the specific generated paper.
+- Clearly describe any human review, filtering, rewriting, or post-processing applied to generated results.

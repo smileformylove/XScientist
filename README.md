@@ -37,13 +37,14 @@ English README: [README.en.md](README.en.md)
     - [B) 连续运行/批量生成（适合跑一段时间）](#b-连续运行批量生成适合跑一段时间)
     - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
   - [输出与可观测性](#输出与可观测性)
+  - [示例论文](#示例论文)
   - [文档索引](#文档索引)
   - [开发与测试](#开发与测试)
   - [路线图](#路线图)
   - [贡献与社区](#贡献与社区)
   - [License](#license)
   - [Acknowledgements](#acknowledgements)
-  - [Citation](#citation)
+  - [Citation and References](#citation-and-references)
 
 ---
 
@@ -259,6 +260,21 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ---
 
+## 示例论文
+
+示例论文与相关提交材料统一放在 `example/` 目录，便于检查论文排版、补充材料组织方式和最终交付格式。
+
+当前已整理的示例文件：
+
+- `example/icml2026_arxiv_paper.pdf`：ICML 2026 arXiv 论文 PDF。
+
+如需继续补充 NeurIPS 2026 test1 的论文与补充材料，请将对应 PDF 放入 `example/`，建议命名为：
+
+- `example/nips2026_test1_paper.pdf`
+- `example/nips2026_test1_supplementary.pdf`
+
+---
+
 ## 文档索引
 
 - `docs/guides/PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
@@ -285,13 +301,28 @@ python3 research_manager.py process-board --status blocked --top 30
 
 ## 路线图
 
-> 欢迎 issue / PR 协作（见 `CONTRIBUTING.md`）。
+XScientist 的路线图聚焦于把自动科研流程从“单次生成”推进到“长期可运行、可复现、可评审、可交付”的科研基础设施。欢迎 issue / PR 协作（见 `CONTRIBUTING.md`）。
 
-- [ ] 把 TODO closure 信号进一步并入 governor 相位切换与回归检测
-- [ ] 强化 evidence 指标与实验结果（figure/table/metric）的绑定
-- [ ] 增加"submission-ready 套件"一致性/回归测试（dossier checks）
-- [ ] 将 self-evolution/playbook 更直接接入自动 rewrite / follow-up 执行器
-- [ ] 提供更完整的英文文档与 API 风格文档（便于外部协作）
+**近期目标：稳定交付与可复现**
+
+- [ ] 完善 `example/` 示例论文与补充材料，形成可直接对照的 submission-ready 样例。
+- [ ] 增强 preflight / smoke 检查，覆盖 API Key、LaTeX、输出目录、登录状态和依赖版本。
+- [ ] 建立论文交付清单，自动检查 PDF、图表、表格、引用、实验日志和复现实验配置。
+- [ ] 把 TODO closure 信号并入质量门禁，明确每篇论文的未闭环实验与证据缺口。
+
+**中期目标：自评审、自修复与质量提升**
+
+- [ ] 强化 evidence 指标与实验结果（figure/table/metric）的双向绑定。
+- [ ] 增加 submission-ready 套件的一致性检查与回归测试（dossier checks）。
+- [ ] 将 self-evolution / playbook 更直接接入自动 rewrite、repair 和 follow-up 执行器。
+- [ ] 引入多评审视角聚合，区分 novelty、soundness、clarity、reproducibility 和 ethics 风险。
+
+**长期目标：持续自治科研系统**
+
+- [ ] 让 daemon 根据历史成功率、成本、质量分数和失败模式自动调整研究策略。
+- [ ] 建立跨项目知识库，沉淀高质量 idea、失败案例、可复用实验模板和写作经验。
+- [ ] 提供更完整的英文文档、API 文档和插件接口，便于外部团队协作与二次开发。
+- [ ] 支持更标准的 benchmark / leaderboard，用于评估自动科研系统的长期表现。
 
 ---
 
@@ -335,28 +366,35 @@ Apache-2.0，详见 `LICENSE`。
 
 ---
 
-## Citation
+## Citation and References
 
-如果你在研究中使用了 XScientist，建议引用（并注明使用的 commit hash 便于复现）：
+如果你在研究中使用了 XScientist，建议引用本项目和具体生成论文；用于论文或报告时，请注明使用的 commit hash、实验配置、模型版本和输出目录，以便复现。
 
-XScientist Board（论文，使用本系统写作/打磨）：
-
-```bibtex
-@misc{xscientist_board,
-  title  = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
-  author = {Anonymous Authors},
-  year   = {2026},
-  note   = {NeurIPS 2026 submission (under review)}
-}
-```
+### XScientist
 
 XScientist（软件/代码仓库）：
 
 ```bibtex
 @software{xscientist,
-  title  = {XScientist},
-  author = {smileformylove and contributors},
-  year   = {2026},
-  url    = {https://github.com/smileformylove/ai_scientist}
+  title        = {XScientist: A Long-Running Autonomous Scientific Research System},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/ai_scientist}
 }
 ```
+
+XScientist Board（使用本系统写作/打磨的论文或报告）：
+
+```bibtex
+@misc{xscientist_board,
+  title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/ai_scientist}
+}
+```
+
+### Citation Notes
+
+- 引用 XScientist 生成的论文时，请同时引用本仓库和具体生成论文。
+- 引用自动生成结果时，请明确标注人工复核、修改和筛选过程。
