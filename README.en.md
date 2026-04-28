@@ -258,7 +258,7 @@ Example papers and related submission artifacts are collected in `example/` for 
 Currently organized example files:
 
 - [example/XScientist_Board.pdf](example/XScientist_Board.pdf): XScientist Board paper/report PDF.
-- [example/icml2026_gravitation_paper.pdf](example/icml2026_gravitation_paper.pdf): ICML 2026 gravitation paper PDF.
+- [example/icml_submitted_gravitation_paper.pdf](example/icml_submitted_gravitation_paper.pdf): ICML-submitted gravitation manuscript PDF.
 
 ---
 
@@ -380,14 +380,14 @@ XScientist Board (paper or report authored/refined with this system):
 }
 ```
 
-ICML 2026 gravitation example paper:
+ICML-submitted gravitation example paper:
 
 ```bibtex
-@misc{xscientist_icml2026_gravitation,
-  title        = {ICML 2026 Gravitation Paper},
+@misc{xscientist_icml_submitted_gravitation,
+  title        = {ICML-Submitted Gravitation Paper},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml2026_gravitation_paper.pdf}
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml_submitted_gravitation_paper.pdf}
 }
 ```
 

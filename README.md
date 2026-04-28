@@ -271,7 +271,7 @@ python3 research_manager.py process-board --status blocked --top 30
 当前已整理的示例文件：
 
 - [example/XScientist_Board.pdf](example/XScientist_Board.pdf)：XScientist Board 论文/报告 PDF。
-- [example/icml2026_gravitation_paper.pdf](example/icml2026_gravitation_paper.pdf)：ICML 2026 gravitation 论文 PDF。
+- [example/icml_submitted_gravitation_paper.pdf](example/icml_submitted_gravitation_paper.pdf)：ICML 投稿中的 gravitation 论文稿件 PDF。
 
 ---
 
@@ -393,14 +393,14 @@ XScientist Board（使用本系统写作/打磨的论文或报告）：
 }
 ```
 
-ICML 2026 gravitation 示例论文：
+ICML 投稿中的 gravitation 示例论文：
 
 ```bibtex
-@misc{xscientist_icml2026_gravitation,
-  title        = {ICML 2026 Gravitation Paper},
+@misc{xscientist_icml_submitted_gravitation,
+  title        = {ICML-Submitted Gravitation Paper},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml2026_gravitation_paper.pdf}
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml_submitted_gravitation_paper.pdf}
 }
 ```
 
