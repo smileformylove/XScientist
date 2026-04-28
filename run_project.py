@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Scientist 项目管理器
+XScientist project runner
 在一个独立文件夹中运行完整的科研流程：想法生成 -> 实验 -> 论文
 支持并行处理多个论文和自动反思改进
 不影响 ai_scientist 原有代码结构
@@ -1898,7 +1898,7 @@ def main():
     require_login("项目管理操作(run_project)")
 
     parser = argparse.ArgumentParser(
-        description="AI Scientist 项目管理器 - 并行处理多个论文",
+        description="XScientist project runner - process multiple papers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:

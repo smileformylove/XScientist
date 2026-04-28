@@ -1,159 +1,95 @@
-# AI Scientist 研究生成配置文件示例
-# 复制此文件为 research_config.yaml 并根据需要修改
+# XScientist research-generation config example.
+# Copy this file to research_config.yaml and adjust values for local runs.
 
 # ====================
-# 基本设置
+# Basic settings
 # ====================
 
-# 研究输出目录（默认：./research_output）
-research_dir: "./research_output"
+# Output directory override. Leave null to use ai_scientist/config/paths.py:
+# RESEARCH_OUTPUT_DIR > AI_SCIENTIST_OUTPUT_DIR > sibling <repo-name>_outputs.
+# For this repository, the default sibling path is ../XScientist_outputs.
+research_dir: null
 
-# 是否使用自定义批次名称
-custom_batch_name: null  # 设置为 "my_batch_001" 使用自定义名称，或 null 使用时间戳
+# Use a custom batch name, or null to use a timestamp.
+custom_batch_name: null
 
 # ====================
-# 想法生成设置
+# Ideation settings
 # ====================
 
 ideation:
-  # 生成想法数量
+  # Number of ideas to generate.
   num_ideas: 5
 
-  # 反思次数
+  # Reflection rounds per idea.
   num_reflections: 5
 
-  # 使用的模型
+  # Ideation model.
   model: "glm-4-flash"
 
-  # 主题文件路径（如果使用文件输入）
+  # Topic file for topic-based runs.
   topic_file: "examples/example_topic.md"
 
-  # 或使用已有想法文件
-  ideas_file: null  # 例如: "existing_ideas.json"
+  # Existing ideas file. Set to null when using topic_file.
+  ideas_file: null
 
 # ====================
-# 论文类型设置
+# Paper type settings
 # ====================
 
-# 要生成的论文类型（可以是多个）
+# Supported CLI paper types: icbinb, normal, journal, extended.
 paper_types:
-  - "icbinb"      # 4页 Workshop论文
-  - "normal"      # 8页标准论文
-  - "journal"     # 12页期刊论文
-  - "extended"    # 2页扩展摘要
+  - "icbinb"
+  - "normal"
+  - "journal"
+  - "extended"
 
-# 或使用 all_types: true 生成所有类型
+# Generate every supported type.
 all_types: false
 
+# Optional venue intent: neurips, iclr, cvpr, journal, or nature.
+target_venue: null
+auto_adjust_paper_type: false
+
 # ====================
-# 并行处理设置
+# Parallel execution
 # ====================
 
 parallel:
-  # 是否启用并行处理
   enabled: false
-
-  # worker数量（建议设置为CPU核心数的一半）
   num_workers: 2
 
 # ====================
-# 模型配置
+# Model configuration
 # ====================
 
 models:
-  # 想法生成模型
   ideation: "glm-4-flash"
-
-  # 图表聚合模型
   agg_plots: "glm-4-flash"
-
-  # 论文写作主模型
   writeup: "glm-4-plus"
-
-  # 论文写作辅助模型
   writeup_small: "glm-4-air"
-
-  # 文献检索模型
   citation: "glm-4-air"
-
-  # 审查模型
   review: "glm-4-plus"
 
 # ====================
-# 写作设置
+# Writing and review
 # ====================
 
 writing:
-  # 文献检索轮数
   num_cite_rounds: 15
-
-  # 写作重试次数
   writeup_retries: 3
-
-  # 改进轮数
   improvement_rounds: 1
+  review_strategy: null
+
+# Idea indices to process. Use null for all selected ideas.
+idea_indices: null
 
 # ====================
-# 想法选择
-# ====================
-
-# 要处理的想法索引（null = 处理全部）
-idea_indices: null  # 例如: [0, 1, 2] 或 "0,1,2"
-
-# ====================
-# 高级设置
+# Advanced settings
 # ====================
 
 advanced:
-  # 实验超时时间（秒）
   experiment_timeout: 3600
-
-  # LaTeX编译超时时间（秒）
   latex_timeout: 30
-
-  # 是否在完成后清理临时文件
   cleanup_temp_files: true
-
-  # 是否保存实验日志
   save_experiment_logs: true
-
-# ====================
-# 通知设置（可选）
-# ====================
-
-notifications:
-  # 完成时是否显示通知
-  enabled: false
-
-  # 通知方式：console, email, webhook
-  method: "console"
-
-  # Webhook URL（如果使用webhook）
-  webhook_url: null
-
-# ====================
-# 自定义论文类型（可选）
-# ====================
-
-# 添加自定义论文类型
-custom_paper_types:
-  # 示例：添加一个新的论文类型
-  # short_paper:
-  #   name: "Short Conference Paper"
-  #   page_limit: 6
-  #   template: "blank_icml_latex"
-  #   description: "6页短论文"
-
-# ====================
-# 调试设置
-# ====================
-
-debug:
-  # 是否启用调试日志
-  enabled: false
-
-  # 日志级别：DEBUG, INFO, WARNING, ERROR
-  log_level: "INFO"
-
-  # 是否保存详细traceback
-  save_traceback: true

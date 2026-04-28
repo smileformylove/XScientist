@@ -1,5 +1,4 @@
 {
-  "research_dir": "./research_output",
   "daemon_name": "stable_night_generate_daemon",
   "source_config": "../sources/stable_source_priority.example.json",
   "source_rotation": "round_robin",

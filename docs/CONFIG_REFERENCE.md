@@ -326,6 +326,7 @@ Reference files:
 
 Typical fields:
 - `research_dir`
+  - Explicit output-root override for this profile. If omitted by a direct CLI run, `continuous_research_daemon.py` uses the runtime default from `ai_scientist/config/paths.py` (`RESEARCH_OUTPUT_DIR` > `AI_SCIENTIST_OUTPUT_DIR` > sibling `<repo-name>_outputs`).
 - `daemon_name`
 - `source_config`
 - `duration_hours` / `run_forever` / `max_cycles`
@@ -359,6 +360,7 @@ python run_daemon_profile.py configs/daemon/daemon_profile.example.json --dry-ru
 Relative path behavior:
 - `source_config`, `topic`, `ideas`, `topic_files`, `ideas_files`, and `research_dir` are resolved relative to the profile file first.
 - If a relative path is not found there, the launcher falls back to the repository root.
+- The checked-in daemon profile examples omit `research_dir` so they use the repository-wide output default. Add `research_dir` only in a local overlay when you want a machine-specific output root.
 
 Local overlay behavior:
 - If a sibling local override exists, such as `configs/daemon/stable_daemon_profile.local.json`, it is applied automatically after the base profile.

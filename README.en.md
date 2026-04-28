@@ -1,7 +1,6 @@
 # XScientist
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Smoke](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml/badge.svg)](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml)
 
 Chinese README: [README.md](README.md)
 
@@ -29,6 +28,7 @@ Important notes:
 - [Docs](#docs)
 - [Development](#development)
 - [Roadmap](#roadmap)
+- [System Architecture](#system-architecture)
 - [Contributing & Community](#contributing--community)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -140,7 +140,7 @@ make smoke
 
 To keep the repo clean, outputs are written to a sibling directory by default:
 
-- Default output root: `../ai_scientist_outputs` (relative to this repo)
+- Default output root: sibling `<repo-name>_outputs`; for this repo that is `../XScientist_outputs`
 - Priority: `RESEARCH_OUTPUT_DIR` > `AI_SCIENTIST_OUTPUT_DIR` > default sibling dir
 - Fallback: if the sibling dir is not writable, use a system data dir (e.g., `~/.local/share/ai_scientist/research`)
 
@@ -204,7 +204,7 @@ bash run_stable_daemon.sh report-trends
 bash run_stable_daemon.sh source-plan
 ```
 
-### D) Feedback system monitoring (NEW)
+### D) Feedback system monitoring
 
 ```bash
 # Check system health
@@ -232,6 +232,9 @@ XScientist writes structured artifacts under the output root (directory names ma
 - `projects/`: full per-project directories
 - `experiments/`: experiment outputs and logs
 - `ideas/`: idea artifacts
+- `papers/`: per-paper directories from batch generation
+- `batches/`: continuous-generator batch progress and reports
+- `cache/`: HuggingFace / Torch / wandb runtime caches
 - `reports/`: trends/handoff reports (daemon)
 - `knowledge_base/`: cross-project memory (e.g., self-evolution history/playbook)
 
@@ -266,17 +269,14 @@ To add the NeurIPS 2026 test1 paper and supplementary material, place the corres
 ## Docs
 
 - `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
-- `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide (NEW)
+- `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide
 - `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
 - `docs/SOURCE_ORCHESTRATION.md`: source queue orchestration and recommended run postures
-- `docs/LONG_RUNNING_GUIDE.md`: Long-running operations guide (NEW)
+- `docs/LONG_RUNNING_GUIDE.md`: Long-running operations guide
 - `docs/LOGIN_GUARDRAIL.md`: login guard and session management
 - `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
-- `ARCHITECTURE.md`: System architecture documentation (NEW)
-- `OPTIMIZATION_SUMMARY.md`: Optimization summary (NEW)
-- `OPTIMIZATION_UPDATE_PHASE2.md`: Phase 2 updates (NEW)
-
-Note: some docs are currently Chinese-first.
+- `ARCHITECTURE.md`: System architecture documentation
+- `OPTIMIZATION_SUMMARY.md`: Optimization summary
 
 ---
 
@@ -369,7 +369,7 @@ XScientist (software / repository):
   title        = {XScientist: A Long-Running Autonomous Scientific Research System},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/ai_scientist}
+  url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 
@@ -380,7 +380,7 @@ XScientist Board (paper or report authored/refined with this system):
   title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/ai_scientist}
+  url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 

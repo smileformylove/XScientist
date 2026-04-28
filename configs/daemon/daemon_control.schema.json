@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.local/daemon_control.schema.json",
-  "title": "AI Scientist Daemon Control",
+  "title": "XScientist Daemon Control",
   "type": "object",
   "additionalProperties": false,
   "properties": {

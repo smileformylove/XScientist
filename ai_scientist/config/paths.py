@@ -1,24 +1,23 @@
 """
-AI Scientist 输出路径配置
-统一管理所有生成文件的输出路径
+XScientist output path configuration.
 
-目录结构:
+Directory layout:
 <output_root>/
-├── cache/              # 缓存文件
-├── ideas/              # 生成的idea文件
-├── experiments/        # 运行的实验结果
-├── papers/             # 每篇论文独立文件夹
-│   └── paper_YYYYMMDD_HHMMSS_idea_name/  # 单篇论文完整文件夹
-│       ├── idea.json           # 想法
-│       ├── idea.md             # 想法描述
-│       ├── experiment/         # 实验代码和结果
-│       ├── latex/              # LaTeX源文件
-│       ├── paper.pdf           # 最终PDF
-│       └── reviews/            # 审查结果
-└── batches/            # 批次管理文件夹
-    └── batch_YYYYMMDD_HHMMSS/  # 批次记录
-        ├── progress.json       # 进度跟踪
-        └── final_report.json   # 最终报告
+├── cache/
+├── ideas/
+├── experiments/
+├── papers/
+│   └── paper_YYYYMMDD_HHMMSS_idea_name/
+│       ├── idea.json
+│       ├── idea.md
+│       ├── experiment/
+│       ├── latex/
+│       ├── paper.pdf
+│       └── reviews/
+└── batches/
+    └── batch_YYYYMMDD_HHMMSS/
+        ├── progress.json
+        └── final_report.json
 """
 from __future__ import annotations
 
@@ -27,11 +26,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-# 获取项目根目录
+# Repository root.
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 
-# 统一的输出目录
-# 优先读取 RESEARCH_OUTPUT_DIR，并兼容旧变量 AI_SCIENTIST_OUTPUT_DIR
+# Unified output directory. Prefer RESEARCH_OUTPUT_DIR and keep
+# AI_SCIENTIST_OUTPUT_DIR as a compatibility alias.
 PRIMARY_OUTPUT_ENV_VAR = "RESEARCH_OUTPUT_DIR"
 LEGACY_OUTPUT_ENV_VAR = "AI_SCIENTIST_OUTPUT_DIR"
 
@@ -92,13 +91,13 @@ DEFAULT_RESEARCH_DIR = _default_research_dir()
 OUTPUT_DIR = resolve_output_dir_value()
 OUTPUT_PATH = resolve_output_path()
 
-# 各种输出路径
+# Common output paths.
 CACHE_DIR = OUTPUT_PATH / "cache"
-IDEAS_DIR = OUTPUT_PATH / "ideas"  # 统一存放所有生成的idea文件
-EXPERIMENTS_DIR = OUTPUT_PATH / "experiments"  # 实验运行结果
-PROJECTS_DIR = OUTPUT_PATH / "projects"  # 完整项目
-PAPERS_DIR = OUTPUT_PATH / "papers"  # 最终论文存放
-BATCHES_DIR = OUTPUT_PATH / "batches"  # 批次管理
+IDEAS_DIR = OUTPUT_PATH / "ideas"
+EXPERIMENTS_DIR = OUTPUT_PATH / "experiments"
+PROJECTS_DIR = OUTPUT_PATH / "projects"
+PAPERS_DIR = OUTPUT_PATH / "papers"
+BATCHES_DIR = OUTPUT_PATH / "batches"
 
 
 def _resolve_output_root(output_root: str | Path | None = None) -> Path:
@@ -108,7 +107,7 @@ def _resolve_output_root(output_root: str | Path | None = None) -> Path:
 
 
 def ensure_output_dirs(output_root: str | Path | None = None):
-    """确保所有输出目录存在"""
+    """Ensure the standard output directories exist."""
     root = _resolve_output_root(output_root)
     dirs = [
         root,

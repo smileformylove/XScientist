@@ -1,5 +1,5 @@
 {
-  "research_dir": "./research_output_local",
+  "research_dir": "/path/to/my_xscientist_outputs_local",
   "dashboard_port": 8010,
   "sleep_minutes": 25,
   "source_config": "../sources/stable_source_priority.example.json",

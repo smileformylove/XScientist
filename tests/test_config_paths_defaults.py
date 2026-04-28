@@ -22,7 +22,7 @@ class ConfigPathsDefaultTests(unittest.TestCase):
 
     def test_should_prefer_repo_sibling_output_when_legacy_missing(self) -> None:
         home_dir = Path("/tmp/home")
-        project_root = Path("/tmp/work/ai_scientist")
+        project_root = Path("/tmp/work/XScientist")
         result = _resolve_default_research_dir(
             home_dir=home_dir,
             platform_name="posix",
@@ -31,7 +31,7 @@ class ConfigPathsDefaultTests(unittest.TestCase):
             project_root=project_root,
             project_parent_writable=True,
         )
-        self.assertEqual(result, project_root.resolve().parent / "ai_scientist_outputs")
+        self.assertEqual(result, project_root.resolve().parent / "XScientist_outputs")
 
     def test_should_support_windows_local_appdata_fallback_when_requested(self) -> None:
         home_dir = Path("C:/Users/tester")

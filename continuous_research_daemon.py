@@ -6050,12 +6050,12 @@ ul { margin: 0; padding-left: 18px; }
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <meta http-equiv='refresh' content='{_html_escape(refresh_seconds)}'>
-  <title>AI Scientist Daemon Dashboard</title>
+  <title>XScientist Daemon Dashboard</title>
   <style>{style}</style>
 </head>
 <body>
   <div class='hero'>
-    <h1>AI Scientist Daemon Dashboard</h1>
+    <h1>XScientist Daemon Dashboard</h1>
     <p class='small'>Generated at {_html_escape(payload.get('generated_at'))} • auto-refresh every {_html_escape(refresh_seconds)}s</p>
     <div class='badges'>
       <span class='badge'>health={_html_escape((cycle.get('health') or brief.get('health') or {}).get('state', 'n/a'))}</span>
@@ -7838,7 +7838,7 @@ def _run_cycle(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Long-running daemon for continuous AI Scientist paper generation",
+        description="Long-running daemon for continuous XScientist paper generation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:

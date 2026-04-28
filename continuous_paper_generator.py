@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Scientist 连续论文生成器
+XScientist continuous paper generator
 支持连续产生论文，不仅限于workshop，所有文件输出到指定目录
 """
 
@@ -4074,7 +4074,7 @@ def main():
     )
 
     parser = argparse.ArgumentParser(
-        description="AI Scientist 连续论文生成器",
+        description="XScientist continuous paper generator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:

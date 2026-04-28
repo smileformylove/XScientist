@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple login/session CLI for AI Scientist operations."""
+"""Simple login/session CLI for XScientist operations."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _format_time(raw: str) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AI Scientist 登录会话管理")
+    parser = argparse.ArgumentParser(description="XScientist login session management")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     login_parser = subparsers.add_parser("login", help="登录并创建会话")
@@ -84,4 +84,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

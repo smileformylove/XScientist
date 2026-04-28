@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Scientist 研究管理工具
+XScientist research management tool
 用于管理 ./research_output 目录中的论文和批次
 """
 
@@ -3670,7 +3670,7 @@ def main():
     require_login("研究管理操作(research_manager)")
 
     parser = argparse.ArgumentParser(
-        description="AI Scientist 研究管理工具",
+        description="XScientist research management tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:

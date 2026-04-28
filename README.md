@@ -1,7 +1,6 @@
 # XScientist
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Smoke](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml/badge.svg)](https://github.com/smileformylove/ai_scientist/actions/workflows/smoke.yml)
 
 English README: [README.en.md](README.en.md)
 
@@ -36,11 +35,13 @@ English README: [README.en.md](README.en.md)
     - [A) 从 Topic 跑一个项目（最常用）](#a-从-topic-跑一个项目最常用)
     - [B) 连续运行/批量生成（适合跑一段时间）](#b-连续运行批量生成适合跑一段时间)
     - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
+    - [D) 反馈系统监控](#d-反馈系统监控)
   - [输出与可观测性](#输出与可观测性)
   - [示例论文](#示例论文)
   - [文档索引](#文档索引)
   - [开发与测试](#开发与测试)
   - [路线图](#路线图)
+  - [系统架构](#系统架构)
   - [贡献与社区](#贡献与社区)
   - [License](#license)
   - [Acknowledgements](#acknowledgements)
@@ -152,14 +153,14 @@ make smoke
 
 为避免运行产物污染仓库，默认输出到**仓库平级目录**：
 
-- 默认输出根目录：`../ai_scientist_outputs`（相对当前仓库）
+- 默认输出根目录：仓库平级的 `<仓库名>_outputs`；本仓库默认是 `../XScientist_outputs`
 - 优先级：`RESEARCH_OUTPUT_DIR` > `AI_SCIENTIST_OUTPUT_DIR` > 默认平级目录
 - 若平级目录不可写：回退到系统数据目录（如 `~/.local/share/ai_scientist/research`）
 
 推荐显式指定输出路径：
 
 ```bash
-export RESEARCH_OUTPUT_DIR="/path/to/my_ai_scientist_outputs"
+export RESEARCH_OUTPUT_DIR="/path/to/my_xscientist_outputs"
 ```
 
 ### 严格兜底策略（调试提示）
@@ -216,7 +217,7 @@ bash run_stable_daemon.sh report-trends
 bash run_stable_daemon.sh source-plan
 ```
 
-### D) 反馈系统监控（新增）
+### D) 反馈系统监控
 
 ```bash
 # 查看系统健康状态
@@ -244,6 +245,9 @@ python3 feedback_cli.py --feedback-dir ./feedback report
 - `projects/`：每个研究项目的完整目录
 - `experiments/`：实验运行结果与日志
 - `ideas/`：生成/整理后的 idea 工件
+- `papers/`：批量生成的单篇论文目录
+- `batches/`：连续生成器批次记录与进度
+- `cache/`：HuggingFace / Torch / wandb 等运行缓存
 - `reports/`：趋势报告/交接报告等（daemon 场景）
 - `knowledge_base/`：跨项目沉淀（例如 self-evolution history/playbook）
 
@@ -278,15 +282,14 @@ python3 research_manager.py process-board --status blocked --top 30
 ## 文档索引
 
 - `docs/guides/PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
-- `docs/guides/FEEDBACK_QUICKSTART.md`：反馈系统快速入门指南（新增）
+- `docs/guides/FEEDBACK_QUICKSTART.md`：反馈系统快速入门指南
 - `docs/CONFIG_REFERENCE.md`：更细的配置/参数参考
 - `docs/SOURCE_ORCHESTRATION.md`：source queue 编排与运行姿态建议
-- `docs/LONG_RUNNING_GUIDE.md`：长时运行操作指南（新增）
+- `docs/LONG_RUNNING_GUIDE.md`：长时运行操作指南
 - `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
 - `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
-- `ARCHITECTURE.md`：系统架构文档（新增）
-- `OPTIMIZATION_SUMMARY.md`：优化总结（新增）
-- `OPTIMIZATION_UPDATE_PHASE2.md`：第二阶段更新（新增）
+- `ARCHITECTURE.md`：系统架构文档
+- `OPTIMIZATION_SUMMARY.md`：优化总结
 
 ---
 
@@ -379,7 +382,7 @@ XScientist（软件/代码仓库）：
   title        = {XScientist: A Long-Running Autonomous Scientific Research System},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/ai_scientist}
+  url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 
@@ -390,7 +393,7 @@ XScientist Board（使用本系统写作/打磨的论文或报告）：
   title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/ai_scientist}
+  url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 

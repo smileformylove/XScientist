@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Scientist 运行前自检。"""
+"""XScientist preflight checks."""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ def print_result(result: CheckResult) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="AI Scientist preflight checks")
+    parser = argparse.ArgumentParser(description="XScientist preflight checks")
     parser.add_argument(
         "--auth-file",
         help="override auth session file for this preflight run",
@@ -185,7 +185,7 @@ def main() -> int:
             Path(args.auth_file).expanduser().resolve()
         )
 
-    print("AI Scientist preflight")
+    print("XScientist preflight")
     print(f"- Python: {sys.version.split()[0]}")
     print(f"- Output env: {PRIMARY_OUTPUT_ENV_VAR} (legacy: {LEGACY_OUTPUT_ENV_VAR})")
     print(f"- Auth session: {auth_file_path()}")

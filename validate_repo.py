@@ -2160,7 +2160,7 @@ Results are preliminary.
                 / "daemon_control.schema.json"
             ).read_text(encoding="utf-8")
         )
-        assert schema.get("title") == "AI Scientist Daemon Control"
+        assert schema.get("title") == "XScientist Daemon Control"
         source_schema = json.loads(
             (
                 PROJECT_ROOT
@@ -2169,7 +2169,7 @@ Results are preliminary.
                 / "source_queue.schema.json"
             ).read_text(encoding="utf-8")
         )
-        assert source_schema.get("title") == "AI Scientist Source Queue"
+        assert source_schema.get("title") == "XScientist Source Queue"
         daemon_profile_schema = json.loads(
             (
                 PROJECT_ROOT
@@ -2178,7 +2178,7 @@ Results are preliminary.
                 / "daemon_profile.schema.json"
             ).read_text(encoding="utf-8")
         )
-        assert daemon_profile_schema.get("title") == "AI Scientist Daemon Profile"
+        assert daemon_profile_schema.get("title") == "XScientist Daemon Profile"
         assert (PROJECT_ROOT / "configs" / "sources" / "stable_source_priority.example.json").exists()
         assert (PROJECT_ROOT / "configs" / "daemon" / "stable_daemon_profile.local.example.json").exists()
         assert (PROJECT_ROOT / "docs" / "CONFIG_REFERENCE.md").exists()
@@ -2396,7 +2396,7 @@ Results are preliminary.
             text=True,
             check=True,
         )
-        assert "AI Scientist 连续论文生成系统" in start_menu_run.stdout
+        assert "XScientist Continuous Paper Generation" in start_menu_run.stdout
         assert "退出" in start_menu_run.stdout
         wrapper_run = subprocess.run(
             [
@@ -2557,7 +2557,7 @@ Results are preliminary.
         )
         assert doctor_run.returncode in {0, 1}
         assert '"status": "ok"' in doctor_run.stdout
-        assert "AI Scientist preflight" in doctor_run.stdout
+        assert "XScientist preflight" in doctor_run.stdout
         handoff_run = subprocess.run(
             [
                 "bash",

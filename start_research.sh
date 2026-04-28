@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AI Scientist 连续论文生成系统 - 快速启动脚本
+# XScientist continuous paper generation quick-start script
 
 set -euo pipefail
 
@@ -158,7 +158,7 @@ setup_research_dir() {
 
 # 显示菜单
 show_menu() {
-    print_header "AI Scientist 连续论文生成系统"
+    print_header "XScientist Continuous Paper Generation"
     echo "项目目录: $PROJECT_ROOT"
     echo "输出目录: $RESEARCH_DIR"
     echo ""
