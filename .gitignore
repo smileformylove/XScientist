@@ -197,6 +197,9 @@ monitor_progress.log
 # final papers
 final_papers/
 
+# Curated example PDFs are intentionally versioned.
+!example/*.pdf
+
 # HF
 cache/
 huggingface/

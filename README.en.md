@@ -257,12 +257,8 @@ Example papers and related submission artifacts are collected in `example/` for 
 
 Currently organized example files:
 
-- `example/icml2026_arxiv_paper.pdf`: ICML 2026 arXiv paper PDF.
-
-To add the NeurIPS 2026 test1 paper and supplementary material, place the corresponding PDFs in `example/` with the following recommended names:
-
-- `example/nips2026_test1_paper.pdf`
-- `example/nips2026_test1_supplementary.pdf`
+- [example/XScientist_Board.pdf](example/XScientist_Board.pdf): XScientist Board paper/report PDF.
+- [example/icml2026_gravitation_paper.pdf](example/icml2026_gravitation_paper.pdf): ICML 2026 gravitation paper PDF.
 
 ---
 
@@ -380,7 +376,18 @@ XScientist Board (paper or report authored/refined with this system):
   title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/XScientist}
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/XScientist_Board.pdf}
+}
+```
+
+ICML 2026 gravitation example paper:
+
+```bibtex
+@misc{xscientist_icml2026_gravitation,
+  title        = {ICML 2026 Gravitation Paper},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml2026_gravitation_paper.pdf}
 }
 ```
 

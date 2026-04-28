@@ -270,12 +270,8 @@ python3 research_manager.py process-board --status blocked --top 30
 
 当前已整理的示例文件：
 
-- `example/icml2026_arxiv_paper.pdf`：ICML 2026 arXiv 论文 PDF。
-
-如需继续补充 NeurIPS 2026 test1 的论文与补充材料，请将对应 PDF 放入 `example/`，建议命名为：
-
-- `example/nips2026_test1_paper.pdf`
-- `example/nips2026_test1_supplementary.pdf`
+- [example/XScientist_Board.pdf](example/XScientist_Board.pdf)：XScientist Board 论文/报告 PDF。
+- [example/icml2026_gravitation_paper.pdf](example/icml2026_gravitation_paper.pdf)：ICML 2026 gravitation 论文 PDF。
 
 ---
 
@@ -393,7 +389,18 @@ XScientist Board（使用本系统写作/打磨的论文或报告）：
   title        = {XScientist Board: Artifact-Routed Submission Hardening for Autonomous Research Systems},
   author       = {{XScientist}},
   year         = {2026},
-  url          = {https://github.com/smileformylove/XScientist}
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/XScientist_Board.pdf}
+}
+```
+
+ICML 2026 gravitation 示例论文：
+
+```bibtex
+@misc{xscientist_icml2026_gravitation,
+  title        = {ICML 2026 Gravitation Paper},
+  author       = {{XScientist}},
+  year         = {2026},
+  url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml2026_gravitation_paper.pdf}
 }
 ```
 
