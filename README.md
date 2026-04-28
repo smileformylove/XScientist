@@ -397,7 +397,7 @@ ICML 投稿中的 gravitation 示例论文：
 
 ```bibtex
 @misc{xscientist_icml_submitted_gravitation,
-  title        = {ICML-Submitted Gravitation Paper},
+  title        = {A Gravitational Field Theory for Deep Networks},
   author       = {{XScientist}},
   year         = {2026},
   url          = {https://github.com/smileformylove/XScientist/blob/main/example/icml_submitted_gravitation_paper.pdf}
