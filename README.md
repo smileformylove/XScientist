@@ -14,7 +14,7 @@ English README: [README.en.md](README.en.md)
 - 可靠性：生成内容可能存在错误或幻觉；请务必自行复核关键结论、数据与引用。
 - 输出目录：默认**不会**把运行产物写入仓库目录（避免污染开源仓库）。
 
-如果你对该仓库来时路感兴趣，欢迎阅读对应的知乎随笔：(XScientist踩坑实录)[https://zhuanlan.zhihu.com/p/2027818800238666075] 。如果对你有帮助，感谢star和小心心～
+如果你对该仓库来时路感兴趣，欢迎阅读对应的知乎随笔：[XScientist踩坑实录](https://zhuanlan.zhihu.com/p/2027818800238666075) 。如果对你有帮助，感谢star和小心心～
 ---
 
 ## 目录 (Contents)
