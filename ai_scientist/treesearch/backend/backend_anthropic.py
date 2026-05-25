@@ -49,8 +49,8 @@ def _select_values_notnone(payload: dict) -> dict:
         if value is not None
     }
 
-def get_ai_client(model : str, max_retries=2) -> anthropic.AnthropicBedrock:
-    client = anthropic.AnthropicBedrock(max_retries=max_retries)
+def get_ai_client(model : str, max_retries=2):
+    client = anthropic.Anthropic(max_retries=max_retries)
     return client
 
 def query(
