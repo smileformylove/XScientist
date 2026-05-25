@@ -77,6 +77,8 @@ def perform_experiments_bfts(config_path: str):
     results_tsv_path = cfg.log_dir / "results.tsv"
     program_md_path = cfg.log_dir / "program.md"
 
+    results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
+
     if not results_tsv_path.exists():
         results_tsv_path.write_text(
             "\t".join(
