@@ -5,6 +5,7 @@ Supports:
 - captures exceptions and stack traces
 - limits execution time
 """
+from __future__ import annotations
 
 import logging
 import os

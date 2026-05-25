@@ -441,13 +441,13 @@ def create_client(model) -> tuple[Any, str]:
     spec = resolve_model_provider(model)
     if spec.client_family == "anthropic":
         print(f"Using {spec.display_name} API with model {spec.client_model}.")
-        return anthropic.Anthropic(), spec.client_model
+        return anthropic.Anthropic(), model
     if spec.client_family == "anthropic_bedrock":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
-        return anthropic.AnthropicBedrock(), spec.client_model
+        return anthropic.AnthropicBedrock(), model
     if spec.client_family == "anthropic_vertex":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
-        return anthropic.AnthropicVertex(), spec.client_model
+        return anthropic.AnthropicVertex(), model
     if spec.client_family == "openai_compatible":
         kwargs, client_model = build_openai_compatible_client_kwargs(model, env=os.environ)
         print(f"Using {spec.display_name} API with model {client_model}.")
