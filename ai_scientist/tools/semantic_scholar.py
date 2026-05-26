@@ -125,6 +125,7 @@ Abstract: {paper.get("abstract", "No abstract available.")}"""
     backoff.expo,
     _SEMANTIC_SCHOLAR_HTTP_ERROR,
     on_backoff=on_backoff,
+    max_tries=8,
 )
 def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     S2_API_KEY = os.getenv("S2_API_KEY")
@@ -156,7 +157,7 @@ def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     rsp.raise_for_status()
     results = rsp.json()
     total = results["total"]
-    time.sleep(1.0)
+    time.sleep(3.0)
     if not total:
         return None
 
