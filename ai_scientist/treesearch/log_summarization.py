@@ -140,6 +140,9 @@ def get_summarizer_prompt(journal, stage_name):
     if not good_leaf_nodes:
         print("NO GOOD LEAF NODES!!!")
         good_leaf_nodes = [n for n in journal.good_nodes]
+    if not good_leaf_nodes:
+        print("NO GOOD NODES — falling back to non-buggy experiment nodes")
+        good_leaf_nodes = [n for n in journal.nodes if n.is_buggy is False]
     node_infos = get_nodes_infos(good_leaf_nodes)
     return report_summarizer_sys_msg, report_summarizer_prompt.format(
         node_infos=node_infos, stage_name=stage_name

@@ -410,7 +410,9 @@ class Journal:
             f"[purple]all nodes ID and is_buggy/is_buggy_plots flags: {list_of_nodes}[/purple]"
         )
         return [
-            n for n in self.nodes if n.is_buggy is False and n.is_buggy_plots is False
+            n
+            for n in self.nodes
+            if n.is_buggy is False and n.is_buggy_plots is not True
         ]
 
     def get_node_by_id(self, node_id: str) -> Optional[Node]:
