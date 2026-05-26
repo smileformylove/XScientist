@@ -478,7 +478,7 @@ class Journal:
         try:
             if cfg is None or cfg.agent.get("select_node", None) is None:
                 # Use environment variable or default to Zhipu
-                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash")
+                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
                 temperature = 0.3
             else:
                 model = cfg.agent.select_node.model
@@ -574,7 +574,7 @@ class Journal:
                 "2. Common failure patterns and pitfalls to avoid\n"
                 "3. Specific recommendations for future experiments based on both successes and failures"
             ),
-            model=model_kwargs.get("model", os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash")),
+            model=model_kwargs.get("model", os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")),
             temperature=model_kwargs.get("temp", 0.3)
         )
 
@@ -636,7 +636,7 @@ class Journal:
 
         # 安全获取 summary 配置
         summary_cfg = cfg.agent.get("summary")
-        model = summary_cfg.model if summary_cfg else os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash")
+        model = summary_cfg.model if summary_cfg else os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
         temperature = summary_cfg.temp if summary_cfg else 0.3
 
         stage_summary = query(

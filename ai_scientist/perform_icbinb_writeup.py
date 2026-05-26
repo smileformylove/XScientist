@@ -761,7 +761,7 @@ def filter_experiment_summaries(exp_summaries, step_name):
     return filtered_summaries
 
 
-def gather_citations(base_folder, num_cite_rounds=15, small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-air")):
+def gather_citations(base_folder, num_cite_rounds=15, small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")):
     """
     Gather citations for a paper, with ability to resume from previous progress.
 

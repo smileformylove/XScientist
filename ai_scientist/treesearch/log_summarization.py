@@ -272,7 +272,7 @@ def annotate_history(journal, cfg=None):
                     if cfg.agent.get("summary", None) is not None:
                         model = cfg.agent.summary.model
                     else:
-                        model = os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash")
+                        model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
                     client = get_ai_client(model)
                     response = get_response_from_llm(
                         overall_plan_summarizer_prompt.format(
@@ -346,7 +346,7 @@ def overall_summarize(journals, cfg=None):
             if cfg.agent.get("summary", None) is not None:
                 model = cfg.agent.summary.get("model", "")
             else:
-                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash")
+                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
             client = get_ai_client(model)
             summary_json = get_stage_summary(journal, stage_name, model, client)
             return summary_json

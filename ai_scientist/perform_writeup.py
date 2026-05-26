@@ -466,7 +466,7 @@ def perform_writeup(
     citations_text=None,
     no_writing=False,
     num_cite_rounds=20,
-    small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash"),
+    small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1"),
     big_model="o1-2024-12-17",
     n_writeup_reflections=3,
     page_limit=8,

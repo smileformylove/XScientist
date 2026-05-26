@@ -276,7 +276,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("ZHIPU_DEFAULT_MODEL", "glm-4-flash"),
+        default=os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1"),
         choices=AVAILABLE_LLMS,
         help="Model to use for AI Scientist.",
     )
