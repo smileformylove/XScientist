@@ -142,7 +142,7 @@ def build_experiment_report(base_folder: str | Path) -> dict[str, Any]:
         node2parent = journal_json.get("node2parent") or {}
 
         def _is_good(node: dict) -> bool:
-            return (node.get("is_buggy") is False) and (node.get("is_buggy_plots") is False)
+            return (node.get("is_buggy") is False)
 
         candidates = [
             node

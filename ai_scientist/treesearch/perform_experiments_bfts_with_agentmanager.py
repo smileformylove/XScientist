@@ -377,7 +377,7 @@ def perform_experiments_bfts(config_path: str):
                 metric_mean, objective, metric_name, maximize = _metric_meta(node)
                 status = (
                     "ok"
-                    if (node.is_buggy is False and node.is_buggy_plots is False and objective is not None)
+                    if (node.is_buggy is False and objective is not None)
                     else "crash"
                 )
 
