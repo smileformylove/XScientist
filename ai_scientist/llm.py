@@ -445,6 +445,11 @@ def create_client(model) -> tuple[Any, str]:
         _http_client = _httpx.Client(
             timeout=_httpx.Timeout(600.0, connect=30.0),
             transport=_httpx.HTTPTransport(retries=3),
+            limits=_httpx.Limits(
+                max_connections=1,
+                max_keepalive_connections=0,
+                keepalive_expiry=0,
+            ),
         )
         return anthropic.Anthropic(
             timeout=600.0,
