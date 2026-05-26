@@ -358,7 +358,13 @@ def overall_summarize(journals, cfg=None):
                 total=len(list(journals)),
             )
         )
-        draft_summary, baseline_summary, research_summary, ablation_summary = results
+        # Handle variable number of stage results
+        # Expect up to 4 stages: draft(0), baseline(1), research(2), ablation(3)
+        summaries = [None, None, None, None]
+        for i, r in enumerate(results):
+            if i < 4:
+                summaries[i] = r
+        draft_summary, baseline_summary, research_summary, ablation_summary = summaries
 
     return draft_summary, baseline_summary, research_summary, ablation_summary
 

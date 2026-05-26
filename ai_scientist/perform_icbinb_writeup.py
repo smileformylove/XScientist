@@ -737,6 +737,8 @@ def filter_experiment_summaries(exp_summaries, step_name):
 
     filtered_summaries = {}
     for stage_name in exp_summaries.keys():
+        if exp_summaries[stage_name] is None:
+            continue
         if stage_name in {"BASELINE_SUMMARY", "RESEARCH_SUMMARY"}:
             filtered_summaries[stage_name] = {}
             for key in exp_summaries[stage_name].keys():

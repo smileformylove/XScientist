@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import logging
 
@@ -49,6 +50,15 @@ def _select_values_notnone(payload: dict) -> dict:
         if value is not None
     }
 
+
+def _func_spec_to_anthropic_tool(func_spec: FunctionSpec) -> dict:
+    return {
+        "name": func_spec.name,
+        "description": func_spec.description,
+        "input_schema": func_spec.json_schema,
+    }
+
+
 def get_ai_client(model : str, max_retries=2):
     client = anthropic.Anthropic(max_retries=max_retries)
     return client
@@ -61,14 +71,21 @@ def query(
 ) -> tuple[OutputType, float, int, int, dict]:
     client = get_ai_client(model_kwargs.get("model"), max_retries=0)
 
+    # Strip provider prefix from model name before sending to API
+    raw_model = model_kwargs.get("model", "")
+    if "/" in raw_model:
+        model_kwargs["model"] = raw_model.split("/", 1)[1]
+
     filtered_kwargs: dict = _select_values_notnone(model_kwargs)
     if "max_tokens" not in filtered_kwargs:
-        filtered_kwargs["max_tokens"] = 8192  # default for Claude models
+        filtered_kwargs["max_tokens"] = 8192
 
     if func_spec is not None:
-        raise NotImplementedError(
-            "Anthropic does not support function calling for now."
-        )
+        filtered_kwargs["tools"] = [_func_spec_to_anthropic_tool(func_spec)]
+        filtered_kwargs["tool_choice"] = {
+            "type": "tool",
+            "name": func_spec.name,
+        }
 
     # Anthropic doesn't allow not having a user messages
     # if we only have system msg -> use it as user msg
@@ -94,7 +111,15 @@ def query(
         summarize_request_kwargs_for_log(filtered_kwargs),
     )
 
-    if "thinking" in filtered_kwargs:
+    if func_spec is not None:
+        tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
+        assert tool_use_blocks, f"Expected tool_use response but got: {[b.type for b in message.content]}"
+        tool_block = tool_use_blocks[0]
+        try:
+            output = json.loads(tool_block.input) if isinstance(tool_block.input, str) else tool_block.input
+        except (json.JSONDecodeError, TypeError):
+            output = tool_block.input
+    elif "thinking" in filtered_kwargs:
         assert (
             len(message.content) == 2
             and message.content[0].type == "thinking"
@@ -102,8 +127,9 @@ def query(
         )
         output: str = message.content[1].text
     else:
-        assert len(message.content) == 1 and message.content[0].type == "text"
-        output: str = message.content[0].text
+        text_blocks = [b for b in message.content if b.type == "text"]
+        assert text_blocks, f"Expected text response but got: {[b.type for b in message.content]}"
+        output: str = text_blocks[0].text
 
     in_tokens = message.usage.input_tokens
     out_tokens = message.usage.output_tokens
