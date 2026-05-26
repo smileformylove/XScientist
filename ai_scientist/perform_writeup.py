@@ -240,7 +240,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_first_prompt_template.format(
+            prompt=citation_first_prompt_template.format(
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
                 Idea=idea_text,
@@ -288,7 +288,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_second_prompt_template.format(
+            prompt=citation_second_prompt_template.format(
                 papers=papers_str,
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
@@ -710,7 +710,7 @@ def perform_writeup(
         )
 
         response, msg_history = get_response_from_llm(
-            msg=combined_prompt,
+            prompt=combined_prompt,
             client=big_client,
             model=big_client_model,
             system_message=big_model_system_message,
@@ -821,7 +821,7 @@ If you believe you are done, simply say: "I am done".
 """
 
             reflection_response, msg_history = get_response_from_llm(
-                msg=reflection_prompt,
+                prompt=reflection_prompt,
                 client=big_client,
                 model=big_client_model,
                 system_message=big_model_system_message,
@@ -912,7 +912,7 @@ Hard requirements:
 - Return the entire updated LaTeX file in one complete ```latex``` block.
 """
                 repair_response, _ = get_response_from_llm(
-                    msg=repair_prompt,
+                    prompt=repair_prompt,
                     client=big_client,
                     model=big_client_model,
                     system_message=big_model_system_message,

@@ -412,7 +412,7 @@ class Journal:
         return [
             n
             for n in self.nodes
-            if n.is_buggy is False and n.is_buggy_plots is not True
+            if n.is_buggy is False
         ]
 
     def get_node_by_id(self, node_id: str) -> Optional[Node]:
