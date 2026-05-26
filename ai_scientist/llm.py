@@ -441,7 +441,16 @@ def create_client(model) -> tuple[Any, str]:
     spec = resolve_model_provider(model)
     if spec.client_family == "anthropic":
         print(f"Using {spec.display_name} API with model {spec.client_model}.")
-        return anthropic.Anthropic(), model
+        import httpx as _httpx
+        _http_client = _httpx.Client(
+            timeout=_httpx.Timeout(600.0, connect=30.0),
+            transport=_httpx.HTTPTransport(retries=3),
+        )
+        return anthropic.Anthropic(
+            timeout=600.0,
+            max_retries=3,
+            http_client=_http_client,
+        ), model
     if spec.client_family == "anthropic_bedrock":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
         return anthropic.AnthropicBedrock(), model
