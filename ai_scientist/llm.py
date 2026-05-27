@@ -443,17 +443,16 @@ def create_client(model) -> tuple[Any, str]:
         print(f"Using {spec.display_name} API with model {spec.client_model}.")
         import httpx as _httpx
         _http_client = _httpx.Client(
-            timeout=_httpx.Timeout(600.0, connect=30.0),
+            timeout=_httpx.Timeout(60.0, connect=10.0),
             transport=_httpx.HTTPTransport(retries=3),
             limits=_httpx.Limits(
                 max_connections=1,
                 max_keepalive_connections=0,
-                keepalive_expiry=0,
             ),
         )
         return anthropic.Anthropic(
-            timeout=600.0,
-            max_retries=3,
+            timeout=60.0,
+            max_retries=10,
             http_client=_http_client,
         ), model
     if spec.client_family == "anthropic_bedrock":
