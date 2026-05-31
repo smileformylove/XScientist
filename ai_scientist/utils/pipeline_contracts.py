@@ -26,6 +26,8 @@ ARTIFACT_FILENAMES = {
     "stage_standards": "stage_standards.json",
     "process_alignment": "process_alignment.json",
     "research_program": "research_program.md",
+    "manuscript_candidate_pool": "manuscript_candidate_pool.json",
+    "repair_attempts": "repair_attempts.jsonl",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -43,6 +45,8 @@ ARTIFACT_DEFAULT_STATUS = {
     "stage_standards": "missing",
     "process_alignment": "missing",
     "research_program": "missing",
+    "manuscript_candidate_pool": "missing",
+    "repair_attempts": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {

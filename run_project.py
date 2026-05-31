@@ -645,6 +645,14 @@ def find_latest_pdf(exp_dir: str):
     return find_latest_pdf_path(exp_dir)
 
 
+def _maybe_pareto_seed_for_rewrite(exp_dir: str) -> str | None:
+    try:
+        from ai_scientist.utils.pareto_pool import maybe_select_seed_path
+    except Exception:
+        return None
+    return maybe_select_seed_path(exp_dir)
+
+
 def improve_paper_with_review(
     exp_dir: str,
     review_text: dict,
@@ -697,6 +705,9 @@ def improve_paper_with_review(
         artifact_dir=review_dir,
         target_venue=target_venue,
         temperature=0.35,
+        seed_latex_path=_maybe_pareto_seed_for_rewrite(exp_dir),
+        project_root=str(Path(exp_dir).expanduser().resolve()),
+        job_id=f"rewrite_round_{round_index}",
     )
     round_gate = assess_self_review_gate(
         ledger=issue_ledger,

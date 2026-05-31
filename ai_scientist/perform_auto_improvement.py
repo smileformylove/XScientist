@@ -443,6 +443,14 @@ class AutoImprovementEngine:
         return True, "继续改进"
 
 
+def _maybe_pareto_seed_for_rewrite(paper_dir: str) -> str | None:
+    try:
+        from ai_scientist.utils.pareto_pool import maybe_select_seed_path
+    except Exception:
+        return None
+    return maybe_select_seed_path(paper_dir)
+
+
 def improve_paper_with_review(
     paper_dir: str,
     text_review: Dict,
@@ -529,6 +537,9 @@ def improve_paper_with_review(
             artifact_dir=round_dir,
             target_venue=target_venue,
             temperature=0.35,
+            seed_latex_path=_maybe_pareto_seed_for_rewrite(paper_dir),
+            project_root=paper_dir,
+            job_id=f"autoimprove_round_{round_index}",
         )
         failed_round_gate = assess_self_review_gate(
             ledger=issue_ledger,
