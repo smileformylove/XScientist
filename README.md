@@ -76,6 +76,8 @@ flowchart LR
 ## 核心能力
 
 - **自评审闭环**：多轮 self-review 生成结构化 issue 与修复计划，并将修复覆盖率/回归检查纳入门禁。
+- **Pareto 前沿候选池**：自动追踪不同 rewrite round 的稿件质量向量，保留 Pareto 前沿候选稿，为后续改写提供互补强项参考与种子稿。
+- **修复反思与验证**：在生成修复计划前进行 LLM 反思（reflection），执行修复后自动验证（verifier），并记录修复尝试历史（repair attempts）用于趋势分析与策略反馈。
 - **实验 TODO 可度量闭环**：把"还差什么实验/证据"显式落成 TODO，并持续跟踪 closure 进度。
 - **长期自治运行（Daemon）**：支持持续运行、失败保护、来源调度、趋势报告、交接简报与策略反馈。
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
@@ -335,6 +337,8 @@ XScientist 的路线图聚焦于把自动科研流程从“单次生成”推进
 - **Experiments Engine**: 实验执行与证据收集
 - **Writeup Engine**: 论文写作与编译
 - **Self-Review Engine**: 自评审与修复
+- **Repair Reflection & Verifier**: 修复反思与验证
+- **Pareto Pool**: 前沿候选稿管理
 - **Autonomous Evolution Engine**: 自主进化与策略优化
 - **Adaptive Learning Engine**: 自适应学习与推荐
 - **Enhanced Feedback System**: 增强反馈与监控

@@ -1156,6 +1156,7 @@ def _build_issue_driven_prompt(
     ledger: Dict[str, Any],
     target_venue: Optional[str] = None,
     max_latex_chars: int = 22000,
+    merge_advisory: Optional[Dict[str, Any]] = None,
 ) -> str:
     issues = [dict(item) for item in (ledger.get("issues") or []) if isinstance(item, dict)]
     issue_by_id = {
@@ -1210,6 +1211,15 @@ def _build_issue_driven_prompt(
         if str(item).strip()
     ]
 
+    merge_block = ""
+    if isinstance(merge_advisory, dict) and merge_advisory.get("complementary_dims"):
+        merge_block = (
+            "\n互补强项参考（来自 Pareto 前沿上的两个候选稿；可借鉴各自强项，但仍以当前 LaTeX 为基础修订，不要整段拷贝）:\n"
+            "```json\n"
+            f"{json.dumps(merge_advisory, indent=2, ensure_ascii=False)}\n"
+            "```\n"
+        )
+
     return f"""
 你是资深科研论文改写审稿助手。请基于“问题台账”进行点对点修订，不要泛泛而谈。
 
@@ -1223,7 +1233,7 @@ def _build_issue_driven_prompt(
 
 目标投稿风格: {active_venue}
 高价值目标 issue_id: {high_value_targets}
-
+{merge_block}
 问题台账（按价值优先级）:
 ```json
 {json.dumps(issue_rows, indent=2, ensure_ascii=False)}
@@ -1274,6 +1284,9 @@ def apply_issue_driven_rewrite(
     artifact_dir: str,
     target_venue: Optional[str] = None,
     temperature: float = 0.35,
+    seed_latex_path: Optional[str] = None,
+    project_root: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     latex_dir = osp.join(paper_dir, "latex")
     latex_file = osp.join(latex_dir, "template.tex")
@@ -1284,14 +1297,39 @@ def apply_issue_driven_rewrite(
             "latex_file": latex_file,
         }
 
+    seed_info: Dict[str, Any] = {}
+    if seed_latex_path:
+        seed_path_obj = Path(seed_latex_path).expanduser()
+        if seed_path_obj.exists():
+            try:
+                shutil.copy(str(seed_path_obj), latex_file)
+                seed_info = {
+                    "seed_latex_path": str(seed_path_obj),
+                    "seed_applied": True,
+                }
+            except OSError as exc:
+                seed_info = {
+                    "seed_latex_path": str(seed_path_obj),
+                    "seed_applied": False,
+                    "seed_error": str(exc),
+                }
+        else:
+            seed_info = {
+                "seed_latex_path": str(seed_path_obj),
+                "seed_applied": False,
+                "seed_error": "missing_file",
+            }
+
     with open(latex_file, "r", encoding="utf-8", errors="ignore") as f:
         original_latex = f.read()
 
     client, client_model = _create_client(model)
+    merge_advisory = _maybe_build_merge_advisory(project_root)
     prompt = _build_issue_driven_prompt(
         latex_content=original_latex,
         ledger=ledger,
         target_venue=target_venue,
+        merge_advisory=merge_advisory,
     )
     response, _ = _get_response_from_llm(
         prompt=prompt,
@@ -1420,11 +1458,167 @@ def apply_issue_driven_rewrite(
         "after_file": str(after_file),
         "raw_response_file": str(raw_response_file),
     }
+    if seed_info:
+        result["seed"] = seed_info
+    if merge_advisory:
+        result["merge_advisory"] = merge_advisory
     _safe_json_dump(
         artifact_path / f"rewrite_result_round_{round_index}.json",
         result,
     )
+    if project_root:
+        verifier_report = _maybe_run_repair_verifiers(project_root)
+        if verifier_report:
+            result["verifier_report"] = verifier_report
+        _maybe_record_repair_attempts(
+            project_root=project_root,
+            round_index=round_index,
+            job_id=job_id,
+            result=result,
+            change_log=change_log,
+            verifier_report=verifier_report,
+        )
     return result
+
+
+def _maybe_run_repair_verifiers(project_root: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not project_root:
+        return None
+    try:
+        from ai_scientist.utils.repair_verifier import maybe_run_repair_plan_verifiers
+    except Exception:
+        return None
+    try:
+        return maybe_run_repair_plan_verifiers(project_root)
+    except Exception:
+        return None
+
+
+def _repair_attempts_enabled() -> bool:
+    import os as _os
+
+    raw = str(_os.environ.get("AI_SCIENTIST_REPAIR_ATTEMPTS") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _maybe_build_merge_advisory(project_root: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not project_root:
+        return None
+    try:
+        from ai_scientist.utils.pareto_pool import maybe_build_merge_advisory
+    except Exception:
+        return None
+    try:
+        return maybe_build_merge_advisory(project_root)
+    except Exception:
+        return None
+
+
+def _maybe_record_repair_attempts(
+    *,
+    project_root: str,
+    round_index: int,
+    job_id: Optional[str],
+    result: Dict[str, Any],
+    change_log: list,
+    verifier_report: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not _repair_attempts_enabled():
+        return
+    try:
+        from ai_scientist.utils.repair_attempts import record_repair_attempt
+    except Exception:
+        return
+    scores_before = _aggregate_current_review_scores(project_root)
+    addressed_set = {str(x).strip() for x in result.get("addressed_issue_ids") or [] if str(x).strip()}
+    coverage_by_issue: Dict[str, bool] = {}
+    for row in change_log:
+        if not isinstance(row, dict):
+            continue
+        issue_id = str(row.get("issue_id") or "").strip()
+        if not issue_id:
+            continue
+        coverage_by_issue[issue_id] = issue_id in addressed_set
+    verifier_by_issue: Dict[str, Dict[str, Any]] = {}
+    if isinstance(verifier_report, dict):
+        for entry in verifier_report.get("results") or []:
+            if not isinstance(entry, dict):
+                continue
+            iid = str(entry.get("issue_id") or "").strip()
+            if iid:
+                verifier_by_issue[iid] = entry
+    targeted = list(result.get("targeted_issue_ids") or [])
+    status = str(result.get("status") or "unknown")
+    for issue_id in targeted:
+        iid = str(issue_id).strip()
+        if not iid:
+            continue
+        addressed = coverage_by_issue.get(iid, iid in addressed_set)
+        verifier_entry = verifier_by_issue.get(iid)
+        note_parts: list[str] = []
+        if verifier_entry:
+            if verifier_entry.get("skipped"):
+                note_parts.append(f"verifier_skipped:{verifier_entry.get('reason') or 'unknown'}")
+            else:
+                note_parts.append(
+                    "verifier_passed" if verifier_entry.get("passed") else "verifier_failed"
+                )
+                # When the verifier disagrees, treat the verifier as authoritative.
+                if not verifier_entry.get("passed"):
+                    addressed = False
+        notes = "; ".join(note_parts) if note_parts else None
+        try:
+            record_repair_attempt(
+                project_root,
+                iid,
+                round_index=round_index,
+                job_id=job_id,
+                status=status,
+                addressed=addressed,
+                coverage_ratio=float(result.get("coverage_ratio") or 0.0),
+                scores_delta=None,
+                scores_before=scores_before,
+                notes=notes,
+            )
+        except Exception:
+            continue
+
+
+def _aggregate_current_review_scores(project_root: str) -> Optional[Dict[str, float]]:
+    """Snapshot per-dim median scores across all role summaries — used to baseline scores_delta later."""
+    try:
+        from ai_scientist.utils.pareto_pool import SCORE_KEYS
+        from ai_scientist.utils.pipeline_contracts import load_contract_artifact
+    except Exception:
+        return None
+    try:
+        state = load_contract_artifact(project_root, "review_state", default=None)
+    except Exception:
+        return None
+    if not isinstance(state, dict):
+        return None
+    role_summaries = state.get("role_summaries")
+    if not isinstance(role_summaries, dict):
+        return None
+    import statistics
+
+    per_dim: Dict[str, list] = {key: [] for key in SCORE_KEYS}
+    for block in role_summaries.values():
+        if not isinstance(block, dict):
+            continue
+        scores = block.get("scores")
+        if not isinstance(scores, dict):
+            continue
+        for key in SCORE_KEYS:
+            raw = scores.get(key)
+            if raw is None:
+                continue
+            try:
+                per_dim[key].append(float(raw))
+            except (TypeError, ValueError):
+                continue
+    out = {key: statistics.median(values) for key, values in per_dim.items() if values}
+    return out or None
 
 
 def save_self_review_artifacts(

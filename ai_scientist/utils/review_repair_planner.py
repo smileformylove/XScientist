@@ -266,16 +266,41 @@ def _build_escalation_lane(task: dict[str, Any], lane: str) -> str:
     return "planner"
 
 
+def _reflection_enabled_from_env() -> bool:
+    return str(os.environ.get("AI_SCIENTIST_REPAIR_REFLECTION") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def build_repair_plan(
     project_root: str | Path,
     *,
     review_state: dict[str, Any] | None = None,
+    use_reflection: bool | None = None,
+    reflection_model: str | None = None,
+    reflection_client: Any = None,
 ) -> dict[str, Any]:
     resolved_root = Path(project_root).expanduser().resolve()
     state = review_state
     if not isinstance(state, dict):
         state = load_contract_artifact(resolved_root, "review_state", default={}) or {}
     manifest = load_pipeline_manifest(resolved_root)
+    if use_reflection is None:
+        use_reflection = _reflection_enabled_from_env()
+    reflection_fn = None
+    apply_reflection_fn = None
+    if use_reflection:
+        try:
+            from ai_scientist.utils.repair_reflection import (
+                apply_reflection_to_task as apply_reflection_fn,
+                reflect_issue_repair_plan as reflection_fn,
+            )
+        except Exception:
+            reflection_fn = None
+            apply_reflection_fn = None
     repair_queue = [
         item for item in (state.get("repair_queue") or []) if isinstance(item, dict)
     ]
@@ -318,6 +343,7 @@ def build_repair_plan(
                 "task_id": f"repair_task_{idx}",
                 "repair_id": queue_item.get("repair_id") or f"RPR-{issue_id}",
                 "issue_id": issue_id,
+                "issue_text": queue_item.get("issue_text"),
                 "lane": lane,
                 "lane_label": LANE_LABELS.get(lane, lane.replace("_", " ").title()),
                 "status": status,
@@ -350,6 +376,23 @@ def build_repair_plan(
                 "blocking_reasons": blocking_reasons,
             }
         )
+
+    if reflection_fn is not None and apply_reflection_fn is not None and tasks:
+        for task in tasks:
+            try:
+                reflection = reflection_fn(
+                    resolved_root,
+                    task,
+                    review_state=state,
+                    model=reflection_model,
+                    client=reflection_client,
+                )
+                apply_reflection_fn(task, reflection)
+            except Exception as exc:
+                existing = list(task.get("reflection_warnings") or [])
+                existing.append(f"unhandled_exception:{exc}")
+                task["reflection_warnings"] = existing
+                task.setdefault("reflection_status", "errored")
 
     lane_rows: list[dict[str, Any]] = []
     for lane_name, count in sorted(lane_counts.items()):
@@ -483,8 +526,17 @@ def save_repair_plan(
     *,
     review_state: dict[str, Any] | None = None,
     producer: str = "review_repair_planner",
+    use_reflection: bool | None = None,
+    reflection_model: str | None = None,
+    reflection_client: Any = None,
 ) -> str:
-    payload = build_repair_plan(project_root, review_state=review_state)
+    payload = build_repair_plan(
+        project_root,
+        review_state=review_state,
+        use_reflection=use_reflection,
+        reflection_model=reflection_model,
+        reflection_client=reflection_client,
+    )
     return save_contract_artifact(
         project_root,
         "repair_plan",
@@ -495,5 +547,7 @@ def save_repair_plan(
             "manuscript_state",
             "figure_spec",
             "claim_evidence_graph",
+            "manuscript_candidate_pool",
+            "repair_attempts",
         ],
     )

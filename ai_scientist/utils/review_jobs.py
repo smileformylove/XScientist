@@ -4,13 +4,93 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
+import statistics
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ai_scientist.utils.pipeline_contracts import load_contract_artifact, save_contract_artifact
+
+
+def _pareto_pool_enabled() -> bool:
+    return str(os.environ.get("AI_SCIENTIST_PARETO_POOL") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _aggregate_scores_from_role_summaries(review_state: dict[str, Any]) -> dict[str, float]:
+    role_summaries = review_state.get("role_summaries") if isinstance(review_state, dict) else None
+    if not isinstance(role_summaries, dict):
+        return {}
+    from ai_scientist.utils.pareto_pool import SCORE_KEYS
+
+    per_dim: dict[str, list[float]] = {key: [] for key in SCORE_KEYS}
+    for block in role_summaries.values():
+        if not isinstance(block, dict):
+            continue
+        scores = block.get("scores")
+        if not isinstance(scores, dict):
+            continue
+        for key in SCORE_KEYS:
+            raw = scores.get(key)
+            if raw is None:
+                continue
+            try:
+                per_dim[key].append(float(raw))
+            except (TypeError, ValueError):
+                continue
+    return {key: statistics.median(values) for key, values in per_dim.items() if values}
+
+
+def _maybe_record_pareto_candidate(
+    project_root: str | Path,
+    *,
+    review_state: dict[str, Any],
+    job: dict[str, Any],
+) -> None:
+    scores = _aggregate_scores_from_role_summaries(review_state)
+    if scores:
+        try:
+            from ai_scientist.utils.repair_attempts import backfill_scores_delta
+
+            backfill_scores_delta(project_root, current_scores=scores)
+        except Exception:
+            pass
+    if not _pareto_pool_enabled():
+        return
+    try:
+        manuscript_state = load_contract_artifact(project_root, "manuscript_state", default=None)
+    except Exception:
+        manuscript_state = None
+    latex_path = None
+    if isinstance(manuscript_state, dict):
+        latex_path = manuscript_state.get("latex_path")
+    if not latex_path:
+        return
+    if not scores:
+        return
+    rounds = [r for r in (review_state.get("rounds") or []) if isinstance(r, dict)]
+    round_index = max(len(rounds) - 1, 0)
+    try:
+        from ai_scientist.utils.pareto_pool import add_candidate, evict_dominated
+
+        add_candidate(
+            project_root,
+            latex_path=latex_path,
+            scores=scores,
+            round_index=round_index,
+            source=str(job.get("lane_name") or "review_round"),
+        )
+        evict_dominated(project_root)
+    except Exception:
+        # Pareto pool failures must not break the review pipeline.
+        return
 
 
 REVIEW_ROLES = (
@@ -1384,6 +1464,7 @@ def update_review_state(
         review_state=review_state,
         producer="review_jobs",
     )
+    _maybe_record_pareto_candidate(project_root, review_state=review_state, job=job)
     from ai_scientist.utils.self_evolution import save_self_evolution
 
     save_self_evolution(
