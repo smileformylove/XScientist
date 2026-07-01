@@ -413,28 +413,11 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 ## 路线图
 
-XScientist 的路线图聚焦于把自动科研流程从“单次生成”推进到“长期可运行、可复现、可评审、可交付”的科研基础设施。欢迎 issue / PR 协作（见 `CONTRIBUTING.md`）。
+XScientist 的目标是把自动科研从「单次生成一篇论文」推进为「长期可运行、可复现、可评审、可交付」的科研基础设施。欢迎 issue / PR 协作（见 `CONTRIBUTING.md`）。
 
-**近期目标：稳定交付与可复现**
-
-- [ ] 完善 `example/` 示例论文与补充材料，形成可直接对照的 submission-ready 样例。
-- [ ] 增强 preflight / smoke 检查，覆盖 API Key、LaTeX、输出目录、登录状态和依赖版本。
-- [ ] 建立论文交付清单，自动检查 PDF、图表、表格、引用、实验日志和复现实验配置。
-- [ ] 把 TODO closure 信号并入质量门禁，明确每篇论文的未闭环实验与证据缺口。
-
-**中期目标：自评审、自修复与质量提升**
-
-- [ ] 强化 evidence 指标与实验结果（figure/table/metric）的双向绑定。
-- [ ] 增加 submission-ready 套件的一致性检查与回归测试（dossier checks）。
-- [ ] 将 self-evolution / playbook 更直接接入自动 rewrite、repair 和 follow-up 执行器。
-- [ ] 引入多评审视角聚合，区分 novelty、soundness、clarity、reproducibility 和 ethics 风险。
-
-**长期目标：持续自治科研系统**
-
-- [ ] 让 daemon 根据历史成功率、成本、质量分数和失败模式自动调整研究策略。
-- [ ] 建立跨项目知识库，沉淀高质量 idea、失败案例、可复用实验模板和写作经验。
-- [ ] 提供更完整的英文文档、API 文档和插件接口，便于外部团队协作与二次开发。
-- [ ] 支持更标准的 benchmark / leaderboard，用于评估自动科研系统的长期表现。
+- **近期**：交付可复现的 submission-ready 样例；补齐 preflight/交付清单；把 TODO closure 并入质量门禁。
+- **中期**：evidence 与 figure/table/metric 双向绑定；dossier 一致性/回归检查；多评审视角聚合。
+- **长期**：daemon 依据历史指标自适应策略；跨项目知识库；标准 benchmark / leaderboard；更完整的英文文档与插件接口。
 
 ---
 

@@ -396,28 +396,11 @@ Currently organized example files:
 
 ## Roadmap
 
-XScientist's roadmap focuses on moving autonomous research from "one-shot paper generation" toward long-running, reproducible, reviewable, and submission-ready research infrastructure. Issues and PRs are welcome (see `CONTRIBUTING.md`).
+XScientist aims to move autonomous research from "one-shot paper generation" toward long-running, reproducible, reviewable, submission-ready infrastructure. Issues and PRs welcome (see `CONTRIBUTING.md`).
 
-**Near Term: Stable Delivery and Reproducibility**
-
-- [ ] Complete the `example/` paper and supplementary-material set as submission-ready reference outputs.
-- [ ] Expand preflight / smoke checks for API keys, LaTeX, output directories, login state, and dependency versions.
-- [ ] Add a paper delivery checklist covering PDFs, figures, tables, citations, experiment logs, and reproducibility configs.
-- [ ] Integrate TODO closure signals into quality gates so each paper exposes unresolved experiments and evidence gaps.
-
-**Mid Term: Self-Review, Repair, and Quality Improvement**
-
-- [ ] Strengthen bidirectional binding between evidence metrics and experiment outputs (figures, tables, and metrics).
-- [ ] Add consistency and regression checks for submission-ready dossiers.
-- [ ] Wire self-evolution / playbook signals more directly into automatic rewrite, repair, and follow-up executors.
-- [ ] Add multi-reviewer aggregation across novelty, soundness, clarity, reproducibility, and ethics risks.
-
-**Long Term: Continuous Autonomous Research**
-
-- [ ] Let the daemon adapt research strategy from historical success rate, cost, quality scores, and failure modes.
-- [ ] Build a cross-project knowledge base for strong ideas, failure cases, reusable experiment templates, and writing lessons.
-- [ ] Provide more complete English docs, API docs, and plugin interfaces for external collaboration and extension.
-- [ ] Support standard benchmarks / leaderboards for evaluating long-running autonomous research systems.
+- **Near term**: ship a reproducible submission-ready example; harden preflight and delivery checklists; wire TODO closure into quality gates.
+- **Mid term**: bidirectional evidence↔figure/table/metric binding; dossier consistency/regression checks; multi-reviewer aggregation.
+- **Long term**: daemon adapts strategy from historical metrics; cross-project knowledge base; standard benchmarks / leaderboards; fuller English docs and plugin API.
 
 ---
 
