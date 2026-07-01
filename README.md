@@ -38,6 +38,7 @@ English README: [README.en.md](README.en.md)
     - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
     - [D) 反馈系统监控](#d-反馈系统监控)
   - [输出与可观测性](#输出与可观测性)
+    - [ARA 工件（面向下游智能体）](#ara-工件面向下游智能体)
   - [示例论文](#示例论文)
   - [文档索引](#文档索引)
   - [开发与测试](#开发与测试)
@@ -83,6 +84,7 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
+- **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `run_ara_fork.py` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作。
 
 相关入口脚本：
 
@@ -90,6 +92,7 @@ flowchart LR
 - `continuous_paper_generator.py`：批量/连续运行入口
 - `continuous_research_daemon.py`：长期自治调度入口
 - `research_manager.py`：索引与看板（筛选、导出、打包）
+- `run_ara_fork.py`：从 ARA 工件里 inspect / re-exec / fork 单个节点
 
 ---
 
@@ -264,6 +267,65 @@ python3 research_manager.py repair-board --top 20 --priority-tier p0
 python3 research_manager.py evolution-board --top 20
 python3 research_manager.py process-board --status blocked --top 30
 ```
+
+### ARA 工件（面向下游智能体）
+
+除了给人看的 PDF，每次成功跑完 `run_project.py` 之后，还会在 `<project_dir>/ara/<timestamp>_<idea>/` 下写入一份「机读」的研究工件（Agent-Native Research Artifact，简称 ARA），设计目标是让另一个 AI Scientist 可以直接 fork / re-execute，而不必去逆向 PDF。
+
+典型目录结构：
+
+```
+<project_dir>/ara/<timestamp>_<idea>/
+├── manifest.json              # 顶层入口，指向下面的所有文件
+├── exploration_graph.json     # 树搜索里每个节点（含失败分支）
+├── nodes/<node_id>/
+│   ├── code.py                # 该节点原样执行的代码
+│   ├── term_out.log           # 完整的 stdout/stderr
+│   ├── metrics.json           # metric + analysis + is_buggy
+│   ├── plots.json             # 图表路径与 VLM 分析
+│   ├── env.json               # Python 版本 / 预期 cwd
+│   └── run.sh                 # 一键复跑脚本
+├── claims/                    # 从 .tex 里扫描出的 `\claimref{node_id}` 映射
+├── repair_history.jsonl       # 修复反思 / 验证器 / 尝试历史
+├── pareto_pool.json           # 非支配的候选稿池
+├── env/
+│   ├── bfts_config.yaml
+│   └── model_fingerprint.json
+└── README.md                  # 面向 agent 的入口说明
+```
+
+配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` 四个子命令：
+
+```bash
+# 打印某个节点的 metric / analysis / 代码大小
+python3 run_ara_fork.py inspect \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id>
+
+# 重跑一个节点并把 fresh vs recorded metric 写进 verify/*.json
+python3 run_ara_fork.py exec \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id>
+
+# 把节点 bundle 拷贝到新目录，作为新一轮树搜索的种子
+python3 run_ara_fork.py fork \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id> \
+  --dest /path/to/fork_seed
+
+# 快照当前解释器的 pip freeze
+python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+```
+
+写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。
+
+可选：批量 re-execution 验证。设置环境变量后，`run_project.py` 结束时会挑选 top-metric 节点重跑并生成 verify 报告：
+
+```bash
+export AI_SCIENTIST_ARA_REEXEC=1
+```
+
+默认关闭，避免非预期地重复调用外部 API/GPU。
 
 ---
 

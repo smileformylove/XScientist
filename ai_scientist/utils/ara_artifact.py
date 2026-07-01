@@ -1,0 +1,660 @@
+"""Agent-Native Research Artifact (ARA) exporter.
+
+Motivation
+----------
+Inspired by "The Second Half of AI for Science" / "The Last Human-Written Paper"
+(arXiv:2604.24658). A PDF is a lossy view of a research run — the exploration
+tree, failed branches, and per-node execution logs are what a *downstream* AI
+scientist needs in order to fork, re-execute, or verify prior work.
+
+Rather than replace the existing PDF pipeline, this module writes a parallel
+artifact directory next to the manuscript. Every field is a *reference* to the
+underlying run data (journal.json, code, term_out, plots, pareto pool, repair
+history, ...) so we neither duplicate storage nor lose fidelity.
+
+Layout under `<project_dir>/ara/<idea_slug>/` (project_dir is the user-supplied
+`--project-dir`, so the ARA export is co-located with `02_experiments/` and
+`03_papers/`):
+
+    manifest.json                Top-level pointer file (schema below).
+    exploration_graph.json       Nodes + edges + status, one entry per journal node.
+    nodes/<node_id>/
+        code.py                  The exact code the node executed (if any).
+        term_out.log             Untrimmed stdout/stderr (best-effort).
+        metrics.json             Metric snapshot + analysis + is_buggy.
+        plots.json               Plot paths + VLM analyses.
+    claims/                      Populated later by claim_registry.
+    repair_history.jsonl         Copied from repair_attempts / repair_reflection.
+    pareto_pool.json             Copied from the manuscript pareto pool if present.
+    env/
+        bfts_config.yaml         Snapshot of the config used for this run.
+        model_fingerprint.json   Model ids + temps + writing profile digest.
+    README.md                    Agent-facing entry point.
+
+The exporter is intentionally *tolerant*: if a piece of source data is missing
+we skip it and record the omission in `manifest.json["missing"]`. A partial ARA
+export is better than none — downstream agents can still fork whatever is
+present.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+
+logger = logging.getLogger(__name__)
+
+ARA_SCHEMA_VERSION = PROTOCOL_VERSION
+ARA_ROOT_NAME = "ara"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _slugify(text: str, fallback: str = "idea") -> str:
+    text = (text or "").strip()
+    if not text:
+        return fallback
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-")
+    slug = slug[:80] or fallback
+    return slug
+
+
+def _safe_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _sha256_of(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass
+class ARAExportResult:
+    root: Path
+    manifest_path: Path
+    missing: list[str]
+    node_count: int
+    claim_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root": str(self.root),
+            "manifest_path": str(self.manifest_path),
+            "missing": list(self.missing),
+            "node_count": self.node_count,
+            "claim_count": self.claim_count,
+        }
+
+
+def ara_root_for_project(project_dir: str | os.PathLike[str]) -> Path:
+    """Return `<project_dir>/ara`. The user's project directory is the anchor."""
+    return Path(project_dir).expanduser().resolve() / ARA_ROOT_NAME
+
+
+def ara_dir_for_idea(
+    project_dir: str | os.PathLike[str],
+    idea_name: str,
+    *,
+    timestamp: str | None = None,
+) -> Path:
+    """Deterministic per-idea ARA directory. `timestamp` is a hint so multiple
+    runs of the same idea don't collide. When omitted we let the caller decide.
+    """
+    root = ara_root_for_project(project_dir)
+    slug = _slugify(idea_name)
+    if timestamp:
+        return root / f"{timestamp}_{slug}"
+    return root / slug
+
+
+def _find_journal_files(exp_dir: Path) -> list[Path]:
+    """Locate all `journal.json` files under `<exp_dir>/logs/*/`."""
+    logs_dir = exp_dir / "logs"
+    if not logs_dir.exists():
+        return []
+    return sorted(logs_dir.rglob("journal.json"))
+
+
+def _load_json(path: Path) -> Any | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("ARA export: failed to load %s: %s", path, exc)
+        return None
+
+
+def _write_node_run_bundle(
+    node_dir: Path,
+    *,
+    node_id: str,
+    exp_dir: Path,
+    ara_dir: Path,
+) -> None:
+    """Emit a minimal, self-describing `run.sh` + `env.json` per node.
+
+    Design choice: we do NOT capture a full pip freeze here (too slow, and
+    reproducibility to bit-level is not the goal). We just record enough for a
+    downstream agent to (a) know which Python + which cwd is expected, and
+    (b) invoke the node's code with one command. The env freeze is deferred to
+    the fork CLI so users only pay that cost when they actually want to fork.
+    """
+    import sys
+
+    env_payload = {
+        "node_id": node_id,
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "expected_cwd": str(exp_dir),
+        "code_file": "code.py",
+        "term_out_file": "term_out.log",
+        "metrics_file": "metrics.json",
+        "plots_file": "plots.json",
+        "ara_root": str(ara_dir),
+        "notes": (
+            "This is a lightweight bundle. Full env freeze is optional — call "
+            "`python run_ara_fork.py --freeze` from the ARA root to snapshot "
+            "the current interpreter's package versions."
+        ),
+    }
+    _safe_write_json(node_dir / "env.json", env_payload)
+
+    # Portable POSIX runner: cd into the original exp_dir so imports resolve,
+    # execute the node's code with the current interpreter. Downstream tools
+    # can override via env vars.
+    run_sh = (
+        "#!/usr/bin/env bash\n"
+        "# ARA per-node runner. Regenerated by ara_artifact.py.\n"
+        "# Override PYTHON / EXP_DIR via env if you fork this bundle.\n"
+        "set -euo pipefail\n"
+        f'NODE_ID="{node_id}"\n'
+        f'ARA_DIR="{ara_dir}"\n'
+        f'DEFAULT_EXP_DIR="{exp_dir}"\n'
+        'EXP_DIR="${EXP_DIR:-$DEFAULT_EXP_DIR}"\n'
+        'PYTHON="${PYTHON:-python3}"\n'
+        'CODE_FILE="$(dirname "$0")/code.py"\n'
+        'if [ ! -f "$CODE_FILE" ]; then\n'
+        '  echo "ARA: no code.py for node $NODE_ID" >&2\n'
+        '  exit 2\n'
+        'fi\n'
+        'if [ ! -d "$EXP_DIR" ]; then\n'
+        '  echo "ARA: expected cwd $EXP_DIR is missing; falling back to node dir" >&2\n'
+        '  EXP_DIR="$(dirname "$0")"\n'
+        'fi\n'
+        'cd "$EXP_DIR"\n'
+        'exec "$PYTHON" "$CODE_FILE" "$@"\n'
+    )
+    run_sh_path = node_dir / "run.sh"
+    run_sh_path.write_text(run_sh, encoding="utf-8")
+    try:
+        run_sh_path.chmod(0o755)
+    except OSError:  # pragma: no cover - platform-specific
+        pass
+
+
+def _export_nodes_from_journal(
+    journal_path: Path,
+    stage_label: str,
+    nodes_root: Path,
+    *,
+    exp_dir: Path,
+    ara_dir: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read one journal.json and dump per-node artifacts.
+
+    Returns (node_entries, edges). node_entries is the ARA graph payload for
+    each node; edges is (parent_id, child_id) pairs.
+    """
+    payload = _load_json(journal_path)
+    if not isinstance(payload, dict):
+        return [], []
+
+    raw_nodes = payload.get("nodes") or []
+    node_entries: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("id") or "").strip()
+        if not node_id:
+            continue
+
+        node_dir = nodes_root / node_id
+        node_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Exact code the node executed.
+        code = raw.get("code")
+        if isinstance(code, str) and code.strip():
+            (node_dir / "code.py").write_text(code, encoding="utf-8")
+
+        plot_code = raw.get("plot_code")
+        if isinstance(plot_code, str) and plot_code.strip():
+            (node_dir / "plot_code.py").write_text(plot_code, encoding="utf-8")
+
+        # 2. Untrimmed terminal output — Node.to_dict() keeps _term_out raw.
+        term_out = raw.get("_term_out")
+        if isinstance(term_out, list):
+            (node_dir / "term_out.log").write_text("".join(term_out), encoding="utf-8")
+        elif isinstance(term_out, str) and term_out:
+            (node_dir / "term_out.log").write_text(term_out, encoding="utf-8")
+
+        plot_term_out = raw.get("plot_term_out")
+        if isinstance(plot_term_out, list) and plot_term_out:
+            (node_dir / "plot_term_out.log").write_text("".join(plot_term_out), encoding="utf-8")
+
+        # 3. Metric + analysis snapshot.
+        metrics_payload = {
+            "metric": raw.get("metric"),
+            "analysis": raw.get("analysis"),
+            "is_buggy": raw.get("is_buggy"),
+            "is_buggy_plots": raw.get("is_buggy_plots"),
+            "exc_type": raw.get("exc_type"),
+            "exc_info": raw.get("exc_info"),
+            "exec_time": raw.get("exec_time"),
+        }
+        # Content hash lets downstream consumers match "the same experiment"
+        # across ARA instances by payload, not path. Documented in SPEC.md.
+        node_content_hash: str | None = None
+        try:
+            node_content_hash = hash_node_payload(
+                code=code if isinstance(code, str) else "",
+                metric=raw.get("metric"),
+            )
+        except Exception as exc:  # pragma: no cover - defensive; hashing is best-effort
+            logger.warning("ARA export: hashing node %s failed: %s", node_id, exc)
+        if node_content_hash:
+            metrics_payload["content_hash"] = node_content_hash
+        _safe_write_json(node_dir / "metrics.json", metrics_payload)
+
+        # 4. Plot references.
+        plots_payload = {
+            "plots": raw.get("plots") or [],
+            "plot_paths": raw.get("plot_paths") or [],
+            "plot_analyses": raw.get("plot_analyses") or [],
+            "vlm_feedback_summary": raw.get("vlm_feedback_summary") or [],
+            "plots_generated": raw.get("plots_generated"),
+        }
+        _safe_write_json(node_dir / "plots.json", plots_payload)
+
+        # 5. Per-node run bundle (see `_write_node_run_bundle` for rationale).
+        # Only emit if the node has code — otherwise nothing to re-execute.
+        if isinstance(code, str) and code.strip():
+            _write_node_run_bundle(node_dir, node_id=node_id, exp_dir=exp_dir, ara_dir=ara_dir)
+
+        node_entries.append(
+            {
+                "id": node_id,
+                "content_hash": node_content_hash,
+                "stage": stage_label,
+                "step": raw.get("step"),
+                "parent_id": raw.get("parent_id"),
+                "children": raw.get("children") or [],
+                "is_buggy": raw.get("is_buggy"),
+                "is_seed_node": raw.get("is_seed_node"),
+                "is_seed_agg_node": raw.get("is_seed_agg_node"),
+                "metric": raw.get("metric"),
+                "plan_excerpt": (raw.get("plan") or "")[:400],
+                "exp_results_dir": raw.get("exp_results_dir"),
+                "ctime": raw.get("ctime"),
+                "artifacts_dir": str(node_dir.relative_to(nodes_root.parent.parent)),
+            }
+        )
+
+        parent_id = raw.get("parent_id")
+        if parent_id:
+            edges.append({"parent": str(parent_id), "child": node_id, "stage": stage_label})
+
+    return node_entries, edges
+
+
+def _copy_optional(src: Path, dst: Path) -> bool:
+    if not src.exists():
+        return False
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dst)
+        return True
+    except OSError as exc:
+        logger.warning("ARA export: failed to copy %s -> %s: %s", src, dst, exc)
+        return False
+
+
+def _digest_model_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Derive a small, deterministic fingerprint of the models/profiles used.
+
+    We do not attempt to record every prompt — just what a downstream agent
+    needs to know to compare runs.
+    """
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {"fingerprint": digest, "spec": payload}
+
+
+def build_env_snapshot(
+    exp_dir: Path,
+    *,
+    bfts_config_path: str | None,
+    model_spec: dict[str, Any] | None,
+    writing_profile: str | None,
+) -> tuple[dict[str, str], list[str]]:
+    """Write env/*.{yaml,json}; return (relative-file-map, missing-notes)."""
+    env_dir_files: dict[str, str] = {}
+    missing: list[str] = []
+
+    env_dir = exp_dir / "env"
+    env_dir.mkdir(parents=True, exist_ok=True)
+
+    if bfts_config_path and Path(bfts_config_path).exists():
+        dst = env_dir / "bfts_config.yaml"
+        if _copy_optional(Path(bfts_config_path), dst):
+            env_dir_files["bfts_config"] = str(dst.relative_to(env_dir.parent))
+    else:
+        missing.append("env/bfts_config.yaml (source missing)")
+
+    fingerprint_payload = _digest_model_fingerprint(
+        {
+            "models": model_spec or {},
+            "writing_profile": writing_profile,
+            "ara_schema_version": ARA_SCHEMA_VERSION,
+        }
+    )
+    fp_path = env_dir / "model_fingerprint.json"
+    _safe_write_json(fp_path, fingerprint_payload)
+    env_dir_files["model_fingerprint"] = str(fp_path.relative_to(env_dir.parent))
+
+    return env_dir_files, missing
+
+
+def _pdf_reference(exp_dir_source: Path) -> dict[str, Any] | None:
+    """Best-effort pointer to the final PDF sitting in the source exp_dir."""
+    try:
+        from ai_scientist.utils.pipeline_helpers import find_latest_pdf_path
+    except Exception:  # pragma: no cover - defensive
+        return None
+    try:
+        pdf_path = find_latest_pdf_path(exp_dir_source)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("ARA export: locating PDF failed: %s", exc)
+        return None
+    if not pdf_path:
+        return None
+    return {
+        "path": str(pdf_path),
+        "sha256": _sha256_of(Path(pdf_path)),
+    }
+
+
+def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
+    """A short, structured entry point for downstream agents (not humans)."""
+    idea = manifest.get("idea", {})
+    lines = [
+        "# ARA Entry Point",
+        "",
+        f"- Schema: {manifest.get('schema_version')}",
+        f"- Created: {manifest.get('created_at')}",
+        f"- Idea: {idea.get('name') or 'unnamed'}",
+        f"- Origin exp_dir: {manifest.get('source_exp_dir')}",
+        "",
+        "## What lives here",
+        "",
+        "- `exploration_graph.json` — every node from the tree search (including buggy ones).",
+        "- `nodes/<id>/` — code, term_out, metrics, plots for each node. Fork from any node id.",
+        "- `claims/` — machine-readable claims linking each manuscript assertion to its evidence node.",
+        "- `repair_history.jsonl` — full self-review / repair trajectory.",
+        "- `pareto_pool.json` — non-dominated manuscript candidates.",
+        "- `env/` — config + model fingerprint needed to reproduce.",
+        "- `README.md` — this file (agent-facing).",
+        "",
+        "## How to fork",
+        "",
+        "1. Pick a node id from `exploration_graph.json`.",
+        "2. Read `nodes/<id>/code.py` and `metrics.json`.",
+        "3. Continue the tree search with that node as the seed.",
+        "",
+        "Failed branches are first-class citizens: consult them to learn what NOT to try.",
+    ]
+    (root / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def export_ara(
+    *,
+    project_dir: str | os.PathLike[str],
+    exp_dir: str | os.PathLike[str],
+    idea: dict[str, Any] | None = None,
+    timestamp: str | None = None,
+    bfts_config_path: str | None = None,
+    model_spec: dict[str, Any] | None = None,
+    writing_profile: str | None = None,
+) -> ARAExportResult:
+    """Build the ARA export for one idea run.
+
+    Parameters
+    ----------
+    project_dir:
+        User-supplied project root (e.g. `args.project_dir`). ARA lands at
+        `{project_dir}/ara/...` per the user request.
+    exp_dir:
+        Per-idea experiment directory (`02_experiments/<ts>_<idea>`).
+    idea:
+        Idea dict (typically loaded from `exp_dir/idea.json`). Used for the
+        manifest's `idea` block; falls back to the exp_dir basename.
+    timestamp:
+        Optional label appended to the ARA subdir to distinguish repeat runs.
+    """
+    project_dir_path = Path(project_dir).expanduser().resolve()
+    exp_dir_path = Path(exp_dir).expanduser().resolve()
+
+    idea = idea or {}
+    idea_name = str(idea.get("Name") or idea.get("name") or exp_dir_path.name)
+
+    # Prefer explicit caller-provided timestamp; else derive from exp_dir name so
+    # exports coming from the same experiment collapse deterministically.
+    if timestamp is None:
+        basename = exp_dir_path.name
+        ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}[_T-]?\d{2}[:_-]?\d{2}(?:[:_-]?\d{2})?)", basename)
+        timestamp = ts_match.group(1) if ts_match else None
+
+    ara_dir = ara_dir_for_idea(project_dir_path, idea_name, timestamp=timestamp)
+    ara_dir.mkdir(parents=True, exist_ok=True)
+
+    missing: list[str] = []
+    nodes_root = ara_dir / "nodes"
+    nodes_root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Exploration graph: iterate every journal.json under logs/*.
+    journals = _find_journal_files(exp_dir_path)
+    all_nodes: list[dict[str, Any]] = []
+    all_edges: list[dict[str, Any]] = []
+    if not journals:
+        missing.append("exploration_graph: no journal.json found under logs/")
+    for journal_path in journals:
+        stage_label = journal_path.parent.name
+        nodes, edges = _export_nodes_from_journal(
+            journal_path,
+            stage_label,
+            nodes_root,
+            exp_dir=exp_dir_path,
+            ara_dir=ara_dir,
+        )
+        all_nodes.extend(nodes)
+        all_edges.extend(edges)
+
+    exploration_graph_path = ara_dir / "exploration_graph.json"
+    _safe_write_json(
+        exploration_graph_path,
+        {
+            "schema_version": ARA_SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "nodes": all_nodes,
+            "edges": all_edges,
+            "source_journals": [str(p) for p in journals],
+            "counts": {
+                "nodes": len(all_nodes),
+                "edges": len(all_edges),
+                "buggy": sum(1 for n in all_nodes if n.get("is_buggy")),
+            },
+        },
+    )
+
+    # 2. Optional companions: pareto pool, repair history, experiment registry.
+    references: dict[str, Any] = {}
+
+    pareto_source = exp_dir_path / "pareto_pool" / "manuscript_candidate_pool.json"
+    if not pareto_source.exists():
+        # Some pipeline_contracts variants write into `.pipeline/*`.
+        alt = exp_dir_path / ".pipeline" / "manuscript_candidate_pool.json"
+        if alt.exists():
+            pareto_source = alt
+    if pareto_source.exists():
+        dst = ara_dir / "pareto_pool.json"
+        if _copy_optional(pareto_source, dst):
+            references["pareto_pool"] = str(dst.relative_to(ara_dir))
+    else:
+        missing.append("pareto_pool.json (source missing)")
+
+    # Repair history: attempt several known filenames; append into one jsonl.
+    repair_dst = ara_dir / "repair_history.jsonl"
+    repair_written = 0
+    for candidate in [
+        exp_dir_path / "repair_attempts.jsonl",
+        exp_dir_path / ".pipeline" / "repair_attempts.jsonl",
+        exp_dir_path / "repair_reflection.jsonl",
+        exp_dir_path / ".pipeline" / "repair_reflection.jsonl",
+        exp_dir_path / "repair_verifier.jsonl",
+        exp_dir_path / ".pipeline" / "repair_verifier.jsonl",
+    ]:
+        if not candidate.exists():
+            continue
+        try:
+            data = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not data:
+            continue
+        header = json.dumps({"__source__": candidate.name}) + "\n"
+        with repair_dst.open("a", encoding="utf-8") as fh:
+            fh.write(header)
+            if not data.endswith("\n"):
+                data = data + "\n"
+            fh.write(data)
+        repair_written += 1
+    if repair_written == 0:
+        missing.append("repair_history.jsonl (no source files found)")
+    else:
+        references["repair_history"] = str(repair_dst.relative_to(ara_dir))
+
+    # Experiment registry — small, keep a copy.
+    registry_src = exp_dir_path / "experiment_registry.jsonl"
+    if registry_src.exists():
+        dst = ara_dir / "experiment_registry.jsonl"
+        if _copy_optional(registry_src, dst):
+            references["experiment_registry"] = str(dst.relative_to(ara_dir))
+    else:
+        missing.append("experiment_registry.jsonl (source missing)")
+
+    # 3. Env snapshot.
+    env_files, env_missing = build_env_snapshot(
+        ara_dir,
+        bfts_config_path=bfts_config_path,
+        model_spec=model_spec,
+        writing_profile=writing_profile,
+    )
+    missing.extend(env_missing)
+    references["env"] = env_files
+
+    # 4. Claims: reserve the directory, populated later by claim_registry.
+    (ara_dir / "claims").mkdir(parents=True, exist_ok=True)
+
+    # 5. PDF reference.
+    pdf_ref = _pdf_reference(exp_dir_path)
+    if pdf_ref:
+        references["pdf"] = pdf_ref
+
+    # 6. Manifest.
+    manifest = {
+        "schema_version": ARA_SCHEMA_VERSION,
+        "created_at": _now_iso(),
+        "source_exp_dir": str(exp_dir_path),
+        "project_dir": str(project_dir_path),
+        "idea": {
+            "name": idea_name,
+            "title": idea.get("Title") or idea.get("title"),
+            "raw": idea,
+        },
+        "counts": {
+            "nodes": len(all_nodes),
+            "edges": len(all_edges),
+            "buggy_nodes": sum(1 for n in all_nodes if n.get("is_buggy")),
+            "journals": len(journals),
+        },
+        "references": references,
+        "missing": missing,
+    }
+    manifest_path = ara_dir / "manifest.json"
+    _safe_write_json(manifest_path, manifest)
+
+    _write_agent_readme(ara_dir, manifest)
+
+    logger.info(
+        "ARA export written: %s (nodes=%d, edges=%d, missing=%d)",
+        ara_dir,
+        len(all_nodes),
+        len(all_edges),
+        len(missing),
+    )
+
+    # `claim_count` is 0 at this stage; claim_registry updates the manifest
+    # afterwards when it finishes scanning the manuscript.
+    return ARAExportResult(
+        root=ara_dir,
+        manifest_path=manifest_path,
+        missing=missing,
+        node_count=len(all_nodes),
+        claim_count=0,
+    )
+
+
+def update_manifest_claim_count(manifest_path: str | os.PathLike[str], claim_count: int) -> None:
+    """Callback used by claim_registry once claims/*.json are populated."""
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        return
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    payload.setdefault("counts", {})["claims"] = int(claim_count)
+    payload["counts_updated_at"] = _now_iso()
+    _safe_write_json(manifest_path, payload)
+
+
+def iter_ara_exports(project_dir: str | os.PathLike[str]) -> Iterable[Path]:
+    """Yield each `manifest.json` under `<project_dir>/ara/`."""
+    root = ara_root_for_project(project_dir)
+    if not root.exists():
+        return []
+    return sorted(root.rglob("manifest.json"))

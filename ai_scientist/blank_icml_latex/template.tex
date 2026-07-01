@@ -28,6 +28,12 @@
 \DeclareMathOperator*{\argmin}{arg\,min}
 \DeclareMathOperator*{\argmax}{arg\,max}
 
+% ARA (Agent-Native Research Artifact) claim marker — renders nothing in the
+% PDF, but leaves a machine-readable link from every quantitative claim to the
+% originating exploration-graph node. Consumed by
+% ai_scientist/utils/claim_registry.py after compilation.
+\providecommand{\claimref}[2][]{}
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % THEOREMS
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

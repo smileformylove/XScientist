@@ -56,6 +56,12 @@ from ai_scientist.utils.experiment_registry import (
     build_experiment_record,
     save_experiment_registry,
 )
+from ai_scientist.utils.ara_artifact import (
+    export_ara,
+    update_manifest_claim_count,
+)
+from ai_scientist.utils.ara_reexec import reexec_ara, reexec_enabled
+from ai_scientist.utils.claim_registry import write_claims_into_ara
 from ai_scientist.utils.guardrail_artifacts import (
     load_guardrail_artifacts,
     result_passed_writeup_guardrails,
@@ -1431,6 +1437,66 @@ def process_single_idea(args):
             if osp.exists(pdf_path):
                 shutil.copy(pdf_path, final_pdf_dst)
 
+        # ========== ARA export: agent-native research artifact ==========
+        # See ai_scientist/utils/ara_artifact.py for rationale. This produces a
+        # `<project_dir>/ara/<timestamp>_<idea>/` directory that a downstream
+        # AI scientist can fork/verify without decoding the PDF.
+        ara_export = None
+        try:
+            ara_export = export_ara(
+                project_dir=project_dir,
+                exp_dir=exp_dir,
+                idea=idea,
+                timestamp=timestamp,
+                bfts_config_path=bfts_config_path,
+                model_spec={
+                    "writeup": model_writeup,
+                    "writeup_small": model_writeup_small,
+                    "citation": model_citation,
+                    "review": model_review,
+                    "agg_plots": model_agg_plots,
+                    "quality": quality_model,
+                },
+                writing_profile=writing_profile,
+            )
+            tex_candidates = [
+                Path(exp_dir) / "latex" / "template.tex",
+                Path(exp_dir) / "template.tex",
+            ]
+            existing_tex = [str(p) for p in tex_candidates if p.exists()]
+            if existing_tex:
+                claim_summary = write_claims_into_ara(
+                    ara_dir=ara_export.root, tex_files=existing_tex
+                )
+                update_manifest_claim_count(
+                    ara_export.manifest_path,
+                    int(claim_summary.get("claim_count") or 0),
+                )
+                print(
+                    f"[想法 #{idea_idx}] ARA claims: "
+                    f"{claim_summary.get('claim_count')} scanned, "
+                    f"{claim_summary.get('resolved_count')} resolved"
+                )
+            print(
+                f"[想法 #{idea_idx}] ARA export: {ara_export.root} "
+                f"(nodes={ara_export.node_count}, missing={len(ara_export.missing)})"
+            )
+            if reexec_enabled():
+                # Opt-in via AI_SCIENTIST_ARA_REEXEC=1. Off by default because
+                # re-executing user code is expensive and can hit external APIs.
+                try:
+                    reexec_report = reexec_ara(ara_export.root)
+                    print(
+                        f"[想法 #{idea_idx}] ARA re-exec: {reexec_report.get('status')} "
+                        f"nodes={reexec_report.get('verdict_count')} "
+                        f"report={reexec_report.get('report_path')}"
+                    )
+                except Exception as reexec_exc:
+                    print(f"[想法 #{idea_idx}] ⚠️  ARA re-exec 失败: {reexec_exc}")
+        except Exception as ara_exc:
+            print(f"[想法 #{idea_idx}] ⚠️  ARA export 失败: {ara_exc}")
+            traceback.print_exc()
+
         final_round_gate_for_todo = (
             self_review_round_records[-1].get("round_gate")
             if self_review_round_records
@@ -1544,6 +1610,9 @@ def process_single_idea(args):
             "status": "success",
             "exp_dir": exp_dir,
             "pdf_path": pdf_path if pdf_path and osp.exists(pdf_path) else None,
+            "ara_dir": str(ara_export.root) if ara_export is not None else None,
+            "ara_manifest": str(ara_export.manifest_path) if ara_export is not None else None,
+            "ara_node_count": ara_export.node_count if ara_export is not None else None,
             "workflow_mode": workflow_mode,
             "template_profile": template_profile,
             "template_capability": template_capability,

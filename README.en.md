@@ -67,6 +67,7 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
+- Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion CLI `run_ara_fork.py` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF.
 
 Entrypoints:
 
@@ -74,6 +75,7 @@ Entrypoints:
 - `continuous_paper_generator.py`: continuous/batch generation
 - `continuous_research_daemon.py`: long-running autonomous scheduling
 - `research_manager.py`: index + boards (filtering, exporting, packaging)
+- `run_ara_fork.py`: inspect / re-execute / fork a single node from an ARA bundle
 
 ---
 
@@ -248,6 +250,65 @@ python3 research_manager.py repair-board --top 20 --priority-tier p0
 python3 research_manager.py evolution-board --top 20
 python3 research_manager.py process-board --status blocked --top 30
 ```
+
+### ARA bundles (agent-facing artifact)
+
+Every successful `run_project.py` also emits a machine-readable "Agent-Native Research Artifact" under `<project_dir>/ara/<timestamp>_<idea>/`. The goal: another AI scientist can fork or re-execute prior work directly, without having to decode the PDF.
+
+Typical layout:
+
+```
+<project_dir>/ara/<timestamp>_<idea>/
+├── manifest.json              # top-level pointer to everything below
+├── exploration_graph.json     # every tree-search node (buggy branches included)
+├── nodes/<node_id>/
+│   ├── code.py                # exact code the node ran
+│   ├── term_out.log           # untrimmed stdout/stderr
+│   ├── metrics.json           # metric + analysis + is_buggy
+│   ├── plots.json             # plot paths + VLM analyses
+│   ├── env.json               # python version / expected cwd
+│   └── run.sh                 # one-shot re-runner
+├── claims/                    # `\claimref{node_id}` markers scanned from the .tex
+├── repair_history.jsonl       # repair reflection / verifier / attempts
+├── pareto_pool.json           # non-dominated manuscript candidates
+├── env/
+│   ├── bfts_config.yaml
+│   └── model_fingerprint.json
+└── README.md                  # agent-facing entry point
+```
+
+The `run_ara_fork.py` CLI ships four sub-commands:
+
+```bash
+# Print a node's metric / analysis / code size.
+python3 run_ara_fork.py inspect \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id>
+
+# Re-execute a node and write a verify report (fresh vs recorded metric).
+python3 run_ara_fork.py exec \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id>
+
+# Copy a node bundle to a new directory to seed further tree search.
+python3 run_ara_fork.py fork \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --node-id <node_id> \
+  --dest /path/to/fork_seed
+
+# Snapshot the current interpreter's pip freeze into env/.
+python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+```
+
+During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them.
+
+Optional: batch re-execution verification. Set the env flag and `run_project.py` will re-run a handful of top-metric nodes at the end and save a verify report:
+
+```bash
+export AI_SCIENTIST_ARA_REEXEC=1
+```
+
+Off by default because re-executing arbitrary code can hit external APIs / GPUs.
 
 ---
 

@@ -52,6 +52,16 @@ from ai_scientist.writeup_guardrails import (
 from ai_scientist.perform_vlm_review import generate_vlm_img_review
 from ai_scientist.vlm import create_client as create_vlm_client
 from ai_scientist.utils.auth_session import require_login
+from ai_scientist.utils.claim_registry import render_claim_prompt_snippet
+
+
+def _ara_claim_marker_guidance() -> str:
+    """Short guidance so the model emits `\\claimref{node_id}` markers.
+
+    Kept tiny on purpose — the LaTeX macro is a no-op in the PDF so the model
+    is free to include or omit markers without hurting the reader's experience.
+    """
+    return "## ARA claim markers\n" + render_claim_prompt_snippet()
 
 
 def remove_accents_and_clean(s):
@@ -694,6 +704,8 @@ def perform_writeup(
             + citation_integrity_rules
             + "\n\n"
             + humanizer_style_rules
+            + "\n\n"
+            + _ara_claim_marker_guidance()
         )
         big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
