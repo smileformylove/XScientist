@@ -294,7 +294,7 @@ python3 research_manager.py process-board --status blocked --top 30
 └── README.md                  # 面向 agent 的入口说明
 ```
 
-配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` 四个子命令：
+配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` 五个子命令：
 
 ```bash
 # 打印某个节点的 metric / analysis / 代码大小
@@ -315,6 +315,9 @@ python3 run_ara_fork.py fork \
 
 # 快照当前解释器的 pip freeze
 python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+
+# 对照 ai_scientist/protocol/SPEC.md 做 conformance 校验
+python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
 ```
 
 写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。
@@ -326,6 +329,51 @@ export AI_SCIENTIST_ARA_REEXEC=1
 ```
 
 默认关闭，避免非预期地重复调用外部 API/GPU。
+
+### 从 ARA 接力（Fork-Continue）
+
+任何一个 XScientist 实例产出的 ARA 都可以作为下一次运行的种子——tree search 的首个 draft 直接使用指定节点的 code，跳过 LLM 冷启动，`provenance` 会自动写进 child ARA 的 `manifest.json`：
+
+```bash
+# 用 fork 目录作为种子（推荐）
+python3 run_project.py \
+  --project-dir <B_project> \
+  --seed-from-ara /path/to/fork_seed \
+  --topic ...   # 其他常规参数
+
+# 或直接从上一次 ARA 的某个节点起接力（等价于 fork + seed 一步到位）
+python3 run_project.py \
+  --project-dir <B_project> \
+  --seed-from-ara <A_project>/ara/<timestamp>_<idea> \
+  --seed-node-id <node_id>
+```
+
+底层通过环境变量 `AI_SCIENTIST_ARA_SEED_PATH` 传递种子清单——同一机制会自动跨越 subprocess 边界（并行 worker 也能生效）。协议细节见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) §7。
+
+### 协议规范
+
+`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含 6 份 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。规范正文见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md)。
+
+### A/B 加速证据实验
+
+想验证「从 ARA 接力真的省事」而不是自嗨，可以跑 `ai_scientist/experiments/ara_ab/`：
+
+```bash
+# CI 安全：不调用真实 LLM，只验证 seed 短路机制
+python -m ai_scientist.experiments.ara_ab.harness stub \
+    --seed-manifest <project>/.ara_seed/ara_seed.json \
+    --out-dir /tmp/ab_out
+
+# 真跑：两次 run_project.py（baseline vs seeded），需 API key
+python -m ai_scientist.experiments.ara_ab.harness real \
+    --project-dir-baseline /tmp/ab_baseline \
+    --project-dir-seeded   /tmp/ab_seeded \
+    --seed-from-ara /path/to/fork \
+    --out-dir /tmp/ab_out \
+    -- --topic mytopic.md   # 后接的参数直传 run_project.py
+```
+
+产物 `ab_report.json`（schema `ara.ab_report.v1`）会同时给出两侧的 wall-clock、LLM 调用数、node 数、content_hash 重叠度，以及最终 verdict（`seed_saved_llm_calls` / `seed_wall_clock_faster` / `seed_did_not_short_circuit` / `seed_inconclusive`）。
 
 ---
 

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/node.schema.json",
+  "title": "ARA Node metrics.json",
+  "description": "Per-node metrics + analysis. Sits alongside code.py, term_out.log, plots.json, env.json, run.sh under nodes/<id>/.",
+  "type": "object",
+  "properties": {
+    "metric": {"type": ["object", "null"]},
+    "analysis": {"type": ["string", "null"]},
+    "is_buggy": {"type": ["boolean", "null"]},
+    "is_buggy_plots": {"type": ["boolean", "null"]},
+    "exc_type": {"type": ["string", "null"]},
+    "exc_info": {"type": ["object", "null"]},
+    "exec_time": {"type": ["number", "null"]},
+    "content_hash": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

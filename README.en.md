@@ -277,7 +277,7 @@ Typical layout:
 └── README.md                  # agent-facing entry point
 ```
 
-The `run_ara_fork.py` CLI ships four sub-commands:
+The `run_ara_fork.py` CLI ships five sub-commands:
 
 ```bash
 # Print a node's metric / analysis / code size.
@@ -298,6 +298,9 @@ python3 run_ara_fork.py fork \
 
 # Snapshot the current interpreter's pip freeze into env/.
 python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+
+# Run conformance validation against ai_scientist/protocol/SPEC.md.
+python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
 ```
 
 During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them.
@@ -309,6 +312,51 @@ export AI_SCIENTIST_ARA_REEXEC=1
 ```
 
 Off by default because re-executing arbitrary code can hit external APIs / GPUs.
+
+### Fork-continue from an ARA
+
+Any ARA produced by an XScientist run can seed the next run — the very first BFTS draft reuses the code from the chosen node instead of paying for an LLM cold start, and `provenance` is written into the child ARA's `manifest.json` automatically:
+
+```bash
+# Seed from a fork directory (recommended workflow).
+python3 run_project.py \
+  --project-dir <B_project> \
+  --seed-from-ara /path/to/fork_seed \
+  --topic ...   # other normal flags
+
+# Or seed directly from a node inside an existing ARA (fork + seed in one step).
+python3 run_project.py \
+  --project-dir <B_project> \
+  --seed-from-ara <A_project>/ara/<timestamp>_<idea> \
+  --seed-node-id <node_id>
+```
+
+Under the hood the seed manifest is passed through the `AI_SCIENTIST_ARA_SEED_PATH` env var, so the short-circuit also applies inside parallel workers. Protocol details in [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) §7.
+
+### Protocol package
+
+`ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): six JSON Schemas, a `content_hash` normalisation algorithm, and a minimal conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
+
+### A/B evidence harness
+
+To check that the ARA seed actually accelerates the next run (rather than just feeling like it does), run `ai_scientist/experiments/ara_ab/`:
+
+```bash
+# CI-safe: no real LLM calls, only verifies that the seed short-circuits.
+python -m ai_scientist.experiments.ara_ab.harness stub \
+    --seed-manifest <project>/.ara_seed/ara_seed.json \
+    --out-dir /tmp/ab_out
+
+# Full run: shells out to run_project.py twice (baseline vs seeded). Needs API keys.
+python -m ai_scientist.experiments.ara_ab.harness real \
+    --project-dir-baseline /tmp/ab_baseline \
+    --project-dir-seeded   /tmp/ab_seeded \
+    --seed-from-ara /path/to/fork \
+    --out-dir /tmp/ab_out \
+    -- --topic mytopic.md   # everything after `--` is forwarded to run_project.py
+```
+
+The resulting `ab_report.json` (schema `ara.ab_report.v1`) records wall-clock, LLM call counts, node counts, and content-hash overlap for both arms, plus a verdict (`seed_saved_llm_calls` / `seed_wall_clock_faster` / `seed_did_not_short_circuit` / `seed_inconclusive`).
 
 ---
 

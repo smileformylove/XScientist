@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/manifest.schema.json",
+  "title": "ARA Manifest",
+  "description": "Top-level pointer file for one ARA export. Consumers read this first.",
+  "type": "object",
+  "required": ["schema_version", "created_at", "source_exp_dir", "idea", "counts"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Protocol version, e.g. 'ara.v1'."
+    },
+    "protocol_kind": {
+      "type": "string",
+      "const": "manifest"
+    },
+    "created_at": {"type": "string", "description": "ISO-8601 timestamp."},
+    "counts_updated_at": {"type": "string"},
+    "source_exp_dir": {"type": "string"},
+    "project_dir": {"type": "string"},
+    "idea": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string"},
+        "title": {"type": ["string", "null"]},
+        "raw": {"type": ["object", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "counts": {
+      "type": "object",
+      "required": ["nodes"],
+      "properties": {
+        "nodes": {"type": "integer", "minimum": 0},
+        "edges": {"type": "integer", "minimum": 0},
+        "buggy_nodes": {"type": "integer", "minimum": 0},
+        "journals": {"type": "integer", "minimum": 0},
+        "claims": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "references": {"type": "object"},
+    "missing": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Human-readable notes about intentionally-absent sub-artifacts."
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Optional back-pointer to the parent artifact this run forked from.",
+      "properties": {
+        "parent_ara_root": {"type": ["string", "null"]},
+        "parent_node_id": {"type": ["string", "null"]},
+        "parent_content_hash": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

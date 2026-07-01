@@ -479,6 +479,25 @@ class MinimalAgent:
         }
 
     def _draft(self) -> Node:
+        # ARA seed short-circuit: if a fork manifest is staged, honour it and
+        # skip the LLM call. Import lazily so BFTS keeps working when the
+        # utils package isn't on sys.path (e.g. in trimmed dev environments).
+        try:
+            from ai_scientist.utils.ara_seed import load_active_seed
+        except Exception:  # pragma: no cover - defensive
+            load_active_seed = None  # type: ignore[assignment]
+        seed = load_active_seed() if load_active_seed else None
+        if seed:
+            code = str(seed.get("code") or "")
+            plan = str(seed.get("plan") or "Seed from ARA fork.")
+            provenance = seed.get("provenance") or {}
+            print(
+                "[cyan]ARA seed detected — bypassing LLM draft. "
+                f"parent_node_id={provenance.get('parent_node_id')} "
+                f"parent_content_hash={provenance.get('parent_content_hash')}[/cyan]"
+            )
+            return Node(plan=plan, code=code)
+
         prompt: Any = {
             "Introduction": (
                 "You are an AI researcher who is looking to publish a paper that will contribute significantly to the field."

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/claim.schema.json",
+  "title": "ARA Claim",
+  "description": "One machine-readable link from a manuscript assertion to its originating exploration node.",
+  "type": "object",
+  "required": ["claim_id", "node_id", "tex_file", "line", "resolved"],
+  "properties": {
+    "claim_id": {"type": "string"},
+    "node_id": {"type": "string"},
+    "tex_file": {"type": "string"},
+    "line": {"type": "integer", "minimum": 0},
+    "context": {"type": "string"},
+    "options": {"type": "object"},
+    "resolved": {"type": "boolean"},
+    "node": {
+      "type": ["object", "null"],
+      "description": "Snapshot of the exploration_graph entry for node_id; null when unresolved."
+    },
+    "recorded_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

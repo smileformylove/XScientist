@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/verify_report.schema.json",
+  "title": "ARA Verify Report",
+  "description": "Output of one re-execution attempt against a single node.",
+  "type": "object",
+  "required": ["schema", "node_id", "ara_root", "started_at", "finished_at", "returncode"],
+  "properties": {
+    "schema": {"type": "string", "const": "ara.verify.v1"},
+    "node_id": {"type": "string"},
+    "ara_root": {"type": "string"},
+    "started_at": {"type": "string"},
+    "finished_at": {"type": "string"},
+    "python": {"type": "string"},
+    "cwd": {"type": "string"},
+    "timeout_seconds": {"type": ["integer", "number"]},
+    "returncode": {"type": "integer"},
+    "timed_out": {"type": "boolean"},
+    "recorded_metric": {"type": ["object", "number", "null"]},
+    "fresh_metric": {"type": "object"},
+    "comparison": {"type": "object"},
+    "stdout_tail": {"type": "string"},
+    "stderr_tail": {"type": "string"}
+  },
+  "additionalProperties": true
+}

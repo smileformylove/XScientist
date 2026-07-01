@@ -240,7 +240,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 def cmd_fork(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
-    _, node_dir = _load_node(ara_root, args.node_id)
+    meta, node_dir = _load_node(ara_root, args.node_id)
     dest = Path(args.dest).expanduser().resolve()
     if dest.exists() and any(dest.iterdir()) and not args.force:
         print(f"Destination {dest} not empty (pass --force to overwrite)", file=sys.stderr)
@@ -254,15 +254,27 @@ def cmd_fork(args: argparse.Namespace) -> int:
         if src.exists():
             shutil.copy2(src, dest / name)
 
+    parent_hash = None
+    metrics_payload = _load_json(node_dir / "metrics.json") or {}
+    if isinstance(metrics_payload, dict):
+        parent_hash = metrics_payload.get("content_hash")
+
     fork_meta = {
         "schema": "ara.fork.v1",
         "created_at": _now_iso(),
         "source_ara": str(ara_root),
         "source_node_id": args.node_id,
+        "source_content_hash": parent_hash,
+        "provenance_hint": {
+            "parent_ara_root": str(ara_root),
+            "parent_node_id": args.node_id,
+            "parent_content_hash": parent_hash,
+        },
         "notes": (
             "Seed a fresh tree search from `node/code.py`. `manifest.json` and "
             "`exploration_graph.json` are the origin context — keep them as a "
-            "read-only lineage record."
+            "read-only lineage record. Pass `provenance_hint` to export_ara() "
+            "when producing the child ARA to preserve the fork lineage."
         ),
     }
     (dest / "fork.json").write_text(
@@ -293,6 +305,17 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     dest.write_text(completed.stdout, encoding="utf-8")
     print(f"[ara-fork] wrote {dest} ({len(completed.stdout.splitlines())} packages)")
     return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Run ARA conformance validation and print a report."""
+    # Local import so callers who never validate don't pay the cost.
+    from ai_scientist.protocol import validate_ara
+
+    ara_root = _resolve_ara_root(args.ara)
+    report = validate_ara(ara_root, strict=args.strict)
+    print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    return 0 if report.ok else 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -330,6 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_p = sub.add_parser("freeze", help="Snapshot the current interpreter's pip freeze into env/.")
     freeze_p.add_argument("--ara", required=True)
     freeze_p.set_defaults(func=cmd_freeze)
+
+    validate_p = sub.add_parser("validate", help="Check an ARA against the protocol schema.")
+    validate_p.add_argument("--ara", required=True)
+    validate_p.add_argument("--strict", action="store_true", help="Promote warnings to errors")
+    validate_p.set_defaults(func=cmd_validate)
 
     return parser
 

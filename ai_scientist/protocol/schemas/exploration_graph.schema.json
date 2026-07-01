@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/exploration_graph.schema.json",
+  "title": "ARA Exploration Graph",
+  "description": "The full tree-search graph — nodes + edges + counts. Failed branches MUST be present, not filtered out.",
+  "type": "object",
+  "required": ["schema_version", "nodes", "edges", "counts"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"type": "string", "const": "exploration_graph"},
+    "generated_at": {"type": "string"},
+    "source_journals": {"type": "array", "items": {"type": "string"}},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string"},
+          "content_hash": {
+            "type": ["string", "null"],
+            "description": "sha256:<hex>, derived from code + normalised metric."
+          },
+          "stage": {"type": ["string", "null"]},
+          "step": {"type": ["integer", "null"]},
+          "parent_id": {"type": ["string", "null"]},
+          "children": {"type": "array", "items": {"type": "string"}},
+          "is_buggy": {"type": ["boolean", "null"]},
+          "is_seed_node": {"type": ["boolean", "null"]},
+          "is_seed_agg_node": {"type": ["boolean", "null"]},
+          "metric": {"type": ["object", "null"]},
+          "plan_excerpt": {"type": "string"},
+          "exp_results_dir": {"type": ["string", "null"]},
+          "ctime": {"type": ["number", "null"]},
+          "artifacts_dir": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["parent", "child"],
+        "properties": {
+          "parent": {"type": "string"},
+          "child": {"type": "string"},
+          "stage": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": ["nodes"],
+      "properties": {
+        "nodes": {"type": "integer", "minimum": 0},
+        "edges": {"type": "integer", "minimum": 0},
+        "buggy": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

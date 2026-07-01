@@ -449,6 +449,7 @@ def export_ara(
     bfts_config_path: str | None = None,
     model_spec: dict[str, Any] | None = None,
     writing_profile: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> ARAExportResult:
     """Build the ARA export for one idea run.
 
@@ -508,6 +509,7 @@ def export_ara(
         exploration_graph_path,
         {
             "schema_version": ARA_SCHEMA_VERSION,
+            "protocol_kind": "exploration_graph",
             "generated_at": _now_iso(),
             "nodes": all_nodes,
             "edges": all_edges,
@@ -597,6 +599,7 @@ def export_ara(
     # 6. Manifest.
     manifest = {
         "schema_version": ARA_SCHEMA_VERSION,
+        "protocol_kind": "manifest",
         "created_at": _now_iso(),
         "source_exp_dir": str(exp_dir_path),
         "project_dir": str(project_dir_path),
@@ -614,6 +617,8 @@ def export_ara(
         "references": references,
         "missing": missing,
     }
+    if provenance:
+        manifest["provenance"] = dict(provenance)
     manifest_path = ara_dir / "manifest.json"
     _safe_write_json(manifest_path, manifest)
 

@@ -1443,6 +1443,15 @@ def process_single_idea(args):
         # AI scientist can fork/verify without decoding the PDF.
         ara_export = None
         try:
+            provenance_env = os.environ.get("AI_SCIENTIST_ARA_SEED_PROVENANCE")
+            ara_provenance = None
+            if provenance_env:
+                try:
+                    parsed = json.loads(provenance_env)
+                    if isinstance(parsed, dict) and parsed:
+                        ara_provenance = parsed
+                except json.JSONDecodeError:
+                    pass
             ara_export = export_ara(
                 project_dir=project_dir,
                 exp_dir=exp_dir,
@@ -1458,6 +1467,7 @@ def process_single_idea(args):
                     "quality": quality_model,
                 },
                 writing_profile=writing_profile,
+                provenance=ara_provenance,
             )
             tex_candidates = [
                 Path(exp_dir) / "latex" / "template.tex",
@@ -2050,6 +2060,24 @@ def main():
         help="禁用严格兜底拦截（默认投稿/高质量/程序驱动模式会在出现 fallback 时终止）。",
     )
 
+    # ARA fork-continue: seed the tree search from a prior ARA node instead of
+    # asking the LLM to draft a baseline. See ai_scientist/protocol/SPEC.md §7.
+    parser.add_argument(
+        "--seed-from-ara",
+        type=str,
+        default=None,
+        help=(
+            "路径：一个 `run_ara_fork.py fork` 产生的目录，或一个 ARA 根目录（需配合 --seed-node-id）。"
+            "首个 BFTS draft 会直接使用该目录中的 code，跳过 LLM。"
+        ),
+    )
+    parser.add_argument(
+        "--seed-node-id",
+        type=str,
+        default=None,
+        help="当 --seed-from-ara 指向 ARA 根目录时，指定要作为种子的 node_id。",
+    )
+
     # 改进设置
     parser.add_argument(
         "--improvement-rounds",
@@ -2182,6 +2210,44 @@ def main():
     # 创建项目结构
     dirs = create_project_structure(args.project_dir, output_root=args.output_root)
     args.project_dir = str(dirs["root"])
+
+    # ARA fork-continue: stage a seed manifest so the first BFTS draft skips
+    # the LLM. Uses env vars so it works transparently across subprocess
+    # boundaries (parallel workers pick it up too).
+    if getattr(args, "seed_from_ara", None):
+        from ai_scientist.utils.ara_seed import (
+            SEED_ENV_VAR,
+            build_seed_manifest_from_ara_node,
+            resolve_seed_manifest_from_source,
+            stage_seed_manifest,
+        )
+
+        try:
+            if args.seed_node_id:
+                seed_manifest = build_seed_manifest_from_ara_node(
+                    ara_root=args.seed_from_ara, node_id=args.seed_node_id
+                )
+            else:
+                seed_manifest = resolve_seed_manifest_from_source(args.seed_from_ara)
+            seed_path = stage_seed_manifest(
+                seed_manifest, workspace_dir=Path(args.project_dir) / ".ara_seed"
+            )
+            os.environ[SEED_ENV_VAR] = str(seed_path)
+            # Also propagate provenance so process_single_idea can attach it
+            # to the child ARA's manifest without re-parsing the seed file.
+            os.environ["AI_SCIENTIST_ARA_SEED_PROVENANCE"] = json.dumps(
+                seed_manifest.get("provenance") or {}
+            )
+            provenance = seed_manifest.get("provenance") or {}
+            print(
+                "🌱 ARA seed staged: "
+                f"parent_node_id={provenance.get('parent_node_id')} "
+                f"parent_content_hash={provenance.get('parent_content_hash')} "
+                f"→ {seed_path}"
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"❌ --seed-from-ara 无法加载: {exc}")
+            sys.exit(1)
 
     args.writeup_type = resolve_paper_type_for_venue(
         args.writeup_type,

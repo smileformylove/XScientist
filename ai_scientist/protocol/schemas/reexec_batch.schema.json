@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/reexec_batch.schema.json",
+  "title": "ARA Re-execution Batch",
+  "description": "Aggregate report from re-executing several nodes in one pass.",
+  "type": "object",
+  "required": ["schema", "generated_at", "ara_root", "verdict_count", "verdicts"],
+  "properties": {
+    "schema": {"type": "string", "const": "ara.reexec.batch.v1"},
+    "generated_at": {"type": "string"},
+    "ara_root": {"type": "string"},
+    "verdict_count": {"type": "integer", "minimum": 0},
+    "passed": {"type": "integer", "minimum": 0},
+    "verdicts": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  },
+  "additionalProperties": true
+}
