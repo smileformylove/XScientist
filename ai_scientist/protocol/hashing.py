@@ -121,3 +121,57 @@ def hash_matches(expected: str, actual: str) -> bool:
     if exp_algo != act_algo:
         return False
     return exp_digest == act_digest
+
+
+def build_provenance(
+    *,
+    parent_ara_root: str | None = None,
+    parent_node_id: str | None = None,
+    parent_content_hash: str | None = None,
+    parents: list[dict] | None = None,
+) -> dict:
+    """Assemble a schema-conformant ``provenance`` block.
+
+    Two shapes are supported and preserved together for backward compat:
+
+      1. Single-parent — the three top-level ``parent_*`` fields.
+      2. Multi-parent — a ``parents: []`` array where each entry names a
+         ``role`` (``code`` / ``env`` / ``data`` / ...) so consumers can
+         reason about *what* was inherited from each ancestor.
+
+    When both are supplied, we ALSO echo the first ``role="code"`` parent
+    (or the first entry when no ``code`` role exists) into the single-parent
+    fields — this keeps existing consumers that only look at the top-level
+    slots working without needing to teach them the array shape.
+    """
+    payload: dict = {}
+    if parent_ara_root is not None:
+        payload["parent_ara_root"] = parent_ara_root
+    if parent_node_id is not None:
+        payload["parent_node_id"] = parent_node_id
+    if parent_content_hash is not None:
+        payload["parent_content_hash"] = parent_content_hash
+
+    if parents:
+        cleaned: list[dict] = []
+        for p in parents:
+            if not isinstance(p, dict):
+                continue
+            entry = {k: v for k, v in p.items() if v is not None}
+            if entry:
+                cleaned.append(entry)
+        if cleaned:
+            payload["parents"] = cleaned
+            # Back-compat: if nothing was supplied for the single-parent
+            # slots, elect the first `code` role (or the first entry) so
+            # existing single-parent consumers still function.
+            if "parent_content_hash" not in payload:
+                elected = next(
+                    (p for p in cleaned if p.get("role") == "code"),
+                    cleaned[0],
+                )
+                for key in ("parent_ara_root", "parent_node_id", "parent_content_hash"):
+                    if key in elected and key not in payload:
+                        payload[key] = elected[key]
+
+    return payload

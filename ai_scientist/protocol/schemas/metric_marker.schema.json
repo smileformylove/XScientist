@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/metric_marker.schema.json",
+  "title": "ARA_METRIC stdout marker",
+  "description": "The JSON payload that follows `ARA_METRIC=` on a stdout line. Consumed by ai_scientist/utils/ara_metric_parser.py during re-execution verification.",
+  "type": "object",
+  "required": ["value"],
+  "properties": {
+    "name": {"type": "string", "description": "Short metric label, e.g. 'acc'."},
+    "value": {"type": "number", "description": "The metric value emitted this run."},
+    "maximize": {
+      "type": "boolean",
+      "description": "True when higher is better. Consumers use it to interpret drift direction."
+    },
+    "source": {
+      "type": "string",
+      "description": "Optional producer tag (e.g. 'text_tail' when the parser fell back to the legacy 'metric: x' format)."
+    }
+  },
+  "additionalProperties": true
+}

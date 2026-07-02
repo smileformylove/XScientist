@@ -185,6 +185,39 @@ the child SHOULD record its origin:
 Content-hash provenance is preferable to path-based provenance: paths break
 when directories move, hashes don't. A validator will accept either.
 
+### 7.0 Multi-Parent Provenance
+
+A child ARA may inherit from *several* ancestors — code from A, env from B,
+data hypothesis from C. Producers MAY populate a ``parents`` array to make
+that explicit:
+
+```json
+"provenance": {
+  "parent_ara_root": "/path/to/A",
+  "parent_node_id": "n47",
+  "parent_content_hash": "sha256:aaa...",
+  "parents": [
+    {"role": "code", "parent_ara_root": "/path/to/A", "parent_node_id": "n47",
+     "parent_content_hash": "sha256:aaa..."},
+    {"role": "env",  "parent_ara_root": "/path/to/B", "parent_node_id": "n03",
+     "parent_content_hash": "sha256:bbb..."},
+    {"role": "data", "parent_ara_root": "/path/to/C", "parent_node_id": "n11",
+     "parent_content_hash": "sha256:ccc..."}
+  ]
+}
+```
+
+Rules:
+
+- Consumers that understand ``parents`` MUST treat it as canonical.
+- Consumers that don't SHOULD fall back to the top-level ``parent_*`` fields;
+  ``ai_scientist.protocol.build_provenance`` echoes the ``role: "code"``
+  entry into those slots by default, so single-parent readers still work.
+- ``role`` is free-form. Common values: ``code`` / ``env`` / ``data`` /
+  ``hypothesis``. Producers SHOULD stick to short lowercase tokens.
+
+Reference helper: ``ai_scientist.protocol.build_provenance(...)``.
+
 ### 7.1 Fork-Continue Workflow
 
 The end-to-end "one agent picks up where another left off" story:
@@ -237,7 +270,33 @@ Two shapes coexist under `verify/`:
 Both formats are additive (`additionalProperties: true`) — future producers
 can attach richer telemetry without breaking older consumers.
 
-## 9. Conformance
+## 9. Metric Markers (Re-execution Contract)
+
+Node code that wants its metric picked up by third-party verifiers MUST emit
+a **metric marker line** on stdout of the form:
+
+```
+ARA_METRIC={"name": "<metric_name>", "value": <float>, "maximize": <bool>}
+```
+
+Rules:
+
+- One JSON object per line, prefixed by the literal string ``ARA_METRIC=``.
+- The last matching line wins (mid-run prints don't override the final one).
+- ``value`` MUST be JSON-numeric. ``name`` and ``maximize`` are recommended
+  but not strictly required.
+- Additional fields are allowed — verifiers preserve them under
+  ``fresh_metric.*`` but do NOT hash them.
+
+Legacy fallback: a trailing line ``metric: 0.42`` (case-insensitive,
+optional whitespace) is also accepted so historical scripts keep working.
+New producers SHOULD emit ``ARA_METRIC=`` — it's unambiguous and pastes
+into other logs cleanly.
+
+Reference implementation: `ai_scientist.utils.ara_metric_parser`. Schema
+file: `schemas/metric_marker.schema.json`.
+
+## 10. Conformance
 
 Reference validator: `ai_scientist.protocol.validate_ara(path)`.
 
@@ -257,7 +316,7 @@ Warnings (non-blocking):
 - `schema_version` differs from `PROTOCOL_VERSION`.
 - A node listed in `exploration_graph.json` has no directory on disk.
 
-## 10. Non-Goals
+## 11. Non-Goals
 
 The protocol deliberately does not specify:
 
@@ -269,7 +328,7 @@ The protocol deliberately does not specify:
 - Any UI / rendering conventions. `README.md` is a courtesy for agents that
   don't want to parse `manifest.json` first — it is not authoritative.
 
-## 11. Extension Points
+## 12. Extension Points
 
 Adding fields:
 - **Add optional fields freely** — schemas are `additionalProperties: true`.

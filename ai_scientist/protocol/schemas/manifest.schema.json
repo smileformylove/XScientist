@@ -48,11 +48,29 @@
     },
     "provenance": {
       "type": "object",
-      "description": "Optional back-pointer to the parent artifact this run forked from.",
+      "description": "Optional back-pointer to the parent artifact(s) this run derives from. Supports both single-parent (top-level parent_* fields) and multi-parent (`parents` array) shapes; consumers should treat `parents` as canonical when present and fall back to the top-level fields otherwise.",
       "properties": {
         "parent_ara_root": {"type": ["string", "null"]},
         "parent_node_id": {"type": ["string", "null"]},
-        "parent_content_hash": {"type": ["string", "null"]}
+        "parent_content_hash": {"type": ["string", "null"]},
+        "parents": {
+          "type": "array",
+          "description": "Optional list of contributing ancestors. Each entry names one parent + which aspect of the child was inherited from it (e.g. `code`, `env`, `data`).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string",
+                "description": "What did we inherit from this parent? Free-form; common values: `code`, `env`, `data`, `hypothesis`."
+              },
+              "parent_ara_root": {"type": ["string", "null"]},
+              "parent_node_id": {"type": ["string", "null"]},
+              "parent_content_hash": {"type": ["string", "null"]},
+              "note": {"type": "string"}
+            },
+            "additionalProperties": true
+          }
+        }
       },
       "additionalProperties": true
     }

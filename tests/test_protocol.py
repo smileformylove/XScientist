@@ -11,6 +11,7 @@ from ai_scientist.protocol import (
     PROTOCOL_VERSION,
     Kind,
     available_schemas,
+    build_provenance,
     content_hash,
     hash_node_payload,
     load_schema,
@@ -116,6 +117,72 @@ class SchemaTest(unittest.TestCase):
             schema = load_schema(kind)
             self.assertIn("$id", schema)
             self.assertEqual(schema.get("type"), "object")
+
+
+class MultiParentProvenanceTest(unittest.TestCase):
+    """O10: `provenance.parents` array shape + back-compat elections."""
+
+    def test_single_parent_shape_unchanged(self) -> None:
+        prov = build_provenance(
+            parent_ara_root="/a", parent_node_id="n1",
+            parent_content_hash="sha256:aa",
+        )
+        self.assertEqual(prov["parent_ara_root"], "/a")
+        self.assertNotIn("parents", prov)
+
+    def test_multi_parent_elects_code_role_into_top_level(self) -> None:
+        prov = build_provenance(
+            parents=[
+                {"role": "env", "parent_ara_root": "/b", "parent_node_id": "n2",
+                 "parent_content_hash": "sha256:bb"},
+                {"role": "code", "parent_ara_root": "/a", "parent_node_id": "n1",
+                 "parent_content_hash": "sha256:aa"},
+            ],
+        )
+        # Elected the `code` role, not the first one.
+        self.assertEqual(prov["parent_content_hash"], "sha256:aa")
+        self.assertEqual(prov["parent_node_id"], "n1")
+        # Still exposes the full array for consumers who understand it.
+        self.assertEqual(len(prov["parents"]), 2)
+        self.assertIn({"role": "code", "parent_ara_root": "/a", "parent_node_id": "n1",
+                       "parent_content_hash": "sha256:aa"}, prov["parents"])
+
+    def test_multi_parent_without_code_role_uses_first_entry(self) -> None:
+        prov = build_provenance(
+            parents=[
+                {"role": "data", "parent_content_hash": "sha256:dd"},
+                {"role": "env",  "parent_content_hash": "sha256:ee"},
+            ],
+        )
+        self.assertEqual(prov["parent_content_hash"], "sha256:dd")
+
+    def test_explicit_top_level_wins_over_election(self) -> None:
+        prov = build_provenance(
+            parent_ara_root="/manual", parent_content_hash="sha256:manual",
+            parents=[
+                {"role": "code", "parent_content_hash": "sha256:auto"},
+            ],
+        )
+        self.assertEqual(prov["parent_ara_root"], "/manual")
+        self.assertEqual(prov["parent_content_hash"], "sha256:manual")
+
+    def test_multi_parent_manifest_roundtrips_validation(self) -> None:
+        payload = {
+            "schema_version": PROTOCOL_VERSION,
+            "protocol_kind": "manifest",
+            "created_at": "2026-07-02T00:00:00Z",
+            "source_exp_dir": "/tmp/x",
+            "idea": {"name": "abc"},
+            "counts": {"nodes": 0},
+            "provenance": build_provenance(
+                parents=[
+                    {"role": "code", "parent_ara_root": "/A", "parent_content_hash": "sha256:aa"},
+                    {"role": "env",  "parent_ara_root": "/B", "parent_content_hash": "sha256:bb"},
+                ],
+            ),
+        }
+        report = validate_manifest(payload)
+        self.assertTrue(report.ok, msg=[e.__dict__ for e in report.errors])
 
 
 class ValidatorTest(unittest.TestCase):

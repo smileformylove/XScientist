@@ -42,6 +42,11 @@ from ai_scientist.utils.experiment_registry import (
 from ai_scientist.utils.experiment_report import write_experiment_report
 from ai_scientist.utils.deferred_imports import load_module_attr
 from ai_scientist.utils.auth_session import require_login
+from ai_scientist.utils.ara_pipeline import (
+    finalize_ara_for_idea,
+    summarise_finalize,
+)
+from ai_scientist.utils.ara_minimal import export_minimal_ara
 from ai_scientist.utils.manuscript_state import (
     build_manuscript_state,
     save_manuscript_state,
@@ -237,6 +242,39 @@ def _ensure_runtime_imports() -> None:
     for name, (module_name, attr_name) in _RUNTIME_IMPORT_ATTRS.items():
         runtime_globals[name] = load_module_attr(module_name, attr_name)
     runtime_globals["_RUNTIME_IMPORTS_LOADED"] = True
+
+
+def _try_minimal_ara(
+    *,
+    paper_dir: Any,
+    idea: dict[str, Any] | None,
+    writing_profile: str | None,
+    producer: str,
+) -> dict[str, Any]:
+    """Best-effort minimal ARA export for the non-BFTS writeup paths.
+
+    Returns extra keys to merge into the caller's return dict. Any failure
+    downgrades to an empty dict so the paper generator never dies on ARA.
+    """
+    try:
+        paper_dir_path = Path(paper_dir)
+        pdf_candidates = list(paper_dir_path.glob("*.pdf")) if paper_dir_path.exists() else []
+        pdf = pdf_candidates[0] if pdf_candidates else None
+        export = export_minimal_ara(
+            project_dir=paper_dir_path,
+            manuscript_pdf=pdf,
+            idea=idea or {},
+            writing_profile=writing_profile,
+            producer=producer,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  minimal ARA export failed ({producer}): {exc}")
+        return {}
+    return {
+        "ara_dir": str(export.root),
+        "ara_manifest": str(export.manifest_path),
+        "ara_node_count": export.node_count,
+    }
 
 
 def _write_json_artifact(
@@ -1752,6 +1790,12 @@ class ContinuousPaperGenerator:
                     "paper_type": paper_type,
                     "writing_profile": writing_profile,
                     "quality_result": quality_result,
+                    **_try_minimal_ara(
+                        paper_dir=paper_dir,
+                        idea=idea,
+                        writing_profile=writing_profile,
+                        producer="continuous_paper_generator.professional_writing",
+                    ),
                 }
             else:
                 return {
@@ -1762,6 +1806,12 @@ class ContinuousPaperGenerator:
                     "paper_type": paper_type,
                     "writing_profile": writing_profile,
                     "quality_result": quality_result,
+                    **_try_minimal_ara(
+                        paper_dir=paper_dir,
+                        idea=idea,
+                        writing_profile=writing_profile,
+                        producer="continuous_paper_generator.professional_writing",
+                    ),
                 }
 
         except StrictFallbackViolation as exc:
@@ -1999,6 +2049,12 @@ class ContinuousPaperGenerator:
                 "idea_name": idea_name,
                 "paper_type": paper_type,
                 "learning_enabled": True,
+                **_try_minimal_ara(
+                    paper_dir=paper_dir,
+                    idea=idea,
+                    writing_profile=writing_profile,
+                    producer="continuous_paper_generator.adaptive_learning",
+                ),
             }
 
         except StrictFallbackViolation as exc:
@@ -3870,11 +3926,58 @@ def _process_single_paper(args):
             print(f"   论文目录: {paper_dir}")
             print(f"   最终PDF: {final_pdf}")
 
+            # ========== ARA finalisation ==========
+            # continuous_paper_generator drives BFTS end-to-end just like
+            # run_project.py does — so the same finalize path applies. ARA
+            # lands under <paper_dir>/ara/ (paper_dir is both the project
+            # anchor and the experiment root in this codepath).
+            try:
+                ara_result = finalize_ara_for_idea(
+                    project_dir=str(paper_dir),
+                    exp_dir=str(paper_dir),
+                    idea=idea,
+                    timestamp=None,
+                    bfts_config_path=bfts_config_path,
+                    model_spec={
+                        "writeup": model_writeup,
+                        "writeup_small": model_writeup_small,
+                        "citation": model_citation,
+                        "review": model_review,
+                        "agg_plots": model_agg_plots,
+                        "quality": quality_model,
+                    },
+                    writing_profile=writing_profile,
+                )
+                for line in summarise_finalize(idea_idx, ara_result):
+                    print(line)
+                ara_export = ara_result.export
+            except Exception as ara_exc:  # noqa: BLE001 — never break the paper on ARA fail
+                print(f"[想法 #{idea_idx}] ⚠️  ARA finalize 失败: {ara_exc}")
+                ara_result = None
+                ara_export = None
+
             return {
                 "idea_idx": idea_idx,
                 "status": "success",
                 "paper_dir": str(paper_dir),
                 "pdf_path": str(final_pdf),
+                "ara_dir": str(ara_export.root) if ara_export is not None else None,
+                "ara_manifest": (
+                    str(ara_export.manifest_path) if ara_export is not None else None
+                ),
+                "ara_node_count": (
+                    ara_export.node_count if ara_export is not None else None
+                ),
+                "ara_claim_coverage_score": (
+                    ara_result.claim_coverage.coverage_score
+                    if ara_result is not None and ara_result.claim_coverage is not None
+                    else None
+                ),
+                "ara_claim_coverage_severity": (
+                    ara_result.claim_coverage.severity
+                    if ara_result is not None and ara_result.claim_coverage is not None
+                    else None
+                ),
                 "paper_type": paper_type,
                 "idea_name": idea_name,
                 "workflow_mode": workflow_mode,

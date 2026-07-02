@@ -18,8 +18,8 @@ loadable at runtime without a Python dependency.
 from __future__ import annotations
 
 from .constants import PROTOCOL_VERSION, Kind
-from .hashing import content_hash, hash_node_payload
-from .schemas import load_schema, available_schemas
+from .hashing import build_provenance, content_hash, hash_node_payload
+from .schemas import available_schemas, load_schema
 from .validator import ValidationReport, validate_ara, validate_manifest
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "Kind",
     "ValidationReport",
     "available_schemas",
+    "build_provenance",
     "content_hash",
     "hash_node_payload",
     "load_schema",

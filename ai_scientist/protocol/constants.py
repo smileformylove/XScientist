@@ -28,6 +28,7 @@ class Kind(str, Enum):
     CLAIM = "claim"
     VERIFY_REPORT = "verify_report"
     REEXEC_BATCH = "reexec_batch"
+    METRIC_MARKER = "metric_marker"
 
     @classmethod
     def values(cls) -> tuple[str, ...]:
