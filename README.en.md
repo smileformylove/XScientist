@@ -277,7 +277,7 @@ Typical layout:
 └── README.md                  # agent-facing entry point
 ```
 
-The `run_ara_fork.py` CLI ships five sub-commands:
+The `run_ara_fork.py` CLI ships six sub-commands:
 
 ```bash
 # Print a node's metric / analysis / code size.
@@ -290,7 +290,8 @@ python3 run_ara_fork.py exec \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
-# Copy a node bundle to a new directory to seed further tree search.
+# Fork a node into a fresh directory that is itself a valid ARA
+# (own manifest, single-node exploration graph, provenance to parent).
 python3 run_ara_fork.py fork \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id> \
@@ -301,9 +302,14 @@ python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
 
 # Run conformance validation against ai_scientist/protocol/SPEC.md.
 python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
+
+# Batch re-execute a handful of nodes and write verify/reexec_batch_*.json.
+python3 run_ara_fork.py verify \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --limit 3
 ```
 
-During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them.
+During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them. `ai_scientist/utils/claim_coverage.py` aggregates those markers into a `coverage_score` and a severity band (`ok` / `sparse` / `unresolved` / `insufficient` / `none`), persisted at `ara/.../claims/coverage.json` for quality gating, ranking, and dossier scoring.
 
 Optional: batch re-execution verification. Set the env flag and `run_project.py` will re-run a handful of top-metric nodes at the end and save a verify report:
 

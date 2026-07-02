@@ -90,6 +90,25 @@ class HashingTest(unittest.TestCase):
         b = content_hash({"b": [2, 3], "a": 1})
         self.assertEqual(a, b)
 
+    def test_large_code_is_truncated_but_length_still_stabilises_identity(self) -> None:
+        big_a = "a" * (512 * 1024)
+        big_b = "b" * (512 * 1024)
+        h_a = hash_node_payload(code=big_a, metric={"value": 1})
+        h_b = hash_node_payload(code=big_b, metric={"value": 1})
+        # Both truncated, but different content → different hash.
+        self.assertNotEqual(h_a, h_b)
+        # Same content of the same size is stable.
+        self.assertEqual(h_a, hash_node_payload(code=big_a, metric={"value": 1}))
+
+    def test_same_prefix_different_length_hashes_differ(self) -> None:
+        # Two payloads share the truncated prefix but differ in original length.
+        short = "a" * (256 * 1024)
+        long_ = "a" * (256 * 1024 + 1)
+        self.assertNotEqual(
+            hash_node_payload(code=short, metric={"value": 1}),
+            hash_node_payload(code=long_, metric={"value": 1}),
+        )
+
 
 class SchemaTest(unittest.TestCase):
     def test_all_schemas_loadable(self) -> None:

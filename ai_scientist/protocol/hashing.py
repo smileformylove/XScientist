@@ -25,6 +25,12 @@ from typing import Any
 
 from .constants import CONTENT_HASH_ALGO
 
+# Cap the code payload we feed into the hash. Pathologically large nodes (some
+# ARA producers embed data blobs inline) would otherwise turn every export
+# into a 500-node × N-MB SHA loop. When we truncate we still record the
+# original length in the payload so two different long files hash differently.
+_MAX_CODE_BYTES = 256 * 1024  # 256 KiB — well above any realistic node code
+
 
 def _normalise_metric(metric: Any) -> dict[str, Any]:
     """Reduce a metric dict to its stable, hash-worthy subset.
@@ -65,17 +71,42 @@ def content_hash(payload: dict[str, Any]) -> str:
     return f"{CONTENT_HASH_ALGO}:{digest}"
 
 
+def _prep_code_for_hash(code: str) -> tuple[str, int, bool]:
+    """Return ``(payload_code, original_len_bytes, truncated)``.
+
+    Truncation kicks in above ``_MAX_CODE_BYTES``; the returned tuple lets
+    callers include the pre-truncation length in the hash payload so two
+    long-but-different sources don't collide.
+    """
+    code = (code or "").strip()
+    original_len = len(code.encode("utf-8", errors="replace"))
+    if original_len <= _MAX_CODE_BYTES:
+        return code, original_len, False
+    truncated = code.encode("utf-8", errors="replace")[:_MAX_CODE_BYTES].decode(
+        "utf-8", errors="replace"
+    )
+    return truncated, original_len, True
+
+
 def hash_node_payload(*, code: str, metric: Any, extras: dict[str, Any] | None = None) -> str:
     """Compute the canonical hash for one exploration node.
 
     ``extras`` gives producers a hook to bind additional stable inputs (e.g.
     ``{"dataset": "cifar10", "seed": 42}``). Keep the payload lean — adding
     unstable fields to ``extras`` will make the hash drift for cosmetic reasons.
+
+    Large ``code`` inputs (>256 KiB) are truncated for hashing speed, but the
+    original length is captured in the payload so distinct long files still
+    hash differently.
     """
+    prepped, original_len, truncated = _prep_code_for_hash(code or "")
     payload: dict[str, Any] = {
-        "code": (code or "").strip(),
+        "code": prepped,
+        "code_len_bytes": original_len,
         "metric": _normalise_metric(metric),
     }
+    if truncated:
+        payload["code_truncated"] = True
     if extras:
         payload["extras"] = dict(extras)
     return content_hash(payload)

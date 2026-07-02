@@ -167,6 +167,47 @@ class StageAndLoadTest(unittest.TestCase):
         os.environ[SEED_ENV_VAR] = str(seed_path)
         self.assertIsNone(load_active_seed())
 
+    def test_consume_once_semantics(self) -> None:
+        """After a seed is loaded once, subsequent siblings must NOT re-consume it."""
+        manifest = build_seed_manifest_from_ara_node(
+            ara_root=self.ara_root, node_id=self.node_id
+        )
+        seed_path = stage_seed_manifest(manifest, workspace_dir=self.tmp / "ws2")
+        os.environ[SEED_ENV_VAR] = str(seed_path)
+        first = load_active_seed()
+        self.assertIsNotNone(first)
+        # The marker should now exist and load_active_seed should refuse it.
+        marker = seed_path.with_suffix(seed_path.suffix + ".consumed")
+        self.assertTrue(marker.exists())
+        self.assertIsNone(load_active_seed())
+
+    def test_idea_binding_gates_load(self) -> None:
+        """A seed bound to idea A should not fire when idea B calls load_active_seed."""
+        manifest = build_seed_manifest_from_ara_node(
+            ara_root=self.ara_root, node_id=self.node_id,
+            applies_to_idea_name="idea_A",
+        )
+        seed_path = stage_seed_manifest(manifest, workspace_dir=self.tmp / "ws3")
+        os.environ[SEED_ENV_VAR] = str(seed_path)
+        # Mismatched idea: refused, no marker written.
+        self.assertIsNone(load_active_seed(current_idea_name="idea_B"))
+        marker = seed_path.with_suffix(seed_path.suffix + ".consumed")
+        self.assertFalse(marker.exists())
+        # Matching idea: accepted, marker appears.
+        got = load_active_seed(current_idea_name="idea_A")
+        self.assertIsNotNone(got)
+        self.assertEqual(got["applies_to_idea_name"], "idea_A")
+        self.assertTrue(marker.exists())
+
+    def test_unbound_seed_still_loads_when_idea_name_provided(self) -> None:
+        """A seed without `applies_to_idea_name` should not care about the current idea."""
+        manifest = build_seed_manifest_from_ara_node(
+            ara_root=self.ara_root, node_id=self.node_id
+        )
+        seed_path = stage_seed_manifest(manifest, workspace_dir=self.tmp / "ws4")
+        os.environ[SEED_ENV_VAR] = str(seed_path)
+        self.assertIsNotNone(load_active_seed(current_idea_name="any-idea"))
+
 
 class DraftShortCircuitTest(unittest.TestCase):
     """Prove `_draft` honours the seed without invoking the LLM.

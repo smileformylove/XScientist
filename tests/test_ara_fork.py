@@ -134,9 +134,92 @@ class ForkCLITest(unittest.TestCase):
             capture_output=True, text=True, check=True,
         )
         self.assertIn("forked node", completed.stdout)
-        self.assertTrue((dest / "node" / "code.py").exists())
+        # New (O6) layout: fork is itself a conformant ARA, with the node
+        # under nodes/<id>/ rather than the legacy top-level `node/`.
+        self.assertTrue((dest / "nodes" / self.node_id / "code.py").exists())
         self.assertTrue((dest / "manifest.json").exists())
+        self.assertTrue((dest / "exploration_graph.json").exists())
         self.assertTrue((dest / "fork.json").exists())
+
+    def test_forked_dir_validates_as_ara(self) -> None:
+        """Regression: forked directories must round-trip through validate_ara."""
+        from ai_scientist.protocol import validate_ara
+
+        dest = self.tmp / "forked_conformant"
+        subprocess.run(
+            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(self.ara_root),
+             "--node-id", self.node_id, "--dest", str(dest)],
+            capture_output=True, text=True, check=True,
+        )
+        report = validate_ara(dest)
+        self.assertTrue(report.ok, msg=[e.__dict__ for e in report.errors])
+
+    def test_fork_of_fork_preserves_provenance_chain(self) -> None:
+        """A fork of a fork should chain provenance back to the original."""
+        import json as _json
+
+        intermediate = self.tmp / "fork_1"
+        subprocess.run(
+            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(self.ara_root),
+             "--node-id", self.node_id, "--dest", str(intermediate)],
+            capture_output=True, text=True, check=True,
+        )
+        # Second fork uses the same node_id (only node in the intermediate ARA).
+        grand = self.tmp / "fork_2"
+        subprocess.run(
+            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(intermediate),
+             "--node-id", self.node_id, "--dest", str(grand)],
+            capture_output=True, text=True, check=True,
+        )
+        grand_manifest = _json.loads((grand / "manifest.json").read_text())
+        # macOS /private path resolution: compare via realpath.
+        self.assertEqual(
+            os.path.realpath(grand_manifest["provenance"]["parent_ara_root"]),
+            os.path.realpath(str(intermediate)),
+        )
+        # Content hash of the leaf node should match across the chain.
+        intermediate_manifest = _json.loads((intermediate / "manifest.json").read_text())
+        self.assertEqual(
+            grand_manifest["provenance"]["parent_content_hash"],
+            intermediate_manifest["provenance"]["parent_content_hash"],
+        )
+
+
+class VerifyCLITest(unittest.TestCase):
+    """The CLI `verify` subcommand — batch re-execution wrapper."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        _, self.ara_root, self.node_id = _seed_project(self.tmp)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_verify_batch_reports_and_zero_exit(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(FORK_SCRIPT), "verify",
+             "--ara", str(self.ara_root), "--limit", "1"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        # Batch report lands under verify/.
+        reports = list((self.ara_root / "verify").glob("reexec_batch_*.json"))
+        self.assertEqual(len(reports), 1)
+        payload = json.loads(reports[0].read_text())
+        self.assertEqual(payload["schema"], "ara.reexec.batch.v1")
+        self.assertGreaterEqual(payload["verdict_count"], 1)
+
+    def test_verify_explicit_node_ids(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(FORK_SCRIPT), "verify",
+             "--ara", str(self.ara_root), "--node-ids", self.node_id],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        parsed = json.loads(completed.stdout)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual(parsed["node_ids"], [self.node_id])
 
 
 class ParseMetricTest(unittest.TestCase):

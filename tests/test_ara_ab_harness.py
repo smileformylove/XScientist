@@ -157,6 +157,58 @@ class StubEndToEndTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertIn("ARA A/B report", completed.stdout)
 
+    def test_conformance_check_embedded_in_report(self) -> None:
+        from ai_scientist.utils.ara_artifact import ara_root_for_project
+
+        out_dir = self.tmp / "out_conf"
+        # Point conformance at the parent ARA we already generated in setUp.
+        parent_ara = list(ara_root_for_project(self.tmp / "parent").iterdir())[0]
+        report = harness.run_ab_stub(
+            seed_manifest_path=self.seed_path,
+            out_dir=out_dir,
+            ara_root_for_conformance=parent_ara,
+        )
+        self.assertIsNotNone(report.ara_conformance)
+        self.assertTrue(
+            report.ara_conformance.get("ok"),
+            msg=json.dumps(report.ara_conformance, indent=2, default=str),
+        )
+        # Stage a fresh seed for the CLI arm — consume-once (O8) forbids
+        # reusing an already-consumed seed manifest.
+        fresh_manifest = build_seed_manifest_from_ara_node(
+            ara_root=parent_ara, node_id="n1"
+        )
+        fresh_seed_path = stage_seed_manifest(
+            fresh_manifest, workspace_dir=self.tmp / "ws_cli_conf"
+        )
+        completed = subprocess.run(
+            [
+                sys.executable, "-m", "ai_scientist.experiments.ara_ab.harness",
+                "stub", "--seed-manifest", str(fresh_seed_path),
+                "--out-dir", str(self.tmp / "cli_conf"),
+                "--check-ara", str(parent_ara),
+            ],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_conformance_failure_exits_two(self) -> None:
+        # Point --check-ara at a directory that has no manifest.json — the
+        # validator will report missing required files, and the stub CLI
+        # should propagate that as exit code 2.
+        empty = self.tmp / "not_an_ara"
+        empty.mkdir()
+        completed = subprocess.run(
+            [
+                sys.executable, "-m", "ai_scientist.experiments.ara_ab.harness",
+                "stub", "--seed-manifest", str(self.seed_path),
+                "--out-dir", str(self.tmp / "out_bad"),
+                "--check-ara", str(empty),
+            ],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+        )
+        self.assertEqual(completed.returncode, 2, msg=completed.stderr)
+
 
 class RealDryRunTest(unittest.TestCase):
     """`real --dry-run` should print the commands without invoking run_project."""

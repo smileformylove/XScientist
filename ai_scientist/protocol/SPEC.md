@@ -94,10 +94,16 @@ Every node SHOULD carry a `content_hash` field of the form
 ```json
 {
   "code": "<node's code, stripped>",
+  "code_len_bytes": 1234,
   "metric": {"name": ..., "value": ..., "maximize": ...},
   "extras": { ... optional producer-supplied fields ... }
 }
 ```
+
+For large code payloads (>256 KiB) the ``code`` field is truncated to the
+byte cap and a ``code_truncated: true`` marker is added — the original
+``code_len_bytes`` still stabilises the identity, so two different long
+files hash differently.
 
 Rules:
 

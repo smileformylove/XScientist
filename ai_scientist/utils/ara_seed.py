@@ -50,23 +50,50 @@ def build_seed_manifest_from_fork(fork_dir: str | Path) -> dict[str, Any]:
     """Read a fork directory (as produced by ``run_ara_fork.py fork``) and
     build a seed manifest.
 
-    The fork layout is:
+    Layouts we accept:
 
-        <fork_dir>/
-            node/code.py           # the code to seed with
-            node/metrics.json      # optional; used to populate provenance
-            fork.json              # provenance record
-            manifest.json          # parent ARA manifest (read-only lineage)
+      New (protocol-conformant ARA; see SPEC.md §7.1):
+          <fork_dir>/
+              manifest.json                    # own manifest, has provenance
+              exploration_graph.json           # single-node graph
+              nodes/<node_id>/code.py          # the code to seed with
+              nodes/<node_id>/metrics.json
+              fork.json                        # legacy marker
+
+      Legacy (pre-O6):
+          <fork_dir>/
+              node/code.py
+              node/metrics.json
+              manifest.json                    # copy of parent's manifest
+              fork.json
     """
     fork_dir = Path(fork_dir).expanduser().resolve()
-    code_path = fork_dir / "node" / "code.py"
-    if not code_path.exists():
-        raise FileNotFoundError(f"Fork missing node/code.py: {fork_dir}")
-    code = code_path.read_text(encoding="utf-8")
 
     fork_meta = _load_json(fork_dir / "fork.json") or {}
-    parent_manifest = _load_json(fork_dir / "manifest.json") or {}
-    metrics = _load_json(fork_dir / "node" / "metrics.json") or {}
+    fork_manifest = _load_json(fork_dir / "manifest.json") or {}
+    node_id = fork_meta.get("source_node_id")
+
+    # Prefer the new layout (nodes/<id>/), then fall back to legacy "node/".
+    candidate_dirs: list[Path] = []
+    if node_id:
+        candidate_dirs.append(fork_dir / "nodes" / str(node_id))
+    candidate_dirs.append(fork_dir / "node")
+    code_path: Path | None = None
+    node_dir_used: Path | None = None
+    for candidate in candidate_dirs:
+        if (candidate / "code.py").exists():
+            code_path = candidate / "code.py"
+            node_dir_used = candidate
+            break
+    if code_path is None:
+        raise FileNotFoundError(
+            f"Fork {fork_dir} exposes no readable code.py "
+            f"(checked {', '.join(str(c) for c in candidate_dirs)})"
+        )
+    code = code_path.read_text(encoding="utf-8")
+    metrics = _load_json(node_dir_used / "metrics.json") if node_dir_used else {}
+    if not isinstance(metrics, dict):
+        metrics = {}
 
     provenance = {
         "parent_ara_root": fork_meta.get("source_ara"),
@@ -87,16 +114,22 @@ def build_seed_manifest_from_fork(fork_dir: str | Path) -> dict[str, Any]:
         "created_at": _now_iso(),
         "source_fork_dir": str(fork_dir),
         "provenance": provenance,
-        "parent_manifest_idea": parent_manifest.get("idea"),
+        "parent_manifest_idea": fork_manifest.get("idea"),
         "plan": plan,
         "code": code,
     }
 
 
 def build_seed_manifest_from_ara_node(
-    *, ara_root: str | Path, node_id: str
+    *, ara_root: str | Path, node_id: str, applies_to_idea_name: str | None = None
 ) -> dict[str, Any]:
-    """Seed directly from an ARA node without going through a fork step."""
+    """Seed directly from an ARA node without going through a fork step.
+
+    ``applies_to_idea_name`` — when set, ``load_active_seed`` will refuse to
+    hand the manifest back to a differently-named idea. This is the O8 knob
+    for parallel-idea projects: without it, one seed would silently short-
+    circuit every idea's draft.
+    """
     ara_root = Path(ara_root).expanduser().resolve()
     node_dir = ara_root / "nodes" / node_id
     code_path = node_dir / "code.py"
@@ -109,7 +142,7 @@ def build_seed_manifest_from_ara_node(
         "parent_node_id": node_id,
         "parent_content_hash": metrics.get("content_hash"),
     }
-    return {
+    payload: dict[str, Any] = {
         "schema_version": PROTOCOL_VERSION,
         "protocol_kind": "seed",
         "created_at": _now_iso(),
@@ -122,6 +155,9 @@ def build_seed_manifest_from_ara_node(
         ),
         "code": code_path.read_text(encoding="utf-8"),
     }
+    if applies_to_idea_name:
+        payload["applies_to_idea_name"] = str(applies_to_idea_name)
+    return payload
 
 
 def stage_seed_manifest(
@@ -142,12 +178,22 @@ def stage_seed_manifest(
     return dest
 
 
-def load_active_seed() -> dict[str, Any] | None:
+def load_active_seed(*, current_idea_name: str | None = None) -> dict[str, Any] | None:
     """Return the currently-active seed manifest (if any).
 
     Called by ``parallel_agent._draft`` to decide whether to bypass the LLM.
-    Returns ``None`` when the env var is unset, empty, or points to a missing
-    / malformed file — the caller falls back to normal drafting.
+    Returns ``None`` when:
+
+      - the env var is unset / empty / dangles at a missing file;
+      - the manifest lacks a usable ``code`` field;
+      - a ``.consumed`` sidecar exists (consume-once, see O8);
+      - the manifest declares ``applies_to_idea_name`` but the caller's
+        ``current_idea_name`` doesn't match.
+
+    On successful load we drop a ``<manifest>.consumed`` marker so subsequent
+    ``_draft`` calls (e.g. sibling ideas or worker restarts) fall back to
+    normal LLM drafting. Callers who want reusable seeds can delete the
+    marker between runs.
     """
     raw = os.environ.get(SEED_ENV_VAR)
     if not raw:
@@ -155,6 +201,13 @@ def load_active_seed() -> dict[str, Any] | None:
     path = Path(raw).expanduser()
     if not path.exists():
         logger.warning("ARA seed manifest not found at %s", path)
+        return None
+    consumed_marker = path.with_suffix(path.suffix + ".consumed")
+    if consumed_marker.exists():
+        logger.info(
+            "ARA seed at %s already consumed (marker: %s); falling back to normal drafting",
+            path, consumed_marker,
+        )
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -164,6 +217,24 @@ def load_active_seed() -> dict[str, Any] | None:
     if not isinstance(payload, dict) or "code" not in payload:
         logger.warning("ARA seed manifest at %s is missing 'code'", path)
         return None
+
+    applies_to = payload.get("applies_to_idea_name")
+    if applies_to and current_idea_name and str(applies_to) != str(current_idea_name):
+        logger.info(
+            "ARA seed at %s is bound to idea %r; current idea is %r — skipping",
+            path, applies_to, current_idea_name,
+        )
+        return None
+
+    # Consume-once: write the marker atomically before returning so a racing
+    # sibling draft won't also see the seed as active.
+    try:
+        consumed_marker.write_text(
+            json.dumps({"consumed_at": _now_iso(), "by_idea": current_idea_name}),
+            encoding="utf-8",
+        )
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("Could not write consumed marker %s: %s", consumed_marker, exc)
     return payload
 
 

@@ -68,6 +68,10 @@ class ABReport:
     ara_seed: ArmResult | None = None
     hash_overlap: dict[str, Any] = field(default_factory=dict)
     verdict: dict[str, Any] = field(default_factory=dict)
+    # Optional protocol conformance check on a paired ARA (see O5).
+    # Kept optional so `real` mode without a canonical ARA still writes a
+    # report — absent field means "not checked".
+    ara_conformance: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +83,7 @@ class ABReport:
             "ara_seed": self.ara_seed.to_dict() if self.ara_seed else None,
             "hash_overlap": self.hash_overlap,
             "verdict": self.verdict,
+            "ara_conformance": self.ara_conformance,
         }
 
 
@@ -327,15 +332,46 @@ def render_console_summary(report: ABReport) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _run_conformance_check(ara_root: Path | None, *, strict: bool) -> dict[str, Any] | None:
+    """Delegate to protocol.validate_ara — imported lazily so the harness has
+    zero import-time coupling to the protocol package.
+    """
+    if ara_root is None:
+        return None
+    try:
+        from ai_scientist.protocol import validate_ara
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"skipped": True, "reason": f"import failed: {exc}"}
+    report = validate_ara(ara_root, strict=strict)
+    return {
+        "ara_root": str(ara_root),
+        "strict": strict,
+        **report.to_dict(),
+    }
+
+
 def run_ab_stub(
     *,
     seed_manifest_path: Path,
     out_dir: Path,
     idea_hint: str | None = None,
+    ara_root_for_conformance: Path | str | None = None,
+    strict_conformance: bool = True,
 ) -> ABReport:
-    """CI-safe A/B: exercise the seed short-circuit twice and diff."""
+    """CI-safe A/B: exercise the seed short-circuit twice and diff.
+
+    When ``ara_root_for_conformance`` is provided, we also run
+    ``validate_ara(ara_root, strict=strict_conformance)`` and embed the
+    result in the report. This is the O5 CI hook: any future edit to the
+    exporter that breaks the on-disk schema flips ``ara_conformance.ok``
+    to ``false``, which the CLI translates into a non-zero exit.
+    """
     baseline = run_stub_arm(arm="baseline", seed_manifest_path=None)
     seeded = run_stub_arm(arm="ara_seed", seed_manifest_path=seed_manifest_path)
+    conformance = _run_conformance_check(
+        Path(ara_root_for_conformance).expanduser() if ara_root_for_conformance else None,
+        strict=strict_conformance,
+    )
     report = ABReport(
         mode="stub",
         idea_hint=idea_hint,
@@ -343,6 +379,7 @@ def run_ab_stub(
         ara_seed=seeded,
         hash_overlap=compute_hash_overlap(baseline, seeded),
         verdict=build_verdict(baseline, seeded),
+        ara_conformance=conformance,
     )
     write_report(report, out_dir)
     return report
@@ -403,6 +440,16 @@ def build_parser() -> argparse.ArgumentParser:
     stub.add_argument("--seed-manifest", required=True, help="Path to a staged ara_seed.json")
     stub.add_argument("--out-dir", required=True)
     stub.add_argument("--idea-hint", default=None)
+    stub.add_argument(
+        "--check-ara",
+        default=None,
+        help="Optional ARA directory to run `validate_ara(..., strict=True)` on. "
+             "Exit non-zero if conformance fails.",
+    )
+    stub.add_argument(
+        "--no-strict-conformance", action="store_true",
+        help="Downgrade the paired conformance check from strict to lenient.",
+    )
     stub.set_defaults(func=_cmd_stub)
 
     real = sub.add_parser("real", help="Shell out to run_project.py twice. Requires API keys.")
@@ -428,9 +475,20 @@ def _cmd_stub(args: argparse.Namespace) -> int:
         seed_manifest_path=Path(args.seed_manifest).expanduser(),
         out_dir=Path(args.out_dir).expanduser(),
         idea_hint=args.idea_hint,
+        ara_root_for_conformance=(
+            Path(args.check_ara).expanduser() if args.check_ara else None
+        ),
+        strict_conformance=not args.no_strict_conformance,
     )
     print(render_console_summary(report))
-    return 0 if (report.ara_seed and report.ara_seed.used_seed) else 1
+    # Two independent failure signals:
+    #   1. Seed short-circuit didn't fire (product bug).
+    #   2. Paired ARA fails strict conformance (protocol bug).
+    if report.ara_seed is None or not report.ara_seed.used_seed:
+        return 1
+    if report.ara_conformance is not None and not report.ara_conformance.get("ok", True):
+        return 2
+    return 0
 
 
 def _cmd_real(args: argparse.Namespace) -> int:

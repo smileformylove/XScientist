@@ -294,7 +294,7 @@ python3 research_manager.py process-board --status blocked --top 30
 └── README.md                  # 面向 agent 的入口说明
 ```
 
-配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` 五个子命令：
+配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` 六个子命令：
 
 ```bash
 # 打印某个节点的 metric / analysis / 代码大小
@@ -307,7 +307,7 @@ python3 run_ara_fork.py exec \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
-# 把节点 bundle 拷贝到新目录，作为新一轮树搜索的种子
+# 把节点拷贝出一份「本身也是合规 ARA」的 fork 目录（可再次 fork / validate）
 python3 run_ara_fork.py fork \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id> \
@@ -318,9 +318,14 @@ python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
 
 # 对照 ai_scientist/protocol/SPEC.md 做 conformance 校验
 python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
+
+# 批量重跑若干节点并写一份 verify/reexec_batch_*.json（对齐 CI 门禁）
+python3 run_ara_fork.py verify \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --limit 3
 ```
 
-写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。
+写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。`ai_scientist/utils/claim_coverage.py` 会把这些标记聚合成 `coverage_score` 与 severity（`ok` / `sparse` / `unresolved` / `insufficient` / `none`），存入 `ara/.../claims/coverage.json`，供质量门禁 / 排行 / dossier 打分使用。
 
 可选：批量 re-execution 验证。设置环境变量后，`run_project.py` 结束时会挑选 top-metric 节点重跑并生成 verify 报告：
 

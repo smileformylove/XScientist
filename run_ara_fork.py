@@ -72,64 +72,17 @@ def _load_node(ara_root: Path, node_id: str) -> tuple[dict[str, Any], Path]:
 
 
 def _parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
-    """Extract a machine-readable metric from a re-executed run.
-
-    We try two strategies, in order:
-      1. Any line matching ``ARA_METRIC={"name": "...", "value": 0.42}`` (JSON
-         after the equals sign). This is the format we recommend downstream
-         agents emit inside their code.
-      2. A trailing line of the form ``metric: <float>`` (case-insensitive).
-
-    If neither matches, we return ``{"available": False}`` so verify can
-    downgrade gracefully to a soft comparison.
+    """CLI-side shim — the real implementation lives in
+    ``ai_scientist.utils.ara_metric_parser``.
     """
-    marker_re = re.compile(r"ARA_METRIC\s*=\s*(\{.*\})\s*$", re.MULTILINE)
-    match = None
-    for candidate in marker_re.finditer(stdout):
-        match = candidate  # keep the last one — freshest wins
-    if match:
-        try:
-            payload = json.loads(match.group(1))
-            if isinstance(payload, dict) and "value" in payload:
-                return {"available": True, **payload}
-        except json.JSONDecodeError:
-            pass
-
-    tail_re = re.compile(r"^\s*metric\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$", re.MULTILINE)
-    tail = None
-    for candidate in tail_re.finditer(stdout):
-        tail = candidate
-    if tail:
-        try:
-            return {"available": True, "value": float(tail.group(1)), "source": "text_tail"}
-        except ValueError:
-            pass
-
-    return {"available": False}
+    from ai_scientist.utils.ara_metric_parser import parse_metric_from_stdout
+    return parse_metric_from_stdout(stdout)
 
 
 def _compare_metrics(recorded: Any, fresh: dict[str, Any], tolerance: float) -> dict[str, Any]:
-    if not fresh.get("available"):
-        return {"status": "no_metric_parsed", "delta": None, "within_tolerance": None}
-    recorded_value = None
-    if isinstance(recorded, dict):
-        recorded_value = recorded.get("value")
-    elif isinstance(recorded, (int, float)):
-        recorded_value = recorded
-    fresh_value = fresh.get("value")
-    if recorded_value is None or fresh_value is None:
-        return {"status": "missing_recorded_value", "delta": None, "within_tolerance": None}
-    try:
-        delta = float(fresh_value) - float(recorded_value)
-    except (TypeError, ValueError):
-        return {"status": "non_numeric_metric", "delta": None, "within_tolerance": None}
-    return {
-        "status": "compared",
-        "recorded_value": recorded_value,
-        "fresh_value": fresh_value,
-        "delta": delta,
-        "within_tolerance": abs(delta) <= tolerance,
-    }
+    """CLI-side shim — see ``ai_scientist.utils.ara_metric_parser``."""
+    from ai_scientist.utils.ara_metric_parser import compare_metrics
+    return compare_metrics(recorded, fresh, tolerance)
 
 
 def _write_verify_report(ara_root: Path, node_id: str, report: dict[str, Any]) -> Path:
@@ -239,6 +192,22 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 
 def cmd_fork(args: argparse.Namespace) -> int:
+    """Fork a node into a *new, valid ARA* rooted at ``--dest``.
+
+    Design (see ai_scientist/protocol/SPEC.md §7.1): the fork target is
+    itself a conformant ARA — one node, its own manifest, its own
+    single-entry exploration_graph, and provenance pointing back at the
+    parent's ``content_hash``. This means:
+
+      1. `validate_ara(dest)` passes (unlike the older 'copy parent + node/'
+         layout that used to fail conformance).
+      2. `run_ara_fork.py fork` can be called on the *fork* to make a
+         grand-fork — the provenance chain is recursive without special code.
+      3. Downstream tools that only speak ARA don't need to learn a second
+         "fork layout".
+    """
+    from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
     dest = Path(args.dest).expanduser().resolve()
@@ -247,34 +216,109 @@ def cmd_fork(args: argparse.Namespace) -> int:
         return 2
     dest.mkdir(parents=True, exist_ok=True)
 
-    shutil.copytree(node_dir, dest / "node", dirs_exist_ok=True)
+    # 1. Copy the node bundle into <dest>/nodes/<node_id>/ (canonical ARA layout).
+    dest_nodes_dir = dest / "nodes" / args.node_id
+    shutil.copytree(node_dir, dest_nodes_dir, dirs_exist_ok=True)
 
-    for name in ("manifest.json", "exploration_graph.json"):
-        src = ara_root / name
-        if src.exists():
-            shutil.copy2(src, dest / name)
+    # 2. Compute / re-use content hash. If the parent had one, keep it; else
+    #    reconstruct from code+metric so the fork is still content-addressable.
+    parent_metrics = _load_json(node_dir / "metrics.json") or {}
+    parent_hash = parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
+    if not parent_hash:
+        code = (node_dir / "code.py").read_text(encoding="utf-8") if (node_dir / "code.py").exists() else ""
+        recorded_metric = parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
+        try:
+            parent_hash = hash_node_payload(code=code, metric=recorded_metric)
+        except Exception:  # pragma: no cover - defensive
+            parent_hash = None
 
-    parent_hash = None
-    metrics_payload = _load_json(node_dir / "metrics.json") or {}
-    if isinstance(metrics_payload, dict):
-        parent_hash = metrics_payload.get("content_hash")
+    parent_manifest = _load_json(ara_root / "manifest.json") or {}
+    parent_graph = _load_json(ara_root / "exploration_graph.json") or {}
+    parent_node_entry: dict[str, Any] = {}
+    for node in parent_graph.get("nodes") or []:
+        if isinstance(node, dict) and str(node.get("id")) == args.node_id:
+            parent_node_entry = node
+            break
 
+    # 3. Emit a single-node exploration_graph for the fork.
+    now_iso = _now_iso()
+    graph_payload = {
+        "schema_version": PROTOCOL_VERSION,
+        "protocol_kind": "exploration_graph",
+        "generated_at": now_iso,
+        "nodes": [
+            {
+                "id": args.node_id,
+                "content_hash": parent_hash,
+                "stage": parent_node_entry.get("stage") or "forked",
+                "step": 0,
+                "parent_id": None,
+                "children": [],
+                "is_buggy": parent_node_entry.get("is_buggy"),
+                "is_seed_node": True,
+                "is_seed_agg_node": False,
+                "metric": parent_node_entry.get("metric") or parent_metrics.get("metric"),
+                "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[:400],
+                "exp_results_dir": None,
+                "ctime": parent_node_entry.get("ctime"),
+                "artifacts_dir": f"nodes/{args.node_id}",
+            }
+        ],
+        "edges": [],
+        "source_journals": [],
+        "counts": {"nodes": 1, "edges": 0, "buggy": 1 if parent_node_entry.get("is_buggy") else 0},
+    }
+    (dest / "exploration_graph.json").write_text(
+        json.dumps(graph_payload, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+
+    # 4. Emit the fork's own manifest — a fully conformant ARA manifest.
+    provenance = {
+        "parent_ara_root": str(ara_root),
+        "parent_node_id": args.node_id,
+        "parent_content_hash": parent_hash,
+    }
+    parent_idea = parent_manifest.get("idea") or {}
+    fork_manifest = {
+        "schema_version": PROTOCOL_VERSION,
+        "protocol_kind": "manifest",
+        "created_at": now_iso,
+        "source_exp_dir": str(node_dir),  # informational only
+        "project_dir": str(dest.parent),
+        "idea": {
+            "name": f"fork_of_{parent_idea.get('name') or 'unknown'}_at_{args.node_id}",
+            "title": parent_idea.get("title"),
+            "raw": {"forked_from": provenance},
+        },
+        "counts": {"nodes": 1, "edges": 0, "buggy_nodes": 0, "journals": 0, "claims": 0},
+        "references": {},
+        "missing": [
+            "no source journals (fork is a synthetic single-node ARA)",
+            "no env/ snapshot (call `run_ara_fork.py freeze` after seeding)",
+        ],
+        "provenance": provenance,
+    }
+    (dest / "manifest.json").write_text(
+        json.dumps(fork_manifest, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+
+    # 5. Small compat file — `ara_seed.py` still looks for `fork.json` to
+    #    disambiguate fork dirs from arbitrary ARAs. Keep the schema tag but
+    #    make its payload minimal (real data lives in `manifest.provenance`).
     fork_meta = {
         "schema": "ara.fork.v1",
-        "created_at": _now_iso(),
+        "created_at": now_iso,
         "source_ara": str(ara_root),
         "source_node_id": args.node_id,
         "source_content_hash": parent_hash,
-        "provenance_hint": {
-            "parent_ara_root": str(ara_root),
-            "parent_node_id": args.node_id,
-            "parent_content_hash": parent_hash,
-        },
+        "provenance_hint": provenance,
         "notes": (
-            "Seed a fresh tree search from `node/code.py`. `manifest.json` and "
-            "`exploration_graph.json` are the origin context — keep them as a "
-            "read-only lineage record. Pass `provenance_hint` to export_ara() "
-            "when producing the child ARA to preserve the fork lineage."
+            "This directory is itself a conformant ARA (see manifest.json). "
+            "`fork.json` is a legacy marker so `ara_seed.py` can tell forks "
+            "apart from other ARAs. All authoritative data lives in "
+            "`manifest.json` / `exploration_graph.json`."
         ),
     }
     (dest / "fork.json").write_text(
@@ -318,6 +362,46 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.ok else 8
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Batch re-execution: pick a handful of nodes and diff fresh vs recorded metrics.
+
+    Delegates to ``ai_scientist.utils.ara_reexec.reexec_ara`` — the CLI's job
+    is to expose the knobs and translate exit codes.
+    """
+    from ai_scientist.utils.ara_reexec import reexec_ara
+
+    ara_root = _resolve_ara_root(args.ara)
+    node_ids = args.node_ids if args.node_ids else None
+    summary = reexec_ara(
+        ara_root,
+        node_ids=node_ids,
+        limit=args.limit,
+        include_buggy=args.include_buggy,
+        python=args.python,
+        timeout=args.timeout,
+        tolerance=args.tolerance,
+    )
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if summary.get("status") != "ok":
+        return 9
+
+    # Non-zero exit when *no* verdict landed within tolerance — makes CI usage
+    # trivial. Callers who don't care about drift can pass --allow-drift.
+    report_path = summary.get("report_path")
+    if report_path:
+        report = _load_json(Path(report_path)) or {}
+        verdicts = report.get("verdicts") or []
+        within = sum(
+            1
+            for v in verdicts
+            if isinstance(v, dict)
+            and (v.get("comparison") or {}).get("within_tolerance") is True
+        )
+        if within == 0 and verdicts and not args.allow_drift:
+            return 10
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fork or re-execute a node from an Agent-Native Research Artifact.",
@@ -358,6 +442,26 @@ def build_parser() -> argparse.ArgumentParser:
     validate_p.add_argument("--ara", required=True)
     validate_p.add_argument("--strict", action="store_true", help="Promote warnings to errors")
     validate_p.set_defaults(func=cmd_validate)
+
+    verify_p = sub.add_parser(
+        "verify",
+        help="Batch re-execute selected nodes and diff fresh vs recorded metrics.",
+    )
+    verify_p.add_argument("--ara", required=True)
+    verify_p.add_argument(
+        "--node-ids", nargs="*", default=None,
+        help="Specific node ids to verify. Omit for the top-metric picks.",
+    )
+    verify_p.add_argument("--limit", type=int, default=3, help="Max nodes to pick automatically")
+    verify_p.add_argument("--include-buggy", action="store_true")
+    verify_p.add_argument("--python", default=None)
+    verify_p.add_argument("--timeout", type=int, default=900)
+    verify_p.add_argument("--tolerance", type=float, default=1e-3)
+    verify_p.add_argument(
+        "--allow-drift", action="store_true",
+        help="Exit zero even when no fresh metric matches the recorded one within tolerance.",
+    )
+    verify_p.set_defaults(func=cmd_verify)
 
     return parser
 

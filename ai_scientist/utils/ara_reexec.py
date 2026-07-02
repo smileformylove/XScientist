@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.utils.ara_artifact import ara_root_for_project
+from ai_scientist.utils.ara_metric_parser import compare_metrics, parse_metric_from_stdout
 
 logger = logging.getLogger(__name__)
 
@@ -53,23 +54,6 @@ def _load_json(path: Path) -> Any | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _import_fork_utils():
-    """Re-use the parsing helpers from run_ara_fork without pulling its argparse."""
-    from importlib import import_module, util
-
-    # run_ara_fork lives at the repo root, not inside a package. Import by path.
-    repo_root = Path(__file__).resolve().parents[2]
-    module_path = repo_root / "run_ara_fork.py"
-    if not module_path.exists():
-        raise RuntimeError(f"run_ara_fork.py not found at {module_path}")
-    spec = util.spec_from_file_location("_ara_fork_helpers", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to load run_ara_fork.py")
-    module = util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _select_candidate_nodes(ara_root: Path, *, limit: int, include_buggy: bool) -> list[str]:
@@ -128,7 +112,6 @@ def reexec_node(
     if not code_path.exists():
         return {"node_id": node_id, "status": "no_code", "error": "code.py missing"}
 
-    helpers = _import_fork_utils()
     manifest = _load_json(ara_root / "manifest.json") or {}
     default_cwd = Path(manifest.get("source_exp_dir") or "").expanduser()
     resolved_cwd = Path(cwd).expanduser() if cwd else default_cwd
@@ -153,9 +136,9 @@ def reexec_node(
         stdout, stderr = (exc.stdout or ""), (exc.stderr or "")
         returncode = -1
 
-    fresh = helpers._parse_metric_from_stdout(stdout + "\n" + stderr)
+    fresh = parse_metric_from_stdout(stdout + "\n" + stderr)
     recorded = (_load_json(node_dir / "metrics.json") or {}).get("metric")
-    comparison = helpers._compare_metrics(recorded, fresh, tolerance)
+    comparison = compare_metrics(recorded, fresh, tolerance)
 
     verdict = {
         "schema": "ara.reexec.v1",

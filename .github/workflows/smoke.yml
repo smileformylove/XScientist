@@ -77,6 +77,53 @@ jobs:
           set -o pipefail
           python -m unittest discover -s tests -p "test_*.py" 2>&1 | tee .ci-output/logs/unittest.log
 
+      - name: ARA protocol conformance smoke
+        # O5: assert the exporter still produces a strict-mode-valid ARA, and
+        # that the stub A/B still short-circuits the LLM draft. Any regression
+        # here means either the on-disk schema drifted or the seed short-
+        # circuit stopped working — both are protocol-level failures worth
+        # blocking on.
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee .ci-output/logs/ara_protocol_smoke.log
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+
+          from ai_scientist.utils.ara_artifact import export_ara
+          from ai_scientist.utils.ara_seed import (
+              build_seed_manifest_from_ara_node,
+              stage_seed_manifest,
+          )
+
+          tmp = Path(tempfile.mkdtemp())
+          exp = tmp / "parent" / "02_experiments" / "20260101_idea"
+          (exp / "logs" / "0-run").mkdir(parents=True)
+          (exp / "logs" / "0-run" / "journal.json").write_text(json.dumps({
+              "nodes": [{
+                  "id": "n1", "step": 0, "code": "print('smoke')",
+                  "_term_out": ["ok\n"],
+                  "metric": {"value": 0.5, "maximize": True, "name": "acc",
+                              "description": ""},
+                  "is_buggy": False, "parent_id": None, "children": [],
+              }],
+              "node2parent": {}, "__version": "2",
+          }))
+          ara = export_ara(project_dir=tmp / "parent", exp_dir=exp,
+                          idea={"Name": "smoke"}, timestamp="20260101")
+          seed_manifest = build_seed_manifest_from_ara_node(
+              ara_root=ara.root, node_id="n1"
+          )
+          seed_path = stage_seed_manifest(seed_manifest, workspace_dir=tmp / "ws")
+          result = subprocess.run([
+              sys.executable, "-m", "ai_scientist.experiments.ara_ab.harness",
+              "stub",
+              "--seed-manifest", str(seed_path),
+              "--out-dir", str(tmp / "out"),
+              "--check-ara", str(ara.root),
+          ], check=True, capture_output=True, text=True)
+          print(result.stdout)
+          PY
+
       - name: Run repository validator
         run: |
           set -o pipefail
