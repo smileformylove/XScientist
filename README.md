@@ -5,8 +5,9 @@
 English README: [README.en.md](README.en.md)
 
 > 面向"可持续自我迭代"的 AI 科研系统：从想法生成、实验执行、论文写作，到自评审闭环、策略调度与长期运行（daemon）。
+> 更进一步——我们想做的不只是「更好的全自动科研」，而是**可 git 的科研协议**，沿着自动化的科技树，从数学与物理这类可验证的根节点向外扩展。
 
-本仓库的目标不是一次性"生成一篇论文"，而是把自动科研系统做成**可长期运行、可观测、可回放、可交接**的研究流水线：每次运行都产出结构化工件（计划、证据、评审、修复任务、质量门禁与报告），便于持续改进与协作。
+本仓库的目标不是一次性"生成一篇论文"，而是把自动科研系统做成**可长期运行、可观测、可回放、可交接**的研究流水线：每次运行都产出结构化工件（计划、证据、评审、修复任务、质量门禁与报告），便于持续改进与协作。这些工件对齐一份独立的协议规范（`ai_scientist/protocol/`，ARA v1），因此可以被别的实现读、写、diff、fork。
 
 重要提示（建议先读）：
 
@@ -21,6 +22,7 @@ English README: [README.en.md](README.en.md)
 
 - [XScientist](#xscientist)
   - [目录 (Contents)](#目录-contents)
+  - [愿景：可 git 的科研协议](#愿景可-git-的科研协议)
   - [项目概览](#项目概览)
   - [核心能力](#核心能力)
   - [快速开始](#快速开始)
@@ -48,6 +50,20 @@ English README: [README.en.md](README.en.md)
   - [License](#license)
   - [Acknowledgements](#acknowledgements)
   - [Citation and References](#citation-and-references)
+
+---
+
+## 愿景：可 git 的科研协议
+
+XScientist 想做的不只是「一个更好的全自动科研系统」，更是一层**可 git 的科研协议**——让研究这件事像代码一样可 diff、可 fork、可 review、可 rebase：
+
+- **协议先于系统**：`ai_scientist/protocol/`（ARA v1）用 6 份 JSON Schema + 一个 `content_hash` 归一化算法，把一次研究运行沉淀成机读工件。第三方 producer / consumer 无需依赖 XScientist 本身也能实现同一协议——就像 git 之于代码。
+- **每次运行都是一个 commit**：ARA 把 exploration graph、每个节点的 `code / term_out / metrics / plots`、失败分支、修复轨迹、Pareto 池和环境指纹一起归档；每一份 manuscript 断言用 `\claimref{node_id}` 反向锚回其证据节点。
+- **fork-continue 而非冷启动**：任一节点都可被 `run_ara_fork.py fork` 出一份「本身也是合规 ARA」的种子，下一次运行直接接力（provenance 自动落进 child ARA），跨系统 / 跨团队都可以延续。
+- **自动化的科技树，数学与物理是根节点**：我们相信科研的可自动化程度沿着一棵树展开——**数学和物理是根节点**，越靠近根的问题「协议 / 证据 / 复核」信号越强、更适合被机器扩展；越靠近叶子（工程、经验、社会科学）越依赖人类判断。XScientist 的重心先落在根附近：把「可验证、可复现、可 fork」的部分自动化，把「值得人类花时间的」部分显式暴露给评审者。
+
+一句话：**把科研做成协议，把系统做成协议的一个实现**。<br/>
+配套细节见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) 与下文的 [ARA 工件](#ara-工件面向下游智能体) / [从 ARA 接力](#从-ara-接力fork-continue) 章节。
 
 ---
 

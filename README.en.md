@@ -5,8 +5,9 @@
 Chinese README: [README.md](README.md)
 
 > A sustainable, self-improving autonomous research system: idea generation, experiment execution, paper writing, self-review loops, strategy scheduling, and long-running daemon ops.
+> Going a step further — we're not just building "better autonomous research"; we're building a **git-like protocol for research**, expanding outward along an automation tech tree whose root nodes are mathematics and physics.
 
-XScientist is not built to "generate one paper once". It is designed as an operational research pipeline that can run continuously, stay observable, and produce handoff-ready artifacts (plans, evidence, reviews, repair tasks, quality gates, and reports) for iterative improvement and collaboration.
+XScientist is not built to "generate one paper once". It is designed as an operational research pipeline that can run continuously, stay observable, and produce handoff-ready artifacts (plans, evidence, reviews, repair tasks, quality gates, and reports) for iterative improvement and collaboration. Those artifacts conform to a standalone protocol (`ai_scientist/protocol/`, ARA v1), so any other implementation can read, write, diff, or fork them.
 
 Important notes:
 
@@ -18,6 +19,7 @@ Important notes:
 
 ## Contents
 
+- [Vision: a git-like protocol for research](#vision-a-git-like-protocol-for-research)
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Quick Start](#quick-start)
@@ -33,6 +35,20 @@ Important notes:
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
 - [Citation and References](#citation-and-references)
+
+---
+
+## Vision: a git-like protocol for research
+
+We don't just want a better "fully automated researcher" — we want a **git-like protocol for research** that makes doing science diffable, forkable, reviewable, and rebasable, just like code:
+
+- **Protocol before system.** `ai_scientist/protocol/` (ARA v1) pins down what a research run looks like on disk: six JSON Schemas and a `content_hash` normalisation rule. Any third-party producer or consumer can implement the same protocol without depending on the rest of XScientist — the same way git is not the only tool that reads a git object database.
+- **Every run is a commit.** An ARA archives the exploration graph, per-node `code / term_out / metrics / plots`, failed branches, the repair trajectory, the Pareto pool, and an environment fingerprint. Every manuscript claim is pinned back to its evidence node via `\claimref{node_id}`.
+- **Fork-continue, not cold-start.** Any node can be `run_ara_fork.py fork`-ed into a directory that is itself a conformant ARA. The next run seeds from it, and provenance lands automatically in the child ARA — across systems, teams, or long time gaps.
+- **An automation tech tree with maths and physics at the root.** We believe the parts of science that are automatable form a *tree*: **mathematics and physics are the root nodes**, where "protocol / evidence / verification" signals are strongest and machines can safely go furthest; the further out you go toward engineering, human factors, or social science, the more indispensable human judgment becomes. XScientist starts near the root — automate what is verifiable, reproducible, and forkable, and surface the rest to human reviewers explicitly.
+
+In one line: **make research a protocol; make the system one implementation of that protocol.**<br/>
+See [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) and the [ARA bundles](#ara-bundles-agent-facing-artifact) / [fork-continue](#fork-continue-from-an-ara) sections below for the concrete surface.
 
 ---
 
