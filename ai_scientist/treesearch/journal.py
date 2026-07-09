@@ -303,6 +303,7 @@ class Node(DataClassJsonMixin):
             "is_seed_node": self.is_seed_node,
             "is_seed_agg_node": self.is_seed_agg_node,
             "exec_time_feedback": self.exec_time_feedback,
+            "llm_call_refs": list(self.llm_call_refs or []),
         }
 
     @classmethod
