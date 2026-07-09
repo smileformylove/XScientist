@@ -43,7 +43,9 @@ def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
     )
 
 
-def _seed_project(tmp: Path, *, metric_value: float = 0.42) -> tuple[Path, Path, str]:
+def _seed_project(
+    tmp: Path, *, metric_value: float = 0.42, is_buggy: bool = False
+) -> tuple[Path, Path, str]:
     project = tmp / "project"
     exp = project / "02_experiments" / "20260701_idea"
     (exp / "logs" / "0-run").mkdir(parents=True)
@@ -64,7 +66,7 @@ def _seed_project(tmp: Path, *, metric_value: float = 0.42) -> tuple[Path, Path,
                 "code": code,
                 "_term_out": [f"ARA_METRIC={{\"name\": \"acc\", \"value\": {metric_value}}}\n"],
                 "metric": {"value": metric_value, "maximize": True, "name": "acc", "description": ""},
-                "is_buggy": False,
+                "is_buggy": is_buggy,
                 "parent_id": None,
                 "children": [],
             },
@@ -161,6 +163,52 @@ class ManifestLockCoverageTest(unittest.TestCase):
         self.assertTrue(report["ok"], msg=f"verify_manifest_lock report: {report!r}")
         self.assertEqual(report["state"], "clean",
                          msg=f"expected state=clean, got {report!r}")
+
+
+class ForkBuggyCounterAgreementTest(unittest.TestCase):
+    """Bug class 3: iter-4 fix aligned exploration_graph.counts.buggy with
+    the parent node's is_buggy flag but left manifest.counts.buggy_nodes
+    hardcoded to 0. Any aggregator that trusts the manifest counter
+    undercounts buggy forks. Both on-disk counters must agree."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _fork_and_read(self, *, is_buggy: bool) -> tuple[dict, dict]:
+        _, ara_root, node_id = _seed_project(self.tmp, is_buggy=is_buggy)
+        fork_root = self.tmp / "forked"
+        _fork(ara_root, node_id, fork_root)
+        manifest = json.loads((fork_root / "manifest.json").read_text(encoding="utf-8"))
+        graph = json.loads((fork_root / "exploration_graph.json").read_text(encoding="utf-8"))
+        return manifest, graph
+
+    def test_fork_of_buggy_node_manifest_counts_agree_with_graph_counts(self) -> None:
+        manifest, graph = self._fork_and_read(is_buggy=True)
+        # Precondition — the graph counter reflects the buggy parent.
+        self.assertEqual(graph["counts"]["buggy"], 1,
+                         msg=f"graph.counts.buggy should be 1 for buggy parent: {graph['counts']!r}")
+        # The manifest counter must match — same commit-like artifact, one truth.
+        self.assertEqual(
+            manifest["counts"]["buggy_nodes"], graph["counts"]["buggy"],
+            msg=(f"manifest.counts.buggy_nodes ({manifest['counts']['buggy_nodes']!r}) "
+                 f"must equal graph.counts.buggy ({graph['counts']['buggy']!r})"),
+        )
+        self.assertEqual(manifest["counts"]["buggy_nodes"], 1)
+
+    def test_fork_of_clean_node_manifest_counts_agree_with_graph_counts(self) -> None:
+        manifest, graph = self._fork_and_read(is_buggy=False)
+        self.assertEqual(graph["counts"]["buggy"], 0,
+                         msg=f"graph.counts.buggy should be 0 for clean parent: {graph['counts']!r}")
+        self.assertEqual(
+            manifest["counts"]["buggy_nodes"], graph["counts"]["buggy"],
+            msg=(f"manifest.counts.buggy_nodes ({manifest['counts']['buggy_nodes']!r}) "
+                 f"must equal graph.counts.buggy ({graph['counts']['buggy']!r})"),
+        )
+        self.assertEqual(manifest["counts"]["buggy_nodes"], 0)
 
 
 if __name__ == "__main__":

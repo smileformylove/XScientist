@@ -331,7 +331,13 @@ def cmd_fork(args: argparse.Namespace) -> int:
             "title": parent_idea.get("title"),
             "raw": {"forked_from": provenance},
         },
-        "counts": {"nodes": 1, "edges": 0, "buggy_nodes": 0, "journals": 0, "claims": 0},
+        "counts": {
+            "nodes": 1,
+            "edges": 0,
+            "buggy_nodes": 1 if parent_node_entry.get("is_buggy") else 0,
+            "journals": 0,
+            "claims": 0,
+        },
         "references": {},
         "missing": [
             "no source journals (fork is a synthetic single-node ARA)",
