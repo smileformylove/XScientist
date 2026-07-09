@@ -369,6 +369,47 @@ def _copy_optional(src: Path, dst: Path) -> bool:
         return False
 
 
+def _writing_profile_content_hash(name: str | None) -> str | None:
+    """Return ``sha256:<hex>`` over the resolved writing-profile dict, or None.
+
+    Two runs with the same profile name but an edited profile body would
+    otherwise share a fingerprint — silently breaking A/B comparability across
+    tweaks to ``writing_prompt_profiles.py``. Hashing the resolved dict body
+    closes that hole. Unknown / unresolvable names return None so the export
+    stays best-effort.
+    """
+    if not name:
+        return None
+    try:
+        from ai_scientist.writing_prompt_profiles import WRITING_PROFILE_SPECS
+    except Exception:
+        return None
+    try:
+        profile = WRITING_PROFILE_SPECS.get(str(name))
+    except Exception:
+        return None
+    if profile is None:
+        return None
+    try:
+        from ai_scientist.protocol import content_hash
+        return content_hash(dict(profile))
+    except Exception:
+        return None
+
+
+def _writing_profile_slot(name: str | None) -> dict[str, Any]:
+    """Structured `writing_profile` slot for the model fingerprint.
+
+    Emits ``{"name": <str|null>, "content_hash": <"sha256:..."|null>}`` so
+    downstream consumers see a stable shape regardless of whether the name
+    resolves to a known profile body.
+    """
+    return {
+        "name": name if name else None,
+        "content_hash": _writing_profile_content_hash(name),
+    }
+
+
 def _digest_model_fingerprint(payload: dict[str, Any]) -> dict[str, Any]:
     """Derive a small, deterministic fingerprint of the models/profiles used.
 
@@ -404,7 +445,7 @@ def build_env_snapshot(
     fingerprint_payload = _digest_model_fingerprint(
         {
             "models": model_spec or {},
-            "writing_profile": writing_profile,
+            "writing_profile": _writing_profile_slot(writing_profile),
             "ara_schema_version": ARA_SCHEMA_VERSION,
         }
     )
