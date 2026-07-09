@@ -16,6 +16,12 @@ Sub-commands
                  tree search can seed from. Optionally snapshot the current
                  interpreter's package list into ``env/requirements.freeze``.
 - ``freeze``   — snapshot ``pip freeze`` into the ARA's ``env/`` directory.
+- ``diff``     — structural diff of two ARAs: manifest hashes, node set
+                 delta, per-node hash-change categorisation, pipeline
+                 artifacts, prompt overlap.
+- ``log``      — commit-log view: manifest revision chain (from
+                 manifest.history.jsonl) plus provenance ancestry walk.
+- ``refs``     — git-style local refs stored under ``<ara>/refs/``.
 
 None of these commands mutate the source ARA — they only read from it. Fork
 outputs go to a caller-supplied ``--dest``.
@@ -328,6 +334,188 @@ def cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# diff / log / refs — added in Phase 2 (git-style verbs over ARAs).
+#
+# These commands are all read-only w.r.t. the source ARAs (refs writes to
+# <ara>/refs/, which is caller-local and not part of the content-addressed
+# state of the ARA). The heavy lifting lives in ai_scientist.utils.ara_diff,
+# ara_log, ara_refs — this file is thin CLI glue.
+# ---------------------------------------------------------------------------
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    from ai_scientist.utils.ara_diff import diff_ara
+
+    ara_a = _resolve_ara_root(args.ara)
+    ara_b = _resolve_ara_root(args.other)
+    result = diff_ara(ara_a, ara_b)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    _render_diff(result)
+    # Non-zero when there's any material difference — makes it usable in CI.
+    if result.manifest.hash_equal and not (
+        result.nodes_added or result.nodes_removed or result.nodes_hash_changed
+        or result.references.seed_changed
+        or result.references.pipeline_added
+        or result.references.pipeline_removed
+        or result.references.pipeline_hash_changed
+    ):
+        return 0
+    return 1 if args.exit_code_on_diff else 0
+
+
+def cmd_log(args: argparse.Namespace) -> int:
+    from ai_scientist.utils.ara_log import ara_log
+
+    ara_root = _resolve_ara_root(args.ara)
+    log = ara_log(ara_root)
+    if args.json:
+        print(json.dumps(log.to_dict(), indent=2, ensure_ascii=False, default=str))
+        return 0
+    _render_log(log)
+    return 0
+
+
+def cmd_refs(args: argparse.Namespace) -> int:
+    from ai_scientist.utils.ara_refs import (
+        RefError, delete_ref, get_ref, list_refs, set_ref,
+    )
+
+    ara_root = _resolve_ara_root(args.ara)
+
+    if args.set:
+        try:
+            path = set_ref(ara_root, args.set[0], args.set[1])
+        except RefError as exc:
+            print(f"[ara-refs] refused: {exc}", file=sys.stderr)
+            return 2
+        print(f"[ara-refs] set {args.set[0]} -> {args.set[1]}  ({path})")
+        return 0
+
+    if args.get:
+        target = get_ref(ara_root, args.get)
+        if target is None:
+            print(f"[ara-refs] {args.get} not set", file=sys.stderr)
+            return 3
+        print(target)
+        return 0
+
+    if args.delete:
+        removed = delete_ref(ara_root, args.delete)
+        if not removed:
+            print(f"[ara-refs] {args.delete} not set", file=sys.stderr)
+            return 3
+        print(f"[ara-refs] deleted {args.delete}")
+        return 0
+
+    refs = list_refs(ara_root)
+    if args.json:
+        print(json.dumps([{"name": r.name, "target": r.target} for r in refs],
+                         indent=2, ensure_ascii=False))
+        return 0
+    if not refs:
+        print("(no refs set)")
+        return 0
+    width = max(len(r.name) for r in refs)
+    for r in refs:
+        print(f"{r.name.ljust(width)}  {r.target}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers (kept in this file so the CLI stays visually consistent).
+# ---------------------------------------------------------------------------
+
+
+def _render_diff(result) -> None:  # ARADiff
+    print(f"# diff  {result.ara_a}  <->  {result.ara_b}")
+    print()
+    m = result.manifest
+    print("## manifest")
+    if m.hash_equal:
+        print(f"  hashes match: {m.hash_a}")
+    else:
+        print(f"  a: {m.hash_a}")
+        print(f"  b: {m.hash_b}")
+        for field_name, delta in m.field_changes.items():
+            print(f"  - {field_name}")
+            print(f"      a: {delta['a']}")
+            print(f"      b: {delta['b']}")
+
+    r = result.references
+    if (r.seed_changed or r.pipeline_added or r.pipeline_removed
+            or r.pipeline_hash_changed):
+        print()
+        print("## references")
+        if r.seed_changed:
+            print(f"  seed: {r.seed_hash_a}  ->  {r.seed_hash_b}")
+        for kind in r.pipeline_added:
+            print(f"  + pipeline/{kind}")
+        for kind in r.pipeline_removed:
+            print(f"  - pipeline/{kind}")
+        for entry in r.pipeline_hash_changed:
+            print(f"  ~ pipeline/{entry['kind']}: {entry['hash_a']}  ->  {entry['hash_b']}")
+
+    print()
+    print(f"## nodes  (+{len(result.nodes_added)} "
+          f"-{len(result.nodes_removed)} "
+          f"~{len(result.nodes_hash_changed)} "
+          f"={result.nodes_unchanged})")
+    for n in result.nodes_added:
+        print(f"  + {n.id}  {n.hash_b}")
+    for n in result.nodes_removed:
+        print(f"  - {n.id}  {n.hash_a}")
+    for n in result.nodes_hash_changed:
+        cats = ",".join(n.changed_categories) or "unknown"
+        print(f"  ~ {n.id}  [{cats}]  {n.hash_a}  ->  {n.hash_b}")
+
+    p = result.prompts
+    print()
+    print(f"## prompts  a={p.total_a} b={p.total_b} "
+          f"shared={p.shared} only_a={p.only_in_a} only_b={p.only_in_b}")
+
+
+def _render_log(log) -> None:  # ARALog
+    print(f"# log  {log.ara_root}")
+    print(f"  verify: {log.verify.get('state')}  "
+          f"({log.verify.get('revision_count')} revisions)")
+    print()
+    print("## revisions")
+    if log.lock:
+        print(f"  rev 0 (lock)  {log.lock.get('manifest_hash')}  "
+              f"{log.lock.get('created_at')}")
+    else:
+        print("  (no manifest.lock — this ARA predates the immutability layer)")
+    for r in log.revisions:
+        fields = ",".join(r.changed_fields) or "-"
+        reason = f"  # {r.reason}" if r.reason else ""
+        print(f"  rev {r.revision}       {r.new_hash}  "
+              f"{r.ts}  [{fields}] {r.producer or ''}{reason}")
+
+    print()
+    print("## ancestry")
+    if not log.ancestors:
+        print("  (root ARA — no provenance)")
+        return
+    for a in log.ancestors:
+        marker = "reachable" if a.reachable else "unreachable"
+        verify = ""
+        if a.hash_verified is True:
+            verify = "  ✓ hash matches"
+        elif a.hash_verified is False:
+            verify = "  ✗ hash mismatch"
+        print(f"  ^{a.depth}  {a.ara_root or '(no path)'}  "
+              f"node={a.node_id}  hash={a.content_hash}  ({marker}){verify}")
+        if a.seed_hash:
+            print(f"       seed_hash={a.seed_hash}")
+        if a.detail:
+            print(f"       note: {a.detail}")
+
+
 def cmd_freeze(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
     env_dir = ara_root / "env"
@@ -462,6 +650,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit zero even when no fresh metric matches the recorded one within tolerance.",
     )
     verify_p.set_defaults(func=cmd_verify)
+
+    diff_p = sub.add_parser(
+        "diff",
+        help="Structural diff of two ARAs (manifest, nodes, prompts, pipeline).",
+    )
+    diff_p.add_argument("--ara", required=True, help="First ARA (a)")
+    diff_p.add_argument("--other", required=True, help="Second ARA (b)")
+    diff_p.add_argument("--json", action="store_true",
+                        help="Machine-readable output")
+    diff_p.add_argument(
+        "--exit-code-on-diff", action="store_true",
+        help="Exit non-zero when any material difference is found (useful in CI)",
+    )
+    diff_p.set_defaults(func=cmd_diff)
+
+    log_p = sub.add_parser(
+        "log",
+        help="Commit-log view: manifest revisions + provenance ancestry.",
+    )
+    log_p.add_argument("--ara", required=True)
+    log_p.add_argument("--json", action="store_true")
+    log_p.set_defaults(func=cmd_log)
+
+    refs_p = sub.add_parser(
+        "refs",
+        help="git-style local refs stored under <ara>/refs/.",
+    )
+    refs_p.add_argument("--ara", required=True)
+    refs_p.add_argument("--set", nargs=2, metavar=("NAME", "TARGET"),
+                        help="Create or update a ref pointing at TARGET (a content hash).")
+    refs_p.add_argument("--get", metavar="NAME",
+                        help="Print a ref's target and exit.")
+    refs_p.add_argument("--delete", metavar="NAME",
+                        help="Remove a ref.")
+    refs_p.add_argument("--json", action="store_true",
+                        help="Machine-readable listing.")
+    refs_p.set_defaults(func=cmd_refs)
 
     return parser
 
