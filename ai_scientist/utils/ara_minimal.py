@@ -41,6 +41,7 @@ from ai_scientist.utils.ara_artifact import (
     ara_dir_for_idea,
     ara_root_for_project,
 )
+from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,11 @@ def export_minimal_ara(
 
     manifest_path = ara_dir / "manifest.json"
     _write_json(manifest_path, manifest_payload)
+
+    # Anchor the manuscript-only manifest under the immutability layer —
+    # SPEC.md promises every ARA carries a manifest.lock, including the
+    # producer-skipped-BFTS variant this module writes.
+    write_manifest_lock(ara_dir, manifest_payload)
 
     # Tiny agent-facing README so downstream tools don't wonder what happened.
     (ara_dir / "README.md").write_text(

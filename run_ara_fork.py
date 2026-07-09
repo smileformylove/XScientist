@@ -250,9 +250,13 @@ def cmd_fork(args: argparse.Namespace) -> int:
 
     # Rewrite the copied metrics.json so its content_hash matches the fork's
     # declared seed role (the copytree above left the parent's hash in place).
+    # We must also refresh content_hash_inputs — the fork_hash was computed
+    # with is_seed=True, so the declared inputs need to advertise 'seed' or
+    # anyone re-hashing per those inputs gets a different digest (drift).
     if isinstance(parent_metrics, dict) and fork_hash:
         fork_metrics = dict(parent_metrics)
         fork_metrics["content_hash"] = fork_hash
+        fork_metrics["content_hash_inputs"] = ["code", "metric", "seed"]
         (dest_nodes_dir / "metrics.json").write_text(
             json.dumps(fork_metrics, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
@@ -276,6 +280,16 @@ def cmd_fork(args: argparse.Namespace) -> int:
             {
                 "id": args.node_id,
                 "content_hash": fork_hash,
+                # Match the metrics.json declaration above so ara_diff's
+                # category-flip logic can index the fork's inputs, and so the
+                # fork's node entry matches the schema shape enforced by
+                # export_ara. SEED nodes typically bypass the LLM entirely,
+                # so llm_call_refs defaults to [] — the parent's refs are
+                # part of the *parent's* identity, not the fork's. If a
+                # future fork variant wants to inherit refs, it should add
+                # 'llm_calls' back into content_hash_inputs at the same time.
+                "content_hash_inputs": ["code", "metric", "seed"],
+                "llm_call_refs": [],
                 "stage": parent_node_entry.get("stage") or "forked",
                 "step": 0,
                 "parent_id": None,
@@ -329,6 +343,11 @@ def cmd_fork(args: argparse.Namespace) -> int:
         json.dumps(fork_manifest, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+
+    # Anchor the fork's manifest under the immutability layer (SPEC §7.2) —
+    # forks are commit-like, so they need the same lock export_ara writes.
+    from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
+    write_manifest_lock(dest, fork_manifest)
 
     # 5. Small compat file — `ara_seed.py` still looks for `fork.json` to
     #    disambiguate fork dirs from arbitrary ARAs. Keep the schema tag but
