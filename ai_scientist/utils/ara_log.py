@@ -232,4 +232,64 @@ def _load_json(path: Path) -> Any | None:
         return None
 
 
-__all__ = ["ARALog", "AncestorEntry", "RevisionEntry", "ara_log"]
+# ---------------------------------------------------------------------------
+# In-ARA node ancestry walk (per-node "git log")
+# ---------------------------------------------------------------------------
+
+
+# Hard cap so a malformed / cyclic exploration_graph never hangs the CLI.
+# Legal chains are shallow; a runaway walk is a graph bug.
+_MAX_NODE_ANCESTRY = 512
+
+
+def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any]]:
+    """Walk parent_id from ``node_id`` back to the root of this ARA.
+
+    Returns a list of ``{id, content_hash, is_buggy, is_seed_node,
+    parent_id, metric}`` dicts in leaf → root order (index 0 is the
+    requested node). Raises ``KeyError`` if the node isn't in the
+    exploration graph. Cycle-safe: if an id is revisited during the
+    walk, the last entry carries a ``note`` explaining the truncation.
+    """
+    graph = _load_json(Path(ara_root) / "exploration_graph.json")
+    if not isinstance(graph, dict):
+        raise KeyError(node_id)
+    by_id: dict[str, dict[str, Any]] = {}
+    for n in (graph.get("nodes") or []):
+        if isinstance(n, dict) and n.get("id") is not None:
+            by_id[str(n["id"])] = n
+    if node_id not in by_id:
+        raise KeyError(node_id)
+
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current: str | None = node_id
+    for _ in range(_MAX_NODE_ANCESTRY):
+        if current is None:
+            break
+        if current in seen:
+            if chain:
+                chain[-1]["note"] = f"cycle detected — parent chain revisits {current}"
+            break
+        node = by_id.get(current)
+        if node is None:
+            if chain:
+                chain[-1]["note"] = f"parent {current} not present in exploration_graph"
+            break
+        seen.add(current)
+        parent = node.get("parent_id")
+        chain.append({
+            "id": str(node.get("id")),
+            "content_hash": node.get("content_hash"),
+            "is_buggy": bool(node.get("is_buggy")),
+            "is_seed_node": bool(node.get("is_seed_node")),
+            "parent_id": (str(parent) if parent is not None else None),
+            "metric": node.get("metric"),
+        })
+        current = str(parent) if parent is not None else None
+    return chain
+
+
+__all__ = [
+    "ARALog", "AncestorEntry", "RevisionEntry", "ara_log", "walk_node_ancestry",
+]

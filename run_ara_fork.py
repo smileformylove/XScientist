@@ -441,9 +441,26 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def cmd_log(args: argparse.Namespace) -> int:
-    from ai_scientist.utils.ara_log import ara_log
+    from ai_scientist.utils.ara_log import ara_log, walk_node_ancestry
 
     ara_root = _resolve_ara_root(args.ara)
+
+    # --node narrows to a single node's in-ARA ancestry (leaf → root).
+    # This is the "git log for THIS node" verb, complementing
+    # `diff --only-node` and `inspect --node-id`.
+    if args.node:
+        try:
+            chain = walk_node_ancestry(ara_root, args.node)
+        except KeyError:
+            print(f"node {args.node} not present in exploration_graph.json",
+                  file=sys.stderr)
+            return 3
+        if args.json:
+            print(json.dumps(chain, indent=2, ensure_ascii=False, default=str))
+            return 0
+        _render_node_ancestry(ara_root, args.node, chain)
+        return 0
+
     log = ara_log(ara_root)
     if args.json:
         print(json.dumps(log.to_dict(), indent=2, ensure_ascii=False, default=str))
@@ -710,6 +727,33 @@ def _render_log(log) -> None:  # ARALog
             print(f"       note: {a.detail}")
 
 
+def _render_node_ancestry(ara_root: Path, node_id: str, chain: list[dict[str, Any]]) -> None:
+    print(f"# log --node {node_id}  {ara_root}")
+    if not chain:
+        print("  (empty ancestry)")
+        return
+    last_ix = len(chain) - 1
+    for ix, entry in enumerate(chain):
+        metric = entry.get("metric")
+        # Metric may be a dict (canonical journal form) or a bare number —
+        # collapse to a compact scalar for the log-style line; --json keeps full shape.
+        if isinstance(metric, dict):
+            metric_out = metric.get("value", metric)
+        else:
+            metric_out = metric
+        print(
+            f"* {entry['id']}  "
+            f"{_short_hash(entry.get('content_hash'))}  "
+            f"is_buggy={entry.get('is_buggy')}  "
+            f"is_seed={entry.get('is_seed_node')}  "
+            f"metric={metric_out}"
+        )
+        if entry.get("note"):
+            print(f"    note: {entry['note']}")
+        if ix != last_ix:
+            print("|")
+
+
 def _short_hash(h: str | None) -> str:
     if not h:
         return "-"
@@ -914,6 +958,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     log_p.add_argument("--ara", required=True)
     log_p.add_argument("--json", action="store_true")
+    log_p.add_argument(
+        "--node", metavar="ID", default=None,
+        help="Focus on one node's in-ARA ancestry (parent_id chain, leaf → root). "
+             "Exits rc=3 when the id isn't in exploration_graph.json.",
+    )
     log_p.set_defaults(func=cmd_log)
 
     verify_lock_p = sub.add_parser(
