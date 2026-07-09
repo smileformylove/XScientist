@@ -31,6 +31,8 @@ class Kind(str, Enum):
     METRIC_MARKER = "metric_marker"
     LLM_CALL = "llm_call"
     REFERENCE_MANIFEST = "reference_manifest"
+    MANIFEST_LOCK = "manifest_lock"
+    MANIFEST_REVISION = "manifest_revision"
 
     @classmethod
     def values(cls) -> tuple[str, ...]:

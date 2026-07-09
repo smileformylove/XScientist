@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/manifest_revision.schema.json",
+  "title": "ARA Manifest Revision",
+  "description": "One row of <ara>/manifest.history.jsonl. Records an append-only change to the manifest post-write (e.g. claim count updated after tex scan finishes). The current manifest.json always reflects the latest revision; a copy of every prior revision lives at <ara>/history/<manifest_hash>.json so audits can rewind.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "revision",
+    "ts",
+    "base_hash",
+    "new_hash"
+  ],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"const": "manifest_revision"},
+    "revision": {"type": "integer", "minimum": 1, "description": "1-indexed; the base manifest is revision 0 and lives in manifest.lock."},
+    "ts": {"type": "string"},
+    "base_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "manifest_hash before this change."
+    },
+    "new_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "manifest_hash after this change."
+    },
+    "changed_fields": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Dotted paths of top-level keys or nested paths that changed. Purely informational — the authoritative source is the diff between the two hashed payloads."
+    },
+    "reason": {"type": ["string", "null"], "description": "Free-form note (e.g. 'claim_count updated after tex scan')."},
+    "producer": {"type": ["string", "null"], "description": "Function or stage that made the change (e.g. 'update_manifest_claim_count')."}
+  },
+  "additionalProperties": true
+}

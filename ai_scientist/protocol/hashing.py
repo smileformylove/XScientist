@@ -148,6 +148,31 @@ def hash_matches(expected: str, actual: str) -> bool:
     return exp_digest == act_digest
 
 
+def hash_manifest(manifest: dict[str, Any]) -> str:
+    """Content hash for a manifest payload.
+
+    Excludes fields that describe the *lock itself* — signatures, and any
+    previously-computed self-reference — because including them would create
+    a chicken-and-egg loop (the manifest's hash would depend on the hash it
+    was about to declare). Everything else, including counts / provenance /
+    references, feeds the hash so a change to any of them is visible.
+
+    Callers that want to detect tampering only need to re-run this over the
+    on-disk manifest.json and compare against manifest.lock.
+    """
+    # Copy so we don't mutate the caller's dict.
+    scrubbed = {k: v for k, v in manifest.items() if k not in _LOCK_EXCLUDED_KEYS}
+    return content_hash(scrubbed)
+
+
+# Fields that must NOT feed hash_manifest — see hash_manifest() docstring.
+# Keep this set in sync with manifest.schema.json.
+_LOCK_EXCLUDED_KEYS = frozenset({
+    "signatures",       # signatures cover the hash, so can't be part of it
+    "manifest_hash",    # hypothetical self-reference; not currently written
+})
+
+
 def build_provenance(
     *,
     parent_ara_root: str | None = None,

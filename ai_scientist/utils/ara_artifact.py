@@ -51,6 +51,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+from ai_scientist.utils.ara_manifest_lock import (
+    append_manifest_revision,
+    write_manifest_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -867,6 +871,14 @@ def export_ara(
     manifest_path = ara_dir / "manifest.json"
     _safe_write_json(manifest_path, manifest)
 
+    # 6b. Freeze the manifest. write_manifest_lock stamps the base hash into
+    # <ara>/manifest.lock; any post-export edit must go through
+    # append_manifest_revision so the audit chain stays intact.
+    try:
+        write_manifest_lock(ara_dir, manifest)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("ARA export: failed to write manifest.lock: %s", exc)
+
     _write_agent_readme(ara_dir, manifest)
 
     logger.info(
@@ -889,17 +901,25 @@ def export_ara(
 
 
 def update_manifest_claim_count(manifest_path: str | os.PathLike[str], claim_count: int) -> None:
-    """Callback used by claim_registry once claims/*.json are populated."""
-    manifest_path = Path(manifest_path)
-    if not manifest_path.exists():
-        return
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    payload.setdefault("counts", {})["claims"] = int(claim_count)
-    payload["counts_updated_at"] = _now_iso()
-    _safe_write_json(manifest_path, payload)
+    """Callback used by claim_registry once claims/*.json are populated.
+
+    Historically this rewrote manifest.json in place, silently mutating the
+    "commit-like" top-level pointer. It now goes through the append-only
+    revision API — the pre-mutation manifest is archived under history/,
+    a manifest_revision row appears in manifest.history.jsonl, and
+    manifest.lock still anchors revision 0.
+    """
+    def _apply(payload: dict) -> list[str]:
+        payload.setdefault("counts", {})["claims"] = int(claim_count)
+        payload["counts_updated_at"] = _now_iso()
+        return ["counts.claims", "counts_updated_at"]
+
+    append_manifest_revision(
+        manifest_path,
+        _apply,
+        reason=f"claim count set to {int(claim_count)}",
+        producer="update_manifest_claim_count",
+    )
 
 
 def iter_ara_exports(project_dir: str | os.PathLike[str]) -> Iterable[Path]:

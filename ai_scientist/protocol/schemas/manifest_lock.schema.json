@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/manifest_lock.schema.json",
+  "title": "ARA Manifest Lock",
+  "description": "Content-hash + creation timestamp for the ROOT (revision-0) manifest of an ARA. Written once at export time and never modified thereafter. Downstream tampering is detectable by re-hashing manifest.json and comparing against manifest_hash here (only the base revision matches — later revisions live in manifest.history.jsonl).",
+  "type": "object",
+  "required": ["schema_version", "protocol_kind", "manifest_hash", "created_at"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"const": "manifest_lock"},
+    "manifest_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "hash_manifest() of the base manifest.json — computed with the signatures and manifest_hash fields excluded."
+    },
+    "created_at": {"type": "string", "description": "ISO-8601 UTC when the base manifest was written."},
+    "hasher": {
+      "type": "string",
+      "description": "Name of the algorithm implementation used to compute manifest_hash, so a future change to hash_manifest() can be detected. Default: 'hash_manifest.v1'."
+    }
+  },
+  "additionalProperties": true
+}

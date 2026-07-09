@@ -57,6 +57,22 @@
       "items": {"type": "string"},
       "description": "Human-readable notes about intentionally-absent sub-artifacts."
     },
+    "signatures": {
+      "type": "array",
+      "description": "Optional detached signatures over manifest_hash (from manifest.lock). Each entry is opaque to the protocol — consumers verify against their own key ring. The signatures field itself is EXCLUDED from hash_manifest() so signing does not invalidate its own subject.",
+      "items": {
+        "type": "object",
+        "required": ["algo", "key_id", "signature"],
+        "properties": {
+          "algo": {"type": "string", "description": "e.g. minisign, ssh-ed25519, pgp"},
+          "key_id": {"type": "string"},
+          "signature": {"type": "string", "description": "Base64-encoded signature over manifest_hash bytes."},
+          "signed_at": {"type": ["string", "null"]},
+          "signer": {"type": ["string", "null"], "description": "Human-readable identity claim; verify against key_id, do not trust this field on its own."}
+        },
+        "additionalProperties": true
+      }
+    },
     "provenance": {
       "type": "object",
       "description": "Optional back-pointer to the parent artifact(s) this run derives from. Supports both single-parent (top-level parent_* fields) and multi-parent (`parents` array) shapes; consumers should treat `parents` as canonical when present and fall back to the top-level fields otherwise. `seed_hash` (when present) is the content_hash of the seed manifest consumed by this run — path-independent, so it survives directory moves.",
