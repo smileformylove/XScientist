@@ -44,12 +44,14 @@ def _project(tmp: Path, *, sub: str, nodes: list[dict]) -> tuple[Path, Path]:
 
 def _make_node(nid: str, *, code: str = "print('ok')",
                metric_val: float = 0.5,
-               llm_refs: list[str] | None = None) -> dict:
+               llm_refs: list[str] | None = None,
+               is_seed_node: bool = False) -> dict:
     d = {
         "id": nid, "step": 0, "code": code,
         "_term_out": [],
         "metric": {"value": metric_val, "maximize": True, "name": "acc"},
         "is_buggy": False, "parent_id": None, "children": [],
+        "is_seed_node": is_seed_node,
     }
     if llm_refs:
         d["llm_call_refs"] = llm_refs

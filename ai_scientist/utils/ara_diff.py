@@ -252,6 +252,7 @@ def _index_nodes(graph: dict) -> dict[str, dict[str, Any]]:
             "hash": n.get("content_hash"),
             "inputs": list(n.get("content_hash_inputs") or []),
             "llm_call_refs": list(n.get("llm_call_refs") or []),
+            "is_seed_node": bool(n.get("is_seed_node")),
         }
     return out
 
@@ -278,6 +279,12 @@ def _which_categories_flipped(
 
     if set(entry_a["llm_call_refs"]) != set(entry_b["llm_call_refs"]):
         cats.append("llm_calls")
+
+    # Seed-role toggle is bound into content_hash (SPEC §11.1 / c1d51d5) but
+    # doesn't live in a file on disk — probe the graph entry directly rather
+    # than leaning on content_hash_inputs, which some producers omit.
+    if bool(entry_a.get("is_seed_node")) != bool(entry_b.get("is_seed_node")):
+        cats.append("seed")
 
     # If nothing flipped locally but the hashes differ, the difference is in
     # some other input category that fed the hash — surface that explicitly.
