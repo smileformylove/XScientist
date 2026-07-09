@@ -94,6 +94,7 @@ def hash_node_payload(
     metric: Any,
     extras: dict[str, Any] | None = None,
     llm_call_hashes: list[str] | None = None,
+    is_seed: bool = False,
 ) -> str:
     """Compute the canonical hash for one exploration node.
 
@@ -109,7 +110,16 @@ def hash_node_payload(
     the list is sorted before hashing, so a caller can pass the raw call
     sequence without worrying about interleaving.
 
-    Nodes that don't opt in to LLM binding are unchanged from earlier
+    ``is_seed`` marks a node as seed-derived (``Node.is_seed_node=True``).
+    When True, an ``is_seed`` marker is folded into the hashed payload so a
+    seed-derived node with identical code+metric hashes *differently* from a
+    regular exploration node — the semantic role is part of the content
+    address, not just an out-of-band label. When False (the default) NOTHING
+    is added to the payload, so all existing callers remain hash-compatible
+    with ARAs exported before this field existed. Same additive discipline
+    as ``llm_call_hashes``.
+
+    Nodes that don't opt in to LLM or seed binding are unchanged from earlier
     protocol revisions — hash-compatible with ARAs exported before this
     field existed.
 
@@ -134,6 +144,11 @@ def hash_node_payload(
         cleaned = sorted({str(h) for h in llm_call_hashes if h})
         if cleaned:
             payload["llm_calls"] = cleaned
+    if is_seed:
+        # Only add the marker when actually seed-derived — mirrors the
+        # llm_calls pattern so ``is_seed=False`` is a no-op and back-compat
+        # with pre-seed-binding ARAs is preserved bit-for-bit.
+        payload["is_seed"] = True
     return content_hash(payload)
 
 

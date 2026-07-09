@@ -368,7 +368,10 @@ Two additive node-level fields make LLM provenance first-class:
 - **`content_hash_inputs`** on both `exploration_graph.nodes[]` and
   `nodes/<id>/metrics.json` — array declaring which categories fed the
   hash. Older ARAs omit this and are treated as `["code","metric"]`. Add
-  `"llm_calls"` when LLM-call hashes were bound in via `extras`.
+  `"llm_calls"` when LLM-call hashes were bound in via `extras`. Add
+  `"seed"` when `Node.is_seed_node` is True; this ensures a seed-derived
+  node with identical code+metric hashes differently from a regular
+  exploration node so the semantic role stays part of the content address.
 
 ```json
 {

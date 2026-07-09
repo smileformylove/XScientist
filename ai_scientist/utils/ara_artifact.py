@@ -284,19 +284,25 @@ def _export_nodes_from_journal(
         # different prompts hash differently — closes the "same code, different
         # prompt" hole. content_hash_inputs records which categories fed the
         # hash so cross-version diff can detect binding scheme changes.
+        # Seed-derived nodes also bind an "is_seed" marker so a seed vs.
+        # non-seed variant of the same code hashes distinctly (SPEC §11.1).
         node_content_hash: str | None = None
         llm_refs_raw = raw.get("llm_call_refs") or []
         # Defensive: journal is JSON, but this list may arrive as any iterable
         # of strings (or nothing at all on legacy runs / seed nodes).
         llm_refs = [str(r) for r in llm_refs_raw if r]
+        is_seed = bool(raw.get("is_seed_node"))
         hash_inputs = ["code", "metric"]
         if llm_refs:
             hash_inputs.append("llm_calls")
+        if is_seed:
+            hash_inputs.append("seed")
         try:
             node_content_hash = hash_node_payload(
                 code=code if isinstance(code, str) else "",
                 metric=raw.get("metric"),
                 llm_call_hashes=llm_refs or None,
+                is_seed=is_seed,
             )
         except Exception as exc:  # pragma: no cover - defensive; hashing is best-effort
             logger.warning("ARA export: hashing node %s failed: %s", node_id, exc)
