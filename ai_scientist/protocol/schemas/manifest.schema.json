@@ -42,12 +42,13 @@
     },
     "references": {
       "type": "object",
-      "description": "Producer-supplied pointers to sub-artifacts. `pipeline_artifacts` follows the reference_manifest.schema.json shape.",
+      "description": "Producer-supplied pointers to sub-artifacts. `pipeline_artifacts` follows the reference_manifest.schema.json shape; `seed`, when present, points at the consumed seed manifest for this run.",
       "properties": {
         "pipeline_artifacts": {
           "type": "array",
           "items": {"$ref": "reference_manifest.schema.json"}
-        }
+        },
+        "seed": {"$ref": "reference_manifest.schema.json"}
       },
       "additionalProperties": true
     },
@@ -58,11 +59,15 @@
     },
     "provenance": {
       "type": "object",
-      "description": "Optional back-pointer to the parent artifact(s) this run derives from. Supports both single-parent (top-level parent_* fields) and multi-parent (`parents` array) shapes; consumers should treat `parents` as canonical when present and fall back to the top-level fields otherwise.",
+      "description": "Optional back-pointer to the parent artifact(s) this run derives from. Supports both single-parent (top-level parent_* fields) and multi-parent (`parents` array) shapes; consumers should treat `parents` as canonical when present and fall back to the top-level fields otherwise. `seed_hash` (when present) is the content_hash of the seed manifest consumed by this run — path-independent, so it survives directory moves.",
       "properties": {
         "parent_ara_root": {"type": ["string", "null"]},
         "parent_node_id": {"type": ["string", "null"]},
         "parent_content_hash": {"type": ["string", "null"]},
+        "seed_hash": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "parents": {
           "type": "array",
           "description": "Optional list of contributing ancestors. Each entry names one parent + which aspect of the child was inherited from it (e.g. `code`, `env`, `data`).",

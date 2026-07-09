@@ -531,6 +531,94 @@ def _iso_mtime(path: Path) -> str | None:
     return ts.isoformat().replace("+00:00", "Z")
 
 
+def _snapshot_seed_manifest(
+    *,
+    ara_dir: Path,
+    project_dir: Path,
+) -> dict[str, Any] | None:
+    """Copy the consumed seed manifest into the child ARA.
+
+    Rationale
+    ---------
+    Before this change, seed manifests lived only under
+    ``<project>/.ara_seed/ara_seed.json`` and never made it into the child's
+    on-disk ARA (SPEC §7.1 explicitly said so). Downstream consumers could
+    see ``manifest.provenance.parent_*`` but had no way to recover *which
+    exact code was seeded* without going back to the parent — and if the
+    parent ARA had moved or been pruned, the trail dead-ended.
+
+    Now every child ARA carries its own ``<ara>/seed/ara_seed.json``, and
+    the manifest's ``provenance.seed_hash`` field is a content_hash over
+    that file. Two effects:
+
+    1. Consumers can inspect the seed without touching the parent ARA.
+    2. Diffing two children of the same parent can compare their
+       ``seed_hash`` values directly — if identical, the divergence is
+       entirely post-seed (LLM stochasticity, environment); if different,
+       the fork itself pivoted.
+
+    We only snapshot when a ``.consumed`` sidecar proves the seed was
+    actually used by this run. A staged-but-unused seed (rare — happens
+    when the pipeline aborts before ``_draft``) is intentionally not
+    snapshotted; it isn't part of this run's history.
+
+    Returns a dict suitable for ``manifest.references['seed']`` plus a
+    ``seed_hash`` string for injection into ``manifest.provenance``.
+    """
+    try:
+        from ai_scientist.utils.ara_seed import SEED_MANIFEST_NAME
+    except Exception:  # pragma: no cover - defensive
+        return None
+    try:
+        from ai_scientist.protocol import ObjectStore
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    src = project_dir / ".ara_seed" / SEED_MANIFEST_NAME
+    consumed = src.with_suffix(src.suffix + ".consumed")
+    if not src.exists() or not consumed.exists():
+        return None
+
+    try:
+        raw = src.read_bytes()
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("ARA export: seed manifest unreadable at %s: %s", src, exc)
+        return None
+
+    try:
+        store = ObjectStore(ara_dir)
+        ref = store.put_bytes(raw)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("ARA export: CAS put failed for seed: %s", exc)
+        return None
+
+    seed_dir = ara_dir / "seed"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    dst = seed_dir / SEED_MANIFEST_NAME
+    try:
+        dst.write_bytes(raw)
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("ARA export: seed mirror write failed for %s: %s", dst, exc)
+        return None
+
+    # Preserve the .consumed sidecar too — it's the provenance receipt
+    # showing which idea consumed the seed and when.
+    try:
+        consumed_raw = consumed.read_bytes()
+        (seed_dir / consumed.name).write_bytes(consumed_raw)
+    except OSError:
+        pass  # sidecar is informational; missing it doesn't invalidate the seed copy
+
+    return {
+        "kind": "seed_manifest",
+        "path": str(dst.relative_to(ara_dir)),
+        "content_hash": ref.hash,
+        "size": ref.size,
+        "generated_at": _iso_mtime(src),
+        "source": str(src),
+    }
+
+
 def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
     """A short, structured entry point for downstream agents (not humans)."""
     idea = manifest.get("idea", {})
@@ -732,6 +820,21 @@ def export_ara(
         missing=missing,
     )
 
+    # 5c. Consumed-seed snapshot.
+    # When this run was seeded (via `--seed-from-ara`), the seed manifest was
+    # staged under <project>/.ara_seed/ but never made it into the child ARA.
+    # Now we copy it in and stamp its content_hash into `provenance.seed_hash`
+    # so downstream tools can inspect the exact seed without touching the
+    # parent ARA (SPEC.md §7 already prefers content-hash references over
+    # path-based ones).
+    seed_entry = _snapshot_seed_manifest(
+        ara_dir=ara_dir, project_dir=project_dir_path,
+    )
+    seed_hash: str | None = None
+    if seed_entry is not None:
+        references["seed"] = seed_entry
+        seed_hash = seed_entry.get("content_hash")
+
     # 6. Manifest.
     manifest = {
         "schema_version": ARA_SCHEMA_VERSION,
@@ -755,6 +858,12 @@ def export_ara(
     }
     if provenance:
         manifest["provenance"] = dict(provenance)
+    if seed_hash:
+        # Attach the seed hash to provenance even if the caller supplied no
+        # provenance dict — the seed itself IS a form of parentage.
+        provenance_block = dict(manifest.get("provenance") or {})
+        provenance_block["seed_hash"] = seed_hash
+        manifest["provenance"] = provenance_block
     manifest_path = ara_dir / "manifest.json"
     _safe_write_json(manifest_path, manifest)
 
