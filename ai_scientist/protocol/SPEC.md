@@ -42,6 +42,15 @@ An ARA is a directory rooted at `manifest.json`:
         bfts_config.yaml
         model_fingerprint.json
         requirements.freeze      (populated by `run_ara_fork.py freeze`)
+
+    objects/sha256/<h>/<rest>    OPTIONAL. Content-addressable object store (§10).
+    llm/calls.jsonl              OPTIONAL. One row per LLM invocation (§11).
+    seed/ara_seed.json           OPTIONAL. Snapshot of consumed seed (§12).
+    pipeline/<artifact>.json     OPTIONAL. Mirrored pipeline stage state (§13).
+    manifest.lock                OPTIONAL. Base manifest hash + created_at (§14).
+    manifest.history.jsonl       OPTIONAL. Append-only post-export edits (§14).
+    history/<manifest_hash>.json OPTIONAL. Full snapshot per revision (§14).
+    refs/<name>                  OPTIONAL. Local caller-writable bookmarks (§15).
 ```
 
 The **only** files a validator requires are `manifest.json` and
@@ -296,7 +305,228 @@ into other logs cleanly.
 Reference implementation: `ai_scientist.utils.ara_metric_parser`. Schema
 file: `schemas/metric_marker.schema.json`.
 
-## 10. Conformance
+## 10. Content-Addressable Object Store (`objects/`)
+
+Any sizeable, immutable payload — LLM prompts and responses, mirrored
+pipeline artifacts, large prompt fragments — is written to a two-level
+sharded content-addressable store at:
+
+```
+<ara>/objects/sha256/<hex[:2]>/<hex[2:]>
+```
+
+Callers store only an `ObjectRef` in the referencing row, never the inline
+payload:
+
+```json
+{"hash": "sha256:<64 hex>", "size": 12345, "gzip": true}
+```
+
+Payloads at or above 4 KiB are gzipped on disk; readers detect compression
+from the gzip magic bytes (`1f 8b`), so no sidecar is needed. Writes are
+atomic (`.tmp` → `os.replace`) and idempotent — writing the same bytes
+twice yields the same hash and skips the second disk write.
+
+The store is append-only. Once an object is written it is expected to live
+for the lifetime of the ARA; garbage collection, if it ever ships, will be
+a separate tool that walks manifests and prunes unreferenced blobs.
+
+Reference implementation: `ai_scientist.protocol.objects.ObjectStore`.
+
+## 11. LLM Call Log (`llm/calls.jsonl`)
+
+Every model invocation is logged as one JSON line under
+`<ara>/llm/calls.jsonl`. Required fields:
+
+```json
+{
+  "schema_version": "ara.v1",
+  "protocol_kind": "llm_call",
+  "call_id": "<uuid>",
+  "ts": "2026-07-10T12:00:00Z",
+  "provider": "anthropic",
+  "model": "anthropic/glm-5.1",
+  "params": {"temperature": 0.7, "max_tokens": 4096},
+  "messages_ref": {"hash": "sha256:...", "size": 12345, "gzip": true},
+  "response_ref": {"hash": "sha256:...", "size":   234, "gzip": false},
+  "tokens": {"input": 300, "output": 42},
+  "latency_ms": 815
+}
+```
+
+Message and response blobs live in `objects/` (§10) and are referenced by
+`messages_ref` / `response_ref`. Rows MUST NOT inline prompt or response
+text. Schema file: `schemas/llm_call.schema.json`.
+
+### 11.1 Binding LLM calls into `content_hash`
+
+Two additive node-level fields make LLM provenance first-class:
+
+- **`llm_call_refs`** on `exploration_graph.nodes[]` — array of
+  `messages_ref.hash` strings pointing back into `llm/calls.jsonl`. Purely
+  informational; not required by the validator.
+- **`content_hash_inputs`** on both `exploration_graph.nodes[]` and
+  `nodes/<id>/metrics.json` — array declaring which categories fed the
+  hash. Older ARAs omit this and are treated as `["code","metric"]`. Add
+  `"llm_calls"` when LLM-call hashes were bound in via `extras`.
+
+```json
+{
+  "content_hash": "sha256:...",
+  "content_hash_inputs": ["code", "metric", "llm_calls"],
+  "llm_call_refs": ["sha256:...", "sha256:..."]
+}
+```
+
+A hash declared with `["code","metric","llm_calls"]` will not collide with
+one declared `["code","metric"]` even for identical code — cross-producer
+comparison stays sound. Consumers that don't understand these fields may
+safely ignore them.
+
+Schemas: `schemas/exploration_graph.schema.json`,
+`schemas/node.schema.json`, `schemas/llm_call.schema.json`.
+
+## 12. Seed Snapshot (`seed/`)
+
+For runs launched via `--seed-from-ara`, the consumed seed manifest is
+snapshotted at `<ara>/seed/ara_seed.json`. The snapshot is byte-identical
+to the seed the producer read from `.ara_seed/` (§7.1) — it makes the
+child ARA self-contained even if the source project directory is deleted
+or relocated.
+
+The manifest records the seed's content_hash under
+`provenance.seed_hash`:
+
+```json
+"provenance": {
+  "parent_ara_root": "/path/to/A",
+  "parent_content_hash": "sha256:...",
+  "seed_hash": "sha256:<64 hex — mirrors content_hash of ara_seed.json>"
+}
+```
+
+Because `seed_hash` is content-addressed, consumers can dedup / cluster
+forks that started from the same seed across producers that stored the
+source ARA at different paths. The snapshot is also referenced from
+`manifest.references.seed` using the shape described in §13.
+
+## 13. Pipeline Artifact Mirror (`pipeline/`)
+
+Producers that run through the pipeline_contracts stack mirror per-stage
+artifacts under `<ara>/pipeline/` so consumers can inspect the pre-writeup
+state that led to the final manuscript. Sixteen artifact kinds are
+recognised (see the schema below for the full vocabulary); common paths:
+
+```
+<ara>/pipeline/
+    review_state.json           critic_findings.json
+    claim_evidence_graph.json   manuscript_state.json
+    figure_spec.json            stage_standards.json
+    process_alignment.json      research_program.json
+    manuscript_candidate_pool.json
+    self_evolution.json         research_plan.json
+    idea_cards.json             pipeline_manifest.json
+    repair_attempts.json        pareto_pool.json
+    experiment_registry.json
+```
+
+Each mirrored artifact is registered as one entry in
+`manifest.references.pipeline_artifacts[]`, following
+`schemas/reference_manifest.schema.json`:
+
+```json
+{
+  "kind": "review_state",
+  "path": "pipeline/review_state.json",
+  "schema_version": "review.v3",
+  "content_hash": "sha256:...",
+  "producer": "reviewer_agent",
+  "generated_at": "2026-07-10T12:00:00Z",
+  "size": 4123
+}
+```
+
+Consumers that only care about a subset can filter by `kind`; those that
+want cross-ARA diffs use `content_hash`.
+
+## 14. Immutability Layer (`manifest.lock` + `manifest.history.jsonl`)
+
+Once an ARA is exported, its base manifest is stamped and every subsequent
+mutation is append-only.
+
+- **`<ara>/manifest.lock`** — written once at export time. Records the
+  `manifest_hash` of the ROOT (revision-0) manifest.json plus the
+  algorithm name (`hasher`, default `"hash_manifest.v1"`) and
+  `created_at`. Tampering with the base manifest is detectable by
+  re-hashing and comparing.
+- **`<ara>/manifest.history.jsonl`** — one JSON line per post-export
+  mutation, produced by `append_manifest_revision(...)`. Fields:
+  `revision` (1-indexed; base is 0), `ts`, `base_hash` (before),
+  `new_hash` (after), `changed_fields` (informational), `reason`,
+  `producer`.
+- **`<ara>/history/<manifest_hash>.json`** — the full manifest snapshot
+  after each revision, keyed by its `new_hash`. Audits can rewind to any
+  prior state without replaying the diff chain.
+
+```json
+{
+  "schema_version": "ara.v1",
+  "protocol_kind": "manifest_revision",
+  "revision": 3,
+  "ts": "2026-07-10T13:00:00Z",
+  "base_hash": "sha256:...",
+  "new_hash":  "sha256:...",
+  "changed_fields": ["counts.claims"],
+  "reason": "claim_count updated after tex scan",
+  "producer": "update_manifest_claim_count"
+}
+```
+
+Producers MUST route every post-write manifest edit through
+`append_manifest_revision` — direct writes to `manifest.json` break the
+audit chain. Schemas: `schemas/manifest_lock.schema.json`,
+`schemas/manifest_revision.schema.json`.
+
+## 15. Local Refs (`refs/`)
+
+`<ara>/refs/` is a git-style namespace of short human-readable names
+pointing at content hashes. Each ref is a single text file whose sole
+content is a `sha256:<hex>` line; nested paths are permitted:
+
+```
+<ara>/refs/candidates/best
+<ara>/refs/ideas/paper_v3
+<ara>/refs/pareto/frontier_2026Q2
+```
+
+Refs are **caller-writable** local bookmarks — CI, humans, or downstream
+agents may create, update, or delete them at any time. They are NOT part
+of `content_hash` and NOT covered by the immutability layer (§14). Ref
+names are validated against directory traversal; targets must match
+`^<algo>:[0-9a-f]+$`.
+
+Reference implementation: `ai_scientist.utils.ara_refs` (`set_ref`,
+`get_ref`, `delete_ref`, `list_refs`).
+
+## 16. Signatures (`manifest.signatures[]`)
+
+`manifest.signatures[]` is an optional array of detached signatures over
+the base `manifest_hash` from `manifest.lock`. Each entry has `algo`,
+`key_id`, `signature` (base64), plus optional `signed_at` and `signer`
+(human-readable claim — verify against `key_id`, do not trust standalone):
+
+```json
+"signatures": [
+  {"algo": "minisign", "key_id": "RWQ...", "signature": "...",
+   "signed_at": "2026-07-10T14:00:00Z", "signer": "ci@xscientist.io"}
+]
+```
+
+The `signatures` field is EXCLUDED from `hash_manifest()` — signing the
+manifest does not invalidate its own subject. Consumers verify signatures
+against their own key ring; the protocol treats each entry as opaque.
+
+## 17. Conformance
 
 Reference validator: `ai_scientist.protocol.validate_ara(path)`.
 
@@ -316,7 +546,7 @@ Warnings (non-blocking):
 - `schema_version` differs from `PROTOCOL_VERSION`.
 - A node listed in `exploration_graph.json` has no directory on disk.
 
-## 11. Non-Goals
+## 18. Non-Goals
 
 The protocol deliberately does not specify:
 
@@ -328,7 +558,7 @@ The protocol deliberately does not specify:
 - Any UI / rendering conventions. `README.md` is a courtesy for agents that
   don't want to parse `manifest.json` first — it is not authoritative.
 
-## 12. Extension Points
+## 19. Extension Points
 
 Adding fields:
 - **Add optional fields freely** — schemas are `additionalProperties: true`.
