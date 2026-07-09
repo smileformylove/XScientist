@@ -177,11 +177,18 @@ class ForkCLITest(unittest.TestCase):
             os.path.realpath(grand_manifest["provenance"]["parent_ara_root"]),
             os.path.realpath(str(intermediate)),
         )
-        # Content hash of the leaf node should match across the chain.
-        intermediate_manifest = _json.loads((intermediate / "manifest.json").read_text())
+        # Grand's provenance.parent_content_hash points at the INTERMEDIATE
+        # fork's OWN content_hash (which is is_seed-bound), not at the
+        # original's hash. This is the correct chain shape after the seed
+        # binding fix — each fork has its own distinct hash and its
+        # provenance points one step back.
+        intermediate_graph = _json.loads(
+            (intermediate / "exploration_graph.json").read_text()
+        )
+        intermediate_own_hash = intermediate_graph["nodes"][0]["content_hash"]
         self.assertEqual(
             grand_manifest["provenance"]["parent_content_hash"],
-            intermediate_manifest["provenance"]["parent_content_hash"],
+            intermediate_own_hash,
         )
 
 

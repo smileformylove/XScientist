@@ -230,13 +230,33 @@ def cmd_fork(args: argparse.Namespace) -> int:
     #    reconstruct from code+metric so the fork is still content-addressable.
     parent_metrics = _load_json(node_dir / "metrics.json") or {}
     parent_hash = parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
+    parent_code = (node_dir / "code.py").read_text(encoding="utf-8") if (node_dir / "code.py").exists() else ""
+    parent_metric = parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
     if not parent_hash:
-        code = (node_dir / "code.py").read_text(encoding="utf-8") if (node_dir / "code.py").exists() else ""
-        recorded_metric = parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
         try:
-            parent_hash = hash_node_payload(code=code, metric=recorded_metric)
+            parent_hash = hash_node_payload(code=parent_code, metric=parent_metric)
         except Exception:  # pragma: no cover - defensive
             parent_hash = None
+
+    # The fork node carries is_seed_node=True, so its OWN content_hash must be
+    # computed with is_seed=True to agree with the declared role. The parent's
+    # hash is still recorded in provenance (source_content_hash /
+    # parent_content_hash) as a REFERENCE to the parent — those stay pointing
+    # at the parent's original hash.
+    try:
+        fork_hash = hash_node_payload(code=parent_code, metric=parent_metric, is_seed=True)
+    except Exception:  # pragma: no cover - defensive
+        fork_hash = parent_hash
+
+    # Rewrite the copied metrics.json so its content_hash matches the fork's
+    # declared seed role (the copytree above left the parent's hash in place).
+    if isinstance(parent_metrics, dict) and fork_hash:
+        fork_metrics = dict(parent_metrics)
+        fork_metrics["content_hash"] = fork_hash
+        (dest_nodes_dir / "metrics.json").write_text(
+            json.dumps(fork_metrics, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
 
     parent_manifest = _load_json(ara_root / "manifest.json") or {}
     parent_graph = _load_json(ara_root / "exploration_graph.json") or {}
@@ -255,7 +275,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
         "nodes": [
             {
                 "id": args.node_id,
-                "content_hash": parent_hash,
+                "content_hash": fork_hash,
                 "stage": parent_node_entry.get("stage") or "forked",
                 "step": 0,
                 "parent_id": None,

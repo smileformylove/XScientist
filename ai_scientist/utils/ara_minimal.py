@@ -130,7 +130,7 @@ def export_minimal_ara(
             "exc_type": None,
             "exc_info": None,
             "exec_time": None,
-            "content_hash": hash_node_payload(code="", metric=None),
+            "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
         },
     )
 
@@ -142,7 +142,7 @@ def export_minimal_ara(
         "nodes": [
             {
                 "id": node_id,
-                "content_hash": hash_node_payload(code="", metric=None),
+                "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
                 "stage": "manuscript_only",
                 "step": 0,
                 "parent_id": None,
