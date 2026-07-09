@@ -78,6 +78,43 @@ class ManifestLockTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(report["state"], "unlocked")
 
+    def test_write_manifest_lock_is_byte_idempotent_on_same_manifest(self) -> None:
+        ara, manifest = _fresh_ara(self.tmp)
+        lock_path = ara / MANIFEST_LOCK_NAME
+        first_bytes = lock_path.read_bytes()
+        first_mtime_ns = lock_path.stat().st_mtime_ns
+        # Sleep past mtime resolution so a rewrite would be observable.
+        import time as _time
+        _time.sleep(1.1)
+        result = write_manifest_lock(ara, manifest)
+        self.assertEqual(result, lock_path)
+        self.assertEqual(lock_path.read_bytes(), first_bytes)
+        self.assertEqual(lock_path.stat().st_mtime_ns, first_mtime_ns)
+
+    def test_write_manifest_lock_rewrites_on_hash_change(self) -> None:
+        ara, manifest = _fresh_ara(self.tmp)
+        lock_path = ara / MANIFEST_LOCK_NAME
+        original = json.loads(lock_path.read_text())
+        # Second manifest has a genuinely different field.
+        m2 = dict(manifest)
+        m2["counts"] = {"nodes": 999}
+        import time as _time
+        _time.sleep(1.1)
+        write_manifest_lock(ara, m2)
+        updated = json.loads(lock_path.read_text())
+        self.assertEqual(updated["manifest_hash"], hash_manifest(m2))
+        self.assertNotEqual(updated["manifest_hash"], original["manifest_hash"])
+        self.assertNotEqual(updated["created_at"], original["created_at"])
+
+    def test_write_manifest_lock_recovers_from_malformed_lock(self) -> None:
+        ara, manifest = _fresh_ara(self.tmp)
+        lock_path = ara / MANIFEST_LOCK_NAME
+        lock_path.write_text("{not json at all", encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        recovered = json.loads(lock_path.read_text())
+        self.assertEqual(recovered["manifest_hash"], hash_manifest(manifest))
+        self.assertEqual(recovered["protocol_kind"], "manifest_lock")
+
 
 class AppendManifestRevisionTests(unittest.TestCase):
     def setUp(self) -> None:

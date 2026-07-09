@@ -9,10 +9,16 @@ its top-level pointer was not.
 What ships here
 ---------------
 * :func:`write_manifest_lock` — write ``<ara>/manifest.lock`` with the
-  content_hash of the base manifest.json. Called exactly once from
-  ``export_ara``. The lock is the immutability anchor: anyone re-hashing
+  content_hash of the base manifest.json. Called from ``export_ara``
+  and cmd_fork. The lock is the immutability anchor: anyone re-hashing
   the base manifest and getting a different digest knows the manifest
   was tampered with (or is at a later revision — see history).
+
+  Writes are **byte-idempotent for the same manifest**: if an existing
+  lock's stored ``manifest_hash`` matches the freshly computed one, the
+  file is left untouched (bytes and mtime unchanged), so re-exports
+  don't spuriously rewrite ``created_at``. A malformed existing lock is
+  replaced rather than raised on.
 
 * :func:`append_manifest_revision` — replaces in-place mutation. It:
     1. Reads the current manifest.json.
@@ -70,16 +76,35 @@ def write_manifest_lock(
 ) -> Path:
     """Write ``<ara>/manifest.lock`` and return its path.
 
-    Called from ``export_ara`` after the base manifest.json lands on
-    disk. The lock is idempotent: writing the same manifest twice
-    produces the same file bytes and does not touch history.
+    Called from ``export_ara`` (and cmd_fork) after the base
+    manifest.json lands on disk. The write is **byte-idempotent for
+    the same manifest**: if the lock already exists and its stored
+    ``manifest_hash`` equals ``hash_manifest(manifest)``, this function
+    returns the existing path without touching the file — bytes and
+    mtime are preserved so downstream tools can treat lock mtime as
+    "when the base manifest was first stamped".
+
+    A malformed / unparsable existing lock is replaced (not raised on).
+    Callers passing a different manifest get a fresh write with a new
+    ``created_at``.
     """
     ara_path = Path(ara_dir)
     lock_path = ara_path / MANIFEST_LOCK_NAME
+    new_hash = hash_manifest(manifest)
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and existing.get("manifest_hash") == new_hash:
+                return lock_path
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug(
+                "write_manifest_lock: replacing malformed lock at %s: %s",
+                lock_path, exc,
+            )
     payload = {
         "schema_version": _LOCK_SCHEMA_VERSION,
         "protocol_kind": "manifest_lock",
-        "manifest_hash": hash_manifest(manifest),
+        "manifest_hash": new_hash,
         "created_at": _now_iso(),
         "hasher": _LOCK_HASHER_ID,
     }
