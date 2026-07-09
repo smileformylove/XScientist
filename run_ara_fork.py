@@ -380,6 +380,41 @@ def cmd_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify_lock(args: argparse.Namespace) -> int:
+    """Check whether manifest.json still matches its manifest.lock chain.
+
+    This is the headline promise of the immutability layer
+    (:mod:`ai_scientist.utils.ara_manifest_lock`): downstream agents who
+    trust the ARA's top-level pointer can prove it hasn't been silently
+    edited outside the append-only revision API. Exit codes are shaped so
+    CI can gate on tampering: ``rc=0`` for ``clean``/``revised``,
+    ``rc=2`` for ``tampered`` (real integrity breach), ``rc=3`` for
+    ``unlocked`` (missing lock — can't judge). The report itself is
+    always printed so the caller can diagnose.
+    """
+    from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    ara_root = _resolve_ara_root(args.ara)
+    report = verify_manifest_lock(ara_root)
+
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(f"# verify-lock  {ara_root}")
+        print(f"  state:          {report.get('state')}")
+        print(f"  base_hash:      {report.get('base_hash')}")
+        print(f"  current_hash:   {report.get('current_hash')}")
+        print(f"  revision_count: {report.get('revision_count')}")
+        print(f"  detail:         {report.get('detail')}")
+
+    state = report.get("state")
+    if state in ("clean", "revised"):
+        return 0
+    if state == "tampered":
+        return 2
+    return 3  # unlocked / anything else — mirror `refs --get` missing semantics
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -672,6 +707,15 @@ def build_parser() -> argparse.ArgumentParser:
     log_p.add_argument("--ara", required=True)
     log_p.add_argument("--json", action="store_true")
     log_p.set_defaults(func=cmd_log)
+
+    verify_lock_p = sub.add_parser(
+        "verify-lock",
+        help="Check that manifest.json still matches manifest.lock (immutability audit).",
+    )
+    verify_lock_p.add_argument("--ara", required=True)
+    verify_lock_p.add_argument("--json", action="store_true",
+                               help="Emit the raw report dict as JSON.")
+    verify_lock_p.set_defaults(func=cmd_verify_lock)
 
     refs_p = sub.add_parser(
         "refs",

@@ -222,3 +222,4 @@ _outputs/
 agent_social_evolution/
 condensed_matter_compression/
 neuroentropy_workspace/
+.auto_loop/

@@ -155,5 +155,49 @@ class CLIRefsTests(unittest.TestCase):
         self.assertIn("refused", err)
 
 
+class CLIVerifyLockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_clean_ara_exits_zero_with_state_clean(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        rc, out, _ = _run("verify-lock", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        self.assertIn("state:", out)
+        self.assertIn("clean", out)
+
+    def test_tampered_manifest_exits_nonzero_with_state_tampered(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        manifest = a / "manifest.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        # Mutate the manifest bytes directly, bypassing the append-only API,
+        # so the on-disk hash no longer matches the lock (or any revision).
+        payload["__tamper_marker__"] = "unauthorized edit"
+        manifest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        rc, out, _ = _run("verify-lock", "--ara", str(a))
+        self.assertEqual(rc, 2)
+        self.assertIn("tampered", out)
+
+    def test_missing_lock_exits_nonzero_with_state_unlocked(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        (a / "manifest.lock").unlink()
+        rc, out, _ = _run("verify-lock", "--ara", str(a))
+        self.assertEqual(rc, 3)
+        self.assertIn("unlocked", out)
+
+    def test_json_output_shape(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        rc, out, _ = _run("verify-lock", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        for key in ("ok", "state", "base_hash", "current_hash",
+                    "revision_count", "detail"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["state"], "clean")
+        self.assertTrue(payload["ok"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
