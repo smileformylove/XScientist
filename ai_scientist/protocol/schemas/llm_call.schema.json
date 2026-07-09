@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/llm_call.schema.json",
+  "title": "ARA LLM Call",
+  "description": "One row of llm/calls.jsonl. Records a single model invocation with content-addressed message and response payloads. Callers should never inline prompt or response text into this row — everything sizeable lives under objects/ and is referenced by hash.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "call_id",
+    "ts",
+    "provider",
+    "model",
+    "messages_ref",
+    "response_ref"
+  ],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"const": "llm_call"},
+    "call_id": {"type": "string", "description": "Unique per invocation; not stable across runs."},
+    "ts": {"type": "string", "description": "ISO-8601 UTC timestamp of when the call completed."},
+    "stage": {"type": ["string", "null"], "description": "Which pipeline stage produced the call (ideation / planning / bfts_draft / bfts_debug / review / repair / writeup / …). Free-form."},
+    "provider": {"type": "string", "description": "openai | anthropic | ollama | huggingface | …"},
+    "model": {"type": "string", "description": "Model id as passed by the caller (e.g. anthropic/glm-5.1)."},
+    "request_style": {"type": "string", "description": "openai_chat | openai_reasoning | anthropic_messages | huggingface | ollama."},
+    "params": {
+      "type": "object",
+      "description": "Hash-worthy request knobs (temperature, max_tokens, seed, top_p, response_format, tool_choice, stop). Non-serialisable values MUST be omitted, not stringified.",
+      "additionalProperties": true
+    },
+    "messages_ref": {"$ref": "#/$defs/objectRef"},
+    "response_ref": {"$ref": "#/$defs/objectRef"},
+    "tokens": {
+      "type": "object",
+      "properties": {
+        "input": {"type": "integer", "minimum": 0},
+        "output": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+    "error": {"type": ["string", "null"], "description": "When the call failed after retries, a short description; response_ref then points at empty bytes."}
+  },
+  "$defs": {
+    "objectRef": {
+      "type": "object",
+      "required": ["hash", "size"],
+      "properties": {
+        "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0},
+        "gzip": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

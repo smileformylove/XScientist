@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
+from ai_scientist.protocol.llm_trace import record_llm_call
 from ai_scientist.utils.token_tracker import track_token_usage
 from ai_scientist.utils.optional_dependencies import (
     import_backoff,
@@ -217,6 +219,25 @@ def get_batch_responses_from_llm(
         print("*" * 21 + " LLM END " + "*" * 21)
         print()
 
+    # Trace each response in the batch as an independent llm_call row.
+    # The messages history for choice i is new_msg_history[i], which already
+    # carries that choice's assistant reply.
+    for i, hist in enumerate(new_msg_history):
+        _record_llm_call_safe(
+            spec=spec,
+            model=model,
+            system_message=system_message,
+            messages=hist,
+            response_text=content[i] if i < len(content) else "",
+            params={
+                "temperature": temperature,
+                "max_tokens": MAX_NUM_TOKENS,
+                "n": n_responses,
+                "seed": 0,
+                "batch_index": i,
+            },
+        )
+
     return content, new_msg_history
 
 
@@ -281,6 +302,8 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
     spec = resolve_model_provider(model)
+    response = None
+    _t0 = time.perf_counter()
 
     if model_uses_anthropic_client(model):
         new_msg_history = msg_history + [
@@ -406,7 +429,79 @@ def get_response_from_llm(
         print("*" * 21 + " LLM END " + "*" * 21)
         print()
 
+    _record_llm_call_safe(
+        spec=spec,
+        model=model,
+        system_message=system_message,
+        messages=new_msg_history,
+        response_text=content,
+        params={"temperature": temperature, "max_tokens": MAX_NUM_TOKENS, "seed": 0},
+        response=response,
+        latency_ms=int((time.perf_counter() - _t0) * 1000),
+    )
+
     return content, new_msg_history
+
+
+def _record_llm_call_safe(
+    *,
+    spec,
+    model: str,
+    system_message: str,
+    messages: list[dict[str, Any]],
+    response_text: str,
+    params: dict[str, Any],
+    response: Any = None,
+    latency_ms: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Wrap ``record_llm_call`` so a broken tracer never breaks the LLM call.
+
+    Also normalises the various SDK usage shapes (Anthropic's
+    ``input_tokens/output_tokens`` vs OpenAI's ``prompt_tokens/
+    completion_tokens``) into the single ``{input, output}`` shape the
+    protocol schema expects.
+    """
+    try:
+        tokens = _extract_tokens(response)
+        record_llm_call(
+            provider=getattr(spec, "provider", "unknown"),
+            model=model,
+            request_style=getattr(spec, "request_style", "unknown"),
+            system_message=system_message or "",
+            messages=messages or [],
+            response_text=response_text or "",
+            params=params,
+            tokens=tokens,
+            latency_ms=latency_ms,
+            error=error,
+        )
+    except Exception:
+        # Tracer must never bring down the caller.
+        return
+
+
+def _extract_tokens(response: Any) -> dict[str, int] | None:
+    """Best-effort usage extraction across SDKs; returns None when nothing found."""
+    if response is None:
+        return None
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    input_tokens = (
+        getattr(usage, "input_tokens", None)
+        or getattr(usage, "prompt_tokens", None)
+    )
+    output_tokens = (
+        getattr(usage, "output_tokens", None)
+        or getattr(usage, "completion_tokens", None)
+    )
+    out: dict[str, int] = {}
+    if isinstance(input_tokens, int):
+        out["input"] = input_tokens
+    if isinstance(output_tokens, int):
+        out["output"] = output_tokens
+    return out or None
 
 
 def extract_json_between_markers(llm_output: str) -> dict | None: 

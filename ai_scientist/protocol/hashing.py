@@ -88,12 +88,30 @@ def _prep_code_for_hash(code: str) -> tuple[str, int, bool]:
     return truncated, original_len, True
 
 
-def hash_node_payload(*, code: str, metric: Any, extras: dict[str, Any] | None = None) -> str:
+def hash_node_payload(
+    *,
+    code: str,
+    metric: Any,
+    extras: dict[str, Any] | None = None,
+    llm_call_hashes: list[str] | None = None,
+) -> str:
     """Compute the canonical hash for one exploration node.
 
     ``extras`` gives producers a hook to bind additional stable inputs (e.g.
     ``{"dataset": "cifar10", "seed": 42}``). Keep the payload lean — adding
     unstable fields to ``extras`` will make the hash drift for cosmetic reasons.
+
+    ``llm_call_hashes`` optionally binds the hashes of the LLM message-blobs
+    that produced this node's code (``messages_ref.hash`` from
+    ``<ara>/llm/calls.jsonl``). When supplied, two nodes with identical code
+    and metric but generated from different prompts hash differently — this
+    is what closes the "code same, prompt different" hole. Order-insensitive:
+    the list is sorted before hashing, so a caller can pass the raw call
+    sequence without worrying about interleaving.
+
+    Nodes that don't opt in to LLM binding are unchanged from earlier
+    protocol revisions — hash-compatible with ARAs exported before this
+    field existed.
 
     Large ``code`` inputs (>256 KiB) are truncated for hashing speed, but the
     original length is captured in the payload so distinct long files still
@@ -109,6 +127,13 @@ def hash_node_payload(*, code: str, metric: Any, extras: dict[str, Any] | None =
         payload["code_truncated"] = True
     if extras:
         payload["extras"] = dict(extras)
+    if llm_call_hashes:
+        # sort so ordering of concurrent calls doesn't churn the hash.
+        # duplicates and empty strings collapse to nothing — a list of only
+        # empty strings must be treated the same as "no LLM calls bound".
+        cleaned = sorted({str(h) for h in llm_call_hashes if h})
+        if cleaned:
+            payload["llm_calls"] = cleaned
     return content_hash(payload)
 
 

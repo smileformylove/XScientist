@@ -13,6 +13,7 @@ from .utils import data_preview
 from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
+from ai_scientist.protocol import capture_llm_calls
 import copy
 import pickle
 from dataclasses import asdict
@@ -496,6 +497,8 @@ class MinimalAgent:
                 f"parent_node_id={provenance.get('parent_node_id')} "
                 f"parent_content_hash={provenance.get('parent_content_hash')}[/cyan]"
             )
+            # Seed-derived nodes have no LLM origin, so llm_call_refs stays
+            # empty. Provenance links back to the parent via the seed manifest.
             return Node(plan=plan, code=code)
 
         prompt: Any = {
@@ -534,9 +537,12 @@ class MinimalAgent:
         print("[cyan]--------------------------------[/cyan]")
 
         print("MinimalAgent: Getting plan and code")
-        plan, code = self.plan_and_code_query(prompt)
+        # Capture the LLM messages_ref hashes that produced this node's code.
+        # When the ARA tracer is inactive the block is a no-op (refs stays []).
+        with capture_llm_calls() as refs:
+            plan, code = self.plan_and_code_query(prompt)
         print("MinimalAgent: Draft complete")
-        return Node(plan=plan, code=code)
+        return Node(plan=plan, code=code, llm_call_refs=list(refs))
 
     def _debug(self, parent_node: Node) -> Node:
         prompt: Any = {
@@ -564,8 +570,9 @@ class MinimalAgent:
         if self.cfg.agent.data_preview:
             prompt["Data Overview"] = self.data_preview
 
-        plan, code = self.plan_and_code_query(prompt)
-        return Node(plan=plan, code=code, parent=parent_node)
+        with capture_llm_calls() as refs:
+            plan, code = self.plan_and_code_query(prompt)
+        return Node(plan=plan, code=code, parent=parent_node, llm_call_refs=list(refs))
 
     def _improve(self, parent_node: Node) -> Node:
         prompt: Any = {
@@ -586,11 +593,13 @@ class MinimalAgent:
         prompt["Instructions"] |= self._prompt_resp_fmt
         prompt["Instructions"] |= self._prompt_impl_guideline
 
-        plan, code = self.plan_and_code_query(prompt)
+        with capture_llm_calls() as refs:
+            plan, code = self.plan_and_code_query(prompt)
         return Node(
             plan=plan,
             code=code,
             parent=parent_node,
+            llm_call_refs=list(refs),
         )
 
     def _generate_seed_node(self, parent_node: Node):

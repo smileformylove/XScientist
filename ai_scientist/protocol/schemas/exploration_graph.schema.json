@@ -19,7 +19,17 @@
           "id": {"type": "string"},
           "content_hash": {
             "type": ["string", "null"],
-            "description": "sha256:<hex>, derived from code + normalised metric."
+            "description": "sha256:<hex>. See content_hash_inputs for which fields fed the hash."
+          },
+          "content_hash_inputs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Which categories of input contributed to content_hash. Older ARAs omit this and are treated as ['code','metric']. Add 'llm_calls' when llm_call_hashes were bound in."
+          },
+          "llm_call_refs": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "description": "messages_ref.hash values from llm/calls.jsonl that produced this node."
           },
           "stage": {"type": ["string", "null"]},
           "step": {"type": ["integer", "null"]},

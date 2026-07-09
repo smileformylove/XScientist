@@ -29,6 +29,8 @@ class Kind(str, Enum):
     VERIFY_REPORT = "verify_report"
     REEXEC_BATCH = "reexec_batch"
     METRIC_MARKER = "metric_marker"
+    LLM_CALL = "llm_call"
+    REFERENCE_MANIFEST = "reference_manifest"
 
     @classmethod
     def values(cls) -> tuple[str, ...]:

@@ -40,7 +40,17 @@
       },
       "additionalProperties": true
     },
-    "references": {"type": "object"},
+    "references": {
+      "type": "object",
+      "description": "Producer-supplied pointers to sub-artifacts. `pipeline_artifacts` follows the reference_manifest.schema.json shape.",
+      "properties": {
+        "pipeline_artifacts": {
+          "type": "array",
+          "items": {"$ref": "reference_manifest.schema.json"}
+        }
+      },
+      "additionalProperties": true
+    },
     "missing": {
       "type": "array",
       "items": {"type": "string"},

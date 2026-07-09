@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/reference_manifest.schema.json",
+  "title": "ARA Reference Entry",
+  "description": "Uniform shape for each entry listed under manifest.references.*. Producers used to write these free-form; this schema pins the fields consumers can rely on so cross-ARA diffs by content_hash become straightforward.",
+  "type": "object",
+  "required": ["kind", "path"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "description": "Semantic tag for the referenced artifact. Common values: pareto_pool, repair_history, experiment_registry, review_state, critic_findings, claim_evidence_graph, manuscript_state, figure_spec, stage_standards, process_alignment, research_program, manuscript_candidate_pool, self_evolution, research_plan, idea_cards, pipeline_manifest, repair_attempts."
+    },
+    "path": {"type": "string", "description": "Path relative to the ARA root (e.g. pipeline/review_state.json)."},
+    "schema_version": {"type": ["string", "null"], "description": "The producer's own version tag for this artifact, if any."},
+    "content_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "producer": {"type": ["string", "null"], "description": "Which pipeline stage or subsystem generated the artifact."},
+    "generated_at": {"type": ["string", "null"]},
+    "size": {"type": ["integer", "null"], "minimum": 0},
+    "notes": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

@@ -33,6 +33,7 @@ from typing import Any
 
 from ai_scientist.utils.ara_artifact import (
     ARAExportResult,
+    ara_dir_for_idea,
     export_ara,
     update_manifest_claim_count,
 )
@@ -42,6 +43,10 @@ from ai_scientist.utils.ara_seed import (
     build_seed_manifest_from_ara_node,
     resolve_seed_manifest_from_source,
     stage_seed_manifest,
+)
+from ai_scientist.protocol.llm_trace import (
+    ENV_ACTIVE_ROOT as LLM_TRACE_ROOT_ENV,
+    ENV_STAGE as LLM_TRACE_STAGE_ENV,
 )
 from ai_scientist.utils.claim_coverage import (
     ClaimCoverageReport,
@@ -124,6 +129,59 @@ def _read_provenance_env() -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if (isinstance(parsed, dict) and parsed) else None
+
+
+def activate_llm_tracing(
+    *,
+    project_dir: str | Path,
+    idea: dict[str, Any] | None = None,
+    exp_dir: str | Path | None = None,
+    timestamp: str | None = None,
+    stage: str | None = None,
+) -> Path | None:
+    """Point the LLM tracer at the ARA directory this idea will write into.
+
+    Rationale: LLM calls happen BEFORE ``export_ara`` runs — if we only turn
+    tracing on after export, we've missed every prompt that generated the
+    code we're exporting. So we resolve the ARA directory eagerly (same math
+    ``export_ara`` uses at line 589), pre-create it, and set the env vars
+    that ``ai_scientist.protocol.llm_trace.record_llm_call`` reads.
+
+    Passing ``stage`` sets a default group label; individual stages can still
+    override it by re-setting ``AI_SCIENTIST_LLM_STAGE`` before their own
+    calls. Returns the ARA root that was activated, or None if we couldn't
+    resolve one (e.g. the caller supplied no idea + exp_dir hint).
+    """
+    idea = idea or {}
+    exp_path = Path(exp_dir).expanduser().resolve() if exp_dir else None
+    name = str(idea.get("Name") or idea.get("name") or (exp_path.name if exp_path else "")).strip()
+    if not name:
+        return None
+
+    ts = timestamp
+    if ts is None and exp_path is not None:
+        # Same regex ``export_ara`` uses when extracting the timestamp segment.
+        import re as _re
+        m = _re.match(r"^(\d{4}-\d{2}-\d{2}[_T-]?\d{2}[:_-]?\d{2}(?:[:_-]?\d{2})?)", exp_path.name)
+        ts = m.group(1) if m else None
+
+    try:
+        ara_dir = ara_dir_for_idea(Path(project_dir).expanduser().resolve(),
+                                   name, timestamp=ts)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    ara_dir.mkdir(parents=True, exist_ok=True)
+    os.environ[LLM_TRACE_ROOT_ENV] = str(ara_dir)
+    if stage is not None:
+        os.environ[LLM_TRACE_STAGE_ENV] = stage
+    return ara_dir
+
+
+def deactivate_llm_tracing() -> None:
+    """Unset tracer env vars. Idempotent; safe to call from ``finally`` blocks."""
+    os.environ.pop(LLM_TRACE_ROOT_ENV, None)
+    os.environ.pop(LLM_TRACE_STAGE_ENV, None)
 
 
 def _find_tex_files(exp_dir: Path) -> list[str]:

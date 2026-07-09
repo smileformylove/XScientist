@@ -124,6 +124,14 @@ class Node(DataClassJsonMixin):
     is_seed_node: bool = field(default=False, kw_only=True)
     is_seed_agg_node: bool = field(default=False, kw_only=True)
 
+    # ---- LLM provenance ----
+    # messages_ref.hash values from <ara>/llm/calls.jsonl for calls that
+    # produced this node's code/plan. Left empty on nodes built without an
+    # active tracer (legacy runs, seed nodes, deterministic replays).
+    # Consumed by export_ara → hash_node_payload(llm_call_hashes=...) so
+    # two nodes with identical code but different prompts hash differently.
+    llm_call_refs: list[str] = field(default_factory=list, kw_only=True)
+
     def __post_init__(self) -> None:
         # Ensure children is a set even if initialized with a list
         if isinstance(self.children, list):

@@ -275,16 +275,30 @@ def _export_nodes_from_journal(
         }
         # Content hash lets downstream consumers match "the same experiment"
         # across ARA instances by payload, not path. Documented in SPEC.md.
+        # We also bind Node.llm_call_refs (messages_ref hashes from
+        # <ara>/llm/calls.jsonl) so two nodes with identical code+metric but
+        # different prompts hash differently — closes the "same code, different
+        # prompt" hole. content_hash_inputs records which categories fed the
+        # hash so cross-version diff can detect binding scheme changes.
         node_content_hash: str | None = None
+        llm_refs_raw = raw.get("llm_call_refs") or []
+        # Defensive: journal is JSON, but this list may arrive as any iterable
+        # of strings (or nothing at all on legacy runs / seed nodes).
+        llm_refs = [str(r) for r in llm_refs_raw if r]
+        hash_inputs = ["code", "metric"]
+        if llm_refs:
+            hash_inputs.append("llm_calls")
         try:
             node_content_hash = hash_node_payload(
                 code=code if isinstance(code, str) else "",
                 metric=raw.get("metric"),
+                llm_call_hashes=llm_refs or None,
             )
         except Exception as exc:  # pragma: no cover - defensive; hashing is best-effort
             logger.warning("ARA export: hashing node %s failed: %s", node_id, exc)
         if node_content_hash:
             metrics_payload["content_hash"] = node_content_hash
+            metrics_payload["content_hash_inputs"] = hash_inputs
         _safe_write_json(node_dir / "metrics.json", metrics_payload)
 
         # 4. Plot references.
@@ -306,6 +320,8 @@ def _export_nodes_from_journal(
             {
                 "id": node_id,
                 "content_hash": node_content_hash,
+                "content_hash_inputs": hash_inputs,
+                "llm_call_refs": llm_refs,
                 "stage": stage_label,
                 "step": raw.get("step"),
                 "parent_id": raw.get("parent_id"),
@@ -406,6 +422,113 @@ def _pdf_reference(exp_dir_source: Path) -> dict[str, Any] | None:
         "path": str(pdf_path),
         "sha256": _sha256_of(Path(pdf_path)),
     }
+
+
+def _snapshot_pipeline_artifacts(
+    *,
+    ara_dir: Path,
+    exp_dir: Path,
+    project_dir: Path,
+    missing: list[str],
+) -> list[dict[str, Any]]:
+    """Copy pipeline_contracts artifacts into the ARA and content-address them.
+
+    For each of the 16 kinds registered in
+    :data:`ai_scientist.utils.pipeline_contracts.ARTIFACT_FILENAMES`, this
+    helper looks in a small set of well-known locations (experiment dir,
+    hidden ``.pipeline`` subdir, project dir, project-level ``.pipeline``
+    subdir), copies the first file it finds into ``<ara>/pipeline/`` for
+    human browsing, and *also* stores the same bytes under ``<ara>/objects/``
+    so cross-ARA diff can go straight to a hash comparison.
+
+    Silently absent artifacts are recorded once in ``missing`` — we don't want
+    to spam the manifest with 16 lines when a project only produces two.
+
+    Never raises. If ``pipeline_contracts`` isn't importable (unlikely, but
+    defends against install-time drift) we skip snapshotting entirely.
+    """
+    try:
+        from ai_scientist.utils.pipeline_contracts import ARTIFACT_FILENAMES
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    try:
+        from ai_scientist.protocol import ObjectStore
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    pipeline_dir = ara_dir / "pipeline"
+    pipeline_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        store = ObjectStore(ara_dir)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    entries: list[dict[str, Any]] = []
+    absent: list[str] = []
+    for kind, filename in ARTIFACT_FILENAMES.items():
+        src = _find_pipeline_artifact(exp_dir, project_dir, filename)
+        if src is None:
+            absent.append(f"pipeline_artifacts/{kind} (source missing)")
+            continue
+        try:
+            raw = src.read_bytes()
+        except OSError as exc:
+            logger.warning("ARA export: pipeline artifact %s unreadable: %s", src, exc)
+            continue
+        try:
+            ref = store.put_bytes(raw)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("ARA export: CAS put failed for %s: %s", src, exc)
+            continue
+        # Mirror to pipeline/ for human browsing. Overwrites are fine —
+        # bytes on disk equal bytes in CAS by construction of put_bytes.
+        dst = pipeline_dir / filename
+        try:
+            dst.write_bytes(raw)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.warning("ARA export: pipeline mirror write failed for %s: %s", dst, exc)
+            continue
+        entries.append({
+            "kind": kind,
+            "path": str(dst.relative_to(ara_dir)),
+            "content_hash": ref.hash,
+            "size": ref.size,
+            "generated_at": _iso_mtime(src),
+            "source": str(src),
+        })
+
+    if absent:
+        # Roll the individually-absent kinds into a single note so the
+        # manifest doesn't get 16 lines of noise.
+        missing.append(f"pipeline_artifacts absent: {len(absent)}/{len(ARTIFACT_FILENAMES)}")
+    return entries
+
+
+def _find_pipeline_artifact(exp_dir: Path, project_dir: Path, filename: str) -> Path | None:
+    """Return the first existing path for ``filename`` across known locations.
+
+    Order matters — the experiment-dir hits win over project-level fallbacks
+    so a per-run version overrides a leftover project-level file.
+    """
+    candidates = (
+        exp_dir / filename,
+        exp_dir / ".pipeline" / filename,
+        project_dir / filename,
+        project_dir / ".pipeline" / filename,
+    )
+    for cand in candidates:
+        if cand.exists() and cand.is_file():
+            return cand
+    return None
+
+
+def _iso_mtime(path: Path) -> str | None:
+    try:
+        ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return ts.isoformat().replace("+00:00", "Z")
 
 
 def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
@@ -595,6 +718,19 @@ def export_ara(
     pdf_ref = _pdf_reference(exp_dir_path)
     if pdf_ref:
         references["pdf"] = pdf_ref
+
+    # 5b. Pipeline artifacts snapshot.
+    # The 16 kinds tracked in pipeline_contracts (review_state, critic_findings,
+    # claim_evidence_graph, manuscript_state, figure_spec, …) live inside
+    # <exp_dir>/<project layout> today and never made it into ARA. Snapshot
+    # them into <ara>/pipeline/ for human browsing and into <ara>/objects/
+    # for content-addressed diffing.
+    references["pipeline_artifacts"] = _snapshot_pipeline_artifacts(
+        ara_dir=ara_dir,
+        exp_dir=exp_dir_path,
+        project_dir=project_dir_path,
+        missing=missing,
+    )
 
     # 6. Manifest.
     manifest = {

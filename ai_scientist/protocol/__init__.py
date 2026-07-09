@@ -19,18 +19,25 @@ from __future__ import annotations
 
 from .constants import PROTOCOL_VERSION, Kind
 from .hashing import build_provenance, content_hash, hash_node_payload
+from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
+from .objects import ObjectRef, ObjectStore
 from .schemas import available_schemas, load_schema
 from .validator import ValidationReport, validate_ara, validate_manifest
 
 __all__ = [
     "PROTOCOL_VERSION",
     "Kind",
+    "ObjectRef",
+    "ObjectStore",
     "ValidationReport",
+    "active_ara_root",
     "available_schemas",
     "build_provenance",
+    "capture_llm_calls",
     "content_hash",
     "hash_node_payload",
     "load_schema",
+    "record_llm_call",
     "validate_ara",
     "validate_manifest",
 ]

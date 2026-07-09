@@ -57,6 +57,8 @@ from ai_scientist.utils.experiment_registry import (
     save_experiment_registry,
 )
 from ai_scientist.utils.ara_pipeline import (
+    activate_llm_tracing,
+    deactivate_llm_tracing,
     finalize_ara_for_idea,
     stage_seed_from_cli,
     summarise_finalize,
@@ -824,6 +826,20 @@ def process_single_idea(args):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         exp_dir = osp.join(project_dir, "02_experiments", f"{timestamp}_{idea_name}")
         os.makedirs(exp_dir, exist_ok=True)
+
+        # Turn on LLM tracing NOW: every prompt from ideation → writeup →
+        # review will be journaled into <ara>/llm/calls.jsonl with its
+        # payloads content-addressed into <ara>/objects/. We activate here
+        # (not after finalize_ara_for_idea) because most LLM calls happen
+        # BEFORE the ARA is exported — activating late would miss them.
+        # deactivate_llm_tracing() runs in the outer finally so a crash
+        # partway through leaves this process's env clean.
+        activate_llm_tracing(
+            project_dir=project_dir,
+            idea=idea,
+            timestamp=timestamp,
+            stage="pipeline",
+        )
         initialize_pipeline_contracts(
             exp_dir,
             project_name=Path(exp_dir).name,
@@ -1725,6 +1741,11 @@ def process_single_idea(args):
             ),
             "critic_roles_used": list(failure_runtime_plan.critic_review_roles),
         }
+    finally:
+        # Clear tracer env vars so a subsequent process_single_idea call
+        # (multi-idea batches) starts clean and cannot leak this idea's ARA
+        # root into the next one.
+        deactivate_llm_tracing()
 
 
 def run_parallel_experiments(project_dir, idea_json, num_workers, idea_indices, **kwargs):
