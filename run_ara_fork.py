@@ -370,15 +370,42 @@ def cmd_diff(args: argparse.Namespace) -> int:
     ara_a = _resolve_ara_root(args.ara)
     ara_b = _resolve_ara_root(args.other)
     result = diff_ara(ara_a, ara_b)
+    lists = ("nodes_added", "nodes_removed", "nodes_hash_changed")
+
+    # --only-node narrows the per-node lists; manifest/references stay aggregate.
+    if args.only_node:
+        matched = False
+        for name in lists:
+            kept = [n for n in getattr(result, name) if n.id == args.only_node]
+            matched = matched or bool(kept)
+            setattr(result, name, kept)
+        if not matched:
+            print(f"node {args.only_node} not present in either side", file=sys.stderr)
+            return 3
+
+    # Snapshot pre-truncation counts so the summary line stays honest.
+    summary_counts = {k: len(getattr(result, n))
+                      for k, n in zip(("added", "removed", "changed"), lists)}
+    truncated = {"added": 0, "removed": 0, "changed": 0}
+    if args.limit_nodes is not None and args.limit_nodes >= 0:
+        n = args.limit_nodes
+        for key, name in zip(("added", "removed", "changed"), lists):
+            lst = getattr(result, name)
+            if len(lst) > n:
+                truncated[key] = len(lst) - n
+                setattr(result, name, lst[:n])
 
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False, default=str))
+        payload = result.to_dict()
+        if any(truncated.values()):
+            payload["truncated"] = truncated
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
         return 0
 
-    _render_diff(result)
+    _render_diff(result, summary_counts=summary_counts, truncated=truncated)
     # Non-zero when there's any material difference — makes it usable in CI.
     if result.manifest.hash_equal and not (
-        result.nodes_added or result.nodes_removed or result.nodes_hash_changed
+        summary_counts["added"] or summary_counts["removed"] or summary_counts["changed"]
         or result.references.seed_changed
         or result.references.pipeline_added
         or result.references.pipeline_removed
@@ -486,7 +513,21 @@ def cmd_refs(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _render_diff(result) -> None:  # ARADiff
+def _render_diff(
+    result,
+    *,
+    summary_counts: dict[str, int] | None = None,
+    truncated: dict[str, int] | None = None,
+) -> None:  # ARADiff
+    # Fall back to counts from result when caller didn't pre-snapshot them.
+    counts = summary_counts or {
+        "added": len(result.nodes_added),
+        "removed": len(result.nodes_removed),
+        "changed": len(result.nodes_hash_changed),
+    }
+    trunc = truncated or {"added": 0, "removed": 0, "changed": 0}
+    footer = "  ... {n} more (use --only-node <id> to inspect)"
+
     print(f"# diff  {result.ara_a}  <->  {result.ara_b}")
     print()
     m = result.manifest
@@ -516,17 +557,23 @@ def _render_diff(result) -> None:  # ARADiff
             print(f"  ~ pipeline/{entry['kind']}: {entry['hash_a']}  ->  {entry['hash_b']}")
 
     print()
-    print(f"## nodes  (+{len(result.nodes_added)} "
-          f"-{len(result.nodes_removed)} "
-          f"~{len(result.nodes_hash_changed)} "
+    print(f"## nodes  (+{counts['added']} "
+          f"-{counts['removed']} "
+          f"~{counts['changed']} "
           f"={result.nodes_unchanged})")
     for n in result.nodes_added:
         print(f"  + {n.id}  {n.hash_b}")
+    if trunc["added"]:
+        print(footer.format(n=trunc["added"]))
     for n in result.nodes_removed:
         print(f"  - {n.id}  {n.hash_a}")
+    if trunc["removed"]:
+        print(footer.format(n=trunc["removed"]))
     for n in result.nodes_hash_changed:
         cats = ",".join(n.changed_categories) or "unknown"
         print(f"  ~ {n.id}  [{cats}]  {n.hash_a}  ->  {n.hash_b}")
+    if trunc["changed"]:
+        print(footer.format(n=trunc["changed"]))
 
     p = result.prompts
     print()
@@ -717,6 +764,15 @@ def build_parser() -> argparse.ArgumentParser:
     diff_p.add_argument(
         "--exit-code-on-diff", action="store_true",
         help="Exit non-zero when any material difference is found (useful in CI)",
+    )
+    diff_p.add_argument(
+        "--only-node", metavar="ID", default=None,
+        help="Filter node lists to entries with this id (exits rc=3 if absent).",
+    )
+    diff_p.add_argument(
+        "--limit-nodes", type=int, default=None, metavar="N",
+        help="Truncate each of added/removed/changed to N entries. Summary "
+             "counts remain accurate; JSON output gains a `truncated` field.",
     )
     diff_p.set_defaults(func=cmd_diff)
 
