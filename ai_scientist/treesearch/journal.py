@@ -304,6 +304,11 @@ class Node(DataClassJsonMixin):
             "is_seed_agg_node": self.is_seed_agg_node,
             "exec_time_feedback": self.exec_time_feedback,
             "llm_call_refs": list(self.llm_call_refs or []),
+            "plot_term_out": self.plot_term_out,
+            "plot_exec_time": self.plot_exec_time,
+            "plot_exc_type": self.plot_exc_type,
+            "plot_exc_info": self.plot_exc_info,
+            "plot_exc_stack": self.plot_exc_stack,
         }
 
     @classmethod
