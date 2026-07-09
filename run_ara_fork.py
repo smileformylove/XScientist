@@ -487,6 +487,73 @@ def cmd_verify_lock(args: argparse.Namespace) -> int:
     return 3  # unlocked / anything else — mirror `refs --get` missing semantics
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    """Render the manifest revision chain (lock + manifest.history.jsonl).
+
+    Row 0 is synthesised from ``manifest.lock`` — the immutability
+    anchor written at export time. Subsequent rows are streamed straight
+    from ``manifest.history.jsonl`` in order. Exit codes mirror
+    ``verify-lock``: rc=0 when the lock exists (even with zero
+    revisions), rc=3 when it doesn't.
+    """
+    from ai_scientist.utils.ara_manifest_lock import (
+        MANIFEST_HISTORY_NAME, MANIFEST_LOCK_NAME,
+    )
+
+    ara_root = _resolve_ara_root(args.ara)
+    lock_path = ara_root / MANIFEST_LOCK_NAME
+    if not lock_path.exists():
+        print(f"[ara-history] {ara_root} is unlocked (no {MANIFEST_LOCK_NAME})",
+              file=sys.stderr)
+        return 3
+
+    lock = _load_json(lock_path) or {}
+    history_path = ara_root / MANIFEST_HISTORY_NAME
+    revisions: list[dict[str, Any]] = []
+    if history_path.exists():
+        try:
+            for line in history_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    revisions.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            revisions = []
+
+    if args.limit is not None and args.limit >= 0:
+        revisions = revisions[-args.limit:] if args.limit else []
+
+    rows: list[dict[str, Any]] = [{
+        "revision": 0,
+        "ts": lock.get("created_at"),
+        "base_hash": None,
+        "new_hash": lock.get("manifest_hash"),
+        "producer": None,
+        "reason": "(initial export)",
+        "changed_fields": [],
+    }]
+    for r in revisions:
+        rows.append({
+            "revision": r.get("revision"),
+            "ts": r.get("ts"),
+            "base_hash": r.get("base_hash"),
+            "new_hash": r.get("new_hash"),
+            "producer": r.get("producer"),
+            "reason": r.get("reason"),
+            "changed_fields": r.get("changed_fields") or [],
+        })
+
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    _render_history(rows)
+    return 0
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -641,6 +708,46 @@ def _render_log(log) -> None:  # ARALog
             print(f"       seed_hash={a.seed_hash}")
         if a.detail:
             print(f"       note: {a.detail}")
+
+
+def _short_hash(h: str | None) -> str:
+    if not h:
+        return "-"
+    # Full form is sha256:<64 hex>. Keep the prefix + first 16 hex + ellipsis.
+    if ":" in h:
+        prefix, digest = h.split(":", 1)
+        return f"{prefix}:{digest[:16]}…" if len(digest) > 16 else h
+    return f"{h[:16]}…" if len(h) > 16 else h
+
+
+def _render_history(rows: list[dict[str, Any]]) -> None:
+    header = ("rev", "ts", "base_hash", "new_hash", "producer", "reason")
+    widths = {
+        "rev": max(3, max(len(str(r["revision"])) for r in rows)),
+        "ts": 20,
+        "base_hash": 24,
+        "new_hash": 24,
+        "producer": 30,
+    }
+    line = (
+        f"{header[0]:<{widths['rev']}}  "
+        f"{header[1]:<{widths['ts']}}  "
+        f"{header[2]:<{widths['base_hash']}}  "
+        f"{header[3]:<{widths['new_hash']}}  "
+        f"{header[4]:<{widths['producer']}}  "
+        f"{header[5]}"
+    )
+    print(line)
+    for r in rows:
+        base = "(base)" if r["revision"] == 0 else _short_hash(r["base_hash"])
+        print(
+            f"{r['revision']:<{widths['rev']}}  "
+            f"{(r['ts'] or '-'):<{widths['ts']}}  "
+            f"{base:<{widths['base_hash']}}  "
+            f"{_short_hash(r['new_hash']):<{widths['new_hash']}}  "
+            f"{(r['producer'] or '-'):<{widths['producer']}}  "
+            f"{r['reason'] or '-'}"
+        )
 
 
 def cmd_freeze(args: argparse.Namespace) -> int:
@@ -817,6 +924,19 @@ def build_parser() -> argparse.ArgumentParser:
     verify_lock_p.add_argument("--json", action="store_true",
                                help="Emit the raw report dict as JSON.")
     verify_lock_p.set_defaults(func=cmd_verify_lock)
+
+    history_p = sub.add_parser(
+        "history",
+        help="Render the manifest revision chain (lock + manifest.history.jsonl).",
+    )
+    history_p.add_argument("--ara", required=True)
+    history_p.add_argument("--json", action="store_true",
+                           help="Emit rows as a JSON array (full hashes preserved).")
+    history_p.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="Show only the last N revisions (row 0 / base is always shown).",
+    )
+    history_p.set_defaults(func=cmd_history)
 
     refs_p = sub.add_parser(
         "refs",
