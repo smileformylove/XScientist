@@ -571,6 +571,82 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_show(args: argparse.Namespace) -> int:
+    """Dump a single node's full metadata as JSON to stdout.
+
+    Machine-readable complement to ``inspect`` — every field a
+    downstream script might want (hash inputs, llm refs, code, tail of
+    term_out) in one shot, so pipelines don't have to xargs six files.
+
+    Exit codes mirror ``log --node`` / ``diff --only-node`` / ``refs
+    --get``: rc=3 when the requested node id is not present.
+    """
+    ara_root = _resolve_ara_root(args.ara)
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    meta: dict[str, Any] = {}
+    for node in graph.get("nodes") or []:
+        if isinstance(node, dict) and str(node.get("id")) == args.node:
+            meta = node
+            break
+    node_dir = ara_root / "nodes" / args.node
+    if not meta and not node_dir.exists():
+        print(f"[ara-show] node {args.node} not found in {ara_root}",
+              file=sys.stderr)
+        return 3
+
+    metrics = _load_json(node_dir / "metrics.json") or {}
+    plots = _load_json(node_dir / "plots.json") or {}
+
+    code_path = node_dir / "code.py"
+    code_text: str | None = None
+    if code_path.exists():
+        try:
+            code_text = code_path.read_text(encoding="utf-8")
+        except OSError:
+            code_text = None
+
+    term_path = node_dir / "term_out.log"
+    term_tail: str | None = None
+    term_size = 0
+    if term_path.exists():
+        try:
+            term_size = term_path.stat().st_size
+            raw = term_path.read_bytes()
+            tail = raw if args.term_tail is None else raw[-args.term_tail:] if args.term_tail > 0 else b""
+            term_tail = tail.decode("utf-8", errors="replace")
+        except OSError:
+            term_tail = None
+            term_size = 0
+
+    payload = {
+        "id": args.node,
+        "content_hash": meta.get("content_hash") or metrics.get("content_hash"),
+        "content_hash_inputs": (
+            meta.get("content_hash_inputs")
+            or metrics.get("content_hash_inputs")
+            or []
+        ),
+        "llm_call_refs": meta.get("llm_call_refs") or [],
+        "is_buggy": meta.get("is_buggy"),
+        "is_seed_node": meta.get("is_seed_node"),
+        "step": meta.get("step"),
+        "parent_id": meta.get("parent_id"),
+        "children": meta.get("children") or [],
+        "metric": metrics.get("metric") if metrics.get("metric") is not None else meta.get("metric"),
+        "analysis": metrics.get("analysis"),
+        "exec_time": metrics.get("exec_time"),
+        "exc_type": metrics.get("exc_type"),
+        "code": code_text,
+        "term_out_tail": term_tail,
+        "term_out_size": term_size,
+        "plots": plots.get("plots") or plots.get("plot_paths") or [],
+        "plots_generated": plots.get("plots_generated"),
+        "vlm_feedback_summary": plots.get("vlm_feedback_summary") or [],
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -986,6 +1062,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show only the last N revisions (row 0 / base is always shown).",
     )
     history_p.set_defaults(func=cmd_history)
+
+    show_p = sub.add_parser(
+        "show",
+        help="Dump a node's full metadata as JSON (machine-readable inspect).",
+    )
+    show_p.add_argument("--ara", required=True)
+    show_p.add_argument("--node", required=True, help="Node id to dump.")
+    show_p.add_argument(
+        "--term-tail", type=int, default=4000, metavar="N",
+        help="Limit term_out.log tail to N bytes (default 4000; 0 = empty).",
+    )
+    show_p.set_defaults(func=cmd_show)
 
     refs_p = sub.add_parser(
         "refs",
