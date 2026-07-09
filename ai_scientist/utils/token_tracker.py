@@ -3,7 +3,7 @@ import inspect
 from typing import Any, Dict, Optional, List, Tuple
 from collections import defaultdict
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 
@@ -203,7 +203,7 @@ def _record_token_usage(result: Any, prompt: Any, system_message: Any) -> None:
         return
 
     model = str(getattr(result, "model", "unknown"))
-    timestamp = getattr(result, "created", datetime.utcnow())
+    timestamp = getattr(result, "created", datetime.now(timezone.utc))
     prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens = usage_tuple
 
     token_tracker.add_tokens(
