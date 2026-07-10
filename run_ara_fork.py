@@ -764,6 +764,12 @@ def cmd_show(args: argparse.Namespace) -> int:
         "plots_generated": plots.get("plots_generated"),
         "vlm_feedback_summary": plots.get("vlm_feedback_summary") or [],
     }
+    if getattr(args, "terse", False):
+        # Shape-only view — drop the two large text blobs while keeping every
+        # other field (including term_out_size) so callers can still see how
+        # big term_out was without paging through the bytes.
+        payload.pop("code", None)
+        payload.pop("term_out_tail", None)
     print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     return 0
 
@@ -2182,6 +2188,10 @@ def build_parser() -> argparse.ArgumentParser:
     show_p.add_argument(
         "--term-tail", type=int, default=4000, metavar="N",
         help="Limit term_out.log tail to N bytes (default 4000; 0 = empty).",
+    )
+    show_p.add_argument(
+        "--terse", action="store_true",
+        help="Omit large text blobs (code, term_out_tail) — shape-only view.",
     )
     show_p.set_defaults(func=cmd_show)
 

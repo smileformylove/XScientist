@@ -143,6 +143,40 @@ class ShowCLITests(unittest.TestCase):
         self.assertEqual(payload["llm_call_refs"], [prompt_hash])
         self.assertIn("llm_calls", payload["content_hash_inputs"])
 
+    def _terse_ara(self) -> Path:
+        return _make_ara(self.tmp, "terse", [{
+            "id": "n1", "step": 0, "code": "print('hi')\n" * 100,
+            "_term_out": ["A" * 6000],
+            "metric": {"value": 0.5, "maximize": True, "name": "acc"},
+            "is_buggy": False, "parent_id": None, "children": [],
+        }])
+
+    def test_show_terse_omits_code_and_term_out_tail(self) -> None:
+        ara = self._terse_ara()
+        rc, out, err = _run("show", "--ara", str(ara), "--node", "n1", "--terse")
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        for key in ("id", "content_hash", "metric", "step", "children"):
+            self.assertIn(key, payload)
+        self.assertNotIn("code", payload)
+        self.assertNotIn("term_out_tail", payload)
+
+    def test_show_terse_preserves_term_out_size(self) -> None:
+        ara = self._terse_ara()
+        rc, out, err = _run("show", "--ara", str(ara), "--node", "n1", "--terse")
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        self.assertEqual(payload["term_out_size"], 6000)
+
+    def test_show_default_still_includes_code(self) -> None:
+        ara = self._terse_ara()
+        rc, out, err = _run("show", "--ara", str(ara), "--node", "n1")
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        self.assertIn("code", payload)
+        self.assertIn("term_out_tail", payload)
+        self.assertTrue(payload["code"].startswith("print('hi')"))
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
