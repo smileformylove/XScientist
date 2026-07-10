@@ -231,6 +231,18 @@ class VerifyLockAllTests(unittest.TestCase):
                 self.assertIn(key, entry)
             self.assertEqual(entry["state"], "clean")
 
+    def test_verify_lock_all_json_empty_project_emits_empty_array(self) -> None:
+        """`--json` on an empty project must emit `[]` on stdout so CI pipes
+        (`... --json | jq`) don't choke on empty input. The human note stays
+        on stderr — same invariant every other verb honors."""
+        project = self.tmp / "empty_json"
+        project.mkdir()
+        rc, out, err = _run("verify-lock", "--all", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "[]")
+        self.assertEqual(json.loads(out), [])
+        self.assertIn("no ARAs", err)
+
     def test_verify_lock_all_and_ara_mutually_exclusive(self) -> None:
         project = self._project_with("mx", 1)
         ara = next(iter((project / "ara").iterdir()))

@@ -586,6 +586,8 @@ def _verify_lock_all(project_dir: Path, args: argparse.Namespace) -> int:
                     "detail": r.get("detail"),
                 })
     if not entries:
+        if args.json:
+            print("[]")
         print(f"(no ARAs found under {ara_base})", file=sys.stderr)
         return 0
     if args.json:
