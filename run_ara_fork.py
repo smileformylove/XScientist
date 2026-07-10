@@ -920,8 +920,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     entries: list[dict[str, Any]] = []
     if ara_base.exists():
         for sub in sorted(ara_base.iterdir()):
-            if not sub.is_dir():
-                continue
+            if not sub.is_dir() or not (sub / "manifest.json").exists():
+                continue  # not an ARA — skip _scratch/ / __pycache__/ / .hidden/ / etc.
             manifest = _load_json(sub / "manifest.json")
             if not isinstance(manifest, dict):
                 entries.append({

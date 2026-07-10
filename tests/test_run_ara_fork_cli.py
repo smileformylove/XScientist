@@ -367,6 +367,22 @@ class ListCLITests(unittest.TestCase):
         parent_entry = next(e for e in payload if e["path"] != "forked_ara")
         self.assertFalse(parent_entry["seed_present"])
 
+    def test_list_skips_subdirs_without_manifest(self) -> None:
+        """Non-ARA sibling dirs (_scratch/, __pycache__/, .hidden/) must not
+        surface as synthetic entries — matches _verify_lock_all's filter."""
+        real = _make_ara(self.tmp, "solo", [_node("nA", value=0.5)])
+        ara_base = real.parent
+        for junk in ("_scratch", "__pycache__", ".hidden"):
+            (ara_base / junk).mkdir()
+
+        rc, out, _ = _run("list", "--project", str(self.tmp / "solo"), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["path"], real.name)
+        for junk in ("_scratch", "__pycache__", ".hidden"):
+            self.assertNotIn(junk, out)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
