@@ -1419,6 +1419,129 @@ def _render_claims(rows: list[dict[str, Any]]) -> None:
         print(fmt.format(*row))
 
 
+def cmd_provenance(args: argparse.Namespace) -> int:
+    """Reverse-lookup: find every ARA under a project that references a hash.
+
+    Complements the immutability/inspection verbs (verify-lock, list, hash-check,
+    describe) with a "who has this hash?" query. Given a full ``sha256:<hex>``
+    string, this sweeps ``<project>/ara/*/`` and reports every place the hash
+    appears: as a manifest_hash (lock), a node content_hash, an entry in a
+    node's llm_call_refs, the provenance seed_hash / parent_content_hash, the
+    references.seed / references.pipeline_artifacts content_hash, or the target
+    of any local ref under ``<ara>/refs/``.
+
+    Always exits rc=0 — this is a lookup, not a check. Callers distinguish
+    empty vs match by parsing output (``[]`` for --json).
+    """
+    from ai_scientist.utils.ara_artifact import ara_root_for_project
+    from ai_scientist.utils.ara_refs import list_refs
+
+    target = args.hash
+    project_dir = Path(args.project).expanduser().resolve()
+    ara_base = ara_root_for_project(str(project_dir))
+    hits: list[dict[str, Any]] = []
+
+    if ara_base.exists():
+        for sub in sorted(ara_base.iterdir()):
+            if not (sub.is_dir() and (sub / "manifest.json").exists()):
+                continue
+            hits.extend(_provenance_scan_ara(sub, target, list_refs))
+
+    if args.json:
+        print(json.dumps(hits, indent=2, ensure_ascii=False, default=str))
+    if not hits:
+        print(f"(no ARAs reference {target})", file=sys.stderr)
+        return 0
+    if not args.json:
+        _render_provenance(hits)
+    return 0
+
+
+def _provenance_scan_ara(ara_root: Path, target: str, list_refs) -> list[dict[str, Any]]:
+    """Scan one ARA and return every hit dict where ``target`` is referenced."""
+    out: list[dict[str, Any]] = []
+
+    lock = _load_json(ara_root / "manifest.lock") or {}
+    if isinstance(lock, dict) and lock.get("manifest_hash") == target:
+        out.append({"ara_root": str(ara_root), "kind": "manifest",
+                    "detail": {"revision": lock.get("revision")}})
+
+    manifest = _load_json(ara_root / "manifest.json") or {}
+    provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+    if isinstance(provenance, dict):
+        for key in ("seed_hash", "parent_content_hash"):
+            if provenance.get(key) == target:
+                out.append({"ara_root": str(ara_root),
+                            "kind": "seed" if key == "seed_hash" else "provenance",
+                            "detail": {"field": key}})
+        # Multi-parent shape: provenance.parents[] carries one entry per role
+        # (code/env/data/...). Only the code-role parent is echoed into the
+        # top-level slots by build_provenance, so we must also scan the array
+        # to honor the verb contract "find every ARA that references a hash."
+        parents = provenance.get("parents")
+        if isinstance(parents, list):
+            for i, p in enumerate(parents):
+                if not isinstance(p, dict):
+                    continue
+                if p.get("parent_content_hash") == target:
+                    out.append({"ara_root": str(ara_root), "kind": "provenance",
+                                "detail": {"field": "parents[]", "index": i,
+                                           "role": p.get("role"),
+                                           "parent_node_id": p.get("parent_node_id")}})
+    references = manifest.get("references") if isinstance(manifest, dict) else None
+    if isinstance(references, dict):
+        seed_ref = references.get("seed")
+        if isinstance(seed_ref, dict) and seed_ref.get("content_hash") == target:
+            out.append({"ara_root": str(ara_root), "kind": "seed",
+                        "detail": {"field": "references.seed"}})
+        for entry in references.get("pipeline_artifacts") or []:
+            if isinstance(entry, dict) and entry.get("content_hash") == target:
+                out.append({"ara_root": str(ara_root), "kind": "pipeline_artifact",
+                            "detail": {"kind": entry.get("kind"),
+                                       "path": entry.get("path")}})
+
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        if node.get("content_hash") == target:
+            out.append({"ara_root": str(ara_root), "kind": "node",
+                        "detail": {"node_id": node_id}})
+        for ref in node.get("llm_call_refs") or []:
+            if ref == target:
+                out.append({"ara_root": str(ara_root), "kind": "llm_call",
+                            "detail": {"node_id": node_id}})
+
+    try:
+        for r in list_refs(ara_root):
+            if r.target == target:
+                out.append({"ara_root": str(ara_root), "kind": "ref",
+                            "detail": {"ref_name": r.name}})
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    return out
+
+
+def _render_provenance(hits: list[dict[str, Any]]) -> None:
+    header = ("KIND", "DETAIL", "ARA")
+
+    def _fmt_detail(d: dict[str, Any] | None) -> str:
+        if not isinstance(d, dict) or not d:
+            return "-"
+        return ", ".join(f"{k}={v}" for k, v in d.items() if v is not None) or "-"
+
+    rows = [(h["kind"], _fmt_detail(h.get("detail")),
+             Path(h["ara_root"]).name) for h in hits]
+    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
+              for i in range(len(header))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    for r in rows:
+        print(fmt.format(*r))
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -2062,6 +2185,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Filter list mode to refs whose name starts with PATH "
                              "(git-style; use trailing slash to scope a namespace).")
     refs_p.set_defaults(func=cmd_refs)
+
+    provenance_p = sub.add_parser(
+        "provenance",
+        help="Reverse-lookup: find every ARA under <project>/ara/ that references a hash.",
+    )
+    provenance_p.add_argument("--hash", required=True,
+                              help="Full content hash string, e.g. sha256:<hex>.")
+    provenance_p.add_argument("--project", required=True,
+                              help="Project directory whose ara/ subtree will be swept.")
+    provenance_p.add_argument("--json", action="store_true",
+                              help="Emit hits as a JSON array (full hashes preserved).")
+    provenance_p.set_defaults(func=cmd_provenance)
 
     return parser
 
