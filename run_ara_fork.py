@@ -30,6 +30,7 @@ outputs go to a caller-supplied ``--dest``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1108,12 +1109,16 @@ def cmd_list(args: argparse.Namespace) -> int:
                 continue
             counts = manifest.get("counts") or {}
             provenance = manifest.get("provenance") or {}
+            if not isinstance(provenance, dict):
+                provenance = {}
             # Match cmd_describe's convention: parent_ara_root also counts
             # as a seed reference (forks set that instead of seed_hash).
             seed_present = bool(
                 provenance.get("seed_hash") or provenance.get("parent_ara_root")
             )
             idea = manifest.get("idea") or {}
+            if not isinstance(idea, dict):
+                idea = {}
             r = verify_manifest_lock(sub)
             entries.append({
                 "ara_root": str(sub),
@@ -1411,6 +1416,119 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hash_file_bytes(path: Path) -> str | None:
+    """sha256 of file bytes as ``sha256:<hex>``; None if unreadable."""
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def cmd_env(args: argparse.Namespace) -> int:
+    """Dump a compact JSON summary of ``<ara>/env/*`` — the reproducibility
+    fingerprint (bfts_config, model_fingerprint, requirements.freeze).
+
+    Complements ``describe`` (whole-ARA), ``show`` (one node), and
+    ``hash-check`` (per-node hash integrity) with a focused view on
+    what a downstream agent needs to re-create the run environment.
+    Always exits rc=0 — this is a dump, not a check.
+    """
+    ara_root = _resolve_ara_root(args.ara)
+    env_dir = ara_root / "env"
+
+    payload: dict[str, Any] = {
+        "ara_root": str(ara_root),
+        "env_dir": None,
+        "bfts_config": {"present": False, "path": "env/bfts_config.yaml"},
+        "model_fingerprint": {"present": False, "path": "env/model_fingerprint.json"},
+        "requirements_freeze": {
+            "present": False,
+            "path": "env/requirements.freeze",
+            "note": "run `run_ara_fork.py freeze` to snapshot",
+        },
+        "other_env_files": [],
+    }
+
+    if not env_dir.is_dir():
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    payload["env_dir"] = str(env_dir)
+    known_names: set[str] = set()
+
+    # bfts_config: prefer .yaml (per iter-1 SPEC / build_env_snapshot) but
+    # fall back to .json for older/hand-authored exports.
+    bfts_yaml = env_dir / "bfts_config.yaml"
+    bfts_json = env_dir / "bfts_config.json"
+    bfts_path = bfts_yaml if bfts_yaml.exists() else (bfts_json if bfts_json.exists() else None)
+    if bfts_path is not None:
+        try:
+            size = bfts_path.stat().st_size
+        except OSError:
+            size = None
+        payload["bfts_config"] = {
+            "present": True,
+            "path": f"env/{bfts_path.name}",
+            "content_hash": _hash_file_bytes(bfts_path),
+            "size_bytes": size,
+        }
+        known_names.add(bfts_path.name)
+
+    # model_fingerprint.json — parsed to lift `models` + `writing_profile`.
+    fp_path = env_dir / "model_fingerprint.json"
+    if fp_path.exists():
+        parsed = _load_json(fp_path) or {}
+        spec = parsed.get("spec") if isinstance(parsed, dict) else None
+        spec = spec if isinstance(spec, dict) else {}
+        payload["model_fingerprint"] = {
+            "present": True,
+            "path": "env/model_fingerprint.json",
+            "content_hash": _hash_file_bytes(fp_path),
+            "fingerprint": parsed.get("fingerprint") if isinstance(parsed, dict) else None,
+            "models": spec.get("models") or {},
+            "writing_profile": spec.get("writing_profile"),
+        }
+        known_names.add("model_fingerprint.json")
+
+    # requirements.freeze — presence + line_count when small (< 4 KiB).
+    freeze_path = env_dir / "requirements.freeze"
+    if freeze_path.exists():
+        try:
+            size = freeze_path.stat().st_size
+        except OSError:
+            size = None
+        entry: dict[str, Any] = {
+            "present": True,
+            "path": "env/requirements.freeze",
+            "content_hash": _hash_file_bytes(freeze_path),
+            "size_bytes": size,
+        }
+        if size is not None and size < 4096:
+            try:
+                entry["line_count"] = sum(
+                    1 for _ in freeze_path.read_text(encoding="utf-8").splitlines()
+                )
+            except OSError:
+                pass
+            except UnicodeDecodeError:
+                entry["line_count"] = None
+                entry["note"] = "file is not valid UTF-8"
+        payload["requirements_freeze"] = entry
+        known_names.add("requirements.freeze")
+
+    # Anything else in env/ — listed relative to ara_root so the paths match
+    # the shape used by the three known-file entries above.
+    try:
+        for child in sorted(env_dir.iterdir()):
+            if child.is_file() and child.name not in known_names:
+                payload["other_env_files"].append(f"env/{child.name}")
+    except OSError:
+        pass
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     """Run ARA conformance validation and print a report."""
     # Local import so callers who never validate don't pay the cost.
@@ -1497,6 +1615,13 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_p = sub.add_parser("freeze", help="Snapshot the current interpreter's pip freeze into env/.")
     freeze_p.add_argument("--ara", required=True)
     freeze_p.set_defaults(func=cmd_freeze)
+
+    env_p = sub.add_parser(
+        "env",
+        help="Dump a JSON summary of env/ (bfts_config, model_fingerprint, requirements.freeze).",
+    )
+    env_p.add_argument("--ara", required=True)
+    env_p.set_defaults(func=cmd_env)
 
     validate_p = sub.add_parser("validate", help="Check an ARA against the protocol schema.")
     validate_p.add_argument("--ara", required=True)

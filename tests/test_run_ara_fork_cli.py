@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -382,6 +383,143 @@ class ListCLITests(unittest.TestCase):
         self.assertEqual(payload[0]["path"], real.name)
         for junk in ("_scratch", "__pycache__", ".hidden"):
             self.assertNotIn(junk, out)
+
+    def test_list_survives_string_provenance(self) -> None:
+        """Legacy/corrupt manifest with `provenance` as a string must not
+        crash the sweep — the ARA still surfaces in the output."""
+        real = _make_ara(self.tmp, "strprov", [_node("nA", value=0.5)])
+        manifest_path = real / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["provenance"] = "parent_ara=/x"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("list", "--project", str(self.tmp / "strprov"), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["path"], real.name)
+        self.assertFalse(payload[0]["seed_present"])
+
+    def test_list_survives_string_idea(self) -> None:
+        """Legacy/corrupt manifest with `idea` as a bare string must not
+        crash the sweep — the ARA still surfaces in the output."""
+        real = _make_ara(self.tmp, "stridea", [_node("nA", value=0.5)])
+        manifest_path = real / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["idea"] = "just-a-string"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("list", "--project", str(self.tmp / "stridea"), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["path"], real.name)
+        self.assertEqual(payload[0]["idea"], "?")
+
+
+class EnvCLITests(unittest.TestCase):
+    """`env --ara <path>` dumps a JSON summary of the reproducibility fingerprint.
+
+    Focused view alongside `describe` (whole-ARA), `show` (one-node),
+    and `hash-check` (per-node integrity) — this one only reads env/*.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_env_all_three_present(self) -> None:
+        a = _make_ara(self.tmp, "envfull", [_node("nA", value=0.5)])
+        # export_ara already writes model_fingerprint.json; add the other two.
+        (a / "env" / "bfts_config.json").write_text(
+            json.dumps({"agent": {"steps": 3}}), encoding="utf-8"
+        )
+        (a / "env" / "requirements.freeze").write_text("", encoding="utf-8")
+
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["bfts_config"]["present"])
+        self.assertTrue(payload["model_fingerprint"]["present"])
+        self.assertTrue(payload["requirements_freeze"]["present"])
+        for key in ("bfts_config", "model_fingerprint", "requirements_freeze"):
+            self.assertTrue(payload[key]["content_hash"].startswith("sha256:"))
+        # bfts_config.json wins over the missing .yaml.
+        self.assertEqual(payload["bfts_config"]["path"], "env/bfts_config.json")
+
+    def test_env_missing_dir(self) -> None:
+        a = _make_ara(self.tmp, "envmissing", [_node("nA", value=0.5)])
+        shutil.rmtree(a / "env")
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIsNone(payload["env_dir"])
+        self.assertFalse(payload["bfts_config"]["present"])
+        self.assertFalse(payload["model_fingerprint"]["present"])
+        self.assertFalse(payload["requirements_freeze"]["present"])
+        self.assertEqual(payload["other_env_files"], [])
+
+    def test_env_model_fingerprint_lifts_writing_profile(self) -> None:
+        # Rebuild fingerprint with the structured writing_profile slot so we
+        # exercise the {name, content_hash} lift path independent of whether
+        # export_ara received a writing_profile arg in this test env.
+        a = _make_ara(self.tmp, "envwp", [_node("nA", value=0.5)])
+        fp_path = a / "env" / "model_fingerprint.json"
+        fp_path.write_text(json.dumps({
+            "fingerprint": "abc123",
+            "spec": {
+                "models": {"writeup": "gpt-4"},
+                "writing_profile": {
+                    "name": "profile_a",
+                    "content_hash": "sha256:deadbeef",
+                },
+                "ara_schema_version": "1.0",
+            },
+        }), encoding="utf-8")
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["model_fingerprint"]["models"], {"writeup": "gpt-4"})
+        wp = payload["model_fingerprint"]["writing_profile"]
+        self.assertEqual(wp["name"], "profile_a")
+        self.assertTrue(wp["content_hash"].startswith("sha256:"))
+
+    def test_env_other_files_listed(self) -> None:
+        a = _make_ara(self.tmp, "envother", [_node("nA", value=0.5)])
+        (a / "env" / "custom.json").write_text("{}", encoding="utf-8")
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIn("env/custom.json", payload["other_env_files"])
+        # model_fingerprint.json is a known file — must NOT leak into other.
+        self.assertNotIn("env/model_fingerprint.json", payload["other_env_files"])
+
+    def test_env_requirements_freeze_line_count_when_small(self) -> None:
+        a = _make_ara(self.tmp, "envfreeze", [_node("nA", value=0.5)])
+        (a / "env" / "requirements.freeze").write_text(
+            "numpy==1.26\nscipy==1.11\ntorch==2.2\n", encoding="utf-8"
+        )
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["requirements_freeze"]["line_count"], 3)
+
+
+    def test_env_requirements_freeze_non_utf8_does_not_crash(self) -> None:
+        """Non-UTF-8 requirements.freeze must not break the docstring's
+        rc=0 guarantee — presence stays true, line_count is null, and a
+        note flags the decode failure."""
+        a = _make_ara(self.tmp, "envfreezebin", [_node("nA", value=0.5)])
+        (a / "env" / "requirements.freeze").write_bytes(
+            b"\xff\xfe\x00\x00binary garbage\n"
+        )
+        rc, out, _ = _run("env", "--ara", str(a))
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["requirements_freeze"]["present"])
+        self.assertIsNone(payload["requirements_freeze"]["line_count"])
+        self.assertIn("UTF-8", payload["requirements_freeze"]["note"])
 
 
 if __name__ == "__main__":  # pragma: no cover
