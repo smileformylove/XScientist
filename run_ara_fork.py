@@ -994,9 +994,10 @@ def cmd_describe(args: argparse.Namespace) -> int:
     counts = manifest.get("counts") or {}
     if not isinstance(counts, dict):
         counts = {}
-    buggy = counts.get("buggy_nodes")
-    if buggy is None:
-        buggy = sum(1 for n in nodes if n.get("is_buggy"))
+    buggy = _safe_int(
+        counts.get("buggy_nodes"),
+        default=sum(1 for n in nodes if n.get("is_buggy")),
+    )
     node_count = _safe_int(counts.get("nodes"), default=len(nodes))
     edge_count = _safe_int(counts.get("edges"), default=len(graph.get("edges") or []))
     seed_count = sum(1 for n in nodes if n.get("is_seed_node"))
@@ -1053,7 +1054,7 @@ def cmd_describe(args: argparse.Namespace) -> int:
             "ara_root": str(ara_root),
             "idea": idea_payload,
             "counts": {
-                "nodes": node_count, "buggy": int(buggy), "seeds": seed_count,
+                "nodes": node_count, "buggy": buggy, "seeds": seed_count,
                 "edges": edge_count, "revisions": lock_payload["revision"],
             },
             "top_metric_node": top_payload,
@@ -1070,7 +1071,7 @@ def cmd_describe(args: argparse.Namespace) -> int:
     print(f"Idea:            {idea_payload['name'] or '(unknown)'}")
     if idea_payload.get("title"):
         print(f"Title:           {idea_payload['title']}")
-    print(f"Nodes:           {node_count}  (buggy: {int(buggy)}, seeds: {seed_count}, edges: {edge_count})")
+    print(f"Nodes:           {node_count}  (buggy: {buggy}, seeds: {seed_count}, edges: {edge_count})")
     if top_payload is None:
         print("Top metric:      (no scored nodes)")
     else:

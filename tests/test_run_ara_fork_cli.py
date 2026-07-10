@@ -562,6 +562,27 @@ class DescribeNonDictCountsTests(unittest.TestCase):
         self.assertEqual(counts["nodes"], 1)
         self.assertEqual(counts["edges"], 0)
 
+    def test_describe_survives_non_numeric_buggy_nodes(self) -> None:
+        """Legacy/corrupt manifest with non-numeric `counts.buggy_nodes`
+        must not crash on int() coercion. Falls back to enumerating
+        `is_buggy` over the graph's nodes list."""
+        a = _make_ara(
+            self.tmp, "descbadbuggy",
+            [_node("nA", value=0.5, is_buggy=True), _node("nB", value=0.1)],
+        )
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"] = {"buggy_nodes": "not_a_number"}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertIsInstance(counts["buggy"], int)
+        # Falls back to counting is_buggy in the nodes list: 1.
+        self.assertEqual(counts["buggy"], 1)
+
 
 class EnvCLITests(unittest.TestCase):
     """`env --ara <path>` dumps a JSON summary of the reproducibility fingerprint.
