@@ -749,6 +749,182 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hash_check(args: argparse.Namespace) -> int:
+    """Node-level integrity check: recompute each node's content_hash from disk.
+
+    Complements ``verify-lock`` (manifest-level) with per-node coverage — the
+    manifest lock protects the pointer to the graph, but individual node
+    payloads (``nodes/<id>/code.py`` and ``metrics.json``) live outside the
+    hash chain. This verb rehashes each node from its on-disk inputs using
+    the exact same binding rule ``export_ara`` used at write time
+    (``ai_scientist/utils/ara_artifact.py::_export_nodes_from_journal``) and
+    reports drift.
+
+    States:
+      * ``clean``         — stored hash matches recompute.
+      * ``drift``         — stored hash present but differs from recompute
+                            (tampering / silent edit signal).
+      * ``missing_code``  — stored hash present but ``code.py`` absent
+                            (data loss — cannot recompute).
+      * ``unhashed``      — no stored hash on the graph entry (legacy /
+                            partial export; not a failure).
+
+    Exit codes (drift beats missing_code so tampering wins in CI):
+      * rc=0 all clean (unhashed nodes allowed)
+      * rc=1 any drift
+      * rc=2 any missing_code (and no drift)
+    """
+    from ai_scientist.protocol import hash_node_payload
+
+    ara_root = _resolve_ara_root(args.ara)
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    entries: list[dict[str, Any]] = []
+    any_drift = False
+    any_missing = False
+
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+
+        stored_hash = node.get("content_hash")
+        node_dir = ara_root / "nodes" / node_id
+        code_path = node_dir / "code.py"
+        metrics = _load_json(node_dir / "metrics.json") or {}
+
+        # Mirror _export_nodes_from_journal's binding logic exactly.
+        llm_refs_raw = node.get("llm_call_refs") or []
+        llm_refs = [str(r) for r in llm_refs_raw if r]
+        is_seed = bool(node.get("is_seed_node"))
+        metric = metrics.get("metric") if isinstance(metrics, dict) else None
+
+        # Export skips writing code.py when the journal node's code is
+        # empty/whitespace, but still stamps a content_hash computed with
+        # ``code=""``. So an absent code.py is only data loss if the stored
+        # hash does NOT match the empty-code recompute; otherwise it's a
+        # legitimate empty-code node and we treat it as clean.
+        code_missing = not code_path.exists()
+        code_text = ""
+        if not code_missing:
+            try:
+                code_text = code_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                entries.append({
+                    "node_id": node_id, "state": "missing_code",
+                    "stored_hash": stored_hash, "computed_hash": None,
+                    "notes": f"code.py unreadable: {exc}",
+                })
+                any_missing = True
+                continue
+
+        try:
+            computed = hash_node_payload(
+                code=code_text,
+                metric=metric,
+                llm_call_hashes=llm_refs or None,
+                is_seed=is_seed,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            entries.append({
+                "node_id": node_id, "state": "drift",
+                "stored_hash": stored_hash, "computed_hash": None,
+                "notes": f"hash recompute failed: {exc}",
+            })
+            any_drift = True
+            continue
+
+        if not stored_hash:
+            # No stored hash to compare against. Preserve the legacy
+            # ``no_code`` label for the code-absent case so the caller can
+            # distinguish "legacy graph entry" from "legacy AND code gone".
+            state = "no_code" if code_missing else "unhashed"
+            note = "code.py absent (no stored hash either)" if code_missing else None
+            entry = {
+                "node_id": node_id, "state": state,
+                "stored_hash": None,
+                "computed_hash": None if code_missing else computed,
+            }
+            if note:
+                entry["notes"] = note
+            entries.append(entry)
+            continue
+
+        if stored_hash == computed:
+            entries.append({
+                "node_id": node_id, "state": "clean",
+                "stored_hash": stored_hash, "computed_hash": computed,
+            })
+            continue
+
+        # Recompute differs from stored. If code.py was absent and the
+        # empty-code recompute did NOT match, the stored hash implies
+        # non-empty code that's now gone from disk — genuine data loss.
+        if code_missing:
+            entries.append({
+                "node_id": node_id, "state": "missing_code",
+                "stored_hash": stored_hash, "computed_hash": None,
+                "notes": "code.py absent; stored hash implies non-empty code",
+            })
+            any_missing = True
+            continue
+
+        # Drift — try to explain which category flipped. The graph entry
+        # carries an independent copy of the pre-export metric alongside
+        # metrics.json's copy (see _export_nodes_from_journal — both are
+        # written from the same `raw.get("metric")`). If they've drifted
+        # apart, someone edited metrics.json (the primary source we hashed
+        # from). Otherwise the drift is on the code side — since metric
+        # matches its export-time twin, the only remaining hash input that
+        # can have changed is code (llm_call_refs / is_seed_node live on the
+        # graph entry and were used verbatim in the recompute).
+        graph_metric = node.get("metric")
+        if metric != graph_metric:
+            note = "metric differs"
+        else:
+            note = "code differs"
+        entries.append({
+            "node_id": node_id, "state": "drift",
+            "stored_hash": stored_hash, "computed_hash": computed,
+            "notes": note,
+        })
+        any_drift = True
+
+    if args.json:
+        print(json.dumps(entries, indent=2, ensure_ascii=False, default=str))
+    else:
+        _render_hash_check(entries)
+
+    if any_drift:
+        return 1
+    if any_missing:
+        return 2
+    return 0
+
+
+def _render_hash_check(entries: list[dict[str, Any]]) -> None:
+    header = ("NODE", "STATE", "STORED", "COMPUTED", "NOTES")
+    rows: list[tuple[str, str, str, str, str]] = []
+    for e in entries:
+        rows.append((
+            e["node_id"],
+            e["state"],
+            _short_hash(e.get("stored_hash")),
+            _short_hash(e.get("computed_hash")),
+            e.get("notes") or "",
+        ))
+    if not rows:
+        print("(no nodes to check)")
+        return
+    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
+              for i in range(len(header))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    for r in rows:
+        print(fmt.format(*r))
+
+
 def _pick_top_metric_node(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Pick the best-scored non-buggy node.
 
@@ -1454,6 +1630,17 @@ def build_parser() -> argparse.ArgumentParser:
     list_p.add_argument("--json", action="store_true",
                         help="Emit entries as a JSON array (full hashes preserved).")
     list_p.set_defaults(func=cmd_list)
+
+    hash_check_p = sub.add_parser(
+        "hash-check",
+        help="Recompute each node's content_hash from disk and report drift.",
+    )
+    hash_check_p.add_argument("--ara", required=True)
+    hash_check_p.add_argument(
+        "--json", action="store_true",
+        help="Emit entries as a JSON array (full hashes preserved).",
+    )
+    hash_check_p.set_defaults(func=cmd_hash_check)
 
     refs_p = sub.add_parser(
         "refs",
