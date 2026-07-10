@@ -252,5 +252,121 @@ class VerifyLockAllTests(unittest.TestCase):
         self.assertNotEqual(ctx.exception.code, 0)
 
 
+class ListCLITests(unittest.TestCase):
+    """`list --project <path>` enumerates every ARA under <project>/ara/.
+
+    Mirrors `verify-lock --all --project`'s sweep pattern but emits a
+    richer per-ARA row (idea + counts + seed presence + lock state).
+    Never fails the sweep — broken ARAs surface as state=error rows.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _project_with_aras(self, name: str, specs: list[tuple[str, list[dict]]]) -> Path:
+        project = self.tmp / name
+        for sub, nodes in specs:
+            exp = project / "02_experiments" / f"20260710_{sub}"
+            _write_journal(exp / "logs", nodes)
+            (exp / "idea.json").write_text(json.dumps({"Name": sub}), encoding="utf-8")
+            export_ara(project_dir=project, exp_dir=exp, idea={"Name": sub})
+        return project
+
+    def test_list_multiple_aras_human_table(self) -> None:
+        project = self._project_with_aras("multi_human", [
+            ("idea_a", [_node("nA", value=0.5)]),
+            ("idea_b", [_node("nB", value=0.7, is_buggy=True)]),
+        ])
+        rc, out, _ = _run("list", "--project", str(project))
+        self.assertEqual(rc, 0)
+        self.assertIn("IDEA", out)
+        self.assertIn("idea_a", out)
+        self.assertIn("idea_b", out)
+        # Header + 2 data rows.
+        self.assertEqual(sum(1 for line in out.splitlines() if line.strip()), 3)
+
+    def test_list_json_shape(self) -> None:
+        project = self._project_with_aras("json_shape", [
+            ("only", [_node("nA", value=0.5)]),
+        ])
+        rc, out, _ = _run("list", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIsInstance(payload, list)
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        for key in ("ara_root", "idea", "nodes", "buggy_nodes",
+                    "seed_present", "state", "manifest_hash", "path"):
+            self.assertIn(key, entry)
+        self.assertEqual(entry["idea"], "only")
+        self.assertEqual(entry["state"], "clean")
+        self.assertFalse(entry["seed_present"])
+
+    def test_list_empty_project_json_emits_empty_array(self) -> None:
+        project = self.tmp / "empty_json"
+        project.mkdir()
+        rc, out, err = _run("list", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "[]")
+        self.assertEqual(json.loads(out), [])
+        self.assertIn("no ARAs", err)
+
+    def test_list_empty_project_human_stderr_only(self) -> None:
+        project = self.tmp / "empty_human"
+        project.mkdir()
+        rc, out, err = _run("list", "--project", str(project))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertIn("no ARAs", err)
+
+    def test_list_survives_broken_ara(self) -> None:
+        project = self._project_with_aras("broken", [
+            ("good", [_node("nG", value=0.5)]),
+            ("bad",  [_node("nB", value=0.5)]),
+        ])
+        # Corrupt one manifest.json to invalid JSON.
+        bad_dir = sorted((project / "ara").iterdir())[0]
+        (bad_dir / "manifest.json").write_text("{not-json", encoding="utf-8")
+
+        rc, out, _ = _run("list", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 2)
+        broken = next(e for e in payload if e["path"] == bad_dir.name)
+        self.assertEqual(broken["state"], "error")
+        self.assertEqual(broken["idea"], "?")
+        # Human mode still emits a row for the broken ARA.
+        rc2, out2, _ = _run("list", "--project", str(project))
+        self.assertEqual(rc2, 0)
+        self.assertIn(bad_dir.name, out2)
+        self.assertIn("error", out2)
+
+    def test_list_reports_seed_present(self) -> None:
+        parent_project = self.tmp / "seedproj"
+        parent_exp = parent_project / "02_experiments" / "20260710_parent"
+        _write_journal(parent_exp / "logs", [_node("np", value=0.5)])
+        (parent_exp / "idea.json").write_text(json.dumps({"Name": "parent"}), encoding="utf-8")
+        parent_res = export_ara(project_dir=parent_project, exp_dir=parent_exp,
+                                idea={"Name": "parent"})
+        parent_ara = Path(parent_res.root)
+
+        # Fork the parent's node into <parent_project>/ara/forked_ara so the
+        # forked ARA lives inside the sweep target.
+        dest = parent_project / "ara" / "forked_ara"
+        rc_fork, _, _ = _run("fork", "--ara", str(parent_ara),
+                             "--node-id", "np", "--dest", str(dest))
+        self.assertEqual(rc_fork, 0)
+
+        rc, out, _ = _run("list", "--project", str(parent_project), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        fork_entry = next(e for e in payload if e["path"] == "forked_ara")
+        self.assertTrue(fork_entry["seed_present"])
+        parent_entry = next(e for e in payload if e["path"] != "forked_ara")
+        self.assertFalse(parent_entry["seed_present"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

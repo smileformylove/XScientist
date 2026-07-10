@@ -898,6 +898,97 @@ def cmd_describe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list(args: argparse.Namespace) -> int:
+    """Enumerate every ARA under ``<project>/ara/`` with a one-line summary.
+
+    Complements ``verify-lock --all --project <path>`` (lock state only)
+    with a richer per-ARA overview: idea, node counts, seed presence, and
+    lock state. See ``describe`` for the deeper single-ARA view (this
+    intentionally omits the top-metric field to stay one line per ARA).
+
+    Exit rule: always rc=0 on success — this is a list, not a checker.
+    Empty projects print a stderr note and emit ``[]`` (JSON) or nothing
+    (human), mirroring ``verify-lock --all --project`` (iter-13 fix).
+    Broken manifests appear with idea=``?`` and state=``error`` rather
+    than failing the whole sweep.
+    """
+    from ai_scientist.utils.ara_artifact import ara_root_for_project
+    from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    project_dir = Path(args.project).expanduser().resolve()
+    ara_base = ara_root_for_project(str(project_dir))
+    entries: list[dict[str, Any]] = []
+    if ara_base.exists():
+        for sub in sorted(ara_base.iterdir()):
+            if not sub.is_dir():
+                continue
+            manifest = _load_json(sub / "manifest.json")
+            if not isinstance(manifest, dict):
+                entries.append({
+                    "ara_root": str(sub), "idea": "?",
+                    "nodes": None, "buggy_nodes": None, "seed_present": None,
+                    "state": "error", "manifest_hash": None, "path": sub.name,
+                })
+                continue
+            counts = manifest.get("counts") or {}
+            provenance = manifest.get("provenance") or {}
+            # Match cmd_describe's convention: parent_ara_root also counts
+            # as a seed reference (forks set that instead of seed_hash).
+            seed_present = bool(
+                provenance.get("seed_hash") or provenance.get("parent_ara_root")
+            )
+            idea = manifest.get("idea") or {}
+            r = verify_manifest_lock(sub)
+            entries.append({
+                "ara_root": str(sub),
+                "idea": idea.get("name") or "?",
+                "nodes": counts.get("nodes"),
+                "buggy_nodes": counts.get("buggy_nodes"),
+                "seed_present": seed_present,
+                "state": r.get("state"),
+                "manifest_hash": r.get("base_hash"),
+                "path": sub.name,
+            })
+    if not entries:
+        if args.json:
+            print("[]")
+        print(f"(no ARAs found under {ara_base})", file=sys.stderr)
+        return 0
+    if args.json:
+        print(json.dumps(entries, indent=2, ensure_ascii=False, default=str))
+        return 0
+    _render_list(entries)
+    return 0
+
+
+def _render_list(entries: list[dict[str, Any]]) -> None:
+    header = ("IDEA", "NODES", "BUGGY", "SEED", "STATE", "LOCK", "PATH")
+
+    def _fmt_count(v: Any) -> str:
+        return "-" if v is None else str(v)
+
+    def _fmt_seed(v: Any) -> str:
+        return "-" if v is None else ("yes" if v else "no")
+
+    def _fmt_lock(state: Any, h: Any) -> str:
+        return _short_hash(h) if state in ("clean", "revised") else "-"
+
+    rows = [
+        (
+            e["idea"] or "?", _fmt_count(e["nodes"]), _fmt_count(e["buggy_nodes"]),
+            _fmt_seed(e["seed_present"]), e["state"] or "?",
+            _fmt_lock(e["state"], e["manifest_hash"]), e["path"],
+        )
+        for e in entries
+    ]
+    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
+              for i in range(len(header))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    for r in rows:
+        print(fmt.format(*r))
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -1353,6 +1444,16 @@ def build_parser() -> argparse.ArgumentParser:
     describe_p.add_argument("--json", action="store_true",
                             help="Emit the overview as a JSON object.")
     describe_p.set_defaults(func=cmd_describe)
+
+    list_p = sub.add_parser(
+        "list",
+        help="Enumerate every ARA under <project>/ara/ with a one-line summary.",
+    )
+    list_p.add_argument("--project", required=True,
+                        help="Project directory whose ara/ subtree will be enumerated.")
+    list_p.add_argument("--json", action="store_true",
+                        help="Emit entries as a JSON array (full hashes preserved).")
+    list_p.set_defaults(func=cmd_list)
 
     refs_p = sub.add_parser(
         "refs",
