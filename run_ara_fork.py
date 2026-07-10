@@ -1174,6 +1174,157 @@ def _render_list(entries: list[dict[str, Any]]) -> None:
         print(fmt.format(*r))
 
 
+def cmd_claims(args: argparse.Namespace) -> int:
+    """Enumerate `\\claimref`-derived claim files under ``<ara>/claims/``.
+
+    Fills the "what does this ARA actually assert?" gap between
+    ``describe`` (whole-ARA) and ``show`` (one node). Each claim file
+    written by :mod:`ai_scientist.utils.claim_registry` carries a link
+    to an exploration-graph node; this verb joins that link so a
+    downstream consumer can see, per claim, which node's hash/metric
+    the assertion is anchored to.
+
+    On-disk shape (per ``claim_registry.write_claims_into_ara``): one
+    ``<ara>/claims/<claim_id>.json`` per marker, plus ``_index.json``
+    and (optionally) ``coverage.json`` — the latter two are metadata,
+    not claims, so they're excluded from enumeration.
+
+    Exit codes mirror ``log --node`` / ``diff --only-node`` / ``refs
+    --get``: rc=3 when ``--node`` filters to zero results. Empty
+    claims dir (or absent) → rc=0 with a stderr note (matches the
+    iter-13 empty-result invariant used by ``list`` and
+    ``verify-lock --all``).
+    """
+    ara_root = _resolve_ara_root(args.ara)
+    claims_dir = ara_root / "claims"
+
+    # Build id -> graph node lookup once so we can annotate each claim
+    # with the linked node's hash/metric/is_buggy without re-parsing the
+    # graph per file. Missing graph = every claim's node fields are null.
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    node_index: dict[str, dict[str, Any]] = {}
+    for node in graph.get("nodes") or []:
+        if isinstance(node, dict):
+            nid = node.get("id")
+            if isinstance(nid, str) and nid:
+                node_index[nid] = node
+
+    # Coverage report is whole-manuscript severity (see claim_coverage.py) —
+    # not per-claim, but downstream consumers benefit from the tag alongside
+    # each row, so we copy the single value onto every record when present.
+    coverage = _load_json(claims_dir / "coverage.json") or {}
+    severity = coverage.get("severity") if isinstance(coverage, dict) else None
+
+    # `_index.json` and `coverage.json` are the registry's own bookkeeping;
+    # only user-facing per-claim files (created by claim_registry) count.
+    claim_files: list[Path] = []
+    if claims_dir.is_dir():
+        for p in sorted(claims_dir.glob("*.json")):
+            if p.name in {"_index.json", "coverage.json"}:
+                continue
+            claim_files.append(p)
+
+    if not claim_files:
+        if args.json:
+            print("[]")
+        print("(no claims recorded)", file=sys.stderr)
+        return 0
+
+    rows: list[dict[str, Any]] = []
+    for path in claim_files:
+        payload = _load_json(path)
+        if not isinstance(payload, dict):
+            continue
+        claim_id = str(payload.get("claim_id") or path.stem)
+        node_id = payload.get("node_id")
+        node_id = str(node_id) if isinstance(node_id, str) and node_id else None
+        # Prefer the graph as source of truth (its content_hash is the one
+        # downstream tools reference) but fall back to the claim file's
+        # embedded copy — write_claims_into_ara snapshots the node under
+        # `node`, so an ARA whose graph has since been pruned still shows
+        # something meaningful.
+        node_meta = node_index.get(node_id) if node_id else None
+        if node_meta is None and isinstance(payload.get("node"), dict):
+            node_meta = payload["node"]
+        if node_meta is not None:
+            content_hash = node_meta.get("content_hash")
+            metric = node_meta.get("metric")
+            is_buggy = node_meta.get("is_buggy")
+        else:
+            content_hash = metric = is_buggy = None
+
+        rows.append({
+            "claim_id": claim_id,
+            "node_id": node_id,
+            "node_content_hash": content_hash,
+            "node_metric": metric,
+            "node_is_buggy": is_buggy,
+            "assertion": payload.get("context") or "",
+            "tex_file": payload.get("tex_file"),
+            "line": payload.get("line"),
+            "severity": severity,
+        })
+
+    if args.node:
+        rows = [r for r in rows if r["node_id"] == args.node]
+        if not rows:
+            print(f"[ara-claims] no claims link to node {args.node}",
+                  file=sys.stderr)
+            return 3
+
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    _render_claims(rows)
+    return 0
+
+
+def _render_claims(rows: list[dict[str, Any]]) -> None:
+    header = ("CLAIM_ID", "NODE", "HASH_PREFIX", "METRIC", "BUGGY", "ASSERTION")
+
+    def _fmt_metric(v: Any) -> str:
+        if v is None:
+            return "-"
+        if isinstance(v, dict):
+            val = v.get("value")
+            return "-" if val is None else str(val)
+        return str(v)
+
+    def _fmt_buggy(v: Any) -> str:
+        if v is None:
+            return "-"
+        return "yes" if v else "no"
+
+    def _fmt_assertion(s: str) -> str:
+        s = " ".join((s or "").split())
+        return s[:120] + "…" if len(s) > 120 else s
+
+    body: list[tuple[str, str, str, str, str, str]] = []
+    for r in rows:
+        # An unresolved node_id (present on the claim but absent from the
+        # graph) is functionally unlinked for the reader — show `-` so the
+        # column matches the null hash/metric/buggy neighbours. JSON keeps
+        # the raw reference so a caller can still cross-check.
+        linked = r["node_content_hash"] is not None
+        body.append((
+            r["claim_id"],
+            r["node_id"] if linked and r["node_id"] else "-",
+            _short_hash(r["node_content_hash"]),
+            _fmt_metric(r["node_metric"]),
+            _fmt_buggy(r["node_is_buggy"]),
+            _fmt_assertion(r["assertion"]),
+        ))
+    if not body:
+        return
+    widths = [max(len(header[i]), max(len(row[i]) for row in body))
+              for i in range(len(header))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    for row in body:
+        print(fmt.format(*row))
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -1775,6 +1926,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit entries as a JSON array (full hashes preserved).",
     )
     hash_check_p.set_defaults(func=cmd_hash_check)
+
+    claims_p = sub.add_parser(
+        "claims",
+        help="Enumerate `\\claimref`-derived claim files with linked node metadata.",
+    )
+    claims_p.add_argument("--ara", required=True)
+    claims_p.add_argument(
+        "--json", action="store_true",
+        help="Emit rows as a JSON array (full hashes + full assertion text).",
+    )
+    claims_p.add_argument(
+        "--node", metavar="ID", default=None,
+        help="Filter to claims linked to this node id (rc=3 when none match).",
+    )
+    claims_p.set_defaults(func=cmd_claims)
 
     refs_p = sub.add_parser(
         "refs",
