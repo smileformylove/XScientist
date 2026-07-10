@@ -152,5 +152,93 @@ class DescribeCLITests(unittest.TestCase):
         self.assertTrue(payload["ancestors"]["all_reachable"])
 
 
+class VerifyLockAllTests(unittest.TestCase):
+    """`verify-lock --all --project <path>` sweeps <project>/ara/.
+
+    Aggregate rc rule: tampered > unlocked > ok. Empty projects are ok.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _project_with(self, name: str, count: int) -> Path:
+        project = self.tmp / name
+        for i in range(count):
+            sub = f"{name}_ara{i}"
+            exp = project / "02_experiments" / f"20260710_{sub}"
+            _write_journal(exp / "logs", [_node(f"n{i}")])
+            (exp / "idea.json").write_text(json.dumps({"Name": sub}), encoding="utf-8")
+            export_ara(project_dir=project, exp_dir=exp, idea={"Name": sub})
+        return project
+
+    @staticmethod
+    def _tamper(ara: Path) -> None:
+        m = ara / "manifest.json"
+        p = json.loads(m.read_text(encoding="utf-8"))
+        p["__tamper__"] = "edit"
+        m.write_text(json.dumps(p, indent=2), encoding="utf-8")
+
+    def test_verify_lock_all_walks_multiple_aras(self) -> None:
+        project = self._project_with("multi", 3)
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project))
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(1 for line in out.splitlines() if line.strip()), 4)
+        self.assertEqual(out.count("clean"), 3)
+
+    def test_verify_lock_all_reports_tampered(self) -> None:
+        project = self._project_with("tamp", 2)
+        target = sorted((project / "ara").iterdir())[0]
+        self._tamper(target)
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project))
+        self.assertEqual(rc, 2)
+        self.assertIn("tampered", out)
+        self.assertIn(target.name, out)
+
+    def test_verify_lock_all_reports_unlocked(self) -> None:
+        project = self._project_with("unlk", 2)
+        (sorted((project / "ara").iterdir())[0] / "manifest.lock").unlink()
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project))
+        self.assertEqual(rc, 3)
+        self.assertIn("unlocked", out)
+
+    def test_verify_lock_all_tampered_beats_unlocked_in_rc(self) -> None:
+        project = self._project_with("mix", 3)
+        aras = sorted((project / "ara").iterdir())
+        self._tamper(aras[1])
+        (aras[2] / "manifest.lock").unlink()
+        rc, _, _ = _run("verify-lock", "--all", "--project", str(project))
+        self.assertEqual(rc, 2)
+
+    def test_verify_lock_all_empty_project_returns_rc_zero(self) -> None:
+        project = self.tmp / "empty_project"
+        project.mkdir()
+        rc, out, err = _run("verify-lock", "--all", "--project", str(project))
+        self.assertEqual(rc, 0)
+        self.assertIn("no ARAs", err)
+        self.assertEqual(out, "")
+
+    def test_verify_lock_all_json_shape(self) -> None:
+        project = self._project_with("json", 3)
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 3)
+        for entry in payload:
+            for key in ("ara_root", "state", "revision_count",
+                        "manifest_hash", "detail"):
+                self.assertIn(key, entry)
+            self.assertEqual(entry["state"], "clean")
+
+    def test_verify_lock_all_and_ara_mutually_exclusive(self) -> None:
+        project = self._project_with("mx", 1)
+        ara = next(iter((project / "ara").iterdir()))
+        with self.assertRaises(SystemExit) as ctx:
+            _run("verify-lock", "--ara", str(ara),
+                 "--all", "--project", str(project))
+        self.assertNotEqual(ctx.exception.code, 0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

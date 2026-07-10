@@ -530,8 +530,18 @@ def cmd_verify_lock(args: argparse.Namespace) -> int:
     ``rc=2`` for ``tampered`` (real integrity breach), ``rc=3`` for
     ``unlocked`` (missing lock — can't judge). The report itself is
     always printed so the caller can diagnose.
+
+    ``--all --project <path>`` sweeps every ARA under ``<path>/ara/`` and
+    aggregates state — tampered wins over unlocked in the exit code.
     """
     from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    if args.project:
+        # --project without --all is rejected loudly so sweep intent stays explicit.
+        if not args.all:
+            print("[verify-lock] --project requires --all", file=sys.stderr)
+            return 2
+        return _verify_lock_all(Path(args.project).expanduser().resolve(), args)
 
     ara_root = _resolve_ara_root(args.ara)
     report = verify_manifest_lock(ara_root)
@@ -552,6 +562,46 @@ def cmd_verify_lock(args: argparse.Namespace) -> int:
     if state == "tampered":
         return 2
     return 3  # unlocked / anything else — mirror `refs --get` missing semantics
+
+
+def _verify_lock_all(project_dir: Path, args: argparse.Namespace) -> int:
+    """Sweep <project_dir>/ara/ and aggregate lock state.
+
+    rc rule: tampered (2) > unlocked (3) > pass (0). Empty projects pass.
+    """
+    from ai_scientist.utils.ara_artifact import ara_root_for_project
+    from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    ara_base = ara_root_for_project(str(project_dir))
+    entries: list[dict[str, Any]] = []
+    if ara_base.exists():
+        for sub in sorted(ara_base.iterdir()):
+            if sub.is_dir() and (sub / "manifest.json").exists():
+                r = verify_manifest_lock(sub)
+                entries.append({
+                    "ara_root": str(sub),
+                    "state": r.get("state"),
+                    "revision_count": r.get("revision_count"),
+                    "manifest_hash": r.get("base_hash"),
+                    "detail": r.get("detail"),
+                })
+    if not entries:
+        print(f"(no ARAs found under {ara_base})", file=sys.stderr)
+        return 0
+    if args.json:
+        print(json.dumps(entries, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(f"{'STATE':<10} {'REVS':<5} {'HASH_PREFIX':<24} PATH")
+        for e in entries:
+            locked = e["state"] in ("clean", "revised")
+            revs = str(e["revision_count"]) if locked else "-"
+            h = _short_hash(e["manifest_hash"]) if locked else "-"
+            print(f"{e['state'] or '?':<10} {revs:<5} {h:<24} {Path(e['ara_root']).name}")
+    if any(e["state"] == "tampered" for e in entries):
+        return 2
+    if any(e["state"] == "unlocked" for e in entries):
+        return 3
+    return 0
 
 
 def cmd_history(args: argparse.Namespace) -> int:
@@ -1251,7 +1301,19 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-lock",
         help="Check that manifest.json still matches manifest.lock (immutability audit).",
     )
-    verify_lock_p.add_argument("--ara", required=True)
+    # --ara (single) and --project (sweep) are mutually exclusive; argparse
+    # itself emits a predictable SystemExit(2) when neither/both are given.
+    verify_lock_target = verify_lock_p.add_mutually_exclusive_group(required=True)
+    verify_lock_target.add_argument("--ara",
+                                    help="Path to a single ARA directory or manifest.json.")
+    verify_lock_target.add_argument(
+        "--project",
+        help="Project directory whose ara/ subtree will be swept (requires --all).",
+    )
+    verify_lock_p.add_argument(
+        "--all", action="store_true",
+        help="With --project, emit a per-ARA state summary across <project>/ara/.",
+    )
     verify_lock_p.add_argument("--json", action="store_true",
                                help="Emit the raw report dict as JSON.")
     verify_lock_p.set_defaults(func=cmd_verify_lock)
