@@ -575,3 +575,188 @@ Adding kinds:
 Adding producers:
 - Copy this SPEC, implement the validator locally, and cross-check by round-
   tripping an example ARA through `ai_scientist.protocol.validate_ara`.
+
+## 20. CLI Reference — `run_ara_fork.py`
+
+The reference implementation ships a CLI that reads and writes ARAs
+according to this spec. Every verb below operates against a directory
+whose layout matches §§1-16; verbs never invent on-disk shape that isn't
+already sanctioned here. `--json` is honored by every verb that produces
+machine-readable output — human notes go to stderr, structured data to
+stdout, so pipelines can consume the CLI without regex-scraping.
+
+Two positional flavours recur throughout:
+
+- **`--ara <path>`** — a single ARA root (the directory containing
+  `manifest.json`).
+- **`--project <path>`** — a project directory whose `ara/` subtree
+  contains one or more ARAs. Sweep verbs (`--all`) walk this tree.
+
+### 20.1 Inspection verbs (single ARA)
+
+**`inspect --ara <path> --node-id <id>`** — Human-readable summary of one
+node (metric name/value/maximize, `is_buggy`, code size in bytes). Meant
+for eyeballing; use `show` when a downstream tool needs the raw JSON.
+
+**`show --ara <path> --node <id> [--terse] [--term-tail K]`** — Full JSON
+dump of one node's on-disk bundle: code, metric (§5.1), a tail of
+`term_out.log`, plot paths, and the `content_hash` from
+`exploration_graph.json`. `--terse` omits code and `term_out_tail` for a
+compact overview. `--term-tail K` caps the log tail at K bytes (default 4000).
+
+**`describe --ara <path> [--json]`** — At-a-glance summary of a whole
+ARA: idea name, node counts (total / buggy), the top-metric node,
+whether a seed snapshot (§12) is present, verify state, and provenance
+ancestry (§7). Cheap enough to run inside listing loops.
+
+**`env --ara <path>`** — JSON summary of `<ara>/env/*.json`
+(`bfts_config.yaml`, `model_fingerprint.json`, and whether
+`requirements.freeze` is present). Does not parse the freeze file.
+
+**`claims --ara <path> [--node <id>] [--json]`** — Enumerate claim tags
+(§6). Each row links a `claim_id` to its `node_id`, node metric, and a
+coverage severity so consumers can grade "how much of the manuscript is
+actually backed by resolved claims". `--node` filters to one node's
+claims.
+
+### 20.2 Integrity verbs
+
+**`verify-lock --ara <path> [--json]`** — Re-hash the current
+`manifest.json` and compare against `manifest.lock` (§14). Reports a
+state ∈ `{clean, revised, tampered, unlocked}`. `clean` means the base
+hash matches; `revised` means a legitimate `manifest.history.jsonl`
+chain leads from the locked base to the current hash; `tampered` means
+the hash drifted with no recorded revision; `unlocked` means
+`manifest.lock` is missing. Exit codes: rc=0 for clean/revised, rc=2
+for tampered, rc=3 for unlocked.
+
+**`verify-lock --all --project <path> [--json]`** — Sweep every ARA
+under `<project>/ara/`. Aggregate rc follows severity: tampered > unlocked
+> clean.
+
+**`hash-check --ara <path> [--json]`** — Node-level integrity: for every
+node with code on disk, recompute `content_hash` from the same inputs
+`hash_node_payload` (§4) uses (code, metric, `llm_call_refs`,
+`is_seed_node`) and diff against the value stored in
+`exploration_graph.json`. rc=1 on any drift, rc=2 if `code.py` is
+missing for a node the graph claims has code.
+
+**`hash-check --all --project <path>`** — Sweep hash-check across every
+ARA in a project. Same rc semantics as the single-ARA form.
+
+### 20.3 Diff / log verbs (git-style)
+
+**`diff --ara A --other B [--only-node <id>] [--limit-nodes N] [--stat] [--json] [--exit-code-on-diff]`** —
+Structural diff between two ARAs. Compares manifest counts and idea
+names, `references` (§13), the set of nodes (added / removed / changed,
+with per-node categories `code` / `metric` / `llm_calls` / `seed`
+distinguishing which input to the content hash actually moved), and any
+prompt refs. `--stat` collapses the whole report into a single summary
+line; `--only-node` narrows to one id; `--limit-nodes N` truncates the
+node list with a `+K more` footer. `--exit-code-on-diff` makes rc=1
+mean "the two ARAs differ" so shell wrappers can gate on structural
+change without parsing JSON.
+
+**`log --ara <path> [--node <id>] [--json]`** — Commit-log view. Two
+kinds of history are interleaved:
+
+- The manifest revision chain from `manifest.history.jsonl` (§14), with
+  revision 0 pulled from `manifest.lock`.
+- The provenance ancestry from `manifest.provenance` (§7), walked up to
+  32 hops with each hop hash-verified against the referenced
+  `content_hash`.
+
+`--node <id>` focuses on one exploration node's `parent_id` ancestry
+(useful when the interesting story is inside one ARA rather than across
+forks).
+
+**`history --ara <path> [--limit N] [--json]`** — Compact table of
+manifest revisions from `manifest.history.jsonl`: `revision`, `ts`,
+`base_hash`, `new_hash`, `producer`, `reason`. `--limit N` caps the
+output to the newest N rows.
+
+### 20.4 Reference / lookup verbs
+
+**`refs --ara <path> [--prefix P] [--set N T | --get N | --delete N] [--json]`** —
+git-style local refs under `<ara>/refs/` (§15). With no action flag, lists
+existing refs (optionally filtered by `--prefix`). `--set N T` writes
+target `T` (a `sha256:<hex>` string) at name `N`; `--get N` prints the
+target of ref `N`; `--delete N` removes it. Refs never affect
+`content_hash` and are outside the immutability layer (§14).
+
+**`provenance --hash <sha256:...> --project <path> [--json]`** —
+Reverse-lookup: scans every ARA under `<project>/ara/` for the given
+content hash and reports every hit with its `kind`. Recognised kinds:
+`manifest`, `node`, `llm_call`, `seed`, `pipeline_artifact`,
+`provenance`, `ref`. Always rc=0 — an empty result is a legitimate
+answer, not an error.
+
+**`list --project <path> [--json]`** — Enumerate every ARA under
+`<project>/ara/` with a one-line-per-ARA summary: idea name, node
+counts, buggy count, seed presence, verify state, and the locked
+manifest hash. Intended as the entry point when a project directory has
+accumulated many ARAs.
+
+### 20.5 Fork / execute / freeze verbs (pre-existing)
+
+The verbs in this block predate the read/inspection surface — they are
+the write path a producer uses to derive a new ARA from an old one.
+
+**`fork --ara <path> --node-id <id> --dest <out>`** — Copy a node's
+bundle to `<out>` to seed further work. The forked child sets
+`is_seed_node=True`; per §4 that adds `"seed"` to
+`content_hash_inputs`, so the fork hashes distinctly from the original
+node even when code+metric are byte-identical. `<out>` is also usable
+directly with `run_project.py --seed-from-ara` (§7.1).
+
+**`exec --ara <path> --node-id <id> [--python <bin>] [--tolerance F]`** —
+Re-execute a node's `code.py` in a subprocess and compare the fresh
+`ARA_METRIC=` line (§9) to the recorded metric. `--python` picks the
+interpreter; `--tolerance` sets the absolute delta below which fresh
+and recorded metrics are treated as equal.
+
+**`verify --ara <path> [--node-ids ...] [--limit N] [--include-buggy]`** —
+Batch re-execute selected nodes and write per-node verify reports plus
+a batched `verify/reexec_batch_*.json` (§8). By default, buggy nodes are
+skipped; `--include-buggy` overrides. `--limit N` caps the batch.
+
+**`freeze --ara <path>`** — Snapshot `pip freeze` output into
+`<ara>/env/requirements.freeze` so consumers can rebuild the
+environment (§1). Idempotent — safe to re-run after every pipeline
+stage.
+
+**`validate --ara <path> [--strict]`** — Run
+`ai_scientist.protocol.validate_ara(path)` (§17) against the JSON
+Schemas shipped in this repo. `--strict` promotes warnings to errors,
+matching CI's stance.
+
+### 20.6 Portability
+
+**`bundle --ara <path> --dest <out.tar.gz> [--force] [--no-verify]`** —
+Pack an ARA into a portable tarball for hand-off to another host or
+long-term archival. Pre-flight refuses to bundle when `verify-lock`
+reports `tampered` or `unlocked`; `revised` is allowed because the
+history chain is self-verifying. `--dest` inside the ARA is refused
+(self-reference guard, resolved symlink-safe) — the tarball would
+otherwise recursively contain a partial copy of itself. `--force`
+overwrites an existing `<out.tar.gz>`; `--no-verify` skips the pre-flight
+integrity check (for offline recovery of a known-broken ARA).
+
+### 20.7 Exit-code conventions
+
+Across every verb:
+
+- **rc=0** — success. For lookup verbs, an empty result is still rc=0
+  (the question was answered; the answer happens to be "no hits").
+- **rc=1** — content-change signal. Emitted by `diff
+  --exit-code-on-diff` when the two ARAs differ, and by `hash-check` on
+  any recorded / recomputed drift.
+- **rc=2** — user error or refused write. Invalid arguments, refused
+  overwrites, and `verify-lock` reporting `tampered` all collapse here.
+- **rc=3** — not-found. Missing ref, missing node, missing
+  `manifest.lock`.
+
+Empty JSON results are always emitted as valid JSON on stdout (`[]`,
+`{"aras": [], "totals": {...}}`, `null` — pick the shape most natural
+for the verb) with any human commentary on stderr, so `--json | jq …`
+pipelines never break on a no-hit case.
