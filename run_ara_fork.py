@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1957,6 +1958,76 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle(args: argparse.Namespace) -> int:
+    """Package an ARA into a portable gzip tarball — the ``git bundle`` analog.
+
+    Pre-flight: unless ``--no-verify`` is set, refuse when
+    ``verify_manifest_lock`` reports the ARA is ``tampered`` or ``unlocked``
+    — a bundled artifact must be provably intact end-to-end. On success the
+    tarball is written atomically (``<dest>.tmp`` → ``os.replace``) so an
+    interrupted run never leaves a half-written archive at ``dest``.
+    """
+    from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    ara_root = _resolve_ara_root(args.ara)
+    dest = Path(args.dest).expanduser().resolve()
+
+    # Refuse writing back into the ARA itself — that would recurse the tarball
+    # into its own input on the next `bundle` call.
+    try:
+        dest.parent.resolve().relative_to(ara_root)
+    except ValueError:
+        pass
+    else:
+        print(f"[ara-bundle] refusing: dest {dest} is inside ARA {ara_root}",
+              file=sys.stderr)
+        return 2
+
+    if not args.no_verify:
+        report = verify_manifest_lock(ara_root)
+        state = report.get("state")
+        if state in ("tampered", "unlocked"):
+            print(
+                f"[ara-bundle] refusing: state={state}, "
+                f"detail={report.get('detail')}. Pass --no-verify to override.",
+                file=sys.stderr,
+            )
+            return 2
+
+    if dest.exists() and not args.force:
+        print(f"[ara-bundle] refusing: dest already exists at {dest} "
+              f"(pass --force to overwrite)", file=sys.stderr)
+        return 2
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+
+    file_count = 0
+    try:
+        with tarfile.open(tmp, "w:gz") as tar:
+            # arcname = ara_root.name so extraction produces a folder, not
+            # scattered files. dereference=False keeps symlinks as symlinks.
+            tar.add(str(ara_root), arcname=ara_root.name, recursive=True)
+            # Count members after the fact so the log matches the archive.
+            file_count = len(tar.getmembers())
+    except OSError as exc:
+        # Clean up partial temp file so retries start clean.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        print(f"[ara-bundle] tarball write failed: {exc}", file=sys.stderr)
+        return 2
+
+    os.replace(tmp, dest)
+    try:
+        size_bytes = dest.stat().st_size
+    except OSError:
+        size_bytes = 0
+    print(f"[ara-bundle] wrote {dest} ({size_bytes} bytes, {file_count} files)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fork or re-execute a node from an Agent-Native Research Artifact.",
@@ -2197,6 +2268,22 @@ def build_parser() -> argparse.ArgumentParser:
     provenance_p.add_argument("--json", action="store_true",
                               help="Emit hits as a JSON array (full hashes preserved).")
     provenance_p.set_defaults(func=cmd_provenance)
+
+    bundle_p = sub.add_parser(
+        "bundle",
+        help="Package an ARA into a portable gzip tarball (git-bundle analog).",
+    )
+    bundle_p.add_argument("--ara", required=True,
+                          help="Path to the ARA directory or manifest.json.")
+    bundle_p.add_argument("--dest", required=True,
+                          help="Output tarball path (e.g. out.tar.gz).")
+    bundle_p.add_argument("--force", action="store_true",
+                          help="Overwrite --dest if it already exists.")
+    bundle_p.add_argument(
+        "--no-verify", action="store_true",
+        help="Skip the pre-flight verify_manifest_lock check.",
+    )
+    bundle_p.set_defaults(func=cmd_bundle)
 
     return parser
 
