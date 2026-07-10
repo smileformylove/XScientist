@@ -55,6 +55,23 @@ def _load_json(path: Path) -> Any | None:
         return None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce ``value`` to int; return ``default`` on TypeError/ValueError.
+
+    Manifests can be hand-edited or produced by older codepaths where
+    ``counts.nodes`` / ``counts.edges`` may end up as strings or other
+    non-numeric junk. ``int("foo")`` would crash describe/list; this
+    helper keeps the CLI resilient without silently masking real bugs
+    (a wrong-but-numeric value still round-trips faithfully).
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _resolve_ara_root(raw: str) -> Path:
     """Accept either the ARA directory or its manifest.json."""
     path = Path(raw).expanduser().resolve()
@@ -980,8 +997,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
     buggy = counts.get("buggy_nodes")
     if buggy is None:
         buggy = sum(1 for n in nodes if n.get("is_buggy"))
-    node_count = int(counts.get("nodes") or len(nodes))
-    edge_count = int(counts.get("edges") or len(graph.get("edges") or []))
+    node_count = _safe_int(counts.get("nodes"), default=len(nodes))
+    edge_count = _safe_int(counts.get("edges"), default=len(graph.get("edges") or []))
     seed_count = sum(1 for n in nodes if n.get("is_seed_node"))
 
     top = _pick_top_metric_node(nodes)
@@ -1005,6 +1022,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
         manifest_hash_current = None
 
     provenance = manifest.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        provenance = {}
     seed_hash = provenance.get("seed_hash")
     seed_payload = None
     if seed_hash or provenance.get("parent_ara_root"):
@@ -1025,6 +1044,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
         "all_verified": all(a.hash_verified is not False for a in log.ancestors) if log.ancestors else True,
     }
     idea = manifest.get("idea") or {}
+    if not isinstance(idea, dict):
+        idea = {}
     idea_payload = {"name": idea.get("name"), "title": idea.get("title")}
 
     if args.json:

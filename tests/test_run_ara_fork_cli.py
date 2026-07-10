@@ -461,6 +461,58 @@ class DescribeNonDictCountsTests(unittest.TestCase):
         # Falls back to whatever the graph enumerates — 1 node, 0 buggy.
         self.assertEqual(payload["counts"]["nodes"], 1)
 
+    def test_describe_survives_string_provenance(self) -> None:
+        """Legacy/corrupt manifest with `provenance` as a bare string must
+        not crash cmd_describe — mirrors iter-16's cmd_list guard."""
+        a = _make_ara(self.tmp, "descstrprov", [_node("nA", value=0.5)])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["provenance"] = "not-a-dict"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        # provenance-derived seed payload defaults to null when nothing valid.
+        self.assertIsNone(payload.get("seed"))
+
+    def test_describe_survives_string_idea(self) -> None:
+        """Legacy/corrupt manifest with `idea` as a bare string must not
+        crash cmd_describe."""
+        a = _make_ara(self.tmp, "descstridea", [_node("nA", value=0.5)])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["idea"] = "just-a-string"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        idea = payload.get("idea") or {}
+        self.assertIsNone(idea.get("name"))
+        self.assertIsNone(idea.get("title"))
+
+    def test_describe_survives_non_numeric_counts_values(self) -> None:
+        """Legacy/corrupt manifest with non-numeric `counts.nodes` /
+        `counts.edges` must not crash on int() coercion. Falls back to
+        the graph's own enumeration (or 0 when the graph is empty)."""
+        a = _make_ara(self.tmp, "descbadints", [_node("nA", value=0.5)])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"] = {"nodes": "not_a_number", "edges": "also_bad"}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertIsInstance(counts["nodes"], int)
+        self.assertIsInstance(counts["edges"], int)
+        # Graph has 1 node and no edges — _safe_int falls back to the
+        # graph enumeration when the manifest value is unparseable.
+        self.assertEqual(counts["nodes"], 1)
+        self.assertEqual(counts["edges"], 0)
+
 
 class EnvCLITests(unittest.TestCase):
     """`env --ara <path>` dumps a JSON summary of the reproducibility fingerprint.
