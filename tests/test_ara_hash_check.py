@@ -44,6 +44,15 @@ def _make_ara(tmp: Path, sub: str, nodes: list[dict]) -> Path:
     return Path(result.root)
 
 
+def _make_ara_in(project: Path, idea_name: str, nodes: list[dict]) -> Path:
+    """Build an ARA under an existing project directory (multi-ARA sweep fixture)."""
+    exp = project / "02_experiments" / f"20260710_{idea_name}"
+    _write_journal(exp / "logs", nodes)
+    (exp / "idea.json").write_text(json.dumps({"Name": idea_name}), encoding="utf-8")
+    result = export_ara(project_dir=project, exp_dir=exp, idea={"Name": idea_name})
+    return Path(result.root)
+
+
 def _run(*argv: str) -> tuple[int, str, str]:
     out = io.StringIO()
     err = io.StringIO()
@@ -182,6 +191,106 @@ class HashCheckCLITests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("NODE"))
         # Truncated hash form uses the ellipsis character.
         self.assertIn("n1", out)
+
+
+class HashCheckAllCLITests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.project = self.tmp / "proj"
+        self.project.mkdir()
+
+    def test_hash_check_all_walks_multiple_aras(self) -> None:
+        _make_ara_in(self.project, "idea_a", [_default_node("n1")])
+        _make_ara_in(self.project, "idea_b", [_default_node("n1"), _default_node("n2")])
+        _make_ara_in(self.project, "idea_c", [_default_node("n1")])
+        rc, out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        self.assertEqual(len(payload["aras"]), 3)
+        self.assertTrue(all(a["state"] == "clean" for a in payload["aras"]))
+        self.assertEqual(payload["totals"]["aras"], 3)
+        self.assertEqual(payload["totals"]["nodes"], 4)
+
+    def test_hash_check_all_reports_drift(self) -> None:
+        _make_ara_in(self.project, "clean_idea", [_default_node("n1")])
+        bad = _make_ara_in(self.project, "drift_idea", [_default_node("n1")])
+        (bad / "nodes" / "n1" / "code.py").write_text(
+            "print('tampered')\n", encoding="utf-8"
+        )
+        rc, out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 1, msg=err)
+        payload = json.loads(out)
+        by_name = {Path(a["ara_root"]).name: a for a in payload["aras"]}
+        drift_key = next(k for k in by_name if "drift_idea" in k)
+        clean_key = next(k for k in by_name if "clean_idea" in k)
+        self.assertEqual(by_name[drift_key]["state"], "drift")
+        self.assertEqual(by_name[clean_key]["state"], "clean")
+        self.assertEqual(payload["totals"]["drift"], 1)
+
+    def test_hash_check_all_reports_missing_code(self) -> None:
+        _make_ara_in(self.project, "clean_idea", [_default_node("n1")])
+        bad = _make_ara_in(self.project, "gone_idea", [_default_node("n1")])
+        (bad / "nodes" / "n1" / "code.py").unlink()
+        rc, out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 2, msg=err)
+        payload = json.loads(out)
+        by_name = {Path(a["ara_root"]).name: a for a in payload["aras"]}
+        gone_key = next(k for k in by_name if "gone_idea" in k)
+        self.assertEqual(by_name[gone_key]["state"], "missing_code")
+        self.assertEqual(payload["totals"]["missing_code"], 1)
+
+    def test_hash_check_all_drift_beats_missing_code_in_rc(self) -> None:
+        _make_ara_in(self.project, "clean_idea", [_default_node("n1")])
+        drift = _make_ara_in(self.project, "drift_idea", [_default_node("n1")])
+        (drift / "nodes" / "n1" / "code.py").write_text(
+            "print('tampered')\n", encoding="utf-8"
+        )
+        gone = _make_ara_in(self.project, "gone_idea", [_default_node("n1")])
+        (gone / "nodes" / "n1" / "code.py").unlink()
+        rc, _out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 1, msg=err)  # drift wins over missing_code
+
+    def test_hash_check_all_empty_project_returns_rc_zero(self) -> None:
+        rc, out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        self.assertEqual(payload["aras"], [])
+        self.assertIn("no ARAs found", err)
+
+    def test_hash_check_all_json_shape(self) -> None:
+        _make_ara_in(self.project, "idea_a", [_default_node("n1")])
+        rc, out, err = _run(
+            "hash-check", "--all", "--project", str(self.project), "--json"
+        )
+        self.assertEqual(rc, 0, msg=err)
+        payload = json.loads(out)
+        self.assertIn("aras", payload)
+        self.assertIn("totals", payload)
+        self.assertIsInstance(payload["aras"], list)
+        self.assertIsInstance(payload["totals"], dict)
+        [entry] = payload["aras"]
+        for key in ("ara_root", "nodes", "counts", "state"):
+            self.assertIn(key, entry)
+
+    def test_hash_check_all_and_ara_mutually_exclusive(self) -> None:
+        ara = _make_ara_in(self.project, "idea_a", [_default_node("n1")])
+        with self.assertRaises(SystemExit):
+            _run(
+                "hash-check", "--ara", str(ara),
+                "--all", "--project", str(self.project),
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -791,14 +791,40 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
       * rc=0 all clean (unhashed nodes allowed)
       * rc=1 any drift
       * rc=2 any missing_code (and no drift)
+
+    ``--all --project <path>`` sweeps every ARA under ``<path>/ara/`` and
+    aggregates counts + state per ARA — drift beats missing_code in the rc.
+    """
+    if args.project:
+        # --project without --all is rejected loudly so sweep intent stays explicit.
+        if not args.all:
+            print("[hash-check] --project requires --all", file=sys.stderr)
+            return 2
+        return _hash_check_all(Path(args.project).expanduser().resolve(), args)
+
+    ara_root = _resolve_ara_root(args.ara)
+    entries = _hash_check_ara(ara_root)
+    if args.json:
+        print(json.dumps(entries, indent=2, ensure_ascii=False, default=str))
+    else:
+        _render_hash_check(entries)
+    if any(e["state"] == "drift" for e in entries):
+        return 1
+    if any(e["state"] == "missing_code" for e in entries):
+        return 2
+    return 0
+
+
+def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
+    """Recompute each node's content_hash from disk and return per-node states.
+
+    Shared between single-ARA ``hash-check --ara`` and the ``--all --project``
+    sweep — keeps the classification rules in exactly one place.
     """
     from ai_scientist.protocol import hash_node_payload
 
-    ara_root = _resolve_ara_root(args.ara)
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     entries: list[dict[str, Any]] = []
-    any_drift = False
-    any_missing = False
 
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
@@ -834,7 +860,6 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
                     "stored_hash": stored_hash, "computed_hash": None,
                     "notes": f"code.py unreadable: {exc}",
                 })
-                any_missing = True
                 continue
 
         try:
@@ -850,7 +875,6 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
                 "stored_hash": stored_hash, "computed_hash": None,
                 "notes": f"hash recompute failed: {exc}",
             })
-            any_drift = True
             continue
 
         if not stored_hash:
@@ -885,7 +909,6 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
                 "stored_hash": stored_hash, "computed_hash": None,
                 "notes": "code.py absent; stored hash implies non-empty code",
             })
-            any_missing = True
             continue
 
         # Drift — try to explain which category flipped. The graph entry
@@ -907,18 +930,8 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
             "stored_hash": stored_hash, "computed_hash": computed,
             "notes": note,
         })
-        any_drift = True
 
-    if args.json:
-        print(json.dumps(entries, indent=2, ensure_ascii=False, default=str))
-    else:
-        _render_hash_check(entries)
-
-    if any_drift:
-        return 1
-    if any_missing:
-        return 2
-    return 0
+    return entries
 
 
 def _render_hash_check(entries: list[dict[str, Any]]) -> None:
@@ -941,6 +954,65 @@ def _render_hash_check(entries: list[dict[str, Any]]) -> None:
     print(fmt.format(*header))
     for r in rows:
         print(fmt.format(*r))
+
+
+def _hash_check_all(project_dir: Path, args: argparse.Namespace) -> int:
+    """Sweep <project_dir>/ara/ and aggregate per-node hash-check state.
+
+    rc rule mirrors single-ARA hash-check: drift (1) beats missing_code (2).
+    Empty projects pass with a stderr note (never silent — iter-13 invariant).
+    """
+    from ai_scientist.utils.ara_artifact import ara_root_for_project
+
+    ara_base = ara_root_for_project(str(project_dir))
+    aras: list[dict[str, Any]] = []
+    if ara_base.exists():
+        for sub in sorted(ara_base.iterdir()):
+            if not (sub.is_dir() and (sub / "manifest.json").exists()):
+                continue
+            entries = _hash_check_ara(sub)
+            counts = {"clean": 0, "drift": 0, "missing_code": 0,
+                      "unhashed": 0, "no_code": 0}
+            for e in entries:
+                counts[e["state"]] = counts.get(e["state"], 0) + 1
+            state = ("drift" if counts["drift"] else
+                     "missing_code" if counts["missing_code"] else "clean")
+            aras.append({"ara_root": str(sub), "nodes": len(entries),
+                         "counts": counts, "state": state})
+    totals = {
+        "aras": len(aras),
+        "nodes": sum(a["nodes"] for a in aras),
+        "drift": sum(a["counts"]["drift"] for a in aras),
+        "missing_code": sum(a["counts"]["missing_code"] for a in aras),
+    }
+    if not aras:
+        if args.json:
+            print(json.dumps({"aras": [], "totals": totals}, indent=2))
+        print(f"(no ARAs found under {ara_base})", file=sys.stderr)
+        return 0
+    if args.json:
+        print(json.dumps({"aras": aras, "totals": totals},
+                         indent=2, ensure_ascii=False, default=str))
+    else:
+        header = ("ARA", "NODES", "CLEAN", "DRIFT", "MISSING", "UNHASHED", "STATE")
+        rows = [(Path(a["ara_root"]).name, str(a["nodes"]),
+                 str(a["counts"]["clean"]), str(a["counts"]["drift"]),
+                 str(a["counts"]["missing_code"]),
+                 str(a["counts"]["unhashed"] + a["counts"]["no_code"]),
+                 a["state"]) for a in aras]
+        widths = [max(len(header[i]), max(len(r[i]) for r in rows))
+                  for i in range(len(header))]
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*header))
+        for r in rows:
+            print(fmt.format(*r))
+        print(f"Total: {totals['aras']} ARAs, {totals['nodes']} nodes, "
+              f"{totals['drift']} drift, {totals['missing_code']} missing_code")
+    if totals["drift"]:
+        return 1
+    if totals["missing_code"]:
+        return 2
+    return 0
 
 
 def _pick_top_metric_node(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1942,7 +2014,16 @@ def build_parser() -> argparse.ArgumentParser:
         "hash-check",
         help="Recompute each node's content_hash from disk and report drift.",
     )
-    hash_check_p.add_argument("--ara", required=True)
+    hash_check_target = hash_check_p.add_mutually_exclusive_group(required=True)
+    hash_check_target.add_argument("--ara")
+    hash_check_target.add_argument(
+        "--project",
+        help="Project directory whose ara/ subtree will be swept (requires --all).",
+    )
+    hash_check_p.add_argument(
+        "--all", action="store_true",
+        help="With --project, walk every ARA and aggregate per-node states.",
+    )
     hash_check_p.add_argument(
         "--json", action="store_true",
         help="Emit entries as a JSON array (full hashes preserved).",
