@@ -647,6 +647,155 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick_top_metric_node(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the best-scored non-buggy node.
+
+    Respects each node's ``metric.maximize`` flag. Nodes with ``is_buggy=True``
+    or without a scalar ``metric.value`` are skipped. Returns None when nothing
+    qualifies.
+    """
+    best: dict[str, Any] | None = None
+    best_value: float | None = None
+    best_maximize: bool = True
+    for node in nodes or []:
+        if not isinstance(node, dict) or node.get("is_buggy"):
+            continue
+        metric = node.get("metric")
+        if not isinstance(metric, dict):
+            continue
+        value = metric.get("value")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        maximize = bool(metric.get("maximize", True))
+        # Compare against the current best using its own maximize direction —
+        # a node with maximize=false beats the best iff its value is lower.
+        if best is None or (
+            float(value) > best_value if best_maximize else float(value) < best_value
+        ):
+            best, best_value, best_maximize = node, float(value), maximize
+    return best
+
+
+def cmd_describe(args: argparse.Namespace) -> int:
+    """Emit a one-shot overview of an ARA.
+
+    Fills the "at-a-glance" gap between ``inspect`` (one node) and
+    ``log`` / ``history`` (chains). Prints a compact human-readable
+    block by default; ``--json`` returns a machine-readable dict.
+    """
+    from ai_scientist.protocol import hash_manifest
+    from ai_scientist.utils.ara_log import ara_log
+    from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+
+    ara_root = _resolve_ara_root(args.ara)
+    manifest = _load_json(ara_root / "manifest.json")
+    if not isinstance(manifest, dict):
+        print(f"[ara-describe] {ara_root} has no readable manifest.json",
+              file=sys.stderr)
+        return 3
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
+    counts = manifest.get("counts") or {}
+    buggy = counts.get("buggy_nodes")
+    if buggy is None:
+        buggy = sum(1 for n in nodes if n.get("is_buggy"))
+    node_count = int(counts.get("nodes") or len(nodes))
+    edge_count = int(counts.get("edges") or len(graph.get("edges") or []))
+    seed_count = sum(1 for n in nodes if n.get("is_seed_node"))
+
+    top = _pick_top_metric_node(nodes)
+    top_payload = None if top is None else {
+        "id": str(top.get("id")),
+        "content_hash": top.get("content_hash"),
+        "metric": top.get("metric"),
+        "is_buggy": bool(top.get("is_buggy")),
+    }
+
+    verify = verify_manifest_lock(ara_root)
+    lock_payload = {
+        "manifest_hash": verify.get("base_hash"),
+        "revision": int(verify.get("revision_count") or 0),
+        "state": verify.get("state"),
+        "current_hash": verify.get("current_hash"),
+    }
+    try:
+        manifest_hash_current = hash_manifest(manifest)
+    except Exception:  # pragma: no cover - defensive
+        manifest_hash_current = None
+
+    provenance = manifest.get("provenance") or {}
+    seed_hash = provenance.get("seed_hash")
+    seed_payload = None
+    if seed_hash or provenance.get("parent_ara_root"):
+        seed_payload = {
+            "hash": seed_hash,
+            "parent_ara_root": provenance.get("parent_ara_root"),
+            "parent_node_id": provenance.get("parent_node_id"),
+            "parent_content_hash": provenance.get("parent_content_hash"),
+        }
+
+    log = ara_log(ara_root)
+    # all_verified: treat None (couldn't check) as pass — same convention as
+    # cmd_log's render — so an unverified but reachable ancestor doesn't get
+    # flagged as a failure.
+    ancestors_payload = {
+        "count": len(log.ancestors),
+        "all_reachable": all(a.reachable for a in log.ancestors) if log.ancestors else True,
+        "all_verified": all(a.hash_verified is not False for a in log.ancestors) if log.ancestors else True,
+    }
+    idea = manifest.get("idea") or {}
+    idea_payload = {"name": idea.get("name"), "title": idea.get("title")}
+
+    if args.json:
+        print(json.dumps({
+            "ara_root": str(ara_root),
+            "idea": idea_payload,
+            "counts": {
+                "nodes": node_count, "buggy": int(buggy), "seeds": seed_count,
+                "edges": edge_count, "revisions": lock_payload["revision"],
+            },
+            "top_metric_node": top_payload,
+            "seed": seed_payload,
+            "lock": lock_payload,
+            "verify_state": verify.get("state"),
+            "manifest_hash_current": manifest_hash_current,
+            "ancestors": ancestors_payload,
+        }, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    # Human view.
+    print(f"# ARA overview: {ara_root}")
+    print(f"Idea:            {idea_payload['name'] or '(unknown)'}")
+    if idea_payload.get("title"):
+        print(f"Title:           {idea_payload['title']}")
+    print(f"Nodes:           {node_count}  (buggy: {int(buggy)}, seeds: {seed_count}, edges: {edge_count})")
+    if top_payload is None:
+        print("Top metric:      (no scored nodes)")
+    else:
+        m = top_payload["metric"] or {}
+        name = m.get("name") if isinstance(m, dict) else None
+        value = m.get("value") if isinstance(m, dict) else m
+        maximize = m.get("maximize") if isinstance(m, dict) else None
+        suffix = f"  (name={name}, maximize={maximize})" if name is not None else ""
+        print(f"Top metric:      {top_payload['id']}  metric={value}{suffix}")
+    if seed_payload:
+        parent_ara = seed_payload.get("parent_ara_root") or "(unknown)"
+        parent_node = seed_payload.get("parent_node_id") or "(unknown)"
+        print(f"Seed:            {_short_hash(seed_payload.get('hash'))}  (parent: {parent_ara} / {parent_node})")
+    else:
+        print("Seed:            (none — root ARA)")
+    print(f"Latest lock:     {_short_hash(lock_payload['manifest_hash'])}  (rev {lock_payload['revision']}, {lock_payload['state']})")
+    print(f"Manifest hash:   {_short_hash(manifest_hash_current)}")
+    print(f"Verify state:    {verify.get('state')}")
+    if ancestors_payload["count"] == 0:
+        print("Ancestors:       0 (root ARA — no provenance)")
+    else:
+        reach = "all reachable" if ancestors_payload["all_reachable"] else "some unreachable"
+        verify_word = "hash verified" if ancestors_payload["all_verified"] else "hash mismatch"
+        print(f"Ancestors:       {ancestors_payload['count']} ({reach}, {verify_word})")
+    return 0
+
+
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
         RefError, delete_ref, get_ref, list_refs, set_ref,
@@ -1074,6 +1223,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit term_out.log tail to N bytes (default 4000; 0 = empty).",
     )
     show_p.set_defaults(func=cmd_show)
+
+    describe_p = sub.add_parser(
+        "describe",
+        help="Compact human overview of an ARA (idea, counts, top metric, lock, ancestors).",
+    )
+    describe_p.add_argument("--ara", required=True)
+    describe_p.add_argument("--json", action="store_true",
+                            help="Emit the overview as a JSON object.")
+    describe_p.set_defaults(func=cmd_describe)
 
     refs_p = sub.add_parser(
         "refs",
