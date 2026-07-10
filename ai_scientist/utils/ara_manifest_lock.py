@@ -288,10 +288,17 @@ def _append_history_row(
 ) -> None:
     history_path = ara_dir / MANIFEST_HISTORY_NAME
     existing = _read_history(ara_dir)
+    # max(revision)+1 rather than len+1 so a corrupt (skipped) row on
+    # disk can't cause a revision number collision with a survivor.
+    highest = max(
+        (r["revision"] for r in existing
+         if isinstance(r.get("revision"), int)),
+        default=0,
+    )
     row = {
         "schema_version": _LOCK_SCHEMA_VERSION,
         "protocol_kind": "manifest_revision",
-        "revision": len(existing) + 1,
+        "revision": max(highest, len(existing)) + 1,
         "ts": _now_iso(),
         "base_hash": base_hash,
         "new_hash": new_hash,
@@ -308,13 +315,24 @@ def _read_history(ara_dir: Path) -> list[dict[str, Any]]:
     p = ara_dir / MANIFEST_HISTORY_NAME
     if not p.exists():
         return []
-    rows: list[dict[str, Any]] = []
     try:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
-    except (OSError, json.JSONDecodeError):
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
         return []
+    # Per-line try/except — one corrupt row must not zero the count.
+    # Whole-file rejection here caused verify_manifest_lock to mis-report
+    # revised ARAs as 'tampered' and reset revision numbers on the next
+    # append. Matches ara_log._read_revisions / cmd_history behaviour.
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
     return rows
 
 

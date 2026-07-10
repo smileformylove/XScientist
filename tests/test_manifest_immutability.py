@@ -12,6 +12,7 @@ from ai_scientist.utils.ara_manifest_lock import (
     HISTORY_SUBDIR,
     MANIFEST_HISTORY_NAME,
     MANIFEST_LOCK_NAME,
+    _read_history,
     append_manifest_revision,
     verify_manifest_lock,
     write_manifest_lock,
@@ -219,6 +220,66 @@ class AppendManifestRevisionTests(unittest.TestCase):
         report = verify_manifest_lock(ara)
         self.assertFalse(report["ok"])
         self.assertEqual(report["state"], "tampered")
+
+
+class CorruptHistoryToleranceTests(unittest.TestCase):
+    """Regression: one bad line in manifest.history.jsonl must not erase the rest.
+
+    Pre-fix, `_read_history` wrapped the whole loop in try/except so any
+    malformed row returned []. That made verify_manifest_lock report
+    'tampered' on revised ARAs and reset revision numbers on next append.
+    Sibling readers (ara_log._read_revisions, cmd_history) skip per-line.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _bump(self, ara: Path, val: int) -> None:
+        append_manifest_revision(
+            ara / "manifest.json",
+            lambda m, v=val: (m.setdefault("counts", {}).__setitem__("claims", v),
+                              ["counts.claims"])[1],
+        )
+
+    def _corrupt_first(self, ara: Path) -> None:
+        p = ara / MANIFEST_HISTORY_NAME
+        lines = p.read_text(encoding="utf-8").splitlines()
+        lines[0] = "{corrupt row"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_read_history_tolerates_single_corrupt_row(self) -> None:
+        ara, _ = _fresh_ara(self.tmp)
+        (ara / MANIFEST_HISTORY_NAME).write_text(
+            json.dumps({"revision": 1}) + "\n{not valid json\n"
+            + json.dumps({"revision": 2}) + "\n", encoding="utf-8",
+        )
+        self.assertEqual([r["revision"] for r in _read_history(ara)], [1, 2])
+
+    def test_verify_manifest_lock_survives_single_corrupt_history_row(self) -> None:
+        ara, _ = _fresh_ara(self.tmp)
+        self._bump(ara, 1); self._bump(ara, 2)
+        self._corrupt_first(ara)
+        report = verify_manifest_lock(ara)
+        # Pre-fix bug collapsed to tampered/revision_count=0.
+        self.assertNotEqual((report["state"], report["revision_count"]),
+                            ("tampered", 0), f"regression: {report}")
+        self.assertEqual(report["state"], "revised")
+        self.assertTrue(report["ok"])
+
+    def test_append_manifest_revision_next_number_survives_corrupt_row(self) -> None:
+        ara, _ = _fresh_ara(self.tmp)
+        self._bump(ara, 1); self._bump(ara, 2)
+        self._corrupt_first(ara)
+        self._bump(ara, 3)
+        parsed = []
+        for ln in (ara / MANIFEST_HISTORY_NAME).read_text().splitlines():
+            if not ln.strip():
+                continue
+            try: parsed.append(json.loads(ln))
+            except json.JSONDecodeError: continue
+        self.assertEqual(parsed[-1]["revision"], 3)
 
 
 if __name__ == "__main__":  # pragma: no cover
