@@ -257,5 +257,108 @@ class DiffCLIFilterTests(unittest.TestCase):
         self.assertEqual(len(payload["nodes_hash_changed"]), 3)
 
 
+class DiffCLIStatTests(unittest.TestCase):
+    """Exercise the --stat one-line summary on the diff CLI."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    @staticmethod
+    def _run(*argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = run_ara_fork.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def _pair_with_shape(
+        self, *, added: int, removed: int, changed: int,
+    ) -> tuple[Path, Path]:
+        """Build two ARAs where B has `added` new node ids, is missing
+        `removed` of A's nodes, and shares `changed` ids but with different
+        code so they land in nodes_hash_changed."""
+        base = [_make_node(f"c{i}", code=f"print('a{i}')") for i in range(changed)]
+        removed_only = [_make_node(f"r{i}") for i in range(removed)]
+        added_only = [_make_node(f"z{i}") for i in range(added)]
+        base_b = [_make_node(f"c{i}", code=f"print('b{i}')") for i in range(changed)]
+        pa, ea = _project(self.tmp, sub="a", nodes=base + removed_only)
+        pb, eb = _project(self.tmp, sub="b", nodes=base_b + added_only)
+        ra = export_ara(project_dir=pa, exp_dir=ea, idea={"Name": "a"})
+        rb = export_ara(project_dir=pb, exp_dir=eb, idea={"Name": "a"})
+        return Path(ra.root), Path(rb.root)
+
+    def test_diff_stat_line_grammar(self) -> None:
+        a, b = self._pair_with_shape(added=2, removed=1, changed=1)
+        rc, out, _ = self._run("diff", "--ara", str(a), "--other", str(b), "--stat")
+        self.assertEqual(rc, 0)
+        line = out.strip()
+        pattern = (
+            r"^nodes: \+2 -1 ~1 "
+            r"prompts: shared=\d+ only_a=\d+ only_b=\d+ "
+            r"seed_ref_changed=(yes|no) pipeline_changed=\d+$"
+        )
+        self.assertRegex(line, pattern)
+        # Exactly one line — the whole point of --stat.
+        self.assertEqual(out.count("\n"), 1)
+
+    def test_diff_stat_json_shape(self) -> None:
+        a, b = self._pair_with_shape(added=2, removed=1, changed=1)
+        rc, out, _ = self._run("diff", "--ara", str(a), "--other", str(b),
+                               "--stat", "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(
+            set(payload.keys()),
+            {"added", "removed", "changed",
+             "prompts_shared", "prompts_only_a", "prompts_only_b",
+             "seed_ref_changed", "pipeline_changed"},
+        )
+        self.assertEqual(payload["added"], 2)
+        self.assertEqual(payload["removed"], 1)
+        self.assertEqual(payload["changed"], 1)
+        self.assertIsInstance(payload["seed_ref_changed"], bool)
+
+    def test_diff_stat_no_diff_exits_zero(self) -> None:
+        pa, ea = _project(self.tmp, sub="a", nodes=[_make_node("n1")])
+        pb, eb = _project(self.tmp, sub="b", nodes=[_make_node("n1")])
+        ra = export_ara(project_dir=pa, exp_dir=ea, idea={"Name": "a"})
+        rb = export_ara(project_dir=pb, exp_dir=eb, idea={"Name": "a"})
+        rc, out, _ = self._run("diff", "--ara", str(ra.root), "--other",
+                               str(rb.root), "--stat")
+        self.assertEqual(rc, 0)
+        self.assertIn("nodes: +0 -0 ~0", out.strip())
+        # Even with --exit-code-on-diff, identical inputs must stay rc=0.
+        rc2, _, _ = self._run("diff", "--ara", str(ra.root), "--other",
+                              str(rb.root), "--stat", "--exit-code-on-diff")
+        self.assertEqual(rc2, 0)
+
+    def test_diff_stat_with_exit_code_on_diff(self) -> None:
+        a, b = self._pair_with_shape(added=0, removed=0, changed=1)
+        rc, out, _ = self._run("diff", "--ara", str(a), "--other", str(b),
+                               "--stat", "--exit-code-on-diff")
+        self.assertEqual(rc, 1)
+        self.assertIn("~1", out)
+
+    def test_diff_stat_silently_ignores_only_node_and_limit(self) -> None:
+        a, b = self._pair_with_shape(added=0, removed=0, changed=3)
+        # Pick an id that exists in both sides but combine with --stat: the
+        # per-node filter must NOT restrict the summary counts.
+        rc, out, _ = self._run("diff", "--ara", str(a), "--other", str(b),
+                               "--stat", "--only-node", "c1",
+                               "--limit-nodes", "1")
+        self.assertEqual(rc, 0)
+        line = out.strip()
+        self.assertRegex(
+            line,
+            r"^nodes: \+0 -0 ~3 "
+            r"prompts: shared=\d+ only_a=\d+ only_b=\d+ "
+            r"seed_ref_changed=(yes|no) pipeline_changed=\d+$",
+        )
+        # No per-node lines slipped through — the one-liner is the whole output.
+        self.assertNotIn("~ c1", out)
+        self.assertNotIn("+ ", out)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

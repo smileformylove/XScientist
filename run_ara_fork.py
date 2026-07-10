@@ -397,6 +397,14 @@ def cmd_diff(args: argparse.Namespace) -> int:
     result = diff_ara(ara_a, ara_b)
     lists = ("nodes_added", "nodes_removed", "nodes_hash_changed")
 
+    # --stat is a whole-ARA one-liner (or single JSON object). It intentionally
+    # bypasses --only-node / --limit-nodes — those slice per-node output that
+    # --stat doesn't emit. Bailing out here also means the pre-truncation
+    # counts we display are the raw diff counts, exactly what a CI dashboard
+    # cell wants to render.
+    if args.stat:
+        return _emit_diff_stat(result, args)
+
     # --only-node narrows the per-node lists; manifest/references stay aggregate.
     if args.only_node:
         matched = False
@@ -438,6 +446,48 @@ def cmd_diff(args: argparse.Namespace) -> int:
     ):
         return 0
     return 1 if args.exit_code_on_diff else 0
+
+
+def _emit_diff_stat(result, args: argparse.Namespace) -> int:  # ARADiff
+    """One-line (or one JSON object) whole-ARA summary for scripts / CI.
+
+    Text grammar (all lowercase, single spaces):
+      ``nodes: +A -R ~C prompts: shared=S only_a=X only_b=Y \
+seed_ref_changed=(yes|no) pipeline_changed=N``
+
+    Exit code mirrors the long-form diff: rc=1 when ``--exit-code-on-diff``
+    is set AND any node/prompt/reference movement is present; else rc=0.
+    """
+    added = len(result.nodes_added)
+    removed = len(result.nodes_removed)
+    changed = len(result.nodes_hash_changed)
+    r = result.references
+    pipeline_changed = (
+        len(r.pipeline_added) + len(r.pipeline_removed) + len(r.pipeline_hash_changed)
+    )
+    seed_ref_changed = bool(r.seed_changed)
+    p = result.prompts
+
+    if args.json:
+        print(json.dumps({
+            "added": added, "removed": removed, "changed": changed,
+            "prompts_shared": p.shared,
+            "prompts_only_a": p.only_in_a, "prompts_only_b": p.only_in_b,
+            "seed_ref_changed": seed_ref_changed,
+            "pipeline_changed": pipeline_changed,
+        }, ensure_ascii=False))
+    else:
+        print(
+            f"nodes: +{added} -{removed} ~{changed} "
+            f"prompts: shared={p.shared} only_a={p.only_in_a} only_b={p.only_in_b} "
+            f"seed_ref_changed={'yes' if seed_ref_changed else 'no'} "
+            f"pipeline_changed={pipeline_changed}"
+        )
+
+    # Manifest-only drift (timestamps etc.) is intentionally NOT surfaced by
+    # the one-liner, so it must not trip --exit-code-on-diff either.
+    material = bool(added or removed or changed or seed_ref_changed or pipeline_changed)
+    return 1 if args.exit_code_on_diff and material else 0
 
 
 def cmd_log(args: argparse.Namespace) -> int:
@@ -1174,6 +1224,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit-nodes", type=int, default=None, metavar="N",
         help="Truncate each of added/removed/changed to N entries. Summary "
              "counts remain accurate; JSON output gains a `truncated` field.",
+    )
+    diff_p.add_argument(
+        "--stat", action="store_true",
+        help="Emit a one-line whole-ARA summary for scripts/CI dashboards "
+             "instead of the multi-section report. With --json, emit a single "
+             "JSON object of the same counts. --only-node and --limit-nodes "
+             "are silently ignored (this flag is a whole-ARA summary).",
     )
     diff_p.set_defaults(func=cmd_diff)
 
