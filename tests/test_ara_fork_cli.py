@@ -154,6 +154,64 @@ class CLIRefsTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("refused", err)
 
+    # --- --prefix filter (list mode) ---------------------------------
+
+    def _seed_refs(self, ara: Path, names: list[str]) -> None:
+        for i, name in enumerate(names):
+            target = "sha256:" + str(i % 10) * 64
+            rc, _, _ = _run("refs", "--ara", str(ara), "--set", name, target)
+            self.assertEqual(rc, 0)
+
+    def test_refs_list_prefix_filters_matching(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        self._seed_refs(a, ["foo/a", "foo/b", "bar/c"])
+        rc, out, _ = _run("refs", "--ara", str(a), "--prefix", "foo/")
+        self.assertEqual(rc, 0)
+        self.assertIn("foo/a", out)
+        self.assertIn("foo/b", out)
+        self.assertNotIn("bar/c", out)
+
+    def test_refs_list_prefix_json_shape_preserved(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        self._seed_refs(a, ["foo/a", "foo/b", "bar/c"])
+        rc, out, _ = _run("refs", "--ara", str(a), "--json", "--prefix", "foo/")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIsInstance(payload, list)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual({r["name"] for r in payload}, {"foo/a", "foo/b"})
+
+    def test_refs_list_prefix_no_matches_empty(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        self._seed_refs(a, ["bar/x", "bar/y"])
+        rc, out, _ = _run("refs", "--ara", str(a), "--prefix", "nothing/")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        rc, out, _ = _run("refs", "--ara", str(a), "--json", "--prefix", "nothing/")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out), [])
+
+    def test_refs_list_prefix_empty_string_matches_all(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        self._seed_refs(a, ["foo/a", "foo/b", "bar/c"])
+        rc, out, _ = _run("refs", "--ara", str(a), "--prefix", "")
+        self.assertEqual(rc, 0)
+        for name in ("foo/a", "foo/b", "bar/c"):
+            self.assertIn(name, out)
+
+    def test_refs_list_prefix_trailing_slash_convention(self) -> None:
+        a = _make_ara(self.tmp, "a")
+        # A plain `foo` cannot coexist with `foo/bar` on the filesystem
+        # (git shares the same restriction), so demonstrate the trailing-slash
+        # convention with a sibling that shares the prefix without the slash.
+        self._seed_refs(a, ["foobar", "foo/bar"])
+        rc, out, _ = _run("refs", "--ara", str(a), "--prefix", "foo/")
+        self.assertEqual(rc, 0)
+        self.assertIn("foo/bar", out)
+        # `foobar` starts with `foo` but not `foo/`, so it must not match.
+        names = [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+        self.assertNotIn("foobar", names)
+
 
 class CLIVerifyLockTests(unittest.TestCase):
     def setUp(self) -> None:

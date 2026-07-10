@@ -1203,12 +1203,17 @@ def cmd_refs(args: argparse.Namespace) -> int:
         return 0
 
     refs = list_refs(ara_root)
+    if args.prefix is not None:
+        refs = [r for r in refs if r.name.startswith(args.prefix)]
     if args.json:
         print(json.dumps([{"name": r.name, "target": r.target} for r in refs],
                          indent=2, ensure_ascii=False))
         return 0
     if not refs:
-        print("(no refs set)")
+        # When a prefix filter is in effect, stay silent so callers can pipe
+        # the output to xargs without a spurious "(no refs set)" line.
+        if args.prefix is None:
+            print("(no refs set)")
         return 0
     width = max(len(r.name) for r in refs)
     for r in refs:
@@ -1780,6 +1785,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Remove a ref.")
     refs_p.add_argument("--json", action="store_true",
                         help="Machine-readable listing.")
+    refs_p.add_argument("--prefix", metavar="PATH", default=None,
+                        help="Filter list mode to refs whose name starts with PATH "
+                             "(git-style; use trailing slash to scope a namespace).")
     refs_p.set_defaults(func=cmd_refs)
 
     return parser
