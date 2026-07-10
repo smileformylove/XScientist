@@ -975,6 +975,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     counts = manifest.get("counts") or {}
+    if not isinstance(counts, dict):
+        counts = {}
     buggy = counts.get("buggy_nodes")
     if buggy is None:
         buggy = sum(1 for n in nodes if n.get("is_buggy"))
@@ -1108,6 +1110,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                 })
                 continue
             counts = manifest.get("counts") or {}
+            if not isinstance(counts, dict):
+                counts = {}
             provenance = manifest.get("provenance") or {}
             if not isinstance(provenance, dict):
                 provenance = {}

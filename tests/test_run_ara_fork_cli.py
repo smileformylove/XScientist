@@ -416,6 +416,51 @@ class ListCLITests(unittest.TestCase):
         self.assertEqual(payload[0]["path"], real.name)
         self.assertEqual(payload[0]["idea"], "?")
 
+    def test_list_survives_non_dict_counts(self) -> None:
+        """Legacy/corrupt manifest with `counts` as a bare scalar must not
+        crash the sweep — the ARA still surfaces in the output."""
+        real = _make_ara(self.tmp, "badcounts", [_node("nA", value=0.5)])
+        manifest_path = real / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"] = 5  # int, not a dict — truthy so `or {}` fallback fails
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run(
+            "list", "--project", str(self.tmp / "badcounts"), "--json"
+        )
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["path"], real.name)
+        # nodes/buggy_nodes fall back to None (dict.get default) when counts
+        # is coerced back to {}.
+        self.assertIsNone(payload[0]["nodes"])
+        self.assertIsNone(payload[0]["buggy_nodes"])
+
+
+class DescribeNonDictCountsTests(unittest.TestCase):
+    """Regression: cmd_describe must degrade gracefully when a legacy
+    manifest carries `counts` as a non-dict scalar (mirrors cmd_list)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_describe_survives_non_dict_counts(self) -> None:
+        a = _make_ara(self.tmp, "descbadcounts", [_node("nA", value=0.5)])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"] = "bad"  # string, not a dict
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIn("counts", payload)
+        # Falls back to whatever the graph enumerates — 1 node, 0 buggy.
+        self.assertEqual(payload["counts"]["nodes"], 1)
+
 
 class EnvCLITests(unittest.TestCase):
     """`env --ara <path>` dumps a JSON summary of the reproducibility fingerprint.
