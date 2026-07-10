@@ -244,6 +244,55 @@ class VerifyLockAllTests(unittest.TestCase):
         self.assertEqual(json.loads(out), [])
         self.assertIn("no ARAs", err)
 
+    def test_verify_lock_all_json_includes_manifest_hash_for_clean(self) -> None:
+        """Every clean entry must carry a resolvable sha256 manifest_hash so
+        downstream tools can compare hashes across ARAs without an extra
+        per-ARA verify-lock call."""
+        project = self._project_with("mhash", 3)
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(len(payload), 3)
+        for entry in payload:
+            self.assertEqual(entry["state"], "clean")
+            self.assertIsInstance(entry["manifest_hash"], str)
+            self.assertTrue(entry["manifest_hash"].startswith("sha256:"))
+
+    def test_verify_lock_all_json_manifest_hash_none_for_unlocked(self) -> None:
+        """Unlocked ARAs have no recorded base hash — the field must be
+        explicitly null, not missing, so JSON consumers can distinguish
+        'no lock' from 'field absent because of a shape regression'."""
+        project = self._project_with("unlkjson", 2)
+        (sorted((project / "ara").iterdir())[0] / "manifest.lock").unlink()
+        rc, out, _ = _run("verify-lock", "--all", "--project", str(project), "--json")
+        self.assertEqual(rc, 3)
+        payload = json.loads(out)
+        unlocked = [e for e in payload if e["state"] == "unlocked"]
+        self.assertEqual(len(unlocked), 1)
+        self.assertIn("manifest_hash", unlocked[0])
+        self.assertIsNone(unlocked[0]["manifest_hash"])
+
+    def test_verify_lock_all_json_matches_single_ara_verify(self) -> None:
+        """The sweep entry's manifest_hash must equal the single-mode
+        verify-lock's for the same ARA — same underlying report, same
+        field."""
+        project = self._project_with("match", 2)
+        one = sorted((project / "ara").iterdir())[0]
+
+        rc_single, out_single, _ = _run("verify-lock", "--ara", str(one), "--json")
+        self.assertEqual(rc_single, 0)
+        single = json.loads(out_single)
+
+        rc_all, out_all, _ = _run("verify-lock", "--all", "--project", str(project), "--json")
+        self.assertEqual(rc_all, 0)
+        sweep = json.loads(out_all)
+        # sweep resolves symlinks (e.g. /var → /private/var on macOS); compare
+        # resolved paths so the assertion holds regardless of platform.
+        one_resolved = one.resolve()
+        match = [e for e in sweep if Path(e["ara_root"]).resolve() == one_resolved]
+        self.assertEqual(len(match), 1)
+        self.assertEqual(match[0]["manifest_hash"], single["base_hash"])
+
     def test_verify_lock_all_and_ara_mutually_exclusive(self) -> None:
         project = self._project_with("mx", 1)
         ara = next(iter((project / "ara").iterdir()))
