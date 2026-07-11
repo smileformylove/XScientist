@@ -16,6 +16,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Any
 import traceback
 
 # 添加项目根目录到路径
@@ -68,6 +69,7 @@ from ai_scientist.utils.guardrail_artifacts import (
     load_guardrail_artifacts,
     result_passed_writeup_guardrails,
 )
+from ai_scientist.utils.integrity_forensics import run_integrity_forensics
 from ai_scientist.utils.manuscript_state import (
     build_manuscript_state,
     save_manuscript_state,
@@ -653,6 +655,58 @@ def find_latest_pdf(exp_dir: str):
     return find_latest_pdf_path(exp_dir)
 
 
+def _find_integrity_latex_sources(exp_dir: str | Path) -> list[Path]:
+    exp_path = Path(exp_dir)
+    candidates = [exp_path / "latex" / "template.tex", exp_path / "template.tex"]
+    return [path for path in candidates if path.exists()]
+
+
+def _run_integrity_forensics_for_exp(
+    *,
+    exp_dir: str | Path,
+    paper_id: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Run deterministic manuscript integrity checks without crashing the pipeline."""
+
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    tex_sources = _find_integrity_latex_sources(exp_dir)
+    if not tex_sources:
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "no LaTeX source found for integrity forensics",
+        }
+    out_dir = Path(exp_dir) / "integrity_forensics"
+    try:
+        result = run_integrity_forensics(
+            paper_id=paper_id,
+            latex_paths=tex_sources,
+            output_dir=out_dir,
+            observability_level=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - forensic pass is advisory here
+        return {
+            "enabled": True,
+            "status": "error",
+            "error": str(exc),
+            "output_dir": str(out_dir),
+        }
+    report = dict(result.report)
+    report["report_path"] = result.files.get("report")
+    report["markdown_path"] = result.files.get("markdown")
+    return {
+        "enabled": True,
+        "status": "completed",
+        "output_dir": str(out_dir),
+        "report": report,
+        "files": dict(result.files),
+        "overall_verdict": report.get("overall_verdict"),
+        "finding_count": (report.get("counts") or {}).get("findings"),
+    }
+
+
 def _maybe_pareto_seed_for_rewrite(exp_dir: str) -> str | None:
     try:
         from ai_scientist.utils.pareto_pool import maybe_select_seed_path
@@ -803,6 +857,7 @@ def process_single_idea(args):
         template_profile,
         template_capability,
         strict_fallbacks,
+        integrity_forensics_enabled,
     ) = args
 
     try:
@@ -810,6 +865,7 @@ def process_single_idea(args):
         guardrail_repair_rounds = max(0, int(guardrail_repair_rounds))
         research_root = Path(research_root).expanduser()
         idea_name = idea.get("Name", f"idea_{idea_idx}")
+        integrity_forensics_result = {"enabled": False, "status": "disabled"}
         workflow_spec, workflow_metadata, _, _ = _resolve_workflow_strategy(
             workflow_mode=workflow_mode,
             submission_mode=(template_profile == "template_first"),
@@ -1453,6 +1509,25 @@ def process_single_idea(args):
             if osp.exists(pdf_path):
                 shutil.copy(pdf_path, final_pdf_dst)
 
+        integrity_forensics_result = _run_integrity_forensics_for_exp(
+            exp_dir=exp_dir,
+            paper_id=f"{idea_idx}_{idea_name}",
+            enabled=bool(integrity_forensics_enabled),
+        )
+        if integrity_forensics_result.get("status") == "completed":
+            print(
+                f"[想法 #{idea_idx}] Integrity forensics: "
+                f"verdict={integrity_forensics_result.get('overall_verdict')} "
+                f"findings={integrity_forensics_result.get('finding_count')} "
+                f"dir={integrity_forensics_result.get('output_dir')}"
+            )
+        elif integrity_forensics_result.get("enabled"):
+            print(
+                f"[想法 #{idea_idx}] ⚠️  Integrity forensics "
+                f"{integrity_forensics_result.get('status')}: "
+                f"{integrity_forensics_result.get('reason') or integrity_forensics_result.get('error')}"
+            )
+
         # ========== ARA finalisation ==========
         # Delegated to ai_scientist/utils/ara_pipeline.py; each stage catches
         # its own exceptions so a claim-scan failure doesn't lose the export.
@@ -1553,6 +1628,11 @@ def process_single_idea(args):
                     > 0
                     else None
                 ),
+                integrity_report=(
+                    integrity_forensics_result.get("report")
+                    if isinstance(integrity_forensics_result.get("report"), dict)
+                    else None
+                ),
             )
             if not final_submission_gate.get("accepted"):
                 return {
@@ -1577,6 +1657,7 @@ def process_single_idea(args):
                     ),
                     "acceptance_reasons": final_submission_gate.get("reasons", []),
                     "acceptance_signals": final_submission_gate.get("signals", {}),
+                    "integrity_forensics": integrity_forensics_result,
                     "workflow_mode": workflow_mode,
                     "template_profile": template_profile,
                     "template_capability": template_capability,
@@ -1644,6 +1725,16 @@ def process_single_idea(args):
             ),
             "submission_acceptance_reasons": (
                 final_submission_gate.get("reasons", []) if high_quality_mode else []
+            ),
+            "integrity_forensics_enabled": integrity_forensics_result.get("enabled"),
+            "integrity_forensics_status": integrity_forensics_result.get("status"),
+            "integrity_forensics_verdict": integrity_forensics_result.get("overall_verdict"),
+            "integrity_forensics_findings": integrity_forensics_result.get("finding_count"),
+            "integrity_forensics_report_file": (
+                (integrity_forensics_result.get("files") or {}).get("report")
+            ),
+            "integrity_forensics_markdown_file": (
+                (integrity_forensics_result.get("files") or {}).get("markdown")
             ),
             "quality_acceptance_passed": (
                 acceptance.get("accepted") if high_quality_mode else None
@@ -1803,6 +1894,7 @@ def run_parallel_experiments(project_dir, idea_json, num_workers, idea_indices, 
             kwargs["template_profile"],
             kwargs["template_capability"],
             kwargs["strict_fallbacks"],
+            kwargs["integrity_forensics_enabled"],
         ))
 
     # 并行执行
@@ -2112,6 +2204,19 @@ def main():
     parser.add_argument("--min-submission-priority", type=float, default=None)
     parser.add_argument("--max-submission-blockers", type=int, default=None)
     parser.add_argument("--require-quality-gate", action="store_true")
+    parser.add_argument(
+        "--integrity-forensics",
+        dest="integrity_forensics",
+        action="store_true",
+        default=None,
+        help="启用最终稿 deterministic integrity forensics 检查。",
+    )
+    parser.add_argument(
+        "--no-integrity-forensics",
+        dest="integrity_forensics",
+        action="store_false",
+        help="禁用最终稿 deterministic integrity forensics 检查。",
+    )
     parser.add_argument("--auto-adjust-paper-type", action="store_true")
     parser.add_argument(
         "--writing-profile",
@@ -2187,6 +2292,14 @@ def main():
         strict_fallbacks = False
     elif strict_fallbacks:
         print("🛡️  启用严格兜底策略：出现 fallback 将直接阻断流程（可通过 --override-strict-fallbacks 临时放宽）。")
+
+    integrity_forensics_enabled = (
+        bool(args.integrity_forensics)
+        if args.integrity_forensics is not None
+        else bool(args.submission_mode or args.high_quality_mode)
+    )
+    if integrity_forensics_enabled:
+        print("🔎 启用 integrity forensics：最终稿将生成可追溯一致性检查报告。")
 
     # 按实际模型检查 provider 凭证
     require_model_credentials(_collect_requested_models(args))
@@ -2347,6 +2460,7 @@ def main():
             "template_profile": template_profile,
             "template_capability": template_capability,
             "strict_fallbacks": strict_fallbacks,
+            "integrity_forensics_enabled": integrity_forensics_enabled,
         }
         results = []
 
@@ -2416,6 +2530,7 @@ def main():
                     kwargs["template_profile"],
                     kwargs["template_capability"],
                     kwargs["strict_fallbacks"],
+                    kwargs["integrity_forensics_enabled"],
                 )
 
                 result = process_single_idea(process_args)

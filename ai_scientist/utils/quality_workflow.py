@@ -234,6 +234,8 @@ def evaluate_final_submission_readiness(
     final_issue_progress: Optional[dict[str, Any]] = None,
     final_todo_snapshot: Optional[dict[str, Any]] = None,
     max_open_p0_todos: Optional[int] = 0,
+    integrity_report: Optional[dict[str, Any]] = None,
+    block_on_integrity_hard_flags: bool = True,
 ) -> dict[str, Any]:
     artifacts = _load_final_submission_artifacts(run_dir)
     resolved_quality_result = (
@@ -464,6 +466,21 @@ def evaluate_final_submission_readiness(
                 f"experiment TODO still has unresolved P0 items ({p0_unresolved} > {max_open_p0_todos})"
             )
 
+    integrity_verdict = None
+    integrity_counts: dict[str, Any] = {}
+    integrity_report_path = None
+    if isinstance(integrity_report, dict) and integrity_report:
+        integrity_verdict = str(integrity_report.get("overall_verdict") or "").strip() or None
+        integrity_counts = (
+            integrity_report.get("counts")
+            if isinstance(integrity_report.get("counts"), dict)
+            else {}
+        )
+        integrity_report_path = integrity_report.get("report_path")
+        if block_on_integrity_hard_flags and integrity_verdict == "HARD_FLAGS":
+            accepted = False
+            reasons.append("integrity forensics reported HARD_FLAGS")
+
     return {
         "accepted": accepted,
         "reasons": _dedupe_reason_list(reasons),
@@ -486,6 +503,9 @@ def evaluate_final_submission_readiness(
             "unresolved_critical_count": unresolved_critical_count,
             "persistent_issue_count": persistent_issue_count,
             "p0_unresolved_todos": p0_unresolved,
+            "integrity_verdict": integrity_verdict,
+            "integrity_counts": integrity_counts,
+            "integrity_report_path": integrity_report_path,
         },
         "artifacts_present": {
             name: bool(isinstance(payload, dict) and payload)

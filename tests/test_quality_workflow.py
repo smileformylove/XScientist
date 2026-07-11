@@ -20,6 +20,33 @@ from ai_scientist.utils.quality_workflow import (
 )
 
 
+def _write_ready_submission_contracts(project_root: Path) -> None:
+    initialize_pipeline_contracts(project_root)
+    for name, payload in {
+        "stage_standards": {
+            "overall_score": 93.0,
+            "blocked_stage_count": 0,
+            "summary": {"top_risks": []},
+        },
+        "review_state": {"repair_metrics": {"active_issue_count": 0}},
+        "repair_plan": {"summary": {"verification_ready_rate": 1.0}},
+        "self_evolution": {
+            "summary": {
+                "status": "ready",
+                "score": 91.0,
+                "required_failure_count": 0,
+            },
+            "self_check": {"required_failures": []},
+        },
+    }.items():
+        save_contract_artifact(
+            project_root,
+            name,
+            payload,
+            producer="test_quality_workflow",
+        )
+
+
 class QualityWorkflowTests(unittest.TestCase):
     def test_evaluate_submission_acceptance_should_reject_strict_quality_fallback(
         self,
@@ -279,6 +306,69 @@ class QualityWorkflowTests(unittest.TestCase):
 
             self.assertTrue(acceptance["accepted"])
             self.assertEqual(acceptance["reasons"], [])
+
+    def test_evaluate_final_submission_readiness_should_reject_integrity_hard_flags(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "demo_project"
+            project_root.mkdir(parents=True, exist_ok=True)
+            _write_ready_submission_contracts(project_root)
+
+            acceptance = evaluate_final_submission_readiness(
+                run_dir=project_root,
+                quality_result={
+                    "quality_gate_passed": True,
+                    "submission_priority_score": 92.0,
+                    "submission_priority_tier": "high",
+                    "blocker_count": 0,
+                },
+                require_quality_gate=True,
+                min_submission_priority=85.0,
+                max_submission_blockers=0,
+                integrity_report={
+                    "overall_verdict": "HARD_FLAGS",
+                    "counts": {"findings": 1},
+                    "report_path": "/tmp/report.json",
+                },
+            )
+
+            self.assertFalse(acceptance["accepted"])
+            self.assertIn("integrity forensics reported HARD_FLAGS", acceptance["reasons"])
+            self.assertEqual(acceptance["signals"]["integrity_verdict"], "HARD_FLAGS")
+            self.assertEqual(
+                acceptance["signals"]["integrity_report_path"], "/tmp/report.json"
+            )
+
+    def test_evaluate_final_submission_readiness_should_allow_integrity_soft_flags(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "demo_project"
+            project_root.mkdir(parents=True, exist_ok=True)
+            _write_ready_submission_contracts(project_root)
+
+            acceptance = evaluate_final_submission_readiness(
+                run_dir=project_root,
+                quality_result={
+                    "quality_gate_passed": True,
+                    "submission_priority_score": 92.0,
+                    "submission_priority_tier": "high",
+                    "blocker_count": 0,
+                },
+                require_quality_gate=True,
+                min_submission_priority=85.0,
+                max_submission_blockers=0,
+                integrity_report={
+                    "overall_verdict": "SOFT_FLAGS",
+                    "counts": {"findings": 2},
+                    "report_path": "/tmp/report.json",
+                },
+            )
+
+            self.assertTrue(acceptance["accepted"])
+            self.assertEqual(acceptance["signals"]["integrity_verdict"], "SOFT_FLAGS")
+            self.assertEqual(acceptance["signals"]["integrity_counts"], {"findings": 2})
 
     def test_derive_autonomous_followup_focus_should_absorb_repair_lane_priorities(self) -> None:
         focus = derive_autonomous_followup_focus(
