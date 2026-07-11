@@ -144,6 +144,7 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
         mark_stage_complete_mock.assert_not_called()
 
     @mock.patch("ai_scientist.utils.launcher_workflow.evaluate_final_submission_readiness")
+    @mock.patch("ai_scientist.utils.launcher_workflow._run_integrity_forensics_for_idea")
     @mock.patch("ai_scientist.utils.launcher_workflow.build_workflow_execution_policy")
     @mock.patch("ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=True)
     @mock.patch("ai_scientist.utils.launcher_workflow.find_best_pdf_path")
@@ -152,6 +153,7 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
         find_pdf_mock: mock.Mock,
         _stage_complete_mock: mock.Mock,
         build_policy_mock: mock.Mock,
+        integrity_mock: mock.Mock,
         evaluate_submission_mock: mock.Mock,
     ) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -164,6 +166,14 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
             build_policy_mock.return_value = SimpleNamespace(
                 reject_on_auto_improvement_fallback=True
             )
+            integrity_mock.return_value = {
+                "enabled": True,
+                "status": "completed",
+                "report": {
+                    "overall_verdict": "SOFT_FLAGS",
+                    "counts": {"findings": 1},
+                },
+            }
             evaluate_submission_mock.return_value = {
                 "accepted": False,
                 "reasons": ["review debt remains"],
@@ -180,7 +190,110 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
 
         self.assertTrue(result["resumed"])
         self.assertFalse(result["submission_acceptance"]["accepted"])
+        self.assertEqual(result["integrity_forensics"]["status"], "completed")
+        integrity_mock.assert_called_once()
         evaluate_submission_mock.assert_called_once()
+        self.assertEqual(
+            evaluate_submission_mock.call_args.kwargs["integrity_report"][
+                "overall_verdict"
+            ],
+            "SOFT_FLAGS",
+        )
+
+    @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_complete")
+    @mock.patch("ai_scientist.utils.launcher_workflow.evaluate_final_submission_readiness")
+    @mock.patch("ai_scientist.utils.launcher_workflow._run_integrity_forensics_for_idea")
+    @mock.patch("ai_scientist.utils.launcher_workflow.run_independent_critic_pass")
+    @mock.patch("ai_scientist.utils.launcher_workflow.execute_review_suite")
+    @mock.patch("ai_scientist.utils.launcher_workflow.build_workflow_runtime_plan")
+    @mock.patch("ai_scientist.utils.launcher_workflow.build_review_execution_plan")
+    @mock.patch("ai_scientist.utils.launcher_workflow.build_workflow_execution_policy")
+    @mock.patch("ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=False)
+    @mock.patch("ai_scientist.utils.launcher_workflow.find_best_pdf_path")
+    def test_run_review_phase_should_pass_integrity_report_to_final_gate(
+        self,
+        find_pdf_mock: mock.Mock,
+        _stage_complete_mock: mock.Mock,
+        build_policy_mock: mock.Mock,
+        build_review_plan_mock: mock.Mock,
+        build_runtime_plan_mock: mock.Mock,
+        execute_review_mock: mock.Mock,
+        critic_mock: mock.Mock,
+        integrity_mock: mock.Mock,
+        evaluate_submission_mock: mock.Mock,
+        mark_stage_complete_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_text("pdf", encoding="utf-8")
+            find_pdf_mock.return_value = str(pdf_path)
+            build_policy_mock.return_value = SimpleNamespace(
+                reject_on_auto_improvement_fallback=True
+            )
+            build_review_plan_mock.return_value = {
+                "target_venue": "nature",
+                "strategy_feedback": {"rationale": []},
+                "review_reflections": 2,
+                "review_ensemble": 3,
+                "review_fewshot": 2,
+                "review_temperature": 0.6,
+                "strategy": SimpleNamespace(value="depth"),
+            }
+            build_runtime_plan_mock.return_value = SimpleNamespace(
+                workflow_mode="review_board",
+                final_review_roles=("reviewer",),
+                critic_review_roles=("hostile_critic",),
+            )
+            execute_review_mock.return_value = {
+                "review_text": {"Overall": 7},
+                "review_img": {"caption": "ok"},
+            }
+            critic_mock.return_value = {
+                "active_issue_count": 0,
+                "blocking_issue_count": 0,
+                "critic_findings_file": None,
+            }
+            integrity_mock.return_value = {
+                "enabled": True,
+                "status": "completed",
+                "overall_verdict": "HARD_FLAGS",
+                "finding_count": 1,
+                "report": {
+                    "overall_verdict": "HARD_FLAGS",
+                    "counts": {"findings": 1},
+                },
+                "files": {"report": str(root / "integrity_forensics" / "report.json")},
+            }
+            evaluate_submission_mock.return_value = {
+                "accepted": False,
+                "reasons": ["integrity forensics reported HARD_FLAGS"],
+            }
+
+            result = run_review_phase(
+                root,
+                model_review="model-review",
+                high_quality_mode=True,
+                workflow_mode="review_board",
+                submission_mode=True,
+                resume=False,
+            )
+
+        self.assertFalse(result["submission_acceptance"]["accepted"])
+        self.assertEqual(result["integrity_forensics"]["overall_verdict"], "HARD_FLAGS")
+        self.assertEqual(
+            evaluate_submission_mock.call_args.kwargs["integrity_report"][
+                "overall_verdict"
+            ],
+            "HARD_FLAGS",
+        )
+        mark_stage_complete_mock.assert_called_once()
+        self.assertEqual(
+            mark_stage_complete_mock.call_args.kwargs["metadata"][
+                "integrity_forensics_verdict"
+            ],
+            "HARD_FLAGS",
+        )
 
 
 class StrictFallbackEnforcementRegressionTests(unittest.TestCase):

@@ -36,6 +36,7 @@ from ai_scientist.utils.critic_workflow import run_independent_critic_pass
 from ai_scientist.utils.workflow_execution_policy import (
     build_workflow_execution_policy,
 )
+from ai_scientist.utils.integrity_forensics import run_integrity_forensics
 
 
 def create_client(*args, **kwargs):
@@ -103,6 +104,61 @@ def perform_experiments_bfts(*args, **kwargs):
         "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager",
         "perform_experiments_bfts",
     )(*args, **kwargs)
+
+
+def _find_integrity_latex_sources(idea_dir: str | Path) -> list[Path]:
+    idea_path = Path(idea_dir)
+    candidates = [idea_path / "latex" / "template.tex", idea_path / "template.tex"]
+    return [path for path in candidates if path.exists()]
+
+
+def _run_integrity_forensics_for_idea(
+    *,
+    idea_dir: str | Path,
+    paper_id: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    tex_sources = _find_integrity_latex_sources(idea_dir)
+    if not tex_sources:
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "no LaTeX source found for integrity forensics",
+        }
+    out_dir = Path(idea_dir) / "integrity_forensics"
+    try:
+        result = run_integrity_forensics(
+            paper_id=paper_id,
+            latex_paths=tex_sources,
+            output_dir=out_dir,
+            observability_level=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - forensic pass must not hide review output
+        return {
+            "enabled": True,
+            "status": "error",
+            "error": str(exc),
+            "output_dir": str(out_dir),
+        }
+    report = dict(result.report)
+    report["report_path"] = result.files.get("report")
+    report["markdown_path"] = result.files.get("markdown")
+    return {
+        "enabled": True,
+        "status": "completed",
+        "output_dir": str(out_dir),
+        "report": report,
+        "files": dict(result.files),
+        "overall_verdict": report.get("overall_verdict"),
+        "finding_count": (report.get("counts") or {}).get("findings"),
+    }
+
+
+def _integrity_report_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    report = result.get("report") if isinstance(result, dict) else None
+    return report if isinstance(report, dict) else None
 
 
 def prepare_idea_artifacts(
@@ -469,11 +525,17 @@ def run_review_phase(
     min_submission_priority: Optional[float] = None,
     max_submission_blockers: Optional[int] = None,
     reject_on_auto_improvement_fallback: bool | None = None,
+    integrity_forensics_enabled: bool | None = None,
     resume: bool = True,
 ) -> dict:
     text_path = Path(idea_dir) / text_filename
     image_path = Path(idea_dir) / image_filename
     pdf_path = find_best_pdf_path(idea_dir, prefer_reflections=True)
+    integrity_enabled = (
+        bool(integrity_forensics_enabled)
+        if integrity_forensics_enabled is not None
+        else bool(submission_mode or high_quality_mode)
+    )
     execution_policy = None
     if high_quality_mode:
         execution_policy = build_workflow_execution_policy(
@@ -491,6 +553,11 @@ def run_review_phase(
 
     if resume and is_stage_complete(idea_dir, "review") and text_path.exists() and image_path.exists():
         submission_acceptance: dict[str, Any] = {}
+        integrity_forensics = _run_integrity_forensics_for_idea(
+            idea_dir=idea_dir,
+            paper_id=Path(idea_dir).name,
+            enabled=integrity_enabled,
+        )
         if high_quality_mode:
             submission_acceptance = evaluate_final_submission_readiness(
                 run_dir=idea_dir,
@@ -500,12 +567,14 @@ def run_review_phase(
                 reject_on_auto_improvement_fallback=bool(
                     reject_on_auto_improvement_fallback
                 ),
+                integrity_report=_integrity_report_payload(integrity_forensics),
             )
         return {
             "found": pdf_path is not None,
             "pdf_path": pdf_path,
             "resumed": True,
             "submission_acceptance": submission_acceptance,
+            "integrity_forensics": integrity_forensics,
         }
 
     if pdf_path is None or not os.path.exists(pdf_path):
@@ -591,6 +660,11 @@ def run_review_phase(
     review_text = review_pass["review_text"]
     review_img = review_pass["review_img"]
     submission_acceptance: dict[str, Any] = {}
+    integrity_forensics = _run_integrity_forensics_for_idea(
+        idea_dir=idea_dir,
+        paper_id=Path(idea_dir).name,
+        enabled=integrity_enabled,
+    )
     if high_quality_mode:
         submission_acceptance = evaluate_final_submission_readiness(
             run_dir=idea_dir,
@@ -600,6 +674,7 @@ def run_review_phase(
             reject_on_auto_improvement_fallback=bool(
                 reject_on_auto_improvement_fallback
             ),
+            integrity_report=_integrity_report_payload(integrity_forensics),
         )
 
     mark_stage_complete(
@@ -625,6 +700,16 @@ def run_review_phase(
             "submission_acceptance_reasons": submission_acceptance.get("reasons", [])
             if high_quality_mode
             else [],
+            "integrity_forensics_enabled": integrity_forensics.get("enabled"),
+            "integrity_forensics_status": integrity_forensics.get("status"),
+            "integrity_forensics_verdict": integrity_forensics.get("overall_verdict"),
+            "integrity_forensics_findings": integrity_forensics.get("finding_count"),
+            "integrity_forensics_report_file": (
+                (integrity_forensics.get("files") or {}).get("report")
+            ),
+            "integrity_forensics_markdown_file": (
+                (integrity_forensics.get("files") or {}).get("markdown")
+            ),
             "strategy_feedback": review_plan["strategy_feedback"].get("rationale")
             if high_quality_mode
             else None,
@@ -642,4 +727,5 @@ def run_review_phase(
         "critic_blocking_issue_count": critic_pass.get("blocking_issue_count"),
         "critic_findings_file": critic_pass.get("critic_findings_file"),
         "submission_acceptance": submission_acceptance,
+        "integrity_forensics": integrity_forensics,
     }
