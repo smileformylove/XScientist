@@ -70,6 +70,8 @@ from ai_scientist.utils.guardrail_artifacts import (
     result_passed_writeup_guardrails,
 )
 from ai_scientist.utils.integrity_workflow import (
+    integrity_forensics_result_fields,
+    integrity_report_payload,
     run_integrity_forensics_for_manuscript,
     summarize_integrity_forensics_result,
 )
@@ -1579,11 +1581,7 @@ def process_single_idea(args):
                     > 0
                     else None
                 ),
-                integrity_report=(
-                    integrity_forensics_result.get("report")
-                    if isinstance(integrity_forensics_result.get("report"), dict)
-                    else None
-                ),
+                integrity_report=integrity_report_payload(integrity_forensics_result),
             )
             if not final_submission_gate.get("accepted"):
                 return {
@@ -1677,16 +1675,7 @@ def process_single_idea(args):
             "submission_acceptance_reasons": (
                 final_submission_gate.get("reasons", []) if high_quality_mode else []
             ),
-            "integrity_forensics_enabled": integrity_forensics_result.get("enabled"),
-            "integrity_forensics_status": integrity_forensics_result.get("status"),
-            "integrity_forensics_verdict": integrity_forensics_result.get("overall_verdict"),
-            "integrity_forensics_findings": integrity_forensics_result.get("finding_count"),
-            "integrity_forensics_report_file": (
-                (integrity_forensics_result.get("files") or {}).get("report")
-            ),
-            "integrity_forensics_markdown_file": (
-                (integrity_forensics_result.get("files") or {}).get("markdown")
-            ),
+            **integrity_forensics_result_fields(integrity_forensics_result),
             "quality_acceptance_passed": (
                 acceptance.get("accepted") if high_quality_mode else None
             ),

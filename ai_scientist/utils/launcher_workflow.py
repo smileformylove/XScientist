@@ -37,6 +37,7 @@ from ai_scientist.utils.workflow_execution_policy import (
     build_workflow_execution_policy,
 )
 from ai_scientist.utils.integrity_workflow import (
+    integrity_forensics_result_fields,
     integrity_report_payload,
     run_integrity_forensics_for_manuscript,
 )
@@ -648,16 +649,7 @@ def run_review_phase(
             "submission_acceptance_reasons": submission_acceptance.get("reasons", [])
             if high_quality_mode
             else [],
-            "integrity_forensics_enabled": integrity_forensics.get("enabled"),
-            "integrity_forensics_status": integrity_forensics.get("status"),
-            "integrity_forensics_verdict": integrity_forensics.get("overall_verdict"),
-            "integrity_forensics_findings": integrity_forensics.get("finding_count"),
-            "integrity_forensics_report_file": (
-                (integrity_forensics.get("files") or {}).get("report")
-            ),
-            "integrity_forensics_markdown_file": (
-                (integrity_forensics.get("files") or {}).get("markdown")
-            ),
+            **integrity_forensics_result_fields(integrity_forensics),
             "strategy_feedback": review_plan["strategy_feedback"].get("rationale")
             if high_quality_mode
             else None,
