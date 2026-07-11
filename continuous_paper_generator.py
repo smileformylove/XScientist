@@ -311,6 +311,41 @@ def _safe_load_json(path: str | Path, *, default=None):
         return default
 
 
+def _summarize_integrity_forensics_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    nested = (
+        result.get("integrity_forensics")
+        if isinstance(result.get("integrity_forensics"), dict)
+        else {}
+    )
+    files = nested.get("files") if isinstance(nested.get("files"), dict) else {}
+    return {
+        "enabled": (
+            result.get("integrity_forensics_enabled")
+            if result.get("integrity_forensics_enabled") is not None
+            else nested.get("enabled")
+        ),
+        "status": (
+            result.get("integrity_forensics_status")
+            or nested.get("status")
+            or "unknown"
+        ),
+        "verdict": (
+            result.get("integrity_forensics_verdict")
+            or nested.get("overall_verdict")
+            or "unknown"
+        ),
+        "findings": (
+            result.get("integrity_forensics_findings")
+            if result.get("integrity_forensics_findings") is not None
+            else nested.get("finding_count")
+        ),
+        "report_file": (
+            result.get("integrity_forensics_report_file")
+            or files.get("report")
+        ),
+    }
+
+
 def _resolve_workflow_strategy(
     *,
     workflow_mode: str | None,
@@ -1248,6 +1283,12 @@ class ContinuousPaperGenerator:
                 "guardrail_passed": 0,
                 "guardrail_blocked": 0,
                 "guardrail_blocking_reasons": {},
+                "integrity_forensics_enabled": 0,
+                "integrity_forensics_completed": 0,
+                "integrity_forensics_hard_flags": 0,
+                "integrity_forensics_soft_flags": 0,
+                "integrity_forensics_status_counts": {},
+                "integrity_forensics_verdict_counts": {},
                 "by_venue": {},
                 "top_papers": [],
             },
@@ -1343,6 +1384,8 @@ class ContinuousPaperGenerator:
             1 for paper in failed if paper.get("guardrail_blocking") is True
         )
         guardrail_reason_counts: Dict[str, int] = {}
+        integrity_status_counts: Dict[str, int] = {}
+        integrity_verdict_counts: Dict[str, int] = {}
         workflow_mode_counts: Dict[str, int] = {}
         source_workflow_mode_counts: Dict[str, int] = {}
         source_archetype_counts: Dict[str, int] = {}
@@ -1382,6 +1425,16 @@ class ContinuousPaperGenerator:
             template_capability_counts[template_capability] = (
                 template_capability_counts.get(template_capability, 0) + 1
             )
+            integrity = _summarize_integrity_forensics_result(paper)
+            if integrity.get("enabled") is True:
+                status = str(integrity.get("status") or "unknown")
+                integrity_status_counts[status] = (
+                    integrity_status_counts.get(status, 0) + 1
+                )
+                verdict = str(integrity.get("verdict") or "unknown")
+                integrity_verdict_counts[verdict] = (
+                    integrity_verdict_counts.get(verdict, 0) + 1
+                )
             source_workflow_mode = str(paper.get("source_workflow_mode") or "unknown")
             source_archetype = str(paper.get("source_archetype") or "unknown")
             source_batch_profile = str(paper.get("source_batch_profile") or "unknown")
@@ -1502,6 +1555,16 @@ class ContinuousPaperGenerator:
             "guardrail_passed": guardrail_passed,
             "guardrail_blocked": guardrail_blocked,
             "guardrail_blocking_reasons": guardrail_reason_counts,
+            "integrity_forensics_enabled": sum(
+                1
+                for paper in completed + failed
+                if _summarize_integrity_forensics_result(paper).get("enabled") is True
+            ),
+            "integrity_forensics_completed": integrity_status_counts.get("completed", 0),
+            "integrity_forensics_hard_flags": integrity_verdict_counts.get("HARD_FLAGS", 0),
+            "integrity_forensics_soft_flags": integrity_verdict_counts.get("SOFT_FLAGS", 0),
+            "integrity_forensics_status_counts": integrity_status_counts,
+            "integrity_forensics_verdict_counts": integrity_verdict_counts,
             "by_venue": by_venue,
             "top_papers": ranked_completed[:5],
         }
@@ -1533,6 +1596,7 @@ class ContinuousPaperGenerator:
         shortlist_file = self.batch_dir / "submission_shortlist.md"
         shortlist_lines = ["# Submission Shortlist", ""]
         for paper in report["quality_summary"]["top_papers"]:
+            integrity = _summarize_integrity_forensics_result(paper)
             shortlist_lines.extend(
                 [
                     f"## idea #{paper.get('idea_idx')} — {paper.get('idea_name', paper.get('paper_type'))}",
@@ -1546,6 +1610,9 @@ class ContinuousPaperGenerator:
                     f"- Claim support: {paper.get('claim_support_score')}",
                     f"- Gate passed: {paper.get('quality_gate_passed')}",
                     f"- Accepted: {paper.get('submission_acceptance_passed')}",
+                    f"- Integrity forensics: {integrity.get('verdict')} "
+                    f"({integrity.get('status')}, findings={integrity.get('findings')})",
+                    f"- Integrity report: {integrity.get('report_file')}",
                     f"- Autonomous followups: {paper.get('autonomous_followup_rounds_run')}",
                     f"- Submission package: {paper.get('submission_package_file')}",
                     f"- Submission dashboard: {paper.get('submission_dashboard_file')}",
@@ -1630,6 +1697,12 @@ class ContinuousPaperGenerator:
         print(f"投稿接受标准达标: {report['quality_summary']['submission_accepted']}")
         print(f"写作守护通过: {report['quality_summary'].get('guardrail_passed', 0)}")
         print(f"写作守护拦截: {report['quality_summary'].get('guardrail_blocked', 0)}")
+        print(
+            "Integrity forensics: "
+            f"completed={report['quality_summary'].get('integrity_forensics_completed', 0)} "
+            f"hard={report['quality_summary'].get('integrity_forensics_hard_flags', 0)} "
+            f"soft={report['quality_summary'].get('integrity_forensics_soft_flags', 0)}"
+        )
         if report["quality_summary"].get("guardrail_blocking_reasons"):
             print("写作守护拦截原因:")
             for reason, count in sorted(

@@ -707,6 +707,41 @@ def _run_integrity_forensics_for_exp(
     }
 
 
+def _summarize_integrity_forensics_result(result: dict[str, Any]) -> dict[str, Any]:
+    nested = (
+        result.get("integrity_forensics")
+        if isinstance(result.get("integrity_forensics"), dict)
+        else {}
+    )
+    files = nested.get("files") if isinstance(nested.get("files"), dict) else {}
+    return {
+        "enabled": (
+            result.get("integrity_forensics_enabled")
+            if result.get("integrity_forensics_enabled") is not None
+            else nested.get("enabled")
+        ),
+        "status": (
+            result.get("integrity_forensics_status")
+            or nested.get("status")
+            or "unknown"
+        ),
+        "verdict": (
+            result.get("integrity_forensics_verdict")
+            or nested.get("overall_verdict")
+            or "unknown"
+        ),
+        "findings": (
+            result.get("integrity_forensics_findings")
+            if result.get("integrity_forensics_findings") is not None
+            else nested.get("finding_count")
+        ),
+        "report_file": (
+            result.get("integrity_forensics_report_file")
+            or files.get("report")
+        ),
+    }
+
+
 def _maybe_pareto_seed_for_rewrite(exp_dir: str) -> str | None:
     try:
         from ai_scientist.utils.pareto_pool import maybe_select_seed_path
@@ -1951,6 +1986,8 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
         1 for result in failed if result.get("guardrail_blocking") is True
     )
     guardrail_reason_counts: dict[str, int] = {}
+    integrity_status_counts: dict[str, int] = {}
+    integrity_verdict_counts: dict[str, int] = {}
     workflow_mode_counts: dict[str, int] = {}
     template_profile_counts: dict[str, int] = {}
     template_capability_counts: dict[str, int] = {}
@@ -1979,6 +2016,14 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
         template_capability_counts[template_capability] = (
             template_capability_counts.get(template_capability, 0) + 1
         )
+        integrity = _summarize_integrity_forensics_result(result)
+        if integrity.get("enabled") is True:
+            status = str(integrity.get("status") or "unknown")
+            integrity_status_counts[status] = integrity_status_counts.get(status, 0) + 1
+            verdict = str(integrity.get("verdict") or "unknown")
+            integrity_verdict_counts[verdict] = (
+                integrity_verdict_counts.get(verdict, 0) + 1
+            )
         execution_policy = str(result.get("execution_policy") or "unknown")
         execution_policy_counts[execution_policy] = (
             execution_policy_counts.get(execution_policy, 0) + 1
@@ -2010,6 +2055,16 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
             "guardrail_passed": guardrail_passed,
             "guardrail_blocked": guardrail_blocked,
             "guardrail_blocking_reasons": guardrail_reason_counts,
+            "integrity_forensics_enabled": sum(
+                1
+                for result in results
+                if _summarize_integrity_forensics_result(result).get("enabled") is True
+            ),
+            "integrity_forensics_completed": integrity_status_counts.get("completed", 0),
+            "integrity_forensics_hard_flags": integrity_verdict_counts.get("HARD_FLAGS", 0),
+            "integrity_forensics_soft_flags": integrity_verdict_counts.get("SOFT_FLAGS", 0),
+            "integrity_forensics_status_counts": integrity_status_counts,
+            "integrity_forensics_verdict_counts": integrity_verdict_counts,
         },
         "pipeline_summary": {
             "workflow_mode_counts": workflow_mode_counts,
@@ -2042,6 +2097,7 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
     shortlist_file = logs_dir / "submission_shortlist.md"
     lines = ["# Project Submission Shortlist", ""]
     for result in ranked[:5]:
+        integrity = _summarize_integrity_forensics_result(result)
         lines.extend([
             f"## idea #{result.get('idea_idx')}",
             f"- Status: {result.get('status')}",
@@ -2052,6 +2108,9 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
             f"- Rigor: {result.get('rigor_score')}",
             f"- Gate Passed: {result.get('quality_gate_passed')}",
             f"- Accepted: {result.get('submission_acceptance_passed')}",
+            f"- Integrity Forensics: {integrity.get('verdict')} "
+            f"({integrity.get('status')}, findings={integrity.get('findings')})",
+            f"- Integrity Report: {integrity.get('report_file')}",
             f"- Autonomous Followups: {result.get('autonomous_followup_rounds_run')}",
             f"- Submission Package: {result.get('submission_package_file')}",
             "",
@@ -2554,6 +2613,12 @@ def main():
         summary_quality = summary_payload.get("quality_summary", {})
         print(f"🛡️ 写作守护通过: {summary_quality.get('guardrail_passed', 0)}")
         print(f"🛡️ 写作守护拦截: {summary_quality.get('guardrail_blocked', 0)}")
+        print(
+            "🔎 Integrity forensics: "
+            f"completed={summary_quality.get('integrity_forensics_completed', 0)} "
+            f"hard={summary_quality.get('integrity_forensics_hard_flags', 0)} "
+            f"soft={summary_quality.get('integrity_forensics_soft_flags', 0)}"
+        )
         reason_counts = summary_quality.get("guardrail_blocking_reasons", {}) or {}
         if reason_counts:
             print("🧾 写作守护拦截原因:")
