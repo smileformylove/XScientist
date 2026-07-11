@@ -6,11 +6,64 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from ai_scientist.utils.integrity_workflow import (
+    integrity_forensics_result_fields,
+    run_integrity_forensics_for_manuscript,
+)
 from continuous_paper_generator import ContinuousPaperGenerator
 from run_project import save_project_summary
 
 
 class IntegritySummaryReportingTests(unittest.TestCase):
+    def test_shared_integrity_workflow_should_return_stable_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            disabled = run_integrity_forensics_for_manuscript(
+                root=root,
+                paper_id="disabled",
+                enabled=False,
+            )
+            self.assertEqual(disabled, {"enabled": False, "status": "disabled"})
+
+            skipped = run_integrity_forensics_for_manuscript(
+                root=root,
+                paper_id="missing-source",
+                enabled=True,
+            )
+            self.assertEqual(skipped["status"], "skipped")
+            self.assertIn("LaTeX source", skipped["reason"])
+
+            latex_dir = root / "latex"
+            latex_dir.mkdir()
+            (latex_dir / "template.tex").write_text("content", encoding="utf-8")
+            explicit_empty = run_integrity_forensics_for_manuscript(
+                root=root,
+                paper_id="explicit-empty",
+                enabled=True,
+                latex_paths=[],
+            )
+            self.assertEqual(explicit_empty["status"], "skipped")
+
+    def test_shared_integrity_workflow_should_flatten_result_fields(self) -> None:
+        fields = integrity_forensics_result_fields(
+            {
+                "enabled": True,
+                "status": "completed",
+                "overall_verdict": "SOFT_FLAGS",
+                "finding_count": 2,
+                "files": {
+                    "report": "/tmp/report.json",
+                    "markdown": "/tmp/REPORT.md",
+                },
+            }
+        )
+        self.assertEqual(fields["integrity_forensics_enabled"], True)
+        self.assertEqual(fields["integrity_forensics_status"], "completed")
+        self.assertEqual(fields["integrity_forensics_verdict"], "SOFT_FLAGS")
+        self.assertEqual(fields["integrity_forensics_findings"], 2)
+        self.assertEqual(fields["integrity_forensics_report_file"], "/tmp/report.json")
+        self.assertEqual(fields["integrity_forensics_markdown_file"], "/tmp/REPORT.md")
+
     def test_project_summary_reports_integrity_forensics_counts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_dir = Path(td) / "project"

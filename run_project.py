@@ -69,7 +69,10 @@ from ai_scientist.utils.guardrail_artifacts import (
     load_guardrail_artifacts,
     result_passed_writeup_guardrails,
 )
-from ai_scientist.utils.integrity_forensics import run_integrity_forensics
+from ai_scientist.utils.integrity_workflow import (
+    run_integrity_forensics_for_manuscript,
+    summarize_integrity_forensics_result,
+)
 from ai_scientist.utils.manuscript_state import (
     build_manuscript_state,
     save_manuscript_state,
@@ -653,93 +656,6 @@ def generate_ideas(project_dir: str, topic_file: str, model: str, num_ideas: int
 def find_latest_pdf(exp_dir: str):
     """查找最新的PDF文件"""
     return find_latest_pdf_path(exp_dir)
-
-
-def _find_integrity_latex_sources(exp_dir: str | Path) -> list[Path]:
-    exp_path = Path(exp_dir)
-    candidates = [exp_path / "latex" / "template.tex", exp_path / "template.tex"]
-    return [path for path in candidates if path.exists()]
-
-
-def _run_integrity_forensics_for_exp(
-    *,
-    exp_dir: str | Path,
-    paper_id: str,
-    enabled: bool,
-) -> dict[str, Any]:
-    """Run deterministic manuscript integrity checks without crashing the pipeline."""
-
-    if not enabled:
-        return {"enabled": False, "status": "disabled"}
-    tex_sources = _find_integrity_latex_sources(exp_dir)
-    if not tex_sources:
-        return {
-            "enabled": True,
-            "status": "skipped",
-            "reason": "no LaTeX source found for integrity forensics",
-        }
-    out_dir = Path(exp_dir) / "integrity_forensics"
-    try:
-        result = run_integrity_forensics(
-            paper_id=paper_id,
-            latex_paths=tex_sources,
-            output_dir=out_dir,
-            observability_level=1,
-        )
-    except Exception as exc:  # noqa: BLE001 - forensic pass is advisory here
-        return {
-            "enabled": True,
-            "status": "error",
-            "error": str(exc),
-            "output_dir": str(out_dir),
-        }
-    report = dict(result.report)
-    report["report_path"] = result.files.get("report")
-    report["markdown_path"] = result.files.get("markdown")
-    return {
-        "enabled": True,
-        "status": "completed",
-        "output_dir": str(out_dir),
-        "report": report,
-        "files": dict(result.files),
-        "overall_verdict": report.get("overall_verdict"),
-        "finding_count": (report.get("counts") or {}).get("findings"),
-    }
-
-
-def _summarize_integrity_forensics_result(result: dict[str, Any]) -> dict[str, Any]:
-    nested = (
-        result.get("integrity_forensics")
-        if isinstance(result.get("integrity_forensics"), dict)
-        else {}
-    )
-    files = nested.get("files") if isinstance(nested.get("files"), dict) else {}
-    return {
-        "enabled": (
-            result.get("integrity_forensics_enabled")
-            if result.get("integrity_forensics_enabled") is not None
-            else nested.get("enabled")
-        ),
-        "status": (
-            result.get("integrity_forensics_status")
-            or nested.get("status")
-            or "unknown"
-        ),
-        "verdict": (
-            result.get("integrity_forensics_verdict")
-            or nested.get("overall_verdict")
-            or "unknown"
-        ),
-        "findings": (
-            result.get("integrity_forensics_findings")
-            if result.get("integrity_forensics_findings") is not None
-            else nested.get("finding_count")
-        ),
-        "report_file": (
-            result.get("integrity_forensics_report_file")
-            or files.get("report")
-        ),
-    }
 
 
 def _maybe_pareto_seed_for_rewrite(exp_dir: str) -> str | None:
@@ -1544,8 +1460,8 @@ def process_single_idea(args):
             if osp.exists(pdf_path):
                 shutil.copy(pdf_path, final_pdf_dst)
 
-        integrity_forensics_result = _run_integrity_forensics_for_exp(
-            exp_dir=exp_dir,
+        integrity_forensics_result = run_integrity_forensics_for_manuscript(
+            root=exp_dir,
             paper_id=f"{idea_idx}_{idea_name}",
             enabled=bool(integrity_forensics_enabled),
         )
@@ -2016,7 +1932,7 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
         template_capability_counts[template_capability] = (
             template_capability_counts.get(template_capability, 0) + 1
         )
-        integrity = _summarize_integrity_forensics_result(result)
+        integrity = summarize_integrity_forensics_result(result)
         if integrity.get("enabled") is True:
             status = str(integrity.get("status") or "unknown")
             integrity_status_counts[status] = integrity_status_counts.get(status, 0) + 1
@@ -2058,7 +1974,7 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
             "integrity_forensics_enabled": sum(
                 1
                 for result in results
-                if _summarize_integrity_forensics_result(result).get("enabled") is True
+                if summarize_integrity_forensics_result(result).get("enabled") is True
             ),
             "integrity_forensics_completed": integrity_status_counts.get("completed", 0),
             "integrity_forensics_hard_flags": integrity_verdict_counts.get("HARD_FLAGS", 0),
@@ -2097,7 +2013,7 @@ def save_project_summary(project_dir: str, results: list[dict]) -> tuple[str, st
     shortlist_file = logs_dir / "submission_shortlist.md"
     lines = ["# Project Submission Shortlist", ""]
     for result in ranked[:5]:
-        integrity = _summarize_integrity_forensics_result(result)
+        integrity = summarize_integrity_forensics_result(result)
         lines.extend([
             f"## idea #{result.get('idea_idx')}",
             f"- Status: {result.get('status')}",

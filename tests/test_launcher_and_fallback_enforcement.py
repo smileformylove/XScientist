@@ -160,7 +160,7 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
         mark_stage_complete_mock.assert_not_called()
 
     @mock.patch("ai_scientist.utils.launcher_workflow.evaluate_final_submission_readiness")
-    @mock.patch("ai_scientist.utils.launcher_workflow._run_integrity_forensics_for_idea")
+    @mock.patch("ai_scientist.utils.launcher_workflow.run_integrity_forensics_for_manuscript")
     @mock.patch("ai_scientist.utils.launcher_workflow.build_workflow_execution_policy")
     @mock.patch("ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=True)
     @mock.patch("ai_scientist.utils.launcher_workflow.find_best_pdf_path")
@@ -218,7 +218,7 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
 
     @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_complete")
     @mock.patch("ai_scientist.utils.launcher_workflow.evaluate_final_submission_readiness")
-    @mock.patch("ai_scientist.utils.launcher_workflow._run_integrity_forensics_for_idea")
+    @mock.patch("ai_scientist.utils.launcher_workflow.run_integrity_forensics_for_manuscript")
     @mock.patch("ai_scientist.utils.launcher_workflow.run_independent_critic_pass")
     @mock.patch("ai_scientist.utils.launcher_workflow.execute_review_suite")
     @mock.patch("ai_scientist.utils.launcher_workflow.build_workflow_runtime_plan")

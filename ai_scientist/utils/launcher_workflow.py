@@ -36,7 +36,10 @@ from ai_scientist.utils.critic_workflow import run_independent_critic_pass
 from ai_scientist.utils.workflow_execution_policy import (
     build_workflow_execution_policy,
 )
-from ai_scientist.utils.integrity_forensics import run_integrity_forensics
+from ai_scientist.utils.integrity_workflow import (
+    integrity_report_payload,
+    run_integrity_forensics_for_manuscript,
+)
 
 
 def create_client(*args, **kwargs):
@@ -104,61 +107,6 @@ def perform_experiments_bfts(*args, **kwargs):
         "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager",
         "perform_experiments_bfts",
     )(*args, **kwargs)
-
-
-def _find_integrity_latex_sources(idea_dir: str | Path) -> list[Path]:
-    idea_path = Path(idea_dir)
-    candidates = [idea_path / "latex" / "template.tex", idea_path / "template.tex"]
-    return [path for path in candidates if path.exists()]
-
-
-def _run_integrity_forensics_for_idea(
-    *,
-    idea_dir: str | Path,
-    paper_id: str,
-    enabled: bool,
-) -> dict[str, Any]:
-    if not enabled:
-        return {"enabled": False, "status": "disabled"}
-    tex_sources = _find_integrity_latex_sources(idea_dir)
-    if not tex_sources:
-        return {
-            "enabled": True,
-            "status": "skipped",
-            "reason": "no LaTeX source found for integrity forensics",
-        }
-    out_dir = Path(idea_dir) / "integrity_forensics"
-    try:
-        result = run_integrity_forensics(
-            paper_id=paper_id,
-            latex_paths=tex_sources,
-            output_dir=out_dir,
-            observability_level=1,
-        )
-    except Exception as exc:  # noqa: BLE001 - forensic pass must not hide review output
-        return {
-            "enabled": True,
-            "status": "error",
-            "error": str(exc),
-            "output_dir": str(out_dir),
-        }
-    report = dict(result.report)
-    report["report_path"] = result.files.get("report")
-    report["markdown_path"] = result.files.get("markdown")
-    return {
-        "enabled": True,
-        "status": "completed",
-        "output_dir": str(out_dir),
-        "report": report,
-        "files": dict(result.files),
-        "overall_verdict": report.get("overall_verdict"),
-        "finding_count": (report.get("counts") or {}).get("findings"),
-    }
-
-
-def _integrity_report_payload(result: dict[str, Any]) -> dict[str, Any] | None:
-    report = result.get("report") if isinstance(result, dict) else None
-    return report if isinstance(report, dict) else None
 
 
 def prepare_idea_artifacts(
@@ -553,8 +501,8 @@ def run_review_phase(
 
     if resume and is_stage_complete(idea_dir, "review") and text_path.exists() and image_path.exists():
         submission_acceptance: dict[str, Any] = {}
-        integrity_forensics = _run_integrity_forensics_for_idea(
-            idea_dir=idea_dir,
+        integrity_forensics = run_integrity_forensics_for_manuscript(
+            root=idea_dir,
             paper_id=Path(idea_dir).name,
             enabled=integrity_enabled,
         )
@@ -567,7 +515,7 @@ def run_review_phase(
                 reject_on_auto_improvement_fallback=bool(
                     reject_on_auto_improvement_fallback
                 ),
-                integrity_report=_integrity_report_payload(integrity_forensics),
+                integrity_report=integrity_report_payload(integrity_forensics),
             )
         return {
             "found": pdf_path is not None,
@@ -660,8 +608,8 @@ def run_review_phase(
     review_text = review_pass["review_text"]
     review_img = review_pass["review_img"]
     submission_acceptance: dict[str, Any] = {}
-    integrity_forensics = _run_integrity_forensics_for_idea(
-        idea_dir=idea_dir,
+    integrity_forensics = run_integrity_forensics_for_manuscript(
+        root=idea_dir,
         paper_id=Path(idea_dir).name,
         enabled=integrity_enabled,
     )
@@ -674,7 +622,7 @@ def run_review_phase(
             reject_on_auto_improvement_fallback=bool(
                 reject_on_auto_improvement_fallback
             ),
-            integrity_report=_integrity_report_payload(integrity_forensics),
+            integrity_report=integrity_report_payload(integrity_forensics),
         )
 
     mark_stage_complete(
