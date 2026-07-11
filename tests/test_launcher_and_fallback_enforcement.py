@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import launch_scientist_bfts
+import launch_scientist_zhipu
 from ai_scientist.utils.launcher_workflow import run_review_phase, run_writeup_phase
 from continuous_paper_generator import (
     StrictFallbackViolation,
@@ -23,6 +25,20 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
             "page_limit": 8,
             "writeup_engine": "normal",
         }
+
+    def test_launcher_parsers_should_support_integrity_forensics_tristate(self) -> None:
+        for module in (launch_scientist_bfts, launch_scientist_zhipu):
+            with mock.patch("sys.argv", [module.__name__]):
+                default_args = module.parse_arguments()
+            self.assertIsNone(default_args.integrity_forensics)
+
+            with mock.patch("sys.argv", [module.__name__, "--integrity-forensics"]):
+                enabled_args = module.parse_arguments()
+            self.assertTrue(enabled_args.integrity_forensics)
+
+            with mock.patch("sys.argv", [module.__name__, "--no-integrity-forensics"]):
+                disabled_args = module.parse_arguments()
+            self.assertFalse(disabled_args.integrity_forensics)
 
     @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_complete")
     @mock.patch("ai_scientist.utils.launcher_workflow.save_token_tracker")

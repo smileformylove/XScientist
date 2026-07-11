@@ -226,6 +226,19 @@ def parse_arguments():
         action="store_true",
         help="如果设置,高质量模式未通过质量门槛时视为失败",
     )
+    parser.add_argument(
+        "--integrity-forensics",
+        dest="integrity_forensics",
+        action="store_true",
+        default=None,
+        help="启用最终稿 deterministic integrity forensics 检查。",
+    )
+    parser.add_argument(
+        "--no-integrity-forensics",
+        dest="integrity_forensics",
+        action="store_false",
+        help="禁用最终稿 deterministic integrity forensics 检查。",
+    )
     parser.add_argument("--review-reflections", type=int, default=1, help="文本审稿反思轮数")
     parser.add_argument("--review-ensemble", type=int, default=1, help="审稿 ensemble 数量")
     parser.add_argument("--review-fewshot", type=int, default=1, help="审稿 few-shot 示例数")
@@ -347,6 +360,13 @@ if __name__ == "__main__":
         strict_fallbacks = False
     elif strict_fallbacks:
         print("🛡️  严格兜底策略已启用：idea ranking 或质量 fallback 会直接终止本次运行。")
+    integrity_forensics_enabled = (
+        bool(args.integrity_forensics)
+        if args.integrity_forensics is not None
+        else bool(args.submission_mode or args.high_quality_mode)
+    )
+    if integrity_forensics_enabled:
+        print("🔎 启用 integrity forensics：最终稿将生成可追溯一致性检查报告。")
     print("=" * 80)
 
     # 检查可用的GPU并根据需要调整并行进程
@@ -514,6 +534,7 @@ if __name__ == "__main__":
                 require_quality_gate=args.require_quality_gate,
                 min_submission_priority=args.min_submission_priority,
                 max_submission_blockers=args.max_submission_blockers,
+                integrity_forensics_enabled=integrity_forensics_enabled,
                 resume=not args.force_rerun,
             )
             if review_result["found"]:

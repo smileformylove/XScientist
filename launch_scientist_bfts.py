@@ -191,6 +191,19 @@ def parse_arguments():
         action="store_true",
         help="Fail the run when high-quality mode does not pass the quality gate",
     )
+    parser.add_argument(
+        "--integrity-forensics",
+        dest="integrity_forensics",
+        action="store_true",
+        default=None,
+        help="Enable deterministic integrity forensics for the final manuscript.",
+    )
+    parser.add_argument(
+        "--no-integrity-forensics",
+        dest="integrity_forensics",
+        action="store_false",
+        help="Disable deterministic integrity forensics for the final manuscript.",
+    )
     parser.add_argument("--review-reflections", type=int, default=1, help="Reflection rounds for textual review")
     parser.add_argument("--review-ensemble", type=int, default=1, help="How many review samples to ensemble")
     parser.add_argument("--review-fewshot", type=int, default=1, help="Few-shot review exemplars")
@@ -302,6 +315,13 @@ if __name__ == "__main__":
         print(
             "Strict fallback policy active: ranking or quality fallbacks will stop this launcher run."
         )
+    integrity_forensics_enabled = (
+        bool(args.integrity_forensics)
+        if args.integrity_forensics is not None
+        else bool(args.submission_mode or args.high_quality_mode)
+    )
+    if integrity_forensics_enabled:
+        print("Integrity forensics enabled for final review.")
     print(f"Strict writing guardrails: {args.strict_writing_guardrails}")
     print(f"Guardrail repair rounds: {args.guardrail_repair_rounds}")
     require_model_credentials(_collect_requested_models(args))
@@ -449,6 +469,7 @@ if __name__ == "__main__":
                 require_quality_gate=args.require_quality_gate,
                 min_submission_priority=args.min_submission_priority,
                 max_submission_blockers=args.max_submission_blockers,
+                integrity_forensics_enabled=integrity_forensics_enabled,
                 resume=not args.force_rerun,
             )
             if review_result["found"]:
