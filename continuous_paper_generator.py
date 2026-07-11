@@ -35,6 +35,7 @@ from ai_scientist.utils.pipeline_helpers import (
     find_latest_pdf_path,
     save_review_artifacts,
 )
+from ai_scientist.utils.integrity_forensics import run_integrity_forensics
 from ai_scientist.utils.experiment_registry import (
     build_experiment_record,
     save_experiment_registry,
@@ -342,6 +343,72 @@ def _summarize_integrity_forensics_result(result: Dict[str, Any]) -> Dict[str, A
         "report_file": (
             result.get("integrity_forensics_report_file")
             or files.get("report")
+        ),
+    }
+
+
+def _find_integrity_latex_sources(paper_dir: str | Path) -> List[Path]:
+    paper_path = Path(paper_dir)
+    candidates = [paper_path / "latex" / "template.tex", paper_path / "template.tex"]
+    return [path for path in candidates if path.exists()]
+
+
+def _run_integrity_forensics_for_paper(
+    *,
+    paper_dir: str | Path,
+    paper_id: str,
+    enabled: bool,
+) -> Dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    tex_sources = _find_integrity_latex_sources(paper_dir)
+    if not tex_sources:
+        return {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "no LaTeX source found for integrity forensics",
+        }
+    out_dir = Path(paper_dir) / "integrity_forensics"
+    try:
+        result = run_integrity_forensics(
+            paper_id=paper_id,
+            latex_paths=tex_sources,
+            output_dir=out_dir,
+            observability_level=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - forensic pass should preserve artifacts
+        return {
+            "enabled": True,
+            "status": "error",
+            "error": str(exc),
+            "output_dir": str(out_dir),
+        }
+    report = dict(result.report)
+    report["report_path"] = result.files.get("report")
+    report["markdown_path"] = result.files.get("markdown")
+    return {
+        "enabled": True,
+        "status": "completed",
+        "output_dir": str(out_dir),
+        "report": report,
+        "files": dict(result.files),
+        "overall_verdict": report.get("overall_verdict"),
+        "finding_count": (report.get("counts") or {}).get("findings"),
+    }
+
+
+def _integrity_forensics_result_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    integrity = _summarize_integrity_forensics_result({"integrity_forensics": result})
+    return {
+        "integrity_forensics_enabled": integrity.get("enabled"),
+        "integrity_forensics_status": integrity.get("status"),
+        "integrity_forensics_verdict": integrity.get("verdict"),
+        "integrity_forensics_findings": integrity.get("findings"),
+        "integrity_forensics_report_file": integrity.get("report_file"),
+        "integrity_forensics_markdown_file": (
+            (result.get("files") or {}).get("markdown")
+            if isinstance(result.get("files"), dict)
+            else None
         ),
     }
 
@@ -1052,6 +1119,7 @@ class ContinuousPaperGenerator:
         strict_writing_guardrails: bool = False,
         guardrail_repair_rounds: int = 1,
         workflow_mode: str = "classic_pipeline",
+        integrity_forensics_enabled: bool | None = None,
     ) -> List[dict]:
         """
         批量生成指定类型的论文
@@ -1083,6 +1151,11 @@ class ContinuousPaperGenerator:
         print(f"页数限制: {paper_config['page_limit']}")
         print(f"描述: {paper_config['description']}")
         print(f"编排模式: {workflow_mode}")
+        resolved_integrity_forensics_enabled = (
+            bool(integrity_forensics_enabled)
+            if integrity_forensics_enabled is not None
+            else bool(submission_mode or high_quality_mode)
+        )
 
         self.progress["current_stage"] = f"generating_{paper_type}_papers"
         self._save_progress()
@@ -1139,6 +1212,7 @@ class ContinuousPaperGenerator:
                     workflow_mode,
                     submission_mode,
                     self.strict_fallbacks,
+                    resolved_integrity_forensics_enabled,
                 )
             )
 
@@ -3466,6 +3540,7 @@ def _process_single_paper(args):
         workflow_mode,
         submission_mode,
         strict_fallbacks,
+        integrity_forensics_enabled,
     ) = args
     try:
         writing_profile = normalize_writing_profile(writing_profile)
@@ -3478,6 +3553,10 @@ def _process_single_paper(args):
     writing_audit_rounds = max(0, int(writing_audit_rounds))
     strict_writing_guardrails = bool(strict_writing_guardrails or high_quality_mode)
     guardrail_repair_rounds = max(0, int(guardrail_repair_rounds))
+    integrity_forensics_result: Dict[str, Any] = {
+        "enabled": False,
+        "status": "disabled",
+    }
 
     try:
         current_stage = "prepare"
@@ -3999,6 +4078,45 @@ def _process_single_paper(args):
             print(f"   论文目录: {paper_dir}")
             print(f"   最终PDF: {final_pdf}")
 
+            integrity_forensics_result = _run_integrity_forensics_for_paper(
+                paper_dir=paper_structure["root"],
+                paper_id=f"{idea_idx}_{idea_name}",
+                enabled=bool(integrity_forensics_enabled),
+            )
+            if integrity_forensics_result.get("status") == "completed":
+                print(
+                    f"[想法 #{idea_idx}] Integrity forensics: "
+                    f"verdict={integrity_forensics_result.get('overall_verdict')} "
+                    f"findings={integrity_forensics_result.get('finding_count')} "
+                    f"dir={integrity_forensics_result.get('output_dir')}"
+                )
+            elif integrity_forensics_result.get("enabled"):
+                print(
+                    f"[想法 #{idea_idx}] ⚠️  Integrity forensics "
+                    f"{integrity_forensics_result.get('status')}: "
+                    f"{integrity_forensics_result.get('reason') or integrity_forensics_result.get('error')}"
+                )
+            if (
+                bool(submission_mode or high_quality_mode)
+                and integrity_forensics_result.get("overall_verdict") == "HARD_FLAGS"
+            ):
+                return {
+                    "idea_idx": idea_idx,
+                    "status": "failed",
+                    "stage": "integrity_forensics",
+                    "paper_type": paper_type,
+                    "paper_dir": str(paper_dir),
+                    "pdf_path": str(final_pdf),
+                    "acceptance_reasons": [
+                        "integrity forensics reported HARD_FLAGS"
+                    ],
+                    "integrity_forensics": integrity_forensics_result,
+                    **_integrity_forensics_result_fields(integrity_forensics_result),
+                    "workflow_mode": workflow_mode,
+                    "template_profile": template_profile,
+                    "template_capability": template_capability,
+                }
+
             # ========== ARA finalisation ==========
             # continuous_paper_generator drives BFTS end-to-end just like
             # run_project.py does — so the same finalize path applies. ARA
@@ -4131,6 +4249,7 @@ def _process_single_paper(args):
                 "reviewer_gate_report_file": quality_result.get(
                     "reviewer_gate_report_file"
                 ),
+                **_integrity_forensics_result_fields(integrity_forensics_result),
                 "experiment_analysis_file": quality_result.get(
                     "experiment_analysis_file"
                 ),
@@ -4426,6 +4545,19 @@ def main():
         help="高质量模式下，未通过质量门槛则视为失败",
     )
     parser.add_argument(
+        "--integrity-forensics",
+        dest="integrity_forensics",
+        action="store_true",
+        default=None,
+        help="启用最终稿 deterministic integrity forensics 检查。",
+    )
+    parser.add_argument(
+        "--no-integrity-forensics",
+        dest="integrity_forensics",
+        action="store_false",
+        help="禁用最终稿 deterministic integrity forensics 检查。",
+    )
+    parser.add_argument(
         "--review-reflections", type=int, default=1, help="审稿反思轮数"
     )
     parser.add_argument(
@@ -4521,6 +4653,13 @@ def main():
         strict_fallbacks = False
     elif strict_fallbacks:
         print("🛡️  Strict fallback policy active: 任何 fallback 将直接终止本批次（使用 --override-strict-fallbacks 可临时放宽）。")
+    integrity_forensics_enabled = (
+        bool(args.integrity_forensics)
+        if args.integrity_forensics is not None
+        else bool(args.submission_mode or args.high_quality_mode)
+    )
+    if integrity_forensics_enabled:
+        print("🔎 启用 integrity forensics：每篇最终稿将生成可追溯一致性检查报告。")
     runtime = initialize_runtime(
         source_file=__file__,
         output_root=args.research_dir,
@@ -4674,6 +4813,7 @@ def main():
         "strict_writing_guardrails": args.strict_writing_guardrails,
         "guardrail_repair_rounds": args.guardrail_repair_rounds,
         "workflow_mode": args.workflow_mode,
+        "integrity_forensics_enabled": integrity_forensics_enabled,
     }
 
     if args.all_types:

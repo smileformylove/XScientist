@@ -146,6 +146,96 @@ class IntegritySummaryReportingTests(unittest.TestCase):
             self.assertIn("Integrity forensics: SOFT_FLAGS", shortlist)
             self.assertIn("/tmp/report.json", shortlist)
 
+    def test_continuous_batch_passes_integrity_forensics_flag_to_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ideas_file = Path(td) / "ideas.json"
+            ideas_file.write_text(
+                json.dumps([{"Name": "flag_case", "Title": "Flag Case"}]),
+                encoding="utf-8",
+            )
+            generator = ContinuousPaperGenerator.__new__(ContinuousPaperGenerator)
+            generator.batch_dir = Path(td) / "batch"
+            generator.batch_dir.mkdir(parents=True, exist_ok=True)
+            generator.research_dir = Path(td) / "research"
+            generator.research_dir.mkdir(parents=True, exist_ok=True)
+            generator.strict_fallbacks = False
+            generator.progress = {
+                "papers_completed": [],
+                "papers_failed": [],
+                "papers_generated": [],
+                "source_provenance": {"source": "test"},
+            }
+            generator._save_progress = lambda: None
+            captured: dict[str, object] = {}
+
+            def fake_process(args):
+                captured["integrity_flag"] = args[-1]
+                return {
+                    "idea_idx": args[2],
+                    "status": "success",
+                    "pdf_path": "/tmp/paper.pdf",
+                }
+
+            with mock.patch(
+                "continuous_paper_generator._process_single_paper",
+                side_effect=fake_process,
+            ), mock.patch("builtins.print"):
+                results = generator.generate_paper_batch(
+                    str(ideas_file),
+                    paper_type="journal",
+                    idea_indices=[0],
+                    num_workers=1,
+                    integrity_forensics_enabled=True,
+                )
+
+            self.assertTrue(captured["integrity_flag"])
+            self.assertEqual(results[0]["status"], "success")
+            self.assertEqual(len(generator.progress["papers_completed"]), 1)
+
+    def test_continuous_batch_defaults_integrity_forensics_for_high_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ideas_file = Path(td) / "ideas.json"
+            ideas_file.write_text(
+                json.dumps([{"Name": "default_case", "Title": "Default Case"}]),
+                encoding="utf-8",
+            )
+            generator = ContinuousPaperGenerator.__new__(ContinuousPaperGenerator)
+            generator.batch_dir = Path(td) / "batch"
+            generator.batch_dir.mkdir(parents=True, exist_ok=True)
+            generator.research_dir = Path(td) / "research"
+            generator.research_dir.mkdir(parents=True, exist_ok=True)
+            generator.strict_fallbacks = False
+            generator.progress = {
+                "papers_completed": [],
+                "papers_failed": [],
+                "papers_generated": [],
+                "source_provenance": {"source": "test"},
+            }
+            generator._save_progress = lambda: None
+            captured: dict[str, object] = {}
+
+            def fake_process(args):
+                captured["integrity_flag"] = args[-1]
+                return {
+                    "idea_idx": args[2],
+                    "status": "success",
+                    "pdf_path": "/tmp/paper.pdf",
+                }
+
+            with mock.patch(
+                "continuous_paper_generator._process_single_paper",
+                side_effect=fake_process,
+            ), mock.patch("builtins.print"):
+                generator.generate_paper_batch(
+                    str(ideas_file),
+                    paper_type="journal",
+                    idea_indices=[0],
+                    num_workers=1,
+                    high_quality_mode=True,
+                )
+
+            self.assertTrue(captured["integrity_flag"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
