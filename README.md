@@ -40,6 +40,7 @@ English README: [README.en.md](README.en.md)
     - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
     - [D) 反馈系统监控](#d-反馈系统监控)
   - [输出与可观测性](#输出与可观测性)
+    - [科研完整性取证（Integrity Forensics）](#科研完整性取证integrity-forensics)
     - [ARA 工件（面向下游智能体）](#ara-工件面向下游智能体)
   - [示例论文](#示例论文)
   - [文档索引](#文档索引)
@@ -229,6 +230,24 @@ python3 continuous_research_daemon.py \
   -- --submission-mode --num-ideas 3
 ```
 
+投稿级/高质量运行会默认启用 deterministic integrity forensics。你也可以显式控制：
+
+```bash
+# 强制启用最终稿完整性取证
+python3 run_project.py my_project \
+  --output-root "$RESEARCH_OUTPUT_DIR" \
+  --topic examples/example_topic.md \
+  --integrity-forensics
+
+# 在高质量调试中临时关闭
+python3 continuous_paper_generator.py \
+  --research-dir "$RESEARCH_OUTPUT_DIR" \
+  --topic examples/example_topic.md \
+  --paper-types icbinb \
+  --high-quality-mode \
+  --no-integrity-forensics
+```
+
 常用运维命令：
 
 ```bash
@@ -283,6 +302,19 @@ python3 research_manager.py repair-board --top 20 --priority-tier p0
 python3 research_manager.py evolution-board --top 20
 python3 research_manager.py process-board --status blocked --top 30
 ```
+
+### 科研完整性取证（Integrity Forensics）
+
+XScientist 会在最终稿阶段运行一组 deterministic integrity forensics 检查，用于在进入 submission gate 前发现更像“硬阻断”的稿件风险，例如证据/断言一致性、结构化报告中的异常信号等。它不是人工审稿或事实核查的替代品，而是一层可复现、可落盘、可被后续 agent 消费的机器检查。
+
+默认行为：
+
+- `--submission-mode` 或 `--high-quality-mode` 下默认启用。
+- 其他普通运行默认关闭，但可用 `--integrity-forensics` 强制启用。
+- 调试或成本敏感场景可用 `--no-integrity-forensics` 显式关闭。
+- 入口覆盖 `run_project.py`、`continuous_paper_generator.py`、`launch_scientist_bfts.py` 与 `launch_scientist_zhipu.py`。
+
+每篇稿件的取证产物写入对应运行目录下的 `integrity_forensics/`，通常包括 JSON 报告和 Markdown 摘要。批量/项目 summary 会记录 `integrity_forensics_status`、`integrity_forensics_verdict`、finding 数量和报告路径，并在 shortlist 中展示。`HARD_FLAGS` 会阻断 submission-ready 判定；`SOFT_FLAGS` 会被报告出来，但不会单独阻断。
 
 ### ARA 工件（面向下游智能体）
 

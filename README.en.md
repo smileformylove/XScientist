@@ -26,6 +26,7 @@ Important notes:
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Outputs & Observability](#outputs--observability)
+  - [Integrity Forensics](#integrity-forensics)
 - [Example Papers](#example-papers)
 - [Docs](#docs)
 - [Development](#development)
@@ -212,6 +213,24 @@ python3 continuous_research_daemon.py \
   -- --submission-mode --num-ideas 3
 ```
 
+Submission-grade and high-quality runs enable deterministic integrity forensics by default. You can also control it explicitly:
+
+```bash
+# Force integrity forensics for the final manuscript.
+python3 run_project.py my_project \
+  --output-root "$RESEARCH_OUTPUT_DIR" \
+  --topic examples/example_topic.md \
+  --integrity-forensics
+
+# Temporarily disable it during high-quality debugging.
+python3 continuous_paper_generator.py \
+  --research-dir "$RESEARCH_OUTPUT_DIR" \
+  --topic examples/example_topic.md \
+  --paper-types icbinb \
+  --high-quality-mode \
+  --no-integrity-forensics
+```
+
 Common ops commands:
 
 ```bash
@@ -266,6 +285,19 @@ python3 research_manager.py repair-board --top 20 --priority-tier p0
 python3 research_manager.py evolution-board --top 20
 python3 research_manager.py process-board --status blocked --top 30
 ```
+
+### Integrity Forensics
+
+XScientist runs deterministic integrity forensics near the final-manuscript stage to catch hard submission risks before the submission gate, including evidence/claim consistency and anomalous signals surfaced in structured reports. This is not a replacement for human review or factual verification; it is a reproducible machine check that writes artifacts other agents can inspect.
+
+Default behavior:
+
+- Enabled automatically when `--submission-mode` or `--high-quality-mode` is active.
+- Disabled by default for ordinary runs, but `--integrity-forensics` forces it on.
+- `--no-integrity-forensics` explicitly disables it for debugging or cost-sensitive runs.
+- Supported by `run_project.py`, `continuous_paper_generator.py`, `launch_scientist_bfts.py`, and `launch_scientist_zhipu.py`.
+
+Per-manuscript artifacts are written under that run's `integrity_forensics/` directory, usually including a JSON report and a Markdown summary. Project and batch summaries record `integrity_forensics_status`, `integrity_forensics_verdict`, finding counts, and report paths, and shortlists surface the same signal. `HARD_FLAGS` blocks submission-ready acceptance; `SOFT_FLAGS` is reported but does not block by itself.
 
 ### ARA bundles (agent-facing artifact)
 
