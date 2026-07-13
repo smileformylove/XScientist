@@ -1064,6 +1064,7 @@ class ContinuousPaperGenerator:
         guardrail_repair_rounds: int = 1,
         workflow_mode: str = "classic_pipeline",
         integrity_forensics_enabled: bool | None = None,
+        requested_workflow_mode: str | None = None,
     ) -> List[dict]:
         """
         批量生成指定类型的论文
@@ -1157,7 +1158,7 @@ class ContinuousPaperGenerator:
                     submission_mode,
                     self.strict_fallbacks,
                     resolved_integrity_forensics_enabled,
-                    kwargs.get("requested_workflow_mode", workflow_mode),
+                    requested_workflow_mode or workflow_mode,
                 )
             )
 

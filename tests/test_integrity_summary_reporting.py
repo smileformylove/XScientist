@@ -222,7 +222,8 @@ class IntegritySummaryReportingTests(unittest.TestCase):
             captured: dict[str, object] = {}
 
             def fake_process(args):
-                captured["integrity_flag"] = args[-1]
+                captured["integrity_flag"] = args[-2]
+                captured["requested_workflow_mode"] = args[-1]
                 return {
                     "idea_idx": args[2],
                     "status": "success",
@@ -242,6 +243,7 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                 )
 
             self.assertTrue(captured["integrity_flag"])
+            self.assertEqual(captured["requested_workflow_mode"], "classic_pipeline")
             self.assertEqual(results[0]["status"], "success")
             self.assertEqual(len(generator.progress["papers_completed"]), 1)
 
@@ -268,7 +270,8 @@ class IntegritySummaryReportingTests(unittest.TestCase):
             captured: dict[str, object] = {}
 
             def fake_process(args):
-                captured["integrity_flag"] = args[-1]
+                captured["integrity_flag"] = args[-2]
+                captured["requested_workflow_mode"] = args[-1]
                 return {
                     "idea_idx": args[2],
                     "status": "success",
@@ -288,6 +291,7 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                 )
 
             self.assertTrue(captured["integrity_flag"])
+            self.assertEqual(captured["requested_workflow_mode"], "classic_pipeline")
 
 
 if __name__ == "__main__":  # pragma: no cover
