@@ -51,6 +51,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+from ai_scientist.utils.ara_graph import (
+    graph_with_dag_metadata,
+    write_exploration_graph_visualization,
+)
 from ai_scientist.utils.ara_manifest_lock import (
     append_manifest_revision,
     write_manifest_lock,
@@ -234,6 +238,15 @@ def _export_nodes_from_journal(
         return [], []
 
     raw_nodes = payload.get("nodes") or []
+    node2parent = (
+        payload.get("node2parent")
+        if isinstance(payload.get("node2parent"), dict)
+        else {}
+    )
+    child_map: dict[str, list[str]] = {}
+    for child_id, parent_id in node2parent.items():
+        if child_id and parent_id:
+            child_map.setdefault(str(parent_id), []).append(str(child_id))
     node_entries: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
 
@@ -326,6 +339,13 @@ def _export_nodes_from_journal(
         if isinstance(code, str) and code.strip():
             _write_node_run_bundle(node_dir, node_id=node_id, exp_dir=exp_dir, ara_dir=ara_dir)
 
+        parent_id = raw.get("parent_id")
+        if not parent_id:
+            parent_id = node2parent.get(node_id)
+        children = raw.get("children") or child_map.get(node_id, [])
+        if not isinstance(children, list):
+            children = []
+
         node_entries.append(
             {
                 "id": node_id,
@@ -334,8 +354,8 @@ def _export_nodes_from_journal(
                 "llm_call_refs": llm_refs,
                 "stage": stage_label,
                 "step": raw.get("step"),
-                "parent_id": raw.get("parent_id"),
-                "children": raw.get("children") or [],
+                "parent_id": str(parent_id) if parent_id else None,
+                "children": [str(child_id) for child_id in children],
                 "is_buggy": raw.get("is_buggy"),
                 "is_seed_node": raw.get("is_seed_node"),
                 "is_seed_agg_node": raw.get("is_seed_agg_node"),
@@ -347,11 +367,103 @@ def _export_nodes_from_journal(
             }
         )
 
-        parent_id = raw.get("parent_id")
         if parent_id:
             edges.append({"parent": str(parent_id), "child": node_id, "stage": stage_label})
 
     return node_entries, edges
+
+
+def _normalize_graph_entries(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Merge same-content carry-over nodes and dedupe edges.
+
+    Multi-stage BFTS journals can append a deepcopy of the previous stage's
+    best node into the next stage while preserving its id. That is one logical
+    exploration node, not a second DAG vertex. If the duplicate carries the same
+    content_hash (or either side is legacy/unhashed), merge stage/children
+    metadata. If the same id has a different content_hash, keep it duplicated so
+    the DAG validator surfaces the id collision instead of hiding data loss.
+    """
+
+    merged: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    duplicate_ids_with_distinct_hash: set[str] = set()
+
+    for node in nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        existing = by_id.get(node_id)
+        if existing is None or node_id in duplicate_ids_with_distinct_hash:
+            current = dict(node)
+            stage = current.get("stage")
+            current["stages"] = [stage] if stage else []
+            merged.append(current)
+            by_id.setdefault(node_id, current)
+            continue
+
+        existing_hash = existing.get("content_hash")
+        current_hash = node.get("content_hash")
+        if existing_hash and current_hash and existing_hash != current_hash:
+            duplicate_ids_with_distinct_hash.add(node_id)
+            current = dict(node)
+            stage = current.get("stage")
+            current["stages"] = [stage] if stage else []
+            merged.append(current)
+            continue
+
+        stage = node.get("stage")
+        stages = existing.setdefault("stages", [])
+        if stage and stage not in stages:
+            stages.append(stage)
+
+        if not existing.get("parent_id") and node.get("parent_id"):
+            existing["parent_id"] = node.get("parent_id")
+        elif (
+            existing.get("parent_id")
+            and node.get("parent_id")
+            and existing.get("parent_id") != node.get("parent_id")
+        ):
+            conflicts = existing.setdefault("parent_id_conflicts", [])
+            conflict = str(node.get("parent_id"))
+            if conflict not in conflicts:
+                conflicts.append(conflict)
+
+        children = existing.setdefault("children", [])
+        for child_id in node.get("children") or []:
+            child = str(child_id)
+            if child not in children:
+                children.append(child)
+
+    edge_seen: set[tuple[str, str]] = set()
+    normalized_edges: list[dict[str, Any]] = []
+    for edge in edges:
+        parent = str(edge.get("parent") or "").strip()
+        child = str(edge.get("child") or "").strip()
+        if not parent or not child:
+            continue
+        key = (parent, child)
+        if key in edge_seen:
+            continue
+        edge_seen.add(key)
+        normalized_edges.append({
+            "parent": parent,
+            "child": child,
+            "stage": edge.get("stage"),
+        })
+
+    node_by_id = {str(node.get("id")): node for node in merged if node.get("id")}
+    for edge in normalized_edges:
+        parent_node = node_by_id.get(edge["parent"])
+        if not parent_node:
+            continue
+        children = parent_node.setdefault("children", [])
+        if edge["child"] not in children:
+            children.append(edge["child"])
+
+    return merged, normalized_edges
 
 
 def _copy_optional(src: Path, dst: Path) -> bool:
@@ -684,6 +796,7 @@ def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
         "## What lives here",
         "",
         "- `exploration_graph.json` — every node from the tree search (including buggy ones).",
+        "- `exploration_graph.html` — browser visualization of the exploration DAG.",
         "- `nodes/<id>/` — code, term_out, metrics, plots for each node. Fork from any node id.",
         "- `claims/` — machine-readable claims linking each manuscript assertion to its evidence node.",
         "- `repair_history.jsonl` — full self-review / repair trajectory.",
@@ -765,10 +878,10 @@ def export_ara(
         )
         all_nodes.extend(nodes)
         all_edges.extend(edges)
+    all_nodes, all_edges = _normalize_graph_entries(all_nodes, all_edges)
 
     exploration_graph_path = ara_dir / "exploration_graph.json"
-    _safe_write_json(
-        exploration_graph_path,
+    graph_payload = graph_with_dag_metadata(
         {
             "schema_version": ARA_SCHEMA_VERSION,
             "protocol_kind": "exploration_graph",
@@ -783,9 +896,16 @@ def export_ara(
             },
         },
     )
+    _safe_write_json(exploration_graph_path, graph_payload)
+    graph_visualization_refs = write_exploration_graph_visualization(
+        ara_dir,
+        graph_payload,
+    )
 
     # 2. Optional companions: pareto pool, repair history, experiment registry.
-    references: dict[str, Any] = {}
+    references: dict[str, Any] = {
+        "exploration_graph_visualization": graph_visualization_refs,
+    }
 
     pareto_source = exp_dir_path / "pareto_pool" / "manuscript_candidate_pool.json"
     if not pareto_source.exists():

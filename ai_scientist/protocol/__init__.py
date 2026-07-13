@@ -18,6 +18,7 @@ loadable at runtime without a Python dependency.
 from __future__ import annotations
 
 from .constants import PROTOCOL_VERSION, Kind
+from .graph import analyze_exploration_graph, graph_with_dag_metadata
 from .hashing import build_provenance, content_hash, hash_manifest, hash_node_payload
 from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
 from .objects import ObjectRef, ObjectStore
@@ -32,9 +33,11 @@ __all__ = [
     "ValidationReport",
     "active_ara_root",
     "available_schemas",
+    "analyze_exploration_graph",
     "build_provenance",
     "capture_llm_calls",
     "content_hash",
+    "graph_with_dag_metadata",
     "hash_manifest",
     "hash_node_payload",
     "load_schema",

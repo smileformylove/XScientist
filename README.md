@@ -325,7 +325,9 @@ XScientist 会在最终稿阶段运行一组 deterministic integrity forensics �
 ```
 <project_dir>/ara/<timestamp>_<idea>/
 ├── manifest.json              # 顶层入口，指向下面的所有文件
-├── exploration_graph.json     # 树搜索里每个节点（含失败分支）
+├── exploration_graph.json     # 树搜索 DAG：每个节点与 parent/child 边（含失败分支）
+├── exploration_graph.html     # 可在浏览器打开的科技探索树视图
+├── exploration_graph.summary.json # DAG 校验摘要（root / leaf / 拓扑序）
 ├── nodes/<node_id>/
 │   ├── code.py                # 该节点原样执行的代码
 │   ├── term_out.log           # 完整的 stdout/stderr
@@ -342,7 +344,7 @@ XScientist 会在最终稿阶段运行一组 deterministic integrity forensics �
 └── README.md                  # 面向 agent 的入口说明
 ```
 
-配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` 六个子命令：
+配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` 等子命令：
 
 ```bash
 # 打印某个节点的 metric / analysis / 代码大小
@@ -367,11 +369,18 @@ python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
 # 对照 ai_scientist/protocol/SPEC.md 做 conformance 校验
 python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
 
+# 检查 DAG invariant，并按需重建可视化
+python3 run_ara_fork.py graph \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --write-html
+
 # 批量重跑若干节点并写一份 verify/reexec_batch_*.json（对齐 CI 门禁）
 python3 run_ara_fork.py verify \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --limit 3
 ```
+
+`exploration_graph.json` 是每篇小论文对应的科技探索 DAG：节点是一次具体实验、修复或失败分支，边是 parent -> child 的演化关系。`validate` 会校验它是有向无环图；`graph --json` 给出 root、leaf、拓扑序和问题列表；`exploration_graph.html` 则是给人看的可视化入口。这样 `run_ara_fork.py log --node <id>` 的祖先链、`diff --only-node <id>` 的节点差异和浏览器里的探索树使用同一份图数据。
 
 写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。`ai_scientist/utils/claim_coverage.py` 会把这些标记聚合成 `coverage_score` 与 severity（`ok` / `sparse` / `unresolved` / `insufficient` / `none`），存入 `ara/.../claims/coverage.json`，供质量门禁 / 排行 / dossier 打分使用。
 

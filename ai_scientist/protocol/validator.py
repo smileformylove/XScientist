@@ -24,6 +24,7 @@ from .constants import (
     REQUIRED_TOP_LEVEL,
     Kind,
 )
+from .graph import analyze_exploration_graph
 from .schemas import load_schema
 
 # Map JSON Schema "type" tokens to Python type checks.
@@ -191,6 +192,21 @@ def validate_ara(ara_root: str | Path, *, strict: bool = False) -> ValidationRep
             report.add_error("exploration_graph.json", f"unreadable JSON: {exc}")
         if isinstance(graph_payload, dict):
             report.merge(_validate_kind(graph_payload, Kind.EXPLORATION_GRAPH, "exploration_graph.json"))
+            try:
+                dag = analyze_exploration_graph(graph_payload)
+            except Exception as exc:  # pragma: no cover - defensive
+                report.add_error(
+                    "exploration_graph.json",
+                    f"DAG analysis failed: {exc}",
+                )
+            else:
+                for issue in dag.get("issues") or []:
+                    path = str(issue.get("path") or "exploration_graph.json")
+                    message = str(issue.get("message") or issue.get("code") or "graph issue")
+                    if issue.get("severity") == "warning":
+                        report.add_warning(path, message)
+                    else:
+                        report.add_error(path, message)
 
     # Optional folders — only validate contents if present.
     if isinstance(graph_payload, dict):

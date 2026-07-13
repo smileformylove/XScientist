@@ -62,6 +62,28 @@ class ExportMinimalARATest(unittest.TestCase):
         report = validate_ara(result.root)
         self.assertTrue(report.ok, msg=[e.__dict__ for e in report.errors])
 
+    def test_validator_rejects_cycle_in_exploration_graph(self) -> None:
+        result = export_minimal_ara(
+            project_dir=self.tmp / "paper_dir",
+            manuscript_pdf=None,
+            idea={"Name": "cycle"},
+        )
+        graph_path = result.root / "exploration_graph.json"
+        graph = json.loads(graph_path.read_text())
+        graph["nodes"].extend([
+            {"id": "a", "parent_id": "b", "children": ["b"]},
+            {"id": "b", "parent_id": "a", "children": ["a"]},
+        ])
+        graph["edges"] = [{"parent": "a", "child": "b"}, {"parent": "b", "child": "a"}]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+        report = validate_ara(result.root)
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("cycle" in issue.message for issue in report.errors),
+            msg=[issue.__dict__ for issue in report.errors],
+        )
+
     def test_provenance_survives_manifest_write(self) -> None:
         provenance = {
             "parent_ara_root": "/tmp/parent",

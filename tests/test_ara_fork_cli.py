@@ -213,6 +213,31 @@ class CLIRefsTests(unittest.TestCase):
         self.assertNotIn("foobar", names)
 
 
+class CLIGraphTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def test_graph_json_reports_dag_and_html_path(self) -> None:
+        ara = _make_ara(self.tmp, "graph")
+        rc, out, _ = _run("graph", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["is_dag"])
+        self.assertEqual(payload["nodes"], 1)
+        self.assertEqual(payload["edges"], 0)
+        self.assertTrue(payload["html"].endswith("exploration_graph.html"))
+
+    def test_graph_write_html_regenerates_missing_visualization(self) -> None:
+        ara = _make_ara(self.tmp, "graph-write")
+        (ara / "exploration_graph.html").unlink()
+        rc, out, _ = _run("graph", "--ara", str(ara), "--write-html")
+        self.assertEqual(rc, 0)
+        self.assertIn("dag:", out)
+        self.assertTrue((ara / "exploration_graph.html").exists())
+
+
 class CLIVerifyLockTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

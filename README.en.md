@@ -308,7 +308,9 @@ Typical layout:
 ```
 <project_dir>/ara/<timestamp>_<idea>/
 ├── manifest.json              # top-level pointer to everything below
-├── exploration_graph.json     # every tree-search node (buggy branches included)
+├── exploration_graph.json     # tree-search DAG: nodes + parent/child edges
+├── exploration_graph.html     # browser-viewable exploration-tree visualization
+├── exploration_graph.summary.json # DAG summary (roots / leaves / topological order)
 ├── nodes/<node_id>/
 │   ├── code.py                # exact code the node ran
 │   ├── term_out.log           # untrimmed stdout/stderr
@@ -325,7 +327,7 @@ Typical layout:
 └── README.md                  # agent-facing entry point
 ```
 
-The `run_ara_fork.py` CLI ships six sub-commands:
+The `run_ara_fork.py` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
 
 ```bash
 # Print a node's metric / analysis / code size.
@@ -351,11 +353,18 @@ python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
 # Run conformance validation against ai_scientist/protocol/SPEC.md.
 python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
 
+# Check the DAG invariant and regenerate the visualization if needed.
+python3 run_ara_fork.py graph \
+  --ara <project_dir>/ara/<timestamp>_<idea> \
+  --write-html
+
 # Batch re-execute a handful of nodes and write verify/reexec_batch_*.json.
 python3 run_ara_fork.py verify \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --limit 3
 ```
+
+`exploration_graph.json` is the exploration DAG behind each paper: nodes are concrete experiments, repairs, or failed branches, and edges are parent -> child evolution links. `validate` checks that the graph is directed and acyclic; `graph --json` reports roots, leaves, topological order, and structural issues; `exploration_graph.html` is the human-facing visualization. `run_ara_fork.py log --node <id>`, `diff --only-node <id>`, and the browser view all read the same graph data.
 
 During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them. `ai_scientist/utils/claim_coverage.py` aggregates those markers into a `coverage_score` and a severity band (`ok` / `sparse` / `unresolved` / `insufficient` / `none`), persisted at `ara/.../claims/coverage.json` for quality gating, ranking, and dossier scoring.
 

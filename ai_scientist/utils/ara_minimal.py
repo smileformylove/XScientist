@@ -41,6 +41,10 @@ from ai_scientist.utils.ara_artifact import (
     ara_dir_for_idea,
     ara_root_for_project,
 )
+from ai_scientist.utils.ara_graph import (
+    graph_with_dag_metadata,
+    write_exploration_graph_visualization,
+)
 from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
 
 logger = logging.getLogger(__name__)
@@ -136,36 +140,39 @@ def export_minimal_ara(
     )
 
     now = _now_iso()
-    graph = {
-        "schema_version": PROTOCOL_VERSION,
-        "protocol_kind": "exploration_graph",
-        "generated_at": now,
-        "nodes": [
-            {
-                "id": node_id,
-                "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
-                "stage": "manuscript_only",
-                "step": 0,
-                "parent_id": None,
-                "children": [],
-                "is_buggy": False,
-                "is_seed_node": True,
-                "is_seed_agg_node": False,
-                "metric": None,
-                "plan_excerpt": (
-                    "Manuscript-only export: producer skipped BFTS and wrote "
-                    "the manuscript directly."
-                ),
-                "exp_results_dir": None,
-                "ctime": None,
-                "artifacts_dir": f"nodes/{node_id}",
-            }
-        ],
-        "edges": [],
-        "source_journals": [],
-        "counts": {"nodes": 1, "edges": 0, "buggy": 0},
-    }
+    graph = graph_with_dag_metadata(
+        {
+            "schema_version": PROTOCOL_VERSION,
+            "protocol_kind": "exploration_graph",
+            "generated_at": now,
+            "nodes": [
+                {
+                    "id": node_id,
+                    "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
+                    "stage": "manuscript_only",
+                    "step": 0,
+                    "parent_id": None,
+                    "children": [],
+                    "is_buggy": False,
+                    "is_seed_node": True,
+                    "is_seed_agg_node": False,
+                    "metric": None,
+                    "plan_excerpt": (
+                        "Manuscript-only export: producer skipped BFTS and wrote "
+                        "the manuscript directly."
+                    ),
+                    "exp_results_dir": None,
+                    "ctime": None,
+                    "artifacts_dir": f"nodes/{node_id}",
+                }
+            ],
+            "edges": [],
+            "source_journals": [],
+            "counts": {"nodes": 1, "edges": 0, "buggy": 0},
+        }
+    )
     _write_json(ara_dir / "exploration_graph.json", graph)
+    graph_visualization_refs = write_exploration_graph_visualization(ara_dir, graph)
 
     manifest_payload = {
         "schema_version": PROTOCOL_VERSION,
@@ -182,6 +189,7 @@ def export_minimal_ara(
         "references": {
             "producer": producer,
             "writing_profile": writing_profile,
+            "exploration_graph_visualization": graph_visualization_refs,
         },
         "missing": [
             "no journal.json (this producer skips BFTS)",
@@ -208,7 +216,8 @@ def export_minimal_ara(
             "This ARA has no exploration tree — the producer wrote the "
             "manuscript directly from the idea. `nodes/<id>/` contains the "
             "PDF (when available); `manifest.provenance` links back to a "
-            "parent ARA if this run was seeded.\n"
+            "parent ARA if this run was seeded. Open `exploration_graph.html` "
+            "for the single-node DAG view.\n"
         ),
         encoding="utf-8",
     )

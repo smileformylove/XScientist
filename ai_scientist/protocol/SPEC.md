@@ -22,6 +22,8 @@ An ARA is a directory rooted at `manifest.json`:
 <ara_root>/
     manifest.json                REQUIRED. Machine-readable entry point.
     exploration_graph.json       REQUIRED. Full node graph, including failures.
+    exploration_graph.html       OPTIONAL. Human-facing DAG visualization.
+    exploration_graph.summary.json OPTIONAL. DAG diagnostics / topo summary.
     README.md                    RECOMMENDED. Structured agent-facing entry.
 
     nodes/<node_id>/             OPTIONAL, but MUST match graph if present.
@@ -84,7 +86,9 @@ Optional keys:
 ## 3. Required File: `exploration_graph.json`
 
 The full tree-search graph. **Failed branches MUST be present** — omitting
-them defeats the purpose of the protocol.
+them defeats the purpose of the protocol. The graph MUST be a directed acyclic
+graph (DAG): node ids are unique, every edge endpoint exists in `nodes[]`, and
+the combined `edges[]` / `parent_id` / `children` relation contains no cycle.
 
 Required top-level keys: `schema_version`, `nodes`, `edges`, `counts`.
 
@@ -94,6 +98,12 @@ Each **node entry** in `nodes[]` must contain `id`. Recommended:
 Each **edge entry** in `edges[]` must contain `parent` and `child`.
 
 `counts.nodes` MUST equal `len(nodes)`.
+
+Producers MAY add a derived `dag` block containing diagnostics such as
+`is_dag`, `root_ids`, `leaf_ids`, `topological_order`, `max_depth`, and
+`issues`. Producers MAY also write `exploration_graph.html` and
+`exploration_graph.summary.json` beside the graph; these are derived views, not
+additional sources of truth.
 
 ## 4. Content Addressing (`content_hash`)
 
@@ -540,6 +550,8 @@ To claim conformance a producer MUST pass:
 
 - Presence of `manifest.json` and `exploration_graph.json`.
 - Schema validity of both files.
+- `exploration_graph.json` is a DAG: unique node ids, valid edge endpoints,
+  and no directed cycles.
 - Every `nodes/<id>/metrics.json` (when present) schema-valid.
 - Every `claims/*.json` (except `_index.json`) schema-valid.
 - Every `verify/*.json` schema-valid.
@@ -729,6 +741,12 @@ stage.
 `ai_scientist.protocol.validate_ara(path)` (§17) against the JSON
 Schemas shipped in this repo. `--strict` promotes warnings to errors,
 matching CI's stance.
+
+**`graph --ara <path> [--json] [--write-html] [--open]`** — Inspect the
+exploration DAG. `--json` emits DAG diagnostics (`root_ids`, `leaf_ids`,
+`topological_order`, `issues`). `--write-html` regenerates
+`exploration_graph.html` and `exploration_graph.summary.json`; `--open`
+regenerates and opens the HTML view in the default browser.
 
 ### 20.6 Portability
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ai_scientist.protocol import analyze_exploration_graph
 from ai_scientist.utils.ara_artifact import (
     ARA_SCHEMA_VERSION,
     ara_dir_for_idea,
@@ -15,6 +16,7 @@ from ai_scientist.utils.ara_artifact import (
     iter_ara_exports,
     update_manifest_claim_count,
 )
+from ai_scientist.utils.ara_graph import render_exploration_graph_html
 from ai_scientist.utils.claim_registry import (
     _CLAIM_RE,
     scan_tex_for_claims,
@@ -27,6 +29,21 @@ def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
     stage_dir.mkdir(parents=True, exist_ok=True)
     (stage_dir / "journal.json").write_text(
         json.dumps({"nodes": nodes, "node2parent": {}, "__version": "2"}),
+        encoding="utf-8",
+    )
+
+
+def _write_serialized_journal(
+    logs_dir: Path,
+    run_name: str,
+    *,
+    nodes: list[dict],
+    node2parent: dict[str, str],
+) -> None:
+    stage_dir = logs_dir / run_name
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    (stage_dir / "journal.json").write_text(
+        json.dumps({"nodes": nodes, "node2parent": node2parent, "__version": "2"}),
         encoding="utf-8",
     )
 
@@ -98,6 +115,12 @@ class ARAExporterTest(unittest.TestCase):
         self.assertEqual(manifest["counts"]["buggy_nodes"], 1)
         self.assertEqual(manifest["idea"]["name"], "abc_idea")
         self.assertIn("env", manifest["references"])
+        self.assertIn("exploration_graph_visualization", manifest["references"])
+        self.assertTrue((result.root / "exploration_graph.html").exists())
+        self.assertTrue((result.root / "exploration_graph.summary.json").exists())
+        graph = json.loads((result.root / "exploration_graph.json").read_text())
+        self.assertTrue(graph["dag"]["is_dag"])
+        self.assertEqual(graph["dag"]["topological_order"], ["node_root", "node_child"])
         # Model fingerprint should hash the spec.
         fp = json.loads(
             (result.root / manifest["references"]["env"]["model_fingerprint"]).read_text()
@@ -143,6 +166,125 @@ class ARAExporterTest(unittest.TestCase):
         self.assertTrue(path.name.startswith("ts_"))
         self.assertNotIn("/", path.name)
         self.assertNotIn(" ", path.name)
+
+    def test_graph_analyzer_detects_cycles(self) -> None:
+        graph = {
+            "nodes": [
+                {"id": "a", "parent_id": "b", "children": ["b"]},
+                {"id": "b", "parent_id": "a", "children": ["a"]},
+            ],
+            "edges": [{"parent": "a", "child": "b"}, {"parent": "b", "child": "a"}],
+        }
+        dag = analyze_exploration_graph(graph)
+        self.assertFalse(dag["is_dag"])
+        self.assertIn("cycle_detected", {issue["code"] for issue in dag["issues"]})
+
+    def test_graph_analyzer_uses_parent_links_when_edges_are_absent(self) -> None:
+        graph = {
+            "nodes": [
+                {"id": "root", "parent_id": None, "children": []},
+                {"id": "child", "parent_id": "root", "children": []},
+            ],
+            "edges": [],
+        }
+        dag = analyze_exploration_graph(graph)
+        self.assertTrue(dag["is_dag"])
+        self.assertEqual(dag["edge_count"], 1)
+        self.assertEqual(dag["topological_order"], ["root", "child"])
+
+    def test_export_uses_serialized_journal_node2parent_for_dag_edges(self) -> None:
+        _write_serialized_journal(
+            self.exp_dir / "logs",
+            "serialized-run",
+            nodes=[
+                {
+                    "id": "root",
+                    "step": 0,
+                    "code": "print('root')",
+                    "_term_out": [],
+                    "metric": {"value": 0.1, "maximize": True, "name": "score"},
+                    "is_buggy": False,
+                },
+                {
+                    "id": "child",
+                    "step": 1,
+                    "code": "print('child')",
+                    "_term_out": [],
+                    "metric": {"value": 0.2, "maximize": True, "name": "score"},
+                    "is_buggy": False,
+                },
+            ],
+            node2parent={"child": "root"},
+        )
+        result = export_ara(
+            project_dir=self.project_dir,
+            exp_dir=self.exp_dir,
+            idea={"Name": "serialized"},
+            timestamp="20260701",
+        )
+        graph = json.loads((result.root / "exploration_graph.json").read_text())
+        by_id = {node["id"]: node for node in graph["nodes"]}
+        self.assertEqual(by_id["child"]["parent_id"], "root")
+        self.assertEqual(by_id["root"]["children"], ["child"])
+        self.assertEqual(graph["edges"], [{"parent": "root", "child": "child", "stage": "serialized-run"}])
+        self.assertEqual(graph["dag"]["topological_order"], ["root", "child"])
+
+    def test_export_dedupes_multistage_carryover_nodes_by_id_and_hash(self) -> None:
+        root_node = {
+            "id": "root",
+            "step": 0,
+            "code": "print('root')",
+            "_term_out": [],
+            "metric": {"value": 0.1, "maximize": True, "name": "score"},
+            "is_buggy": False,
+        }
+        _write_serialized_journal(
+            self.exp_dir / "logs",
+            "stage-1",
+            nodes=[root_node],
+            node2parent={},
+        )
+        _write_serialized_journal(
+            self.exp_dir / "logs",
+            "stage-2",
+            nodes=[
+                dict(root_node),
+                {
+                    "id": "child",
+                    "step": 1,
+                    "code": "print('child')",
+                    "_term_out": [],
+                    "metric": {"value": 0.2, "maximize": True, "name": "score"},
+                    "is_buggy": False,
+                },
+            ],
+            node2parent={"child": "root"},
+        )
+        result = export_ara(
+            project_dir=self.project_dir,
+            exp_dir=self.exp_dir,
+            idea={"Name": "multistage"},
+            timestamp="20260701",
+        )
+        graph = json.loads((result.root / "exploration_graph.json").read_text())
+        self.assertEqual([node["id"] for node in graph["nodes"]], ["root", "child"])
+        root = {node["id"]: node for node in graph["nodes"]}["root"]
+        self.assertEqual(root["stages"], ["stage-1", "stage-2"])
+        self.assertEqual(root["children"], ["child"])
+        self.assertEqual(graph["dag"]["topological_order"], ["root", "child"])
+
+    def test_html_renderer_merges_children_links_like_dag_analyzer(self) -> None:
+        html = render_exploration_graph_html(
+            {
+                "nodes": [
+                    {"id": "root", "children": ["child"], "parent_id": None},
+                    {"id": "child", "children": [], "parent_id": None},
+                ],
+                "edges": [],
+            }
+        )
+        self.assertIn("Array.isArray(n.children)", html)
+        self.assertIn("explicitEdges.push([String(n.id), String(child)])", html)
 
 
 class ClaimRegistryTest(unittest.TestCase):

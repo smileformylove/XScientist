@@ -290,47 +290,55 @@ def cmd_fork(args: argparse.Namespace) -> int:
             break
 
     # 3. Emit a single-node exploration_graph for the fork.
+    from ai_scientist.utils.ara_graph import (
+        graph_with_dag_metadata,
+        write_exploration_graph_visualization,
+    )
+
     now_iso = _now_iso()
-    graph_payload = {
-        "schema_version": PROTOCOL_VERSION,
-        "protocol_kind": "exploration_graph",
-        "generated_at": now_iso,
-        "nodes": [
-            {
-                "id": args.node_id,
-                "content_hash": fork_hash,
-                # Match the metrics.json declaration above so ara_diff's
-                # category-flip logic can index the fork's inputs, and so the
-                # fork's node entry matches the schema shape enforced by
-                # export_ara. SEED nodes typically bypass the LLM entirely,
-                # so llm_call_refs defaults to [] — the parent's refs are
-                # part of the *parent's* identity, not the fork's. If a
-                # future fork variant wants to inherit refs, it should add
-                # 'llm_calls' back into content_hash_inputs at the same time.
-                "content_hash_inputs": ["code", "metric", "seed"],
-                "llm_call_refs": [],
-                "stage": parent_node_entry.get("stage") or "forked",
-                "step": 0,
-                "parent_id": None,
-                "children": [],
-                "is_buggy": parent_node_entry.get("is_buggy"),
-                "is_seed_node": True,
-                "is_seed_agg_node": False,
-                "metric": parent_node_entry.get("metric") or parent_metrics.get("metric"),
-                "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[:400],
-                "exp_results_dir": None,
-                "ctime": parent_node_entry.get("ctime"),
-                "artifacts_dir": f"nodes/{args.node_id}",
-            }
-        ],
-        "edges": [],
-        "source_journals": [],
-        "counts": {"nodes": 1, "edges": 0, "buggy": 1 if parent_node_entry.get("is_buggy") else 0},
-    }
+    graph_payload = graph_with_dag_metadata(
+        {
+            "schema_version": PROTOCOL_VERSION,
+            "protocol_kind": "exploration_graph",
+            "generated_at": now_iso,
+            "nodes": [
+                {
+                    "id": args.node_id,
+                    "content_hash": fork_hash,
+                    # Match the metrics.json declaration above so ara_diff's
+                    # category-flip logic can index the fork's inputs, and so the
+                    # fork's node entry matches the schema shape enforced by
+                    # export_ara. SEED nodes typically bypass the LLM entirely,
+                    # so llm_call_refs defaults to [] — the parent's refs are
+                    # part of the *parent's* identity, not the fork's. If a
+                    # future fork variant wants to inherit refs, it should add
+                    # 'llm_calls' back into content_hash_inputs at the same time.
+                    "content_hash_inputs": ["code", "metric", "seed"],
+                    "llm_call_refs": [],
+                    "stage": parent_node_entry.get("stage") or "forked",
+                    "step": 0,
+                    "parent_id": None,
+                    "children": [],
+                    "is_buggy": parent_node_entry.get("is_buggy"),
+                    "is_seed_node": True,
+                    "is_seed_agg_node": False,
+                    "metric": parent_node_entry.get("metric") or parent_metrics.get("metric"),
+                    "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[:400],
+                    "exp_results_dir": None,
+                    "ctime": parent_node_entry.get("ctime"),
+                    "artifacts_dir": f"nodes/{args.node_id}",
+                }
+            ],
+            "edges": [],
+            "source_journals": [],
+            "counts": {"nodes": 1, "edges": 0, "buggy": 1 if parent_node_entry.get("is_buggy") else 0},
+        }
+    )
     (dest / "exploration_graph.json").write_text(
         json.dumps(graph_payload, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+    graph_visualization_refs = write_exploration_graph_visualization(dest, graph_payload)
 
     # 4. Emit the fork's own manifest — a fully conformant ARA manifest.
     provenance = {
@@ -357,7 +365,9 @@ def cmd_fork(args: argparse.Namespace) -> int:
             "journals": 0,
             "claims": 0,
         },
-        "references": {},
+        "references": {
+            "exploration_graph_visualization": graph_visualization_refs,
+        },
         "missing": [
             "no source journals (fork is a synthetic single-node ARA)",
             "no env/ snapshot (call `run_ara_fork.py freeze` after seeding)",
@@ -1924,6 +1934,74 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report.ok else 8
 
 
+def cmd_graph(args: argparse.Namespace) -> int:
+    """Inspect or materialize the exploration DAG visualization."""
+    from ai_scientist.utils.ara_graph import (
+        analyze_exploration_graph,
+        write_exploration_graph_visualization,
+    )
+
+    ara_root = _resolve_ara_root(args.ara)
+    graph = _load_json(ara_root / "exploration_graph.json")
+    if not isinstance(graph, dict):
+        print(f"[ara-graph] no readable exploration_graph.json in {ara_root}", file=sys.stderr)
+        return 3
+
+    dag = analyze_exploration_graph(graph)
+    html_path = ara_root / "exploration_graph.html"
+    summary_path = ara_root / "exploration_graph.summary.json"
+
+    if args.write_html or args.open:
+        refs = write_exploration_graph_visualization(ara_root, graph)
+        html_path = ara_root / refs["html"]
+        summary_path = ara_root / refs["summary"]
+
+    payload = {
+        "ara_root": str(ara_root),
+        "is_dag": dag.get("is_dag"),
+        "nodes": dag.get("node_count"),
+        "edges": dag.get("edge_count"),
+        "roots": dag.get("root_ids") or [],
+        "leaves": dag.get("leaf_ids") or [],
+        "max_depth": dag.get("max_depth"),
+        "error_count": dag.get("error_count"),
+        "warning_count": dag.get("warning_count"),
+        "html": str(html_path) if html_path.exists() else None,
+        "summary": str(summary_path) if summary_path.exists() else None,
+        "issues": dag.get("issues") or [],
+    }
+
+    if args.open:
+        import webbrowser
+
+        if not html_path.exists():
+            print(f"[ara-graph] HTML visualization not found at {html_path}", file=sys.stderr)
+            return 3
+        webbrowser.open(html_path.as_uri())
+
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        return 0 if dag.get("is_dag") else 8
+
+    print(f"# graph  {ara_root}")
+    print(f"  dag:       {'yes' if dag.get('is_dag') else 'no'}")
+    print(f"  nodes:     {payload['nodes']}")
+    print(f"  edges:     {payload['edges']}")
+    print(f"  roots:     {', '.join(payload['roots']) or '-'}")
+    print(f"  leaves:    {', '.join(payload['leaves']) or '-'}")
+    print(f"  max_depth: {payload['max_depth'] if payload['max_depth'] is not None else '-'}")
+    print(f"  html:      {payload['html'] or '(not written; pass --write-html)'}")
+    if payload["issues"]:
+        print()
+        print("## issues")
+        for issue in payload["issues"]:
+            print(
+                f"  [{issue.get('severity')}] {issue.get('path')}: "
+                f"{issue.get('message')}"
+            )
+    return 0 if dag.get("is_dag") else 8
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Batch re-execution: pick a handful of nodes and diff fresh vs recorded metrics.
 
@@ -2081,6 +2159,24 @@ def build_parser() -> argparse.ArgumentParser:
     validate_p.add_argument("--ara", required=True)
     validate_p.add_argument("--strict", action="store_true", help="Promote warnings to errors")
     validate_p.set_defaults(func=cmd_validate)
+
+    graph_p = sub.add_parser(
+        "graph",
+        help="Inspect the exploration DAG and optionally write/open exploration_graph.html.",
+    )
+    graph_p.add_argument("--ara", required=True)
+    graph_p.add_argument("--json", action="store_true")
+    graph_p.add_argument(
+        "--write-html",
+        action="store_true",
+        help="Regenerate exploration_graph.html and exploration_graph.summary.json.",
+    )
+    graph_p.add_argument(
+        "--open",
+        action="store_true",
+        help="Regenerate and open exploration_graph.html in the default browser.",
+    )
+    graph_p.set_defaults(func=cmd_graph)
 
     verify_p = sub.add_parser(
         "verify",
