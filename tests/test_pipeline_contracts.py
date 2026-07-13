@@ -83,6 +83,11 @@ class PipelineContractsTests(unittest.TestCase):
             self.assertIn("self_evolution", reloaded["artifacts"])
             self.assertIn("process_alignment", reloaded["artifacts"])
             self.assertIn("critic_findings", reloaded["artifacts"])
+            self.assertIn("truth_contract", reloaded["artifacts"])
+            self.assertIn("hallucination_checks", reloaded["artifacts"])
+            self.assertIn("hallucination_review", reloaded["artifacts"])
+            self.assertIn("sample_gate", reloaded["artifacts"])
+            self.assertIn("decision_log", reloaded["artifacts"])
             self.assertEqual(
                 reloaded["artifacts"]["repair_plan"]["status"],
                 "missing",

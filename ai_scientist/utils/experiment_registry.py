@@ -37,6 +37,8 @@ def build_experiment_record(
     workflow_mode: str | None = None,
     policy_name: str | None = None,
     acceptance_checks: list[str] | None = None,
+    acceptance_results: list[dict[str, Any]] | None = None,
+    budget_audit: dict[str, Any] | None = None,
     budget_status: str | None = None,
 ) -> dict[str, Any]:
     error_tokens = " ".join(
@@ -71,6 +73,8 @@ def build_experiment_record(
         "workflow_mode": workflow_mode,
         "policy_name": policy_name or workflow_mode,
         "acceptance_checks": list(acceptance_checks or []),
+        "acceptance_results": list(acceptance_results or []),
+        "budget_audit": dict(budget_audit or {}),
         "started_at": _now_iso(),
         "finished_at": None if status in {"planned", "running"} else _now_iso(),
     }

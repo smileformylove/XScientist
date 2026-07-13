@@ -117,6 +117,22 @@ from ai_scientist.utils.workflow_runtime import (
 )
 from ai_scientist.utils.critic_workflow import run_independent_critic_pass
 from ai_scientist.utils.stage_standards import save_stage_standards
+from ai_scientist.utils.truth_contracts import save_truth_contract_bundle
+from ai_scientist.utils.sample_gate import (
+    evaluate_and_save_sample_gate,
+    save_sample_gate_plan,
+)
+from ai_scientist.utils.decision_log import (
+    build_sample_gate_decision_options,
+    build_workflow_strategy_decision_options,
+    record_decision,
+    record_model_provider_decisions,
+)
+from ai_scientist.utils.gate_preconditions import (
+    GatePreconditionContext,
+    UnsatisfiableGateError,
+    assert_gate_preconditions_satisfiable,
+)
 
 PROFESSIONAL_TEMPLATE_BY_PAPER_TYPE = {
     "normal": "neurips",
@@ -507,6 +523,17 @@ def _save_paper_pipeline_seed_artifacts(
         producer="continuous_paper_generator.planning",
         depends_on=["idea_cards"],
     )
+    save_truth_contract_bundle(
+        paper_root_path,
+        idea_card=idea_card,
+        research_plan=research_plan,
+        producer="continuous_paper_generator.planning",
+    )
+    save_sample_gate_plan(
+        paper_root_path,
+        research_plan=research_plan,
+        producer="continuous_paper_generator.planning",
+    )
     claim_evidence_graph = build_claim_evidence_graph(idea_card, research_plan)
     save_contract_artifact(
         paper_root_path,
@@ -618,6 +645,20 @@ def _build_experiment_registry_rows(
                 workflow_mode=research_plan.get("workflow_mode"),
                 policy_name=(research_plan.get("execution_policy") or {}).get("policy_name"),
                 acceptance_checks=task.get("acceptance_checks"),
+                acceptance_results=[
+                    {
+                        "check": str(check),
+                        "passed": status == "completed",
+                        "source": "experiment_report_best_result",
+                    }
+                    for check in (task.get("acceptance_checks") or [])
+                ],
+                budget_audit={
+                    "audited": status == "completed",
+                    "within_budget": status == "completed",
+                    "source": "experiment_registry_builder",
+                },
+                budget_status="within_budget" if status == "completed" else None,
             )
         )
     return rows
@@ -1116,6 +1157,7 @@ class ContinuousPaperGenerator:
                     submission_mode,
                     self.strict_fallbacks,
                     resolved_integrity_forensics_enabled,
+                    kwargs.get("requested_workflow_mode", workflow_mode),
                 )
             )
 
@@ -3405,6 +3447,15 @@ def _process_single_paper(args):
     Returns:
         结果字典
     """
+    args = list(args)
+    requested_workflow_mode = None
+    if len(args) == 39:
+        requested_workflow_mode = args.pop()
+    elif len(args) == 38 and isinstance(args[-1], str) and isinstance(args[-2], bool):
+        requested_workflow_mode = args.pop()
+        args.append(False)
+    elif len(args) == 37:
+        args.append(False)
     (
         batch_dir,
         research_dir,
@@ -3445,6 +3496,7 @@ def _process_single_paper(args):
         strict_fallbacks,
         integrity_forensics_enabled,
     ) = args
+    requested_workflow_mode = requested_workflow_mode or workflow_mode
     try:
         writing_profile = normalize_writing_profile(writing_profile)
     except ValueError as exc:
@@ -3496,11 +3548,43 @@ def _process_single_paper(args):
             submission_mode=bool(submission_mode),
             high_quality_mode=bool(high_quality_mode),
         )
+        record_decision(
+            paper_structure["root"],
+            category="workflow_strategy",
+            selected=str(research_plan.get("workflow_mode") or workflow_mode),
+            options_considered=build_workflow_strategy_decision_options(
+                selected=str(research_plan.get("workflow_mode") or workflow_mode),
+                requested_workflow_mode=requested_workflow_mode,
+                submission_mode=bool(submission_mode),
+                high_quality_mode=bool(high_quality_mode),
+                target_venue=target_venue,
+            ),
+            producer="continuous_paper_generator.workflow_strategy",
+            metadata={
+                "requested_workflow_mode": requested_workflow_mode,
+                "resolved_workflow_mode": workflow_mode,
+                "template_profile": template_profile,
+                "template_capability": template_capability,
+                "target_venue": target_venue,
+                "submission_mode": bool(submission_mode),
+                "high_quality_mode": bool(high_quality_mode),
+            },
+        )
         workflow_runtime_plan = build_workflow_runtime_plan(
             workflow_mode,
             submission_mode=bool(submission_mode),
             high_quality_mode=bool(high_quality_mode),
             target_venue=target_venue,
+        )
+        assert_gate_preconditions_satisfiable(
+            GatePreconditionContext(
+                research_plan=research_plan,
+                improvement_rounds=improvement_rounds,
+                require_quality_gate=require_quality_gate,
+                high_quality_mode=high_quality_mode,
+                target_venue=target_venue,
+                require_sample_gate=False,
+            )
         )
 
         print(f"📁 论文目录: {paper_dir}")
@@ -3544,6 +3628,43 @@ def _process_single_paper(args):
             research_plan=research_plan,
         )
         save_experiment_registry(str(paper_structure["root"]), registry_rows)
+        sample_gate = evaluate_and_save_sample_gate(
+            paper_structure["root"],
+            producer="continuous_paper_generator.experiment_registry",
+        )
+        sample_gate_decision = (
+            "continue_full_generation"
+            if sample_gate.get("full_generation_allowed")
+            else "block_full_generation"
+        )
+        record_decision(
+            paper_structure["root"],
+            category="sample_gate_full_generation",
+            selected=sample_gate_decision,
+            options_considered=build_sample_gate_decision_options(
+                bool(sample_gate.get("full_generation_allowed"))
+            ),
+            producer="continuous_paper_generator.sample_gate",
+            metadata={
+                "sample_gate_reasons": sample_gate.get("result", {}).get("reasons", []),
+                "sample_task_count": sample_gate.get("sample_task_count"),
+            },
+        )
+        if not sample_gate.get("full_generation_allowed"):
+            print(
+                f"[想法 #{idea_idx}] ⚠️  Sample gate 未通过: "
+                f"{sample_gate.get('result', {}).get('reasons', [])}"
+            )
+        assert_gate_preconditions_satisfiable(
+            GatePreconditionContext(
+                research_plan=research_plan,
+                sample_gate=sample_gate,
+                improvement_rounds=improvement_rounds,
+                require_quality_gate=require_quality_gate,
+                high_quality_mode=high_quality_mode,
+                target_venue=target_venue,
+            )
+        )
 
         # 复制实验结果到experiment子目录
         latest_run_dir = find_latest_bfts_run_dir(exp_dir, logs_subdir="logs")
@@ -4231,6 +4352,14 @@ def _process_single_paper(args):
             "status": "failed",
             "stage": current_stage,
             "error": str(e),
+            "pause_reason": "unsatisfiable_gate"
+            if isinstance(e, UnsatisfiableGateError)
+            else None,
+            "gate_reasons": (
+                str(e).replace("Unsatisfiable gate preconditions: ", "").split(", ")
+                if isinstance(e, UnsatisfiableGateError)
+                else []
+            ),
             "traceback": traceback.format_exc(),
             "paper_type": paper_type,
             "writing_profile": writing_profile,
@@ -4544,6 +4673,7 @@ def main():
     )
 
     args = parser.parse_args()
+    requested_workflow_mode = args.workflow_mode
     normalize_batch_workflow_args(args)
     strict_fallbacks = should_enforce_strict_fallbacks(
         args.workflow_mode,
@@ -4572,7 +4702,8 @@ def main():
     args.research_dir = str(runtime.research_root)
 
     # 按实际模型检查 provider 凭证
-    require_model_credentials(_collect_requested_models(args))
+    requested_models = _collect_requested_models(args)
+    require_model_credentials(requested_models)
 
     # 确定论文类型
     paper_types = list(PAPER_TYPES.keys()) if args.all_types else args.paper_types
@@ -4591,6 +4722,11 @@ def main():
         batch_name=args.batch_name,
         paper_types=paper_types,
         strict_fallbacks=strict_fallbacks,
+    )
+    record_model_provider_decisions(
+        generator.batch_dir,
+        requested_models,
+        producer="continuous_paper_generator.model_provider",
     )
 
     # 确定想法文件
@@ -4717,6 +4853,7 @@ def main():
         "guardrail_repair_rounds": args.guardrail_repair_rounds,
         "workflow_mode": args.workflow_mode,
         "integrity_forensics_enabled": integrity_forensics_enabled,
+        "requested_workflow_mode": requested_workflow_mode,
     }
 
     if args.all_types:

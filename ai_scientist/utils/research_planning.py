@@ -5,6 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ai_scientist.utils.truth_contracts import (
+    HIGH_RISK_WORKFLOW_MODES,
+    build_truth_contract,
+    derive_hallucination_checks,
+)
 from ai_scientist.utils.workflow_execution_policy import (
     build_workflow_execution_policy,
     policy_snapshot,
@@ -549,8 +554,7 @@ def build_research_plan(
         execution_policy=policy_snapshot(execution_policy),
         failure_criteria=failure_criteria,
     )
-
-    return {
+    plan_payload = {
         "plan_id": f"{idea_card.get('idea_id')}_plan",
         "idea_id": idea_card.get("idea_id"),
         "idea_name": idea_card.get("name"),
@@ -561,6 +565,38 @@ def build_research_plan(
         "agent_plan": agent_plan,
         "tasks": tasks,
     }
+    truth_contract = build_truth_contract(idea_card, plan_payload)
+    hallucination_checks = derive_hallucination_checks(truth_contract, plan_payload)
+    checks_by_task: dict[str, list[dict[str, Any]]] = {}
+    for check in hallucination_checks.get("checks") or []:
+        if not isinstance(check, dict):
+            continue
+        task_id = str(check.get("task_id") or "").strip()
+        if task_id:
+            checks_by_task.setdefault(task_id, []).append(check)
+    for task in tasks:
+        task_id = str(task.get("task_id") or "").strip()
+        task_checks = checks_by_task.get(task_id, [])
+        high_risk_task = (
+            workflow_mode in HIGH_RISK_WORKFLOW_MODES
+            or str(task.get("priority") or "").strip().upper() == "P0"
+            or str(task.get("escalation_lane") or "").strip() == "hostile_critic"
+        )
+        task["truth_contract_status"] = (
+            "pending" if high_risk_task and task_checks else "not_applicable"
+        )
+        task["truth_contract_refs"] = (
+            [
+                f"{check.get('category')}:{check.get('evidence_source')}"
+                for check in task_checks
+            ]
+            if high_risk_task
+            else []
+        )
+        task["hallucination_checks"] = task_checks if high_risk_task else []
+    plan_payload["truth_contract"] = truth_contract
+    plan_payload["hallucination_checks"] = hallucination_checks
+    return plan_payload
 
 
 def build_claim_evidence_graph(

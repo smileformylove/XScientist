@@ -11,6 +11,11 @@ from ai_scientist.utils.research_planning import (
     build_idea_cards,
     build_research_plan,
 )
+from ai_scientist.utils.truth_contracts import (
+    TRUTH_CONTRACT_CATEGORIES,
+    validate_hallucination_checks,
+    validate_truth_contract,
+)
 
 
 class ResearchPipelineArtifactsTests(unittest.TestCase):
@@ -87,6 +92,31 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
             manuscript_state["claim_figure_bindings"]["claim_0"],
             ["figure_0"],
         )
+
+    def test_low_risk_plan_should_mark_truth_contract_not_applicable_per_task(self) -> None:
+        ideas = [
+            {
+                "Name": "Idea Low Risk",
+                "Short Hypothesis": "A normal run should not imply hallucination review ran.",
+                "Experiments": [
+                    "Run one comparison study.",
+                    "Run a follow-up robustness check.",
+                ],
+            }
+        ]
+        idea_card = build_idea_cards(
+            ideas,
+            target_venue="iclr",
+            workflow_mode="classic_pipeline",
+        )[0]
+        research_plan = build_research_plan(idea_card, target_venue="iclr")
+
+        self.assertEqual(research_plan["workflow_mode"], "classic_pipeline")
+        self.assertEqual(
+            research_plan["tasks"][1]["truth_contract_status"],
+            "not_applicable",
+        )
+        self.assertEqual(research_plan["tasks"][1]["hallucination_checks"], [])
 
     def test_manuscript_state_should_block_when_claim_has_no_ready_figure(self) -> None:
         ideas = [
@@ -181,8 +211,54 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
         self.assertTrue(research_plan["tasks"][0]["kill_criteria"])
         self.assertEqual(research_plan["tasks"][0]["verifier"], "quality_gate")
         self.assertEqual(research_plan["tasks"][0]["escalation_lane"], "hostile_critic")
+        self.assertEqual(research_plan["tasks"][0]["truth_contract_status"], "pending")
         self.assertTrue(research_plan["tasks"][0]["required_inputs"])
         self.assertTrue(research_plan["tasks"][0]["produced_artifacts"])
+        self.assertTrue(validate_truth_contract(research_plan["truth_contract"])["passed"])
+        self.assertTrue(
+            validate_hallucination_checks(
+                research_plan["hallucination_checks"],
+                research_plan=research_plan,
+            )["passed"]
+        )
+        self.assertEqual(
+            set(research_plan["truth_contract"]["categories"].keys()),
+            set(TRUTH_CONTRACT_CATEGORIES),
+        )
+        self.assertIn("derivation_policy", research_plan["truth_contract"])
+        self.assertGreater(
+            len(research_plan["truth_contract"]["categories"]["physical_constraints"]),
+            1,
+        )
+        self.assertGreater(
+            len(research_plan["truth_contract"]["categories"]["product_geometry_rules"]),
+            1,
+        )
+        self.assertGreater(
+            len(research_plan["truth_contract"]["categories"]["motion_coherence_rules"]),
+            1,
+        )
+        self.assertGreater(
+            len(research_plan["truth_contract"]["categories"]["values_guardrails"]),
+            1,
+        )
+        self.assertTrue(research_plan["tasks"][0]["hallucination_checks"])
+        self.assertTrue(research_plan["tasks"][0]["truth_contract_refs"])
+        self.assertIn(
+            "objective_facts",
+            {
+                check["category"]
+                for check in research_plan["tasks"][0]["hallucination_checks"]
+            },
+        )
+        for task in research_plan["tasks"]:
+            self.assertEqual(
+                {
+                    check["category"]
+                    for check in task["hallucination_checks"]
+                },
+                set(TRUTH_CONTRACT_CATEGORIES),
+            )
         self.assertIn(
             "meta_reviewer",
             research_plan["agent_plan"]["review_bundles"]["final_roles"],

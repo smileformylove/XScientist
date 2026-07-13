@@ -28,6 +28,11 @@ ARTIFACT_FILENAMES = {
     "research_program": "research_program.md",
     "manuscript_candidate_pool": "manuscript_candidate_pool.json",
     "repair_attempts": "repair_attempts.jsonl",
+    "truth_contract": "truth_contract.json",
+    "hallucination_checks": "hallucination_checks.json",
+    "hallucination_review": "hallucination_review.json",
+    "sample_gate": "sample_gate.json",
+    "decision_log": "decision_log.jsonl",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -47,6 +52,11 @@ ARTIFACT_DEFAULT_STATUS = {
     "research_program": "missing",
     "manuscript_candidate_pool": "missing",
     "repair_attempts": "missing",
+    "truth_contract": "missing",
+    "hallucination_checks": "missing",
+    "hallucination_review": "missing",
+    "sample_gate": "missing",
+    "decision_log": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {

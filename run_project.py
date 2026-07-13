@@ -123,6 +123,22 @@ from ai_scientist.utils.workflow_runtime import (
 )
 from ai_scientist.utils.critic_workflow import run_independent_critic_pass
 from ai_scientist.utils.stage_standards import save_stage_standards
+from ai_scientist.utils.truth_contracts import save_truth_contract_bundle
+from ai_scientist.utils.sample_gate import (
+    evaluate_and_save_sample_gate,
+    save_sample_gate_plan,
+)
+from ai_scientist.utils.decision_log import (
+    build_sample_gate_decision_options,
+    build_workflow_strategy_decision_options,
+    record_decision,
+    record_model_provider_decisions,
+)
+from ai_scientist.utils.gate_preconditions import (
+    GatePreconditionContext,
+    UnsatisfiableGateError,
+    assert_gate_preconditions_satisfiable,
+)
 
 # 导入路径配置
 from ai_scientist.config.paths import (
@@ -471,6 +487,17 @@ def _write_experiment_pipeline_seed_artifacts(
         producer="run_project.planning",
         depends_on=["idea_cards"],
     )
+    save_truth_contract_bundle(
+        exp_root,
+        idea_card=idea_card,
+        research_plan=research_plan,
+        producer="run_project.planning",
+    )
+    save_sample_gate_plan(
+        exp_root,
+        research_plan=research_plan,
+        producer="run_project.planning",
+    )
     claim_evidence_graph = build_claim_evidence_graph(idea_card, research_plan)
     save_contract_artifact(
         exp_root,
@@ -577,6 +604,20 @@ def _build_experiment_registry_rows(
                 workflow_mode=research_plan.get("workflow_mode"),
                 policy_name=(research_plan.get("execution_policy") or {}).get("policy_name"),
                 acceptance_checks=task.get("acceptance_checks"),
+                acceptance_results=[
+                    {
+                        "check": str(check),
+                        "passed": status == "completed",
+                        "source": "experiment_report_best_result",
+                    }
+                    for check in (task.get("acceptance_checks") or [])
+                ],
+                budget_audit={
+                    "audited": status == "completed",
+                    "within_budget": status == "completed",
+                    "source": "experiment_registry_builder",
+                },
+                budget_status="within_budget" if status == "completed" else None,
             )
         )
     return rows
@@ -771,6 +812,15 @@ def improve_paper_with_review(
 
 def process_single_idea(args):
     """处理单个想法的完整流程（可在子进程中运行）"""
+    args = list(args)
+    requested_workflow_mode = None
+    if len(args) == 40:
+        requested_workflow_mode = args.pop()
+    elif len(args) == 39 and isinstance(args[-1], str) and isinstance(args[-2], bool):
+        requested_workflow_mode = args.pop()
+        args.append(False)
+    elif len(args) == 38:
+        args.append(False)
     (
         project_dir,
         research_root,
@@ -812,6 +862,7 @@ def process_single_idea(args):
         strict_fallbacks,
         integrity_forensics_enabled,
     ) = args
+    requested_workflow_mode = requested_workflow_mode or workflow_mode
 
     try:
         strict_writing_guardrails = bool(strict_writing_guardrails or high_quality_mode)
@@ -861,6 +912,27 @@ def process_single_idea(args):
             workflow_inspirations=workflow_metadata["workflow_inspirations"],
             workflow_sequence=workflow_metadata["workflow_sequence"],
         )
+        record_decision(
+            exp_dir,
+            category="workflow_strategy",
+            selected=workflow_metadata["workflow_mode"],
+            options_considered=build_workflow_strategy_decision_options(
+                selected=workflow_metadata["workflow_mode"],
+                requested_workflow_mode=requested_workflow_mode,
+                submission_mode=(template_profile == "template_first"),
+                high_quality_mode=bool(high_quality_mode),
+                target_venue=target_venue,
+            ),
+            producer="run_project.workflow_strategy",
+            metadata={
+                "requested_workflow_mode": requested_workflow_mode,
+                "resolved_workflow_mode": workflow_mode,
+                "template_profile": template_profile,
+                "template_capability": template_capability,
+                "target_venue": target_venue,
+                "high_quality_mode": bool(high_quality_mode),
+            },
+        )
 
         # 保存想法
         idea_path_json = osp.join(exp_dir, "idea.json")
@@ -878,6 +950,16 @@ def process_single_idea(args):
                 high_quality_mode=high_quality_mode,
                 template_profile=template_profile,
                 template_capability=template_capability,
+            )
+        )
+        assert_gate_preconditions_satisfiable(
+            GatePreconditionContext(
+                research_plan=research_plan,
+                improvement_rounds=improvement_rounds,
+                require_quality_gate=require_quality_gate,
+                high_quality_mode=high_quality_mode,
+                target_venue=target_venue,
+                require_sample_gate=False,
             )
         )
 
@@ -916,6 +998,43 @@ def process_single_idea(args):
             research_plan=research_plan,
         )
         save_experiment_registry(exp_dir, registry_rows)
+        sample_gate = evaluate_and_save_sample_gate(
+            exp_dir,
+            producer="run_project.experiment_registry",
+        )
+        sample_gate_decision = (
+            "continue_full_generation"
+            if sample_gate.get("full_generation_allowed")
+            else "block_full_generation"
+        )
+        record_decision(
+            exp_dir,
+            category="sample_gate_full_generation",
+            selected=sample_gate_decision,
+            options_considered=build_sample_gate_decision_options(
+                bool(sample_gate.get("full_generation_allowed"))
+            ),
+            producer="run_project.sample_gate",
+            metadata={
+                "sample_gate_reasons": sample_gate.get("result", {}).get("reasons", []),
+                "sample_task_count": sample_gate.get("sample_task_count"),
+            },
+        )
+        if not sample_gate.get("full_generation_allowed"):
+            print(
+                f"[想法 #{idea_idx}] ⚠️  Sample gate 未通过: "
+                f"{sample_gate.get('result', {}).get('reasons', [])}"
+            )
+        assert_gate_preconditions_satisfiable(
+            GatePreconditionContext(
+                research_plan=research_plan,
+                sample_gate=sample_gate,
+                improvement_rounds=improvement_rounds,
+                require_quality_gate=require_quality_gate,
+                high_quality_mode=high_quality_mode,
+                target_venue=target_venue,
+            )
+        )
 
         # ========== 步骤2: 生成论文 ==========
         print(f"\n📝 [想法 #{idea_idx}] 步骤 2/4: 生成论文")
@@ -1752,6 +1871,14 @@ def process_single_idea(args):
             "idea_idx": idea_idx,
             "status": "failed",
             "error": str(e),
+            "pause_reason": "unsatisfiable_gate"
+            if isinstance(e, UnsatisfiableGateError)
+            else None,
+            "gate_reasons": (
+                str(e).replace("Unsatisfiable gate preconditions: ", "").split(", ")
+                if isinstance(e, UnsatisfiableGateError)
+                else []
+            ),
             "traceback": traceback.format_exc(),
             "writing_profile": writing_profile,
             "writing_audit_rounds": writing_audit_rounds,
@@ -1835,6 +1962,7 @@ def run_parallel_experiments(project_dir, idea_json, num_workers, idea_indices, 
             kwargs["template_capability"],
             kwargs["strict_fallbacks"],
             kwargs["integrity_forensics_enabled"],
+            kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
         ))
 
     # 并行执行
@@ -2223,6 +2351,7 @@ def main():
     )
 
     args = parser.parse_args()
+    requested_workflow_mode = args.workflow_mode
     normalize_project_workflow_args(
         args,
         invalid_profile_logger=lambda exc: print(
@@ -2266,11 +2395,17 @@ def main():
         print("🔎 启用 integrity forensics：最终稿将生成可追溯一致性检查报告。")
 
     # 按实际模型检查 provider 凭证
-    require_model_credentials(_collect_requested_models(args))
+    requested_models = _collect_requested_models(args)
+    require_model_credentials(requested_models)
 
     # 创建项目结构
     dirs = create_project_structure(args.project_dir, output_root=args.output_root)
     args.project_dir = str(dirs["root"])
+    record_model_provider_decisions(
+        args.project_dir,
+        requested_models,
+        producer="run_project.model_provider",
+    )
 
     # ARA fork-continue: stage a seed manifest so the first BFTS draft skips
     # the LLM. Uses env vars so it works transparently across subprocess
@@ -2421,6 +2556,7 @@ def main():
             "strict_writing_guardrails": args.strict_writing_guardrails,
             "guardrail_repair_rounds": args.guardrail_repair_rounds,
             "workflow_mode": workflow_spec.name,
+            "requested_workflow_mode": requested_workflow_mode,
             "template_profile": template_profile,
             "template_capability": template_capability,
             "strict_fallbacks": strict_fallbacks,
@@ -2495,6 +2631,7 @@ def main():
                     kwargs["template_capability"],
                     kwargs["strict_fallbacks"],
                     kwargs["integrity_forensics_enabled"],
+                    kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
                 )
 
                 result = process_single_idea(process_args)
