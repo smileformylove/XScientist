@@ -12,7 +12,7 @@
 
 \author{
 Jixiang Luo\\
-Independent Researcher
+\texttt{jixiangluo85@gmail.com}
 }
 
 \date{July 2026}
@@ -78,6 +78,17 @@ a continuous paper generator, or a daemon that schedules multiple research
 sources over time. Its output is not just a manuscript but a structured
 record of how the manuscript came to exist.
 
+This report makes three contributions. First, it describes the design of a
+long-running research operating system whose core abstractions are run
+artifacts, quality gates, and operator handoffs rather than a single prompt.
+Second, it specifies the ARA layer as a practical interchange format for
+agent-native research state: exploration graphs, node bundles, claim anchors,
+content hashes, and provenance. Third, it documents the guardrails that have
+become necessary in practice, including sample-first execution, truth
+contracts, deterministic integrity forensics, and daemon controls. The paper
+is therefore best read as a system report and protocol proposal, not as a
+claim that autonomous research can replace scientific review.
+
 \section{System Overview}
 
 XScientist is organized as a research operating system. Figure
@@ -128,6 +139,44 @@ source provenance, and handoff briefs. These artifacts are deliberately more
 important than transient console output. They give downstream agents and
 human operators a stable interface for audit and continuation.
 
+\subsection{Core Components}
+
+The system is decomposed into components that can be used independently or as
+part of the full pipeline.
+
+\paragraph{Ideation and planning.}
+The ideation layer converts topics and source queues into candidate ideas,
+rankings, and research plans. Plans contain tasks, expected outputs,
+acceptance checks, baselines, and execution policy hints. In high-quality
+runs, the planner also produces artifacts used by later quality and truth
+checks.
+
+\paragraph{Experiment execution.}
+Experiments are executed through a tree-search-style loop that records code,
+stdout/stderr, metrics, plots, and failure states. XScientist treats failed
+branches as useful evidence: they may explain why a later repair exists, why a
+claim was softened, or why a branch should not be continued.
+
+\paragraph{Writing and review.}
+The writing layer produces LaTeX manuscripts and structured metadata. The
+review layer applies text and figure review, extracts issues, schedules repair
+actions, and can run multiple reviewer-oriented strategies such as novelty,
+rigor, clarity, and reproducibility checks.
+
+\paragraph{Indexing and management.}
+The management layer surfaces boards for generated papers, review issues,
+repair priorities, process alignment, and evolution signals. This keeps the
+system usable as an operating workflow rather than only as a batch script.
+
+\subsection{Operating Assumptions}
+
+XScientist assumes that autonomous research should be operated under explicit
+budgets and review boundaries. The system can run for long periods, but it
+does not assume that every cycle should advance to a full manuscript. A run
+may stop because a sample gate fails, because a truth contract is violated,
+because integrity forensics finds hard flags, or because the operator pauses
+the daemon. These stopping states are treated as valid outcomes.
+
 \section{Agent-Native Research Artifacts}
 
 The most important interface in XScientist is the Agent-Native Research
@@ -144,6 +193,13 @@ parent-to-child evolution of the research process. The system validates that
 the graph is directed and acyclic, writes a summary file, and can render a
 self-contained HTML visualization. This turns each paper into a science
 exploration tree.
+
+The exploration tree is intentionally not a polished success-only lineage.
+It includes bug states, discarded branches, and repaired branches because
+those states are often the most important for later review. A downstream agent
+that sees only the final successful experiment cannot know whether the result
+was robust, whether a metric was changed midstream, or whether a failed
+baseline was silently dropped. ARA makes those transitions inspectable.
 
 \begin{figure}[t]
 \centering
@@ -176,6 +232,12 @@ optional provenance fields. Forked runs preserve parent pointers, so a child
 research run can describe which previous ARA and node seeded it. The protocol
 therefore behaves like a lightweight object model for research state.
 
+In practice, this gives XScientist a commit-like substrate. The final PDF is
+only one rendered view. The underlying research state can be diffed, logged,
+forked, or frozen. When an ARA is committed to a normal git repository, git
+records file-level snapshots, while ARA commands expose node-level scientific
+history inside those snapshots.
+
 \subsection{Claim Anchoring}
 
 The writing stage can insert invisible \texttt{\textbackslash claimref}
@@ -195,6 +257,27 @@ code, create a new seed ARA, compare two ARAs, or walk the provenance chain.
 The same graph data underlies the HTML visualization, the log view, and
 node-level diffs.
 
+\subsection{ARA Directory Contract}
+
+The minimal ARA contract requires two files: \texttt{manifest.json} and
+\texttt{exploration\_graph.json}. Optional but common files include per-node
+\texttt{code.py}, \texttt{term\_out.log}, \texttt{metrics.json},
+\texttt{plots.json}, environment snapshots, claim records, verification
+reports, repair history, Pareto candidate pools, and a human-facing HTML graph
+view. Missing artifacts are not treated as fatal if they are declared; this
+lets lightweight producers implement the protocol incrementally while still
+being consumable by stricter tools.
+
+\subsection{Why a Protocol Instead of a Database}
+
+A database would make local querying convenient but would make handoff harder.
+ARA uses ordinary files so that artifacts can be copied, archived, attached to
+issues, reviewed in pull requests, or consumed by other agents without running
+a XScientist service. This design is deliberately close to how software
+engineering uses repositories: the protocol specifies what must exist on
+disk, while different tools can provide richer user interfaces over the same
+state.
+
 \section{Quality and Integrity Controls}
 
 Autonomous research systems require checks that are deterministic enough to
@@ -208,6 +291,13 @@ structured issues, prioritizes repairs, and records repair attempts. The
 system tracks whether reviewer objections were addressed, whether manuscript
 changes regressed earlier claims, and whether quality thresholds were met.
 
+Repair is represented as a trace rather than as a single overwrite. The
+system records which issue motivated a repair, which artifact was modified,
+which checks were rerun, and whether the repair introduced new risks. This is
+important for generated manuscripts because a fluent rewrite can hide evidence
+loss. XScientist therefore treats repair coverage and regression detection as
+first-class quality signals.
+
 \subsection{Truth Contracts}
 
 Truth contracts translate a research plan into explicit constraints. They
@@ -215,6 +305,12 @@ separate objective facts, comparability constraints, artifact-binding rules,
 branch-state rules, and value guardrails. For example, a manuscript should not
 claim a baseline-comparable improvement unless the experiment registry
 contains a completed run on the declared dataset, metric, and baseline.
+
+The categories are intentionally broad: objective facts, comparability
+constraints, artifact-binding rules, branch-state transitions, and value
+guardrails. They are not a formal proof system. They are a pragmatic checklist
+that converts ambiguous planner intent into concrete conditions that can be
+checked later by gates, reviewers, or downstream agents.
 
 \subsection{Sample Gates}
 
@@ -232,6 +328,24 @@ manuscript source, applies model-free consistency checks, and writes a
 deterministic adjudication report. Hard findings can block submission-ready
 status; soft findings are reported for reviewer attention.
 
+The deterministic design is deliberate. Model-based critique is useful, but a
+submission gate needs repeatable behavior. Integrity forensics therefore
+focuses on checks that can be rerun with the same result: suspicious pipeline
+artifacts in the manuscript, unsupported strong wording, arithmetic drift in
+reported deltas, citation placeholders, repeated caption/table presentation
+signals, and evidence-ledger gaps. It is a conservative screen for risks that
+deserve attention before a paper is treated as submission-ready.
+
+\subsection{Decision Logs and Gate Preconditions}
+
+Recent XScientist runs also write decision logs for workflow strategy,
+sample-gate outcomes, and model-provider choices. Gate preconditions are
+checked before expensive or high-risk stages proceed. For example, a quality
+gate that requires high-quality mode should not run under a cheaper classic
+pipeline by accident; a full-generation stage should not proceed when the
+sample gate is blocked. These checks turn implicit workflow assumptions into
+explicit runtime contracts.
+
 \section{Long-Running Daemon Operation}
 
 The daemon mode treats research as an ongoing operation rather than a single
@@ -245,6 +359,46 @@ review-hardening source may be valuable only after enough experimental
 evidence exists. XScientist therefore records source-level and portfolio-level
 signals so later cycles can adjust scheduling rather than replay a fixed
 script.
+
+\subsection{Operator Controls}
+
+The daemon is designed for supervised autonomy. Operators can pause and
+resume, stop after the current cycle, force or boost a source, apply a
+cooldown, inspect dashboard state, and generate handoff reports. This makes
+the system suitable for long-running local operation where full automation is
+not always desirable. A useful autonomous research system should make it easy
+to interrupt, inspect, and redirect.
+
+\subsection{Feedback Loops}
+
+The daemon collects feedback at several levels: paper-level quality signals,
+source-level health, strategy-level success rates, repair pressure, and
+process alignment. These signals can influence later scheduling and execution
+policy. For example, a source that repeatedly produces blocked sample gates
+can be cooled down, while a source producing useful review-hardening tasks can
+be boosted when a manuscript is near submission.
+
+\section{Reproducibility and Release Workflow}
+
+XScientist separates source code from generated research outputs by default.
+Runtime artifacts are written outside the repository unless the operator
+chooses otherwise. This reduces accidental repository pollution while keeping
+outputs easy to archive. For reproducibility, a report should cite the
+repository commit, configuration, model choices, output directory, and the ARA
+root used for any generated paper.
+
+The recommended release workflow for a generated manuscript is:
+\begin{enumerate}[leftmargin=*]
+  \item run the project or daemon under an explicit output root and budget;
+  \item inspect the generated manuscript, ARA, review reports, and integrity
+  forensics;
+  \item verify or re-execute important ARA nodes where feasible;
+  \item check claim coverage and manually review evidence-sensitive claims;
+  \item package the manuscript and artifact references with commit hashes.
+\end{enumerate}
+
+This workflow does not guarantee correctness, but it raises the cost of
+silent evidence loss and makes later review more concrete.
 
 \section{Comparison to One-Shot Paper Generation}
 
@@ -270,6 +424,31 @@ artifact-centered workflow.}
 \label{tab:comparison}
 \end{table}
 
+\section{Evaluation Strategy}
+
+This report does not present a large benchmark claiming that XScientist
+outperforms other autonomous research systems. Instead, the current evaluation
+strategy is artifact-centered. A run should be judged by whether it produces:
+
+\begin{itemize}[leftmargin=*]
+  \item a valid ARA with a DAG exploration graph;
+  \item per-node code, metrics, logs, and environment descriptors when
+  available;
+  \item claim anchors and claim coverage summaries for evidence-sensitive
+  manuscript statements;
+  \item review and repair artifacts that explain how manuscript changes were
+  made;
+  \item deterministic integrity reports with clear hard and soft findings;
+  \item enough provenance for another agent or human to fork, verify, or
+  reject the result.
+\end{itemize}
+
+This evaluation style is closer to systems engineering than to leaderboard
+scoring. It asks whether the research process is inspectable and recoverable.
+Future empirical work should compare ARA-backed continuation against cold
+start baselines, measure the cost of re-execution, and study whether
+claim-anchored review improves human error detection.
+
 \section{Limitations}
 
 XScientist does not make autonomous research automatically correct. The
@@ -287,7 +466,26 @@ limitations:
   adoption requires independent producers and consumers.
   \item The daemon improves operations, but long-running autonomy still needs
   explicit budgets, stop conditions, and operator oversight.
+  \item The present paper is a system report. It documents the implementation
+  and protocol surface but does not yet provide a controlled user study or a
+  broad external benchmark.
 \end{itemize}
+
+\section{Ethical and Safety Considerations}
+
+Autonomous research tooling can create plausible but incorrect scientific
+artifacts at high speed. XScientist is therefore designed to preserve
+uncertainty, not to erase it. The system records failed branches, exposes
+blocked gates, and explicitly states that integrity forensics is incomplete.
+Users should not submit generated papers without human review, should disclose
+substantial automated assistance when appropriate, and should avoid using the
+system for domains where erroneous claims can cause direct harm without
+additional expert oversight.
+
+There is also an operational safety concern: long-running agents can consume
+API credits, compute, and storage unexpectedly. XScientist includes output
+isolation, preflight checks, daemon controls, and budget-oriented gates, but
+operators remain responsible for configuring limits and monitoring runs.
 
 \section{Discussion}
 

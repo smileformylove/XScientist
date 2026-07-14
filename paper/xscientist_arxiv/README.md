@@ -16,6 +16,12 @@ Suggested arXiv category:
 Local compile command, if a TeX distribution is installed:
 
 ```bash
+tectonic main.tex
+```
+
+or:
+
+```bash
 pdflatex main.tex
 pdflatex main.tex
 ```
@@ -29,7 +35,7 @@ arXiv upload notes:
 
 Before submitting:
 
-- Confirm the author spelling, affiliation, and optional contact email.
+- Confirm the author spelling and contact email.
 - Add an arXiv ID to the README/BibTeX only after arXiv assigns one.
 - Re-read the limitations section and remove or soften any claim that you do
   not want to stand behind publicly.
