@@ -2,7 +2,7 @@
 
 This directory contains an arXiv-ready source draft for:
 
-> XScientist: A Long-Running Autonomous Scientific Research System
+> XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery
 
 Files:
 

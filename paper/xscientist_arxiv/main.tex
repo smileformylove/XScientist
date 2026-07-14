@@ -6,16 +6,19 @@
 \usepackage{amssymb}
 \usepackage{booktabs}
 \usepackage{enumitem}
+\usepackage{array}
+\usepackage{tikz}
 \usepackage{url}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
 
-\title{XScientist: A Long-Running Autonomous Scientific Research System}
+\title{XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery}
 
 \author{
 Jixiang Luo\\
 \texttt{jixiangluo85@gmail.com}
 }
 
-\date{July 2026}
+\date{May 2026}
 
 \begin{document}
 \maketitle
@@ -25,13 +28,13 @@ Autonomous research systems are often evaluated as one-shot paper generators:
 given a topic, they produce a manuscript and a small set of experiment logs.
 This framing hides the operational problem that makes such systems difficult
 to trust: research is long-running, branching, failure-prone, and dependent on
-auditable handoffs between agents and humans. XScientist is a research
-operating system for this setting. It orchestrates idea generation,
-experiment execution, manuscript drafting, self-review, repair, quality
-gating, daemon scheduling, and reproducibility artifacts as one continuously
-observable pipeline. The central design choice is to treat each run as a
-portable research artifact rather than only as a PDF. XScientist exports an
-Agent-Native Research Artifact (ARA), a git-like protocol that records an
+auditable handoffs between agents and humans. XScientist is a git-like
+research protocol and operating system for this setting. It orchestrates idea
+generation, experiment execution, manuscript drafting, self-review, repair,
+quality gating, daemon scheduling, and reproducibility artifacts as one
+continuously observable pipeline. The central design choice is to treat each
+run as a portable research artifact rather than only as a PDF. XScientist
+exports an Agent-Native Research Artifact (ARA), a protocol that records an
 exploration DAG, per-node code and outputs, claim-to-evidence anchors,
 content hashes, provenance, and re-execution hooks. This makes each generated
 paper inspectable as a science exploration tree: failed branches, repaired
@@ -48,11 +51,14 @@ reviewable, and forkable research infrastructure.
 
 Large language models have made it possible to automate substantial portions
 of the scientific workflow: ideation, experiment scripting, result
-interpretation, manuscript drafting, and review simulation. However, a system
-that generates a plausible manuscript is not necessarily a system that can be
-trusted as research infrastructure. The hard problem is not only text
-generation. It is the management of evidence, failures, revisions, and
-handoffs over time.
+interpretation, manuscript drafting, and review simulation
+\cite{ai-scientist,ai-scientist-v2}. Related agent systems have shown that
+language models can reason, act, write code, repair software, and operate
+over long horizons \cite{react,reflexion,tree-of-thoughts,swe-agent,voyager}.
+However, a system that generates a plausible manuscript is not necessarily a
+system that can be trusted as research infrastructure. The hard problem is
+not only text generation. It is the management of evidence, failures,
+revisions, and handoffs over time.
 
 XScientist addresses this operational problem. The system is designed around
 four principles:
@@ -88,6 +94,50 @@ become necessary in practice, including sample-first execution, truth
 contracts, deterministic integrity forensics, and daemon controls. The paper
 is therefore best read as a system report and protocol proposal, not as a
 claim that autonomous research can replace scientific review.
+
+\section{Related Work}
+
+\paragraph{Autonomous scientific discovery.}
+The AI Scientist introduced an end-to-end loop for automated idea generation,
+experiment execution, paper writing, and review \cite{ai-scientist}; related
+open research prototypes such as autoresearch also explore lightweight
+automation loops for scientific work \cite{autoresearch}. AI
+Scientist-v2 extends this line with agentic tree search and workshop-level
+paper generation \cite{ai-scientist-v2}. XScientist follows the same broad
+goal of automating research workflows, but shifts the main abstraction from
+``generate a paper'' to ``produce a forkable research protocol artifact.''
+The protocol layer is intended to make continuation, review, and
+cross-system handoff explicit.
+
+\paragraph{LLM agents and long-horizon work.}
+ReAct combines reasoning and acting in language models \cite{react};
+Reflexion studies verbal feedback loops for language agents
+\cite{reflexion}; Tree of Thoughts explores deliberate branching search
+\cite{tree-of-thoughts}; Voyager demonstrates open-ended skill accumulation
+in an embodied environment \cite{voyager}. Software-engineering agents such
+as SWE-agent show how interface design affects autonomous repair
+\cite{swe-agent}, AIDE explores code-space search for ML engineering tasks
+\cite{aide}, while multi-agent frameworks such as AutoGen support
+conversation-based orchestration \cite{autogen}. XScientist borrows the
+branching and repair mindset of these systems but applies it to scientific
+artifact management.
+
+\paragraph{Experiment tracking and versioned research state.}
+MLflow and DVC are representative tools for machine-learning lifecycle
+tracking and data/model versioning \cite{mlflow,dvc}. They address important
+parts of reproducibility but do not directly specify a claim-to-experiment
+protocol for autonomous research manuscripts. XScientist's ARA layer is
+closer to a git-like object model for research runs: a portable directory
+contract with nodes, edges, content hashes, provenance, and re-execution
+hooks.
+
+\paragraph{Automated review and integrity checking.}
+Reviewer-oriented systems such as DeepReviewer explore stronger automated
+review signals \cite{deepreviewer}. Anti-Autoresearch motivates evidence-led
+scrutiny of generated research artifacts \cite{anti-autoresearch}. XScientist
+integrates reviewer-style repair with deterministic integrity forensics, but
+keeps these checks conservative: they are safeguards and audit aids, not
+proofs of scientific correctness.
 
 \section{System Overview}
 
@@ -203,22 +253,40 @@ baseline was silently dropped. ARA makes those transitions inspectable.
 
 \begin{figure}[t]
 \centering
-\fbox{
-\begin{minipage}{0.92\linewidth}
-\centering
-\vspace{0.5em}
-\texttt{root}
-$\rightarrow$ \texttt{experiment}
-$\rightarrow$ \texttt{failed branch}
-$\rightarrow$ \texttt{repair}\\
-\texttt{experiment}
-$\rightarrow$ \texttt{ablation}
-$\rightarrow$ \texttt{candidate paper}
-$\rightarrow$ \texttt{claim anchor}
-$\rightarrow$ \texttt{fork seed}
-\vspace{0.5em}
-\end{minipage}
-}
+\begin{tikzpicture}[
+  node distance=1.25cm and 1.05cm,
+  every node/.style={font=\small},
+  state/.style={
+    draw,
+    rounded corners,
+    align=center,
+    minimum width=2.25cm,
+    minimum height=0.78cm,
+    fill=gray!8
+  },
+  good/.style={state, fill=green!8},
+  warn/.style={state, fill=orange!12},
+  paper/.style={state, fill=blue!8},
+  arrow/.style={-{Latex[length=2mm]}, thick}
+]
+\node[state] (root) {root\\question};
+\node[good, right=of root] (exp) {experiment\\node};
+\node[warn, above right=of exp] (fail) {failed\\branch};
+\node[good, right=of fail] (repair) {repair\\rerun};
+\node[good, below right=of exp] (ablate) {ablation\\node};
+\node[paper, right=2.25cm of exp] (candidate) {manuscript\\candidate};
+\node[state, right=of candidate] (claim) {claimref\\anchor};
+\node[state, below=of candidate] (fork) {fork\\seed};
+
+\draw[arrow] (root) -- (exp);
+\draw[arrow] (exp) -- (fail);
+\draw[arrow] (fail) -- (repair);
+\draw[arrow] (repair) -- (candidate);
+\draw[arrow] (exp) -- (ablate);
+\draw[arrow] (ablate) -- (candidate);
+\draw[arrow] (candidate) -- (claim);
+\draw[arrow] (candidate) -- (fork);
+\end{tikzpicture}
 \caption{Conceptual science exploration tree. ARA preserves both successful
 and failed branches, allowing later agents to audit or fork a specific node.}
 \label{fig:tree}
@@ -267,6 +335,32 @@ reports, repair history, Pareto candidate pools, and a human-facing HTML graph
 view. Missing artifacts are not treated as fatal if they are declared; this
 lets lightweight producers implement the protocol incrementally while still
 being consumable by stricter tools.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{p{0.23\linewidth}p{0.18\linewidth}p{0.49\linewidth}}
+\toprule
+Artifact & Status & Purpose \\
+\midrule
+\texttt{manifest.json} & required & Entry point, schema version, counts,
+references, provenance, and missing-artifact declarations. \\
+\texttt{exploration\_}\linebreak\texttt{graph.json} & required & Node and edge set for the
+science exploration DAG. \\
+\texttt{nodes/<id>/} & optional & Per-node code, metrics, logs, plots,
+environment descriptors, and rerun script. \\
+\texttt{claims/} & optional & Claim-to-node anchors extracted from manuscript
+source. \\
+\texttt{verify/} & optional & Re-execution reports and metric-drift checks. \\
+\texttt{pipeline/} & optional & Mirrored planning, review, repair, and gate
+artifacts for downstream agents. \\
+\bottomrule
+\end{tabular}
+\normalsize
+\caption{Simplified ARA directory contract. The protocol is file-based so it
+can be archived, diffed, copied, or consumed by non-XScientist tools.}
+\label{tab:ara-contract}
+\end{table}
 
 \subsection{Why a Protocol Instead of a Database}
 
@@ -345,6 +439,31 @@ gate that requires high-quality mode should not run under a cheaper classic
 pipeline by accident; a full-generation stage should not proceed when the
 sample gate is blocked. These checks turn implicit workflow assumptions into
 explicit runtime contracts.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{p{0.25\linewidth}p{0.33\linewidth}p{0.32\linewidth}}
+\toprule
+Control & Signal & Effect \\
+\midrule
+Sample gate & Sample task completion, budget audit, acceptance checks &
+Blocks full generation when cheap preliminary evidence is absent. \\
+Truth contract & Plan-derived facts, comparability rules, artifact bindings &
+Prevents unsupported or mismatched claims from being treated as ready. \\
+Integrity forensics & Span ledger, deterministic consistency checks & Raises
+hard or soft manuscript risk flags. \\
+Review repair trace & Structured issues, repair attempts, regression checks &
+Shows how reviewer objections were addressed. \\
+Gate preconditions & Workflow mode, quality mode, gate requirements & Stops
+incompatible stage combinations before expensive execution. \\
+\bottomrule
+\end{tabular}
+\normalsize
+\caption{Quality controls in XScientist. The goal is not to prove correctness
+automatically, but to make risk states explicit and reproducible.}
+\label{tab:quality-controls}
+\end{table}
 
 \section{Long-Running Daemon Operation}
 
@@ -527,12 +646,17 @@ DeepReviewer, and related open-source autonomous research and review systems.
 The integrity forensics layer adapts an evidence-ledger pattern inspired by
 Anti-Autoresearch.
 
-\begin{thebibliography}{9}
+\begin{thebibliography}{99}
 
 \bibitem{ai-scientist}
-Sakana AI.
-\newblock The AI Scientist.
-\newblock \url{https://github.com/SakanaAI/AI-Scientist}.
+Chris Lu, Cong Lu, Robert Tjarko Lange, Jakob Foerster, Jeff Clune, and David Ha.
+\newblock The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery.
+\newblock arXiv preprint arXiv:2408.06292, 2024.
+
+\bibitem{ai-scientist-v2}
+Yutaro Yamada, Robert Tjarko Lange, Cong Lu, Shengran Hu, Chris Lu, Jakob Foerster, Jeff Clune, and David Ha.
+\newblock The AI Scientist-v2: Workshop-Level Automated Scientific Discovery via Agentic Tree Search.
+\newblock arXiv preprint arXiv:2504.08066, 2025.
 
 \bibitem{autoresearch}
 Andrej Karpathy.
@@ -541,8 +665,48 @@ Andrej Karpathy.
 
 \bibitem{aide}
 WecoAI.
-\newblock AIDE.
+\newblock AIDE: AI-Driven Exploration in the Space of Code.
 \newblock \url{https://github.com/WecoAI/aideml}.
+
+\bibitem{react}
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao.
+\newblock ReAct: Synergizing Reasoning and Acting in Language Models.
+\newblock In \emph{International Conference on Learning Representations}, 2023.
+
+\bibitem{reflexion}
+Noah Shinn, Federico Cassano, Edward Berman, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao.
+\newblock Reflexion: Language Agents with Verbal Reinforcement Learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem{tree-of-thoughts}
+Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Thomas L. Griffiths, Yuan Cao, and Karthik Narasimhan.
+\newblock Tree of Thoughts: Deliberate Problem Solving with Large Language Models.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem{swe-agent}
+John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press.
+\newblock SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering.
+\newblock arXiv preprint arXiv:2405.15793, 2024.
+
+\bibitem{autogen}
+Qingyun Wu et al.
+\newblock AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation.
+\newblock arXiv preprint arXiv:2308.08155, 2023.
+
+\bibitem{voyager}
+Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan, and Anima Anandkumar.
+\newblock Voyager: An Open-Ended Embodied Agent with Large Language Models.
+\newblock arXiv preprint arXiv:2305.16291, 2023.
+
+\bibitem{mlflow}
+Matei Zaharia et al.
+\newblock Accelerating the Machine Learning Lifecycle with MLflow.
+\newblock IEEE Data Engineering Bulletin, 2018.
+
+\bibitem{dvc}
+Dmitry Petrov, Pavel Gritsenko, Daniil Vorobev, and Ivan Isakov.
+\newblock Data Version Control: Data and Model Management for Machine Learning.
+\newblock \url{https://dvc.org}.
 
 \bibitem{deepreviewer}
 ResearAI.
