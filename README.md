@@ -551,9 +551,21 @@ XScientist (software / repository):
 ```bibtex
 @software{xscientist,
   title        = {XScientist: A Long-Running Autonomous Scientific Research System},
-  author       = {{XScientist}},
+  author       = {Luo, Jixiang},
   year         = {2026},
   url          = {https://github.com/smileformylove/XScientist}
+}
+```
+
+arXiv manuscript source draft:
+
+```bibtex
+@misc{xscientist_arxiv_draft,
+  title        = {XScientist: A Long-Running Autonomous Scientific Research System},
+  author       = {Luo, Jixiang},
+  year         = {2026},
+  howpublished = {arXiv source draft},
+  url          = {https://github.com/smileformylove/XScientist/tree/main/paper/xscientist_arxiv}
 }
 ```
 
