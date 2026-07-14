@@ -4,6 +4,14 @@ This directory contains an arXiv-ready source draft for:
 
 > XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery
 
+Project repository:
+
+- https://github.com/smileformylove/XScientist
+
+The report is intended to be read together with the repository. The repository
+contains the running implementation, ARA protocol schemas, CLI tools, examples,
+tests, and the manuscript source in this directory.
+
 Files:
 
 - `main.tex`: single-file LaTeX manuscript with inline bibliography.
@@ -36,6 +44,8 @@ arXiv upload notes:
 Before submitting:
 
 - Confirm the author spelling and contact email.
+- Confirm that the repository URL is visible on the title page and in the
+  availability section.
 - Add an arXiv ID to the README/BibTeX only after arXiv assigns one.
 - Re-read the limitations section and remove or soften any claim that you do
   not want to stand behind publicly.

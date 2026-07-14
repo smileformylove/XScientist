@@ -9,7 +9,7 @@
 \usepackage{array}
 \usepackage{tikz}
 \usepackage{url}
-\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+\usetikzlibrary{arrows.meta,backgrounds,fit,positioning,shapes.geometric}
 
 \title{XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery}
 
@@ -22,6 +22,10 @@ Jixiang Luo\\
 
 \begin{document}
 \maketitle
+
+\begin{center}
+\textbf{Project repository:} \url{https://github.com/smileformylove/XScientist}
+\end{center}
 
 \begin{abstract}
 Autonomous research systems are often evaluated as one-shot paper generators:
@@ -44,7 +48,9 @@ forensics, sample gates, truth contracts, reviewer-oriented repair loops, and
 long-running daemon controls. This paper describes the current XScientist
 architecture, the ARA protocol surface, and the practical safeguards needed
 to move autonomous science from single-run demos toward reproducible,
-reviewable, and forkable research infrastructure.
+reviewable, and forkable research infrastructure. The implementation and this
+manuscript source are maintained in the public GitHub repository
+\url{https://github.com/smileformylove/XScientist}.
 \end{abstract}
 
 \section{Introduction}
@@ -83,6 +89,14 @@ git-like artifact protocol. XScientist can be used as a local project runner,
 a continuous paper generator, or a daemon that schedules multiple research
 sources over time. Its output is not just a manuscript but a structured
 record of how the manuscript came to exist.
+
+The system described here is not only a design sketch. It is tied to the
+open-source XScientist repository at
+\url{https://github.com/smileformylove/XScientist}, which contains the running
+implementation, protocol schemas, command-line tools, examples, documentation,
+and the arXiv source for this report. The repository is therefore part of the
+research contribution: it is the inspectable substrate for the protocol,
+figures, release workflow, and future replication attempts.
 
 This report makes three contributions. First, it describes the design of a
 long-running research operating system whose core abstractions are run
@@ -149,22 +163,106 @@ integrity gates, and archives reusable artifacts.
 
 \begin{figure}[t]
 \centering
-\fbox{
-\begin{minipage}{0.92\linewidth}
-\centering
-\vspace{0.5em}
-Topic / Sources
-$\rightarrow$ Ideation and Ranking
-$\rightarrow$ Experiments
-$\rightarrow$ Writeup and Quality Gates
-$\rightarrow$ Self-Review and Repair
-$\rightarrow$ Artifacts, Index, and Dossier
-$\rightarrow$ Daemon Strategy Feedback
-\vspace{0.5em}
-\end{minipage}
-}
-\caption{Simplified XScientist control loop. The daemon can feed outcomes
-back into later source selection, quality policy, and writing strategy.}
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  every node/.style={font=\scriptsize},
+  lane/.style={
+    draw,
+    rounded corners,
+    inner sep=7pt,
+    fill=#1,
+    fill opacity=0.13,
+    text opacity=1
+  },
+  lane label/.style={
+    font=\scriptsize\bfseries,
+    anchor=west,
+    fill=white,
+    inner xsep=2pt,
+    inner ysep=1pt
+  },
+  block/.style={
+    draw,
+    rounded corners,
+    align=center,
+    text width=2.12cm,
+    minimum height=0.72cm,
+    fill=blue!6
+  },
+  artifact/.style={
+    draw,
+    rounded corners,
+    align=center,
+    text width=2.28cm,
+    minimum height=0.72cm,
+    fill=green!8
+  },
+  gate/.style={
+    draw,
+    diamond,
+    aspect=1.7,
+    align=center,
+    inner sep=1.1pt,
+    fill=orange!14
+  },
+  smallblock/.style={
+    draw,
+    rounded corners,
+    align=center,
+    text width=2.05cm,
+    minimum height=0.66cm,
+    fill=gray!8
+  },
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  feedback/.style={-{Latex[length=2mm]}, thick, dashed}
+]
+\node[smallblock] (daemon) at (0,1.55) {daemon scheduler\\operator policy};
+\node[smallblock] (budget) at (3.2,1.55) {budgets\\source queues};
+\node[smallblock] (dash) at (6.4,1.55) {dashboard\\run state};
+
+\node[block] (sources) at (0,0) {topic and\\sources};
+\node[block] (ideas) at (3.2,0) {idea ranking\\planning};
+\node[block] (experiments) at (6.4,0) {experiment\\tree search};
+\node[block] (writeup) at (9.6,0) {manuscript\\draft};
+
+\node[gate] (gates) at (9.6,-1.55) {quality\\gates};
+\node[block] (review) at (6.4,-1.55) {self-review\\repair loop};
+\node[artifact] (ara) at (3.2,-1.55) {ARA dossier\\research log};
+\node[artifact] (claims) at (0,-1.55) {claim anchors\\provenance};
+
+\begin{scope}[on background layer]
+  \node[lane=gray!20, fit=(daemon)(budget)(dash)] (controlplane) {};
+  \node[lane=blue!18, fit=(sources)(ideas)(experiments)(writeup)] (researchloop) {};
+  \node[lane=green!18, fit=(claims)(ara)(review)(gates)] (artifactplane) {};
+\end{scope}
+\node[lane label] at ([xshift=0.12cm,yshift=-0.08cm]controlplane.north west) {control plane};
+\node[lane label] at ([xshift=0.12cm,yshift=-0.08cm]researchloop.north west) {research loop};
+\node[lane label] at ([xshift=0.12cm,yshift=-0.08cm]artifactplane.north west) {artifact and verification plane};
+
+\draw[arrow] (daemon) -- (budget);
+\draw[arrow] (budget) -- (dash);
+\draw[arrow] (daemon.south) -- (sources.north);
+\draw[arrow] (budget.south) -- (ideas.north);
+\draw[arrow] (dash.south) -- (experiments.north);
+
+\draw[arrow] (sources) -- (ideas);
+\draw[arrow] (ideas) -- (experiments);
+\draw[arrow] (experiments) -- (writeup);
+\draw[arrow] (writeup) -- (gates);
+\draw[arrow] (gates) -- (review);
+\draw[arrow] (review) -- (ara);
+\draw[arrow] (ara) -- (claims);
+
+\draw[feedback] (review.north) -- (experiments.south);
+\draw[feedback] (ara.north) -- (ideas.south);
+\draw[feedback] (claims.west) to[out=180,in=235,looseness=1.25] (daemon.west);
+\draw[feedback] (gates.east) -- ++(0.82,0) |- (dash.east);
+\end{tikzpicture}
+\caption{XScientist research protocol flowchart. The upper control plane
+schedules sources and budgets, the middle loop performs scientific work, and
+the lower artifact plane records evidence, gates, repairs, and provenance for
+later audit or forked continuation. Dashed edges denote long-horizon feedback.}
 \label{fig:pipeline}
 \end{figure}
 
@@ -254,13 +352,14 @@ baseline was silently dropped. ARA makes those transitions inspectable.
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}[
-  node distance=1.25cm and 1.05cm,
+  x=1cm,
+  y=1cm,
   every node/.style={font=\small},
   state/.style={
     draw,
     rounded corners,
     align=center,
-    minimum width=2.25cm,
+    minimum width=2.05cm,
     minimum height=0.78cm,
     fill=gray!8
   },
@@ -269,14 +368,14 @@ baseline was silently dropped. ARA makes those transitions inspectable.
   paper/.style={state, fill=blue!8},
   arrow/.style={-{Latex[length=2mm]}, thick}
 ]
-\node[state] (root) {root\\question};
-\node[good, right=of root] (exp) {experiment\\node};
-\node[warn, above right=of exp] (fail) {failed\\branch};
-\node[good, right=of fail] (repair) {repair\\rerun};
-\node[good, below right=of exp] (ablate) {ablation\\node};
-\node[paper, right=2.25cm of exp] (candidate) {manuscript\\candidate};
-\node[state, right=of candidate] (claim) {claimref\\anchor};
-\node[state, below=of candidate] (fork) {fork\\seed};
+\node[state] (root) at (0,0) {root\\question};
+\node[good] (exp) at (2.8,0) {experiment\\node};
+\node[warn] (fail) at (5.6,1.2) {failed\\branch};
+\node[good] (repair) at (8.4,1.2) {repair\\rerun};
+\node[good] (ablate) at (5.6,-1.2) {ablation\\node};
+\node[paper] (candidate) at (8.4,-1.2) {manuscript\\candidate};
+\node[state] (claim) at (11.2,-0.25) {claimref\\anchor};
+\node[state] (fork) at (11.2,-1.95) {fork\\seed};
 
 \draw[arrow] (root) -- (exp);
 \draw[arrow] (exp) -- (fail);
@@ -503,8 +602,10 @@ XScientist separates source code from generated research outputs by default.
 Runtime artifacts are written outside the repository unless the operator
 chooses otherwise. This reduces accidental repository pollution while keeping
 outputs easy to archive. For reproducibility, a report should cite the
-repository commit, configuration, model choices, output directory, and the ARA
-root used for any generated paper.
+public repository, the exact commit hash, configuration, model choices, output
+directory, and the ARA root used for any generated paper. For the present
+system report, the canonical repository is
+\url{https://github.com/smileformylove/XScientist}.
 
 The recommended release workflow for a generated manuscript is:
 \begin{enumerate}[leftmargin=*]
@@ -634,10 +735,19 @@ research infrastructure.
 
 \section*{Availability}
 
-The XScientist repository is available at
-\url{https://github.com/smileformylove/XScientist}. The arXiv source for this
-system report is maintained under \texttt{paper/xscientist\_arxiv/} in the
-repository.
+The primary artifact for this report is the public XScientist GitHub
+repository:
+\begin{center}
+\url{https://github.com/smileformylove/XScientist}
+\end{center}
+It contains the implementation, ARA protocol schemas, command-line tools,
+examples, documentation, and tests. The arXiv source for this system report is
+maintained in the same repository under:
+\begin{center}
+\texttt{paper/xscientist\_arxiv/}
+\end{center}
+Reproducibility claims should cite both the repository URL and the exact commit
+hash used to run or inspect the system.
 
 \section*{Acknowledgements}
 
