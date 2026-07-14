@@ -42,6 +42,7 @@ English README: [README.en.md](README.en.md)
   - [输出与可观测性](#输出与可观测性)
     - [科研完整性取证（Integrity Forensics）](#科研完整性取证integrity-forensics)
     - [ARA 工件（面向下游智能体）](#ara-工件面向下游智能体)
+      - [科技探索树视图](#科技探索树视图)
   - [示例论文](#示例论文)
   - [文档索引](#文档索引)
   - [开发与测试](#开发与测试)
@@ -101,7 +102,7 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
-- **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `run_ara_fork.py` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作。
+- **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `run_ara_fork.py` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
 相关入口脚本：
 
@@ -343,6 +344,37 @@ XScientist 会在最终稿阶段运行一组 deterministic integrity forensics �
 │   └── model_fingerprint.json
 └── README.md                  # 面向 agent 的入口说明
 ```
+
+#### 科技探索树视图
+
+每一份 ARA 都把一次小论文生成过程记录成一个有向无环图（DAG）：根节点通常是初始方案或 baseline，子节点是后续实验、消融、修复、失败分支或候选稿改写。用户可以直接打开 `exploration_graph.html` 查看这棵科技探索树，也可以用 `run_ara_fork.py graph --json` 读取同一份结构化图。
+
+示意图如下：
+
+```mermaid
+flowchart TD
+  root["root: 研究问题 / baseline"]
+  exp1["exp-1: 第一版实验"]
+  fail1["fail-1: 失败分支 / bug"]
+  repair1["repair-1: 修复与重跑"]
+  ablate1["ablate-1: 消融实验"]
+  candidate1["paper-a: 候选小论文"]
+  candidate2["paper-b: Pareto 候选"]
+  claim1["claimref: 论文结论锚点"]
+  fork1["fork: 下一轮接力种子"]
+
+  root --> exp1
+  exp1 --> fail1
+  fail1 --> repair1
+  exp1 --> ablate1
+  repair1 --> candidate1
+  ablate1 --> candidate2
+  candidate1 --> claim1
+  candidate2 --> claim1
+  candidate2 --> fork1
+```
+
+这棵树和 git-like 记录、CLI log、节点 diff 使用的是同一份 provenance：`exploration_graph.json` 是源数据，`exploration_graph.html`、`exploration_graph.summary.json`、`run_ara_fork.py log`、`run_ara_fork.py diff --only-node` 和 `run_ara_fork.py fork` 都是它的不同视图。如果把 ARA 目录提交进 git，git 记录的是这份图数据的文件级快照；XScientist 的 log/diff/fork 则给出节点级历史。因此某篇小论文的结论如果来自 `candidate2`，就能继续追到它的父实验、失败修复、消融对照，以及可以从哪个节点 fork 出下一轮研究。
 
 配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` 等子命令：
 

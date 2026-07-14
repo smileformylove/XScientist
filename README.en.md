@@ -27,6 +27,8 @@ Important notes:
 - [Usage](#usage)
 - [Outputs & Observability](#outputs--observability)
   - [Integrity Forensics](#integrity-forensics)
+  - [ARA bundles (agent-facing artifact)](#ara-bundles-agent-facing-artifact)
+    - [Science Exploration Tree View](#science-exploration-tree-view)
 - [Example Papers](#example-papers)
 - [Docs](#docs)
 - [Development](#development)
@@ -84,7 +86,7 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
-- Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion CLI `run_ara_fork.py` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF.
+- Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion CLI `run_ara_fork.py` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
 Entrypoints:
 
@@ -326,6 +328,37 @@ Typical layout:
 │   └── model_fingerprint.json
 └── README.md                  # agent-facing entry point
 ```
+
+#### Science Exploration Tree View
+
+Every ARA records a paper run as a directed acyclic graph (DAG): the root is usually the initial plan or baseline, while child nodes are experiments, ablations, repairs, failed branches, or manuscript candidates. Users can open `exploration_graph.html` directly to browse this science exploration tree, or run `run_ara_fork.py graph --json` to read the same graph as structured data.
+
+Conceptually:
+
+```mermaid
+flowchart TD
+  root["root: research question / baseline"]
+  exp1["exp-1: first experiment"]
+  fail1["fail-1: failed branch / bug"]
+  repair1["repair-1: fix and rerun"]
+  ablate1["ablate-1: ablation"]
+  candidate1["paper-a: manuscript candidate"]
+  candidate2["paper-b: Pareto candidate"]
+  claim1["claimref: paper claim anchor"]
+  fork1["fork: next-run seed"]
+
+  root --> exp1
+  exp1 --> fail1
+  fail1 --> repair1
+  exp1 --> ablate1
+  repair1 --> candidate1
+  ablate1 --> candidate2
+  candidate1 --> claim1
+  candidate2 --> claim1
+  candidate2 --> fork1
+```
+
+This tree shares provenance with the git-like record, CLI logs, and node diffs: `exploration_graph.json` is the source of truth, while `exploration_graph.html`, `exploration_graph.summary.json`, `run_ara_fork.py log`, `run_ara_fork.py diff --only-node`, and `run_ara_fork.py fork` are different views over the same graph. If the ARA directory is committed to git, git captures the file-level snapshot of that graph; XScientist's log/diff/fork commands expose the node-level history. So if a paper claim comes from `candidate2`, you can trace back through its parent experiment, failed repair path, ablation evidence, and the node that can seed the next fork.
 
 The `run_ara_fork.py` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
 
