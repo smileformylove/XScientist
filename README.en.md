@@ -5,6 +5,11 @@ The English README is now the default repository README:
 - [README.md](README.md)
 - [中文 README](README.zh.md)
 
+System report:
+
+- arXiv: [2607.12301](https://arxiv.org/abs/2607.12301)
+- Source: [`paper/xscientist_arxiv/`](paper/xscientist_arxiv/)
+
 Common old anchors:
 
 - [Quick Start](README.md#quick-start)

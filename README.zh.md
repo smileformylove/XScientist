@@ -9,6 +9,11 @@ English README: [README.md](README.md)
 
 本仓库的目标不是一次性"生成一篇论文"，而是把自动科研系统做成**可长期运行、可观测、可回放、可交接**的研究流水线：每次运行都产出结构化工件（计划、证据、评审、修复任务、质量门禁与报告），便于持续改进与协作。这些工件对齐一份独立的协议规范（`ai_scientist/protocol/`，ARA v1），因此可以被别的实现读、写、diff、fork。
 
+系统报告：
+
+- arXiv: [2607.12301](https://arxiv.org/abs/2607.12301) — *XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery*
+- 源码目录：[`paper/xscientist_arxiv/`](paper/xscientist_arxiv/)
+
 重要提示（建议先读）：
 
 - 成本：运行会调用大模型/检索服务，可能产生 API 费用与较长运行时间。
@@ -567,22 +572,25 @@ XScientist（软件/代码仓库）：
 
 ```bibtex
 @software{xscientist,
-  title        = {XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery},
+  title        = {XScientist},
   author       = {Luo, Jixiang},
   year         = {2026},
   url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 
-arXiv 论文源稿：
+XScientist arXiv 系统报告：
 
 ```bibtex
-@misc{xscientist_arxiv_draft,
+@misc{xscientist_arxiv_2607_12301,
   title        = {XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery},
   author       = {Luo, Jixiang},
   year         = {2026},
-  howpublished = {arXiv source draft},
-  url          = {https://github.com/smileformylove/XScientist/tree/main/paper/xscientist_arxiv}
+  eprint       = {2607.12301},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.SE},
+  doi          = {10.48550/arXiv.2607.12301},
+  url          = {https://arxiv.org/abs/2607.12301}
 }
 ```
 

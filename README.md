@@ -9,6 +9,11 @@ Chinese README: [README.zh.md](README.zh.md)
 
 XScientist is not built to "generate one paper once". It is designed as an operational research pipeline that can run continuously, stay observable, and produce handoff-ready artifacts (plans, evidence, reviews, repair tasks, quality gates, and reports) for iterative improvement and collaboration. Those artifacts conform to a standalone protocol (`ai_scientist/protocol/`, ARA v1), so any other implementation can read, write, diff, or fork them.
 
+System report:
+
+- arXiv: [2607.12301](https://arxiv.org/abs/2607.12301) — *XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery*
+- Source: [`paper/xscientist_arxiv/`](paper/xscientist_arxiv/)
+
 Important notes:
 
 - Cost: running the system calls LLMs / retrieval services and may incur API fees and long runtimes.
@@ -550,22 +555,25 @@ XScientist (software / repository):
 
 ```bibtex
 @software{xscientist,
-  title        = {XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery},
+  title        = {XScientist},
   author       = {Luo, Jixiang},
   year         = {2026},
   url          = {https://github.com/smileformylove/XScientist}
 }
 ```
 
-arXiv manuscript source draft:
+XScientist arXiv system report:
 
 ```bibtex
-@misc{xscientist_arxiv_draft,
+@misc{xscientist_arxiv_2607_12301,
   title        = {XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery},
   author       = {Luo, Jixiang},
   year         = {2026},
-  howpublished = {arXiv source draft},
-  url          = {https://github.com/smileformylove/XScientist/tree/main/paper/xscientist_arxiv}
+  eprint       = {2607.12301},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.SE},
+  doi          = {10.48550/arXiv.2607.12301},
+  url          = {https://arxiv.org/abs/2607.12301}
 }
 ```
 

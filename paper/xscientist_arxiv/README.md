@@ -1,8 +1,14 @@
 # XScientist arXiv Manuscript
 
-This directory contains an arXiv-ready source draft for:
+This directory contains the source for the published arXiv system report:
 
 > XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery
+
+arXiv record:
+
+- https://arxiv.org/abs/2607.12301
+- arXiv: `2607.12301`
+- DOI: `10.48550/arXiv.2607.12301`
 
 Project repository:
 
@@ -16,10 +22,10 @@ Files:
 
 - `main.tex`: single-file LaTeX manuscript with inline bibliography.
 
-Suggested arXiv category:
+Published arXiv categories:
 
-- Primary: `cs.AI`
-- Possible cross-list: `cs.SE`, depending on the final emphasis.
+- Primary: `cs.SE`
+- Cross-list: `cs.MA`
 
 Local compile command, if a TeX distribution is installed:
 
@@ -34,18 +40,19 @@ pdflatex main.tex
 pdflatex main.tex
 ```
 
-arXiv upload notes:
+Version/update notes:
 
-- Upload the TeX source, not a PDF generated from the TeX source.
+- For future arXiv replacements, upload the TeX source, not a PDF generated
+  from the TeX source.
 - Keep `main.tex` at the root of the uploaded source package.
 - Do not include build artifacts such as `.aux`, `.log`, or local PDFs.
-- Verify the arXiv-generated PDF before final submission.
+- Verify the arXiv-generated PDF before submitting a replacement version.
 
-Before submitting:
+Maintenance notes:
 
 - Confirm the author spelling and contact email.
 - Confirm that the repository URL is visible on the title page and in the
   availability section.
-- Add an arXiv ID to the README/BibTeX only after arXiv assigns one.
+- Keep README/BibTeX references aligned with arXiv: `2607.12301`.
 - Re-read the limitations section and remove or soften any claim that you do
   not want to stand behind publicly.
