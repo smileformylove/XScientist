@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Experiment registry helpers inspired by explicit experiment managers."""
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from ai_scientist.utils.pipeline_contracts import (
     append_jsonl_artifact,
     artifact_path,
     load_jsonl_artifact,
+    save_jsonl_artifact,
     update_pipeline_artifact,
 )
 
@@ -130,10 +130,7 @@ def summarize_experiment_registry(project_root: str | Path) -> dict[str, Any]:
 
 def save_experiment_registry(project_root: str | Path, rows: list[dict[str, Any]]) -> str:
     output_path = Path(artifact_path(project_root, "experiment_registry"))
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    save_jsonl_artifact(output_path, rows)
     update_pipeline_artifact(
         project_root,
         "experiment_registry",

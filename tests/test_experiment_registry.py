@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from ai_scientist.utils import experiment_registry
 from ai_scientist.utils.experiment_registry import (
     build_experiment_record,
     load_experiment_records,
@@ -14,6 +16,32 @@ from ai_scientist.utils.pipeline_contracts import load_pipeline_manifest
 
 
 class ExperimentRegistryTests(unittest.TestCase):
+    def test_failed_registry_rebuild_preserves_file_and_manifest_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "demo_project"
+            project_root.mkdir(parents=True, exist_ok=True)
+            output_path = project_root / "experiment_registry.jsonl"
+            output_path.write_text('{"status":"previous"}\n', encoding="utf-8")
+
+            with (
+                mock.patch.object(
+                    experiment_registry,
+                    "save_jsonl_artifact",
+                    side_effect=OSError("disk busy"),
+                ),
+                mock.patch.object(
+                    experiment_registry, "update_pipeline_artifact"
+                ) as update,
+                self.assertRaisesRegex(OSError, "disk busy"),
+            ):
+                save_experiment_registry(project_root, [{"status": "new"}])
+
+            self.assertEqual(
+                output_path.read_text(encoding="utf-8"),
+                '{"status":"previous"}\n',
+            )
+            update.assert_not_called()
+
     def test_save_and_summarize_registry_should_update_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo_project"
