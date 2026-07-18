@@ -342,12 +342,14 @@ class LLMBudgetConfigTests(unittest.TestCase):
 
             self.assertIsNotNone(next_stage)
             self.assertEqual(manager.current_stage, next_stage)
+            self.assertEqual(manager.current_stage_number, 2)
             self.assertEqual(manager.completed_stages, [completed_stage.name])
             checkpoint = log_dir / f"stage_{next_stage.name}" / "checkpoint.json"
             restored = AgentManager.from_checkpoint(
                 checkpoint, cfg=cfg, workspace_dir=workspace
             )
             self.assertEqual(restored.current_stage.name, next_stage.name)
+            self.assertEqual(restored.current_stage_number, 2)
             self.assertEqual(restored.completed_stages, [completed_stage.name])
 
     def test_final_stage_checkpoint_records_terminal_state(self) -> None:
@@ -492,6 +494,28 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 ),
             )
             with self.assertRaisesRegex(ValueError, "current stage is not present"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload.update({"current_stage_number": 2}),
+            )
+            with self.assertRaisesRegex(ValueError, "number does not match"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["stages"][0].update(
+                    {"stage_number": "one"}
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "invalid stage number"):
                 AgentManager.from_checkpoint(
                     checkpoint, cfg=cfg, workspace_dir=workspace
                 )

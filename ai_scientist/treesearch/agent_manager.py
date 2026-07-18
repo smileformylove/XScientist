@@ -390,13 +390,24 @@ Your research idea:\n\n
         if not isinstance(stages_payload, list) or not stages_payload:
             raise ValueError("BFTS checkpoint must contain at least one stage")
         stage_names = []
+        stage_numbers = []
         for index, stage_payload in enumerate(stages_payload):
             if not isinstance(stage_payload, dict):
                 raise ValueError(f"BFTS checkpoint stage {index} must be an object")
             stage_name = stage_payload.get("name")
             if not isinstance(stage_name, str) or not stage_name:
                 raise ValueError(f"BFTS checkpoint stage {index} has an invalid name")
+            stage_number = stage_payload.get("stage_number")
+            if (
+                isinstance(stage_number, bool)
+                or not isinstance(stage_number, int)
+                or stage_number < 1
+            ):
+                raise ValueError(
+                    f"BFTS checkpoint stage {stage_name} has an invalid stage number"
+                )
             stage_names.append(stage_name)
+            stage_numbers.append(stage_number)
         duplicate_stage_names = sorted(
             name for name in set(stage_names) if stage_names.count(name) > 1
         )
@@ -419,6 +430,18 @@ Your research idea:\n\n
             )
 
         current_stage_payload = checkpoint["current_stage"]
+        current_stage_number = checkpoint.get("current_stage_number")
+        if (
+            isinstance(current_stage_number, bool)
+            or not isinstance(current_stage_number, int)
+            or current_stage_number < 1
+        ):
+            raise ValueError("BFTS checkpoint has an invalid current stage number")
+        max_stage_number = max(stage_numbers)
+        if current_stage_number != max_stage_number:
+            raise ValueError(
+                "BFTS checkpoint current stage number does not match its stages"
+            )
         if current_stage_payload is not None:
             if not isinstance(current_stage_payload, dict):
                 raise ValueError("BFTS checkpoint current stage must be an object")
@@ -431,6 +454,10 @@ Your research idea:\n\n
             if current_stage_payload != canonical_stage_payload:
                 raise ValueError(
                     "BFTS checkpoint current stage does not match its stage definition"
+                )
+            if current_stage_payload.get("stage_number") != current_stage_number:
+                raise ValueError(
+                    "BFTS checkpoint current stage number does not match current stage"
                 )
 
         manager = cls(
@@ -453,7 +480,7 @@ Your research idea:\n\n
             for transition in (checkpoint.get("stage_history") or [])
         ]
         manager.completed_stages = list(checkpoint.get("completed_stages") or [])
-        manager.current_stage_number = int(checkpoint.get("current_stage_number") or 0)
+        manager.current_stage_number = current_stage_number
         current_stage = current_stage_payload
         if isinstance(current_stage, dict):
             current_stage = Stage(**current_stage)
@@ -942,6 +969,7 @@ Your research idea:\n\n
             self.stages.append(next_main_stage)
             self.journals[next_main_stage.name] = Journal()
             self.current_stage = next_main_stage
+            self.current_stage_number = next_main_stage.stage_number
         else:
             logger.info(f"Completed stage: {completed_stage.name}")
             logger.info("No more stages to run -- exiting the loop...")
