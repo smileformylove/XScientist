@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import pickle
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,9 +80,9 @@ class LLMBudgetConfigTests(unittest.TestCase):
             logs_dir = root / "logs"
             workspaces_dir = root / "workspaces"
             run_name = "0-run"
-            checkpoint = logs_dir / run_name / "stage_demo" / "checkpoint.pkl"
+            checkpoint = logs_dir / run_name / "stage_demo" / "checkpoint.json"
             checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_bytes(pickle.dumps({"placeholder": True}))
+            checkpoint.write_text(json.dumps({"placeholder": True}))
             (workspaces_dir / run_name).mkdir(parents=True)
             data_dir.mkdir()
 
@@ -166,6 +166,69 @@ class LLMBudgetConfigTests(unittest.TestCase):
             self.assertEqual(len(restored_nodes), 2)
             self.assertIs(restored_nodes[1].parent, restored_nodes[0])
             self.assertIn(restored_nodes[1], restored_nodes[0].children)
+
+    def test_checkpoint_rejects_tampering_and_config_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            checkpoint = manager._save_checkpoint()
+
+            tampered = json.loads(checkpoint.read_text())
+            tampered["payload"]["completed_stages"] = ["forged"]
+            checkpoint.write_text(json.dumps(tampered))
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            drifted_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+            drifted_cfg.agent.code.model = "different-model"
+            with self.assertRaisesRegex(ValueError, "configuration fingerprint"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=drifted_cfg, workspace_dir=workspace
+                )
+
+            with self.assertRaisesRegex(ValueError, "workspace mismatch"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=root / "other-workspace"
+                )
+
+            with self.assertRaisesRegex(ValueError, "current task"):
+                AgentManager.from_checkpoint(
+                    checkpoint,
+                    cfg=cfg,
+                    workspace_dir=workspace,
+                    expected_task_desc={
+                        "Title": "Different",
+                        "Abstract": "A",
+                        "Short Hypothesis": "H",
+                        "Experiments": [],
+                        "Risk Factors and Limitations": [],
+                    },
+                )
+
+    def test_checkpoint_rejects_legacy_pickle_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            checkpoint = Path(td) / "checkpoint.pkl"
+            checkpoint.write_bytes(b"not loaded")
+            cfg = OmegaConf.load("bfts_config.yaml")
+            with self.assertRaisesRegex(ValueError, "Unsafe legacy checkpoint"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=Path(td)
+                )
 
 
 if __name__ == "__main__":

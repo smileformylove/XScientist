@@ -292,6 +292,7 @@ def perform_experiments_bfts(config_path: str):
             cfg.resume_from,
             cfg=cfg,
             workspace_dir=Path(cfg.workspace_dir),
+            expected_task_desc=task_desc,
         )
         logged_node_ids.update(
             node.id

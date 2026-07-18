@@ -89,7 +89,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
                     raise exception
 
                 def _save_checkpoint(self):
-                    path = log_dir / f"stage_{stage.name}" / "checkpoint.pkl"
+                    path = log_dir / f"stage_{stage.name}" / "checkpoint.json"
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(b"checkpoint")
                     return path
@@ -244,7 +244,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             perform_mock.return_value = {
                 "status": "failed",
                 "resumable": True,
-                "checkpoint_path": str(root / "checkpoint.pkl"),
+                "checkpoint_path": str(root / "checkpoint.json"),
                 "run_status_path": str(root / "run_status.json"),
                 "failure_error": {
                     "type": "RuntimeError",
@@ -367,7 +367,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             root = Path(td)
             idea_path = root / "idea.json"
             idea_path.write_text("{}", encoding="utf-8")
-            checkpoint = root / "logs" / "0-run" / "stage_x" / "checkpoint.pkl"
+            checkpoint = root / "logs" / "0-run" / "stage_x" / "checkpoint.json"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(b"checkpoint")
             edit_config_mock.return_value = str(root / "bfts_config.yaml")
@@ -408,7 +408,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            checkpoint = root / "logs" / "0-run" / "stage_x" / "checkpoint.pkl"
+            checkpoint = root / "logs" / "0-run" / "stage_x" / "checkpoint.json"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(b"checkpoint")
             (root / ".workflow_state.json").write_text(
@@ -513,7 +513,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
                     _kwargs["step_callback"](stage, self.journals[stage.name])
 
                 def _save_checkpoint(self):
-                    path = log_dir / f"stage_{stage.name}" / "checkpoint.pkl"
+                    path = log_dir / f"stage_{stage.name}" / "checkpoint.json"
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(b"checkpoint")
                     return path

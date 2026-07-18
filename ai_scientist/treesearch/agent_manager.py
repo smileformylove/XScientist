@@ -1,9 +1,9 @@
 from typing import List, Optional, Dict, Callable, Any, Tuple
-import pickle
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 import logging
+import hashlib
 from .parallel_agent import ParallelAgent
 from .journal import Journal, Node
 import copy
@@ -17,6 +17,40 @@ from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 
 logger = logging.getLogger(__name__)
+
+CHECKPOINT_SCHEMA = "xscientist.bfts.checkpoint.v3"
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _sha256_json(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _checkpoint_config_projection(cfg: Any) -> dict:
+    def plain(value: Any) -> Any:
+        if hasattr(value, "items"):
+            return {str(key): plain(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [plain(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        return value
+
+    return {
+        "agent": plain(cfg.agent),
+        "exec": plain(cfg.exec),
+        "experiment": plain(cfg.experiment),
+        "debug": plain(cfg.debug),
+    }
 
 
 stage_config_spec = FunctionSpec(
@@ -256,10 +290,9 @@ Your research idea:\n\n
             logger.warning("Cannot save checkpoint: no stages are available")
             return None
         stage_name = "stage_" + checkpoint_stage.name
-        save_path = Path(self.cfg.log_dir) / stage_name / "checkpoint.pkl"
+        save_path = Path(self.cfg.log_dir) / stage_name / "checkpoint.json"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
-            "schema_version": 2,
             "journals": {
                 name: journal.to_dict() for name, journal in self.journals.items()
             },
@@ -273,26 +306,71 @@ Your research idea:\n\n
                 checkpoint_stage.__dict__ if self.current_stage is not None else None
             ),
         }
+        envelope = {
+            "schema": CHECKPOINT_SCHEMA,
+            "task_fingerprint": _sha256_json(self.task_desc),
+            "config_fingerprint": _sha256_json(
+                _checkpoint_config_projection(self.cfg)
+            ),
+            "payload_hash": _sha256_json(checkpoint),
+            "payload": checkpoint,
+        }
         print("Saving checkpoint to ", save_path)
-        temp_path = save_path.with_suffix(".tmp")
-        with open(temp_path, "wb") as f:
-            pickle.dump(checkpoint, f)
+        temp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps(envelope, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
         temp_path.replace(save_path)
         return save_path
 
     @classmethod
     def from_checkpoint(
-        cls, checkpoint_path: str | Path, *, cfg: Any, workspace_dir: Path
+        cls,
+        checkpoint_path: str | Path,
+        *,
+        cfg: Any,
+        workspace_dir: Path,
+        expected_task_desc: str | dict | None = None,
     ) -> "AgentManager":
         checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-        with open(checkpoint_path, "rb") as handle:
-            checkpoint = pickle.load(handle)
+        if checkpoint_path.suffix != ".json":
+            raise ValueError("Unsafe legacy checkpoint format; JSON checkpoint required")
+        try:
+            envelope = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid BFTS checkpoint JSON: {exc}") from exc
+        if envelope.get("schema") != CHECKPOINT_SCHEMA:
+            raise ValueError("Unsupported BFTS checkpoint schema")
+        checkpoint = envelope.get("payload")
         if not isinstance(checkpoint, dict):
             raise ValueError("Invalid BFTS checkpoint payload")
+        if envelope.get("payload_hash") != _sha256_json(checkpoint):
+            raise ValueError("BFTS checkpoint content hash mismatch")
         required = {"journals", "task_desc", "current_stage"}
         missing = sorted(required - set(checkpoint))
         if missing:
             raise ValueError(f"BFTS checkpoint is missing fields: {missing}")
+        if envelope.get("task_fingerprint") != _sha256_json(checkpoint["task_desc"]):
+            raise ValueError("BFTS checkpoint task fingerprint mismatch")
+        if expected_task_desc is not None:
+            current_task = (
+                json.loads(expected_task_desc)
+                if isinstance(expected_task_desc, str)
+                else expected_task_desc
+            )
+            if envelope.get("task_fingerprint") != _sha256_json(current_task):
+                raise ValueError("BFTS checkpoint does not match the current task")
+        if envelope.get("config_fingerprint") != _sha256_json(
+            _checkpoint_config_projection(cfg)
+        ):
+            raise ValueError("BFTS checkpoint configuration fingerprint mismatch")
+        expected_workspace = str(Path(workspace_dir).expanduser().resolve())
+        checkpoint_workspace = str(
+            Path(checkpoint.get("workspace_dir") or "").expanduser().resolve()
+        )
+        if checkpoint_workspace != expected_workspace:
+            raise ValueError("BFTS checkpoint workspace mismatch")
 
         manager = cls(
             task_desc=json.dumps(checkpoint["task_desc"]),
