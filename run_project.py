@@ -988,6 +988,8 @@ def process_single_idea(args):
                 "resumable": bool(experiment_result.get("resumable")),
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "run_status_path": experiment_result.get("run_status_path"),
+                "lock_path": experiment_result.get("lock_path"),
+                "lock_owner": experiment_result.get("lock_owner"),
             }
 
         # 复制实验结果

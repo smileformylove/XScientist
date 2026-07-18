@@ -38,6 +38,11 @@ from ai_scientist.utils.llm_budget import (
     llm_budget_exception_payload,
     llm_budget_manager,
 )
+from ai_scientist.utils.experiment_run_lock import (
+    ExperimentRunLock,
+    ExperimentRunLocked,
+    experiment_lock_root,
+)
 
 
 logger = logging.getLogger("ai-scientist")
@@ -108,7 +113,7 @@ def journal_to_rich_tree(journal: Journal, cfg):
     return tree
 
 
-def perform_experiments_bfts(config_path: str):
+def _perform_experiments_bfts_locked(config_path: str):
     # turn config path string into a path object
     config_path = Path(config_path)
     cfg = load_cfg(config_path)
@@ -821,6 +826,26 @@ def perform_experiments_bfts(config_path: str):
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,
     }
+
+
+def perform_experiments_bfts(config_path: str):
+    config_path = Path(config_path).expanduser().resolve()
+    lock_root = experiment_lock_root(config_path)
+    try:
+        with ExperimentRunLock(lock_root, config_path=config_path):
+            return _perform_experiments_bfts_locked(str(config_path))
+    except ExperimentRunLocked as exc:
+        return {
+            "status": "locked",
+            "config_path": str(config_path),
+            "lock_path": str(exc.lock_path),
+            "lock_owner": exc.owner,
+            "failure_error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+            "resumable": False,
+        }
 
 
 if __name__ == "__main__":

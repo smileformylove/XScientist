@@ -272,6 +272,53 @@ class GatePreconditionTests(unittest.TestCase):
             "sample gate did not pass, so full generation remains blocked",
         )
 
+    @mock.patch("run_project.gather_citations")
+    @mock.patch("run_project.write_experiment_report")
+    @mock.patch("run_project.perform_experiments_bfts")
+    @mock.patch(
+        "run_project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml"
+    )
+    @mock.patch("run_project.idea_to_markdown")
+    def test_process_single_idea_should_stop_when_experiment_is_locked(
+        self,
+        _idea_to_markdown_mock: mock.Mock,
+        _edit_config_mock: mock.Mock,
+        perform_bfts_mock: mock.Mock,
+        write_report_mock: mock.Mock,
+        gather_citations_mock: mock.Mock,
+    ) -> None:
+        perform_bfts_mock.return_value = {
+            "status": "locked",
+            "resumable": False,
+            "lock_path": "/tmp/idea/.xscientist-experiment.lock",
+            "lock_owner": {"pid": 123},
+            "failure_error": {
+                "type": "ExperimentRunLocked",
+                "message": "Experiment directory is already locked",
+            },
+        }
+        with TemporaryDirectory() as td:
+            project_dir = Path(td) / "project"
+            project_dir.mkdir()
+            result = process_single_idea(
+                (
+                    str(project_dir), str(project_dir), 1,
+                    {"Name": "Locked", "Experiments": ["Run a baseline."]},
+                    None, "model-writeup", "model-citation", "model-review",
+                    "model-plots", "model-small", 1, 1, "normal", 1, 0, 1,
+                    0, 0.0, "depth", False, "publishable", "model-quality",
+                    "neurips", 8.0, 8.0, 0, 0, False, "P1", 0, "default",
+                    0, False, 0, "classic_pipeline", "open_ended", "adaptive",
+                    False, "adaptive",
+                )
+            )
+
+        self.assertEqual(result["status"], "locked")
+        self.assertEqual(result["stage"], "experiment")
+        self.assertEqual(result["lock_owner"]["pid"], 123)
+        write_report_mock.assert_not_called()
+        gather_citations_mock.assert_not_called()
+
     @mock.patch("continuous_paper_generator.perform_experiments_bfts", create=True)
     def test_process_single_paper_should_fail_fast_before_bfts_on_static_gate_conflict(
         self,
@@ -431,6 +478,57 @@ class GatePreconditionTests(unittest.TestCase):
             rejected_continue["rejected_because"],
             "sample gate did not pass, so full generation remains blocked",
         )
+
+    @mock.patch("continuous_paper_generator.gather_citations", create=True)
+    @mock.patch("continuous_paper_generator.write_experiment_report")
+    @mock.patch("continuous_paper_generator.perform_experiments_bfts", create=True)
+    @mock.patch(
+        "continuous_paper_generator.edit_bfts_config_file",
+        create=True,
+        return_value="/tmp/demo_config.yaml",
+    )
+    @mock.patch("continuous_paper_generator.idea_to_markdown", create=True)
+    def test_process_single_paper_should_stop_when_experiment_is_locked(
+        self,
+        _idea_to_markdown_mock: mock.Mock,
+        _edit_config_mock: mock.Mock,
+        perform_bfts_mock: mock.Mock,
+        write_report_mock: mock.Mock,
+        gather_citations_mock: mock.Mock,
+    ) -> None:
+        perform_bfts_mock.return_value = {
+            "status": "locked",
+            "resumable": False,
+            "lock_path": "/tmp/paper/.xscientist-experiment.lock",
+            "lock_owner": {"pid": 456},
+            "failure_error": {
+                "type": "ExperimentRunLocked",
+                "message": "Experiment directory is already locked",
+            },
+        }
+        with TemporaryDirectory() as td:
+            batch_dir = Path(td) / "batch"
+            research_dir = Path(td) / "research"
+            batch_dir.mkdir()
+            research_dir.mkdir()
+            result = _process_single_paper(
+                (
+                    str(batch_dir), str(research_dir), 1,
+                    {"Name": "Locked", "Experiments": ["Run a baseline."]},
+                    "normal", None, "model-writeup", "model-citation",
+                    "model-review", "model-plots", "model-small", 1, 1, 1,
+                    False, "publishable", "model-quality", "neurips", 8.0,
+                    8.0, 0, 0, False, "P1", 0, 0, 1, 0, 0.0, "depth",
+                    "default", 0, False, 0, "classic_pipeline", False, False,
+                    "adaptive",
+                )
+            )
+
+        self.assertEqual(result["status"], "locked")
+        self.assertEqual(result["stage"], "experiment")
+        self.assertEqual(result["lock_owner"]["pid"], 456)
+        write_report_mock.assert_not_called()
+        gather_citations_mock.assert_not_called()
 
 
 if __name__ == "__main__":

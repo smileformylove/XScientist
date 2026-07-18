@@ -64,6 +64,8 @@ def experiment_stop_exit_code(experiment_result: Any) -> int | None:
         return 128 + signal_number if signal_number else INTERRUPTED_EXIT_CODE
     if status == "failed":
         return 1
+    if status == "locked":
+        return LLM_BUDGET_EXIT_CODE
     return None
 
 
@@ -240,6 +242,11 @@ def run_experiment_phase(
     )
 
     experiment_result = perform_experiments_bfts(idea_config_path)
+    if (
+        isinstance(experiment_result, dict)
+        and experiment_result.get("status") == "locked"
+    ):
+        return experiment_result
     if isinstance(experiment_result, dict) and experiment_result.get("status") in {
         "budget_exhausted",
         "failed",

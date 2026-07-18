@@ -433,6 +433,13 @@ if __name__ == "__main__":
                 )
             elif experiment_status == "interrupted":
                 print("Experiment interrupted. Partial artifacts were saved.")
+            elif experiment_status == "locked":
+                owner = experiment_result.get("lock_owner") or {}
+                print(
+                    "Experiment was not started because this idea is already running "
+                    f"under pid {owner.get('pid', 'unknown')} on "
+                    f"{owner.get('hostname', 'unknown')}. Retry after that run exits."
+                )
             else:
                 failure = experiment_result.get("failure_error") or {}
                 print(

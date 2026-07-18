@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import shutil
+import uuid
 import yaml
 
 
@@ -60,9 +61,13 @@ def edit_bfts_config_file(
         idea_path: Path to the idea.md file
 
     Returns:
-        Path to the edited bfts_config.yaml file
+        Path to a unique run config retained with the idea for provenance
     """
-    run_config_path = osp.join(idea_dir, "bfts_config.yaml")
+    config_dir = osp.join(idea_dir, ".xscientist", "configs")
+    os.makedirs(config_dir, exist_ok=True)
+    run_config_path = osp.join(
+        config_dir, f"bfts_config-{os.getpid()}-{uuid.uuid4().hex}.yaml"
+    )
     shutil.copy(config_path, run_config_path)
     with open(run_config_path, "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
