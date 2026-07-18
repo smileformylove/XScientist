@@ -8,7 +8,12 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from ai_scientist.treesearch.agent_manager import AgentManager, Stage, _sha256_json
+from ai_scientist.treesearch.agent_manager import (
+    AgentManager,
+    ExperimentCannotContinueError,
+    Stage,
+    _sha256_json,
+)
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.utils.metric import MetricValue
 from ai_scientist.treesearch.utils.config import load_cfg, prep_cfg
@@ -156,6 +161,70 @@ class LLMBudgetConfigTests(unittest.TestCase):
                     os.environ["AI_SCIENTIST_LLM_BUDGET_STATE"] = old_state
                 llm_budget_manager.configure(max_total_tokens=None, reset=True)
                 llm_budget_manager.export_environment()
+
+    def test_initial_stage_exhaustion_is_a_runtime_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            manager.current_stage.max_iterations = 1
+            manager.journals[manager.current_stage.name].append(
+                Node(
+                    code="raise RuntimeError()",
+                    plan="failed",
+                    is_buggy=True,
+                    metric=MetricValue(None),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExperimentCannotContinueError, "did not find a working implementation"
+            ):
+                manager._check_stage_completion(manager.current_stage)
+
+    def test_initial_stage_accepts_working_node_at_iteration_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            manager.current_stage.max_iterations = 1
+            manager.journals[manager.current_stage.name].append(
+                Node(
+                    code="print('ok')",
+                    plan="working",
+                    is_buggy=False,
+                    metric=MetricValue(1.0, maximize=True),
+                )
+            )
+
+            completed, reason = manager._check_stage_completion(
+                manager.current_stage
+            )
+
+            self.assertTrue(completed)
+            self.assertEqual(reason, "Reached max iterations")
 
     def test_resume_reuses_existing_run_directories(self) -> None:
         with tempfile.TemporaryDirectory() as td:

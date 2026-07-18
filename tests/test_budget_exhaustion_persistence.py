@@ -9,7 +9,10 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 
-from ai_scientist.treesearch.agent_manager import Stage
+from ai_scientist.treesearch.agent_manager import (
+    ExperimentCannotContinueError,
+    Stage,
+)
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
     INITIALIZATION_STATUS_SCHEMA,
@@ -152,6 +155,20 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         self.assertEqual(status["failure_error"]["type"], "RuntimeError")
         self.assertEqual(status["failure_error"]["message"], "worker crashed")
         self.assertTrue(result["resumable"])
+        self.assertTrue(checkpoint_exists)
+
+    def test_manager_cannot_continue_is_reported_as_failed(self) -> None:
+        result, status, checkpoint_exists = self._run_manager_stop(
+            ExperimentCannotContinueError("no viable implementation")
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            status["failure_error"]["type"], "ExperimentCannotContinueError"
+        )
+        self.assertEqual(
+            status["failure_error"]["message"], "no viable implementation"
+        )
         self.assertTrue(checkpoint_exists)
 
     def test_completed_run_preserves_workspace_and_writes_json_manager_state(self) -> None:

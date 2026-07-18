@@ -155,6 +155,10 @@ class StageTransition:
     config_adjustments: Dict[str, Any]
 
 
+class ExperimentCannotContinueError(RuntimeError):
+    """Raised when the experiment has no valid state from which to continue."""
+
+
 class AgentManager:
     def __init__(self, task_desc: str, cfg: Any, workspace_dir: Path):
         self.task_desc = json.loads(task_desc)
@@ -609,23 +613,20 @@ Your research idea:\n\n
         journal = self.journals[stage.name]
         # Terminate if max iterations reached
         if len(journal.nodes) >= stage.max_iterations:
+            if stage.stage_number == 1 and not journal.good_nodes:
+                # For initial stage, if it didn't even find a working implementation until max iterations,
+                # stop as a failure so the outer runner persists a resumable status.
+                message = (
+                    f"Initial stage {stage.name} did not find a working implementation "
+                    f"after {stage.max_iterations} iterations"
+                )
+                logger.error(message)
+                raise ExperimentCannotContinueError(message)
             logger.info(f"Stage {stage.name} completed: reached max iterations")
             print(
                 f"[green]Stage {stage.name} completed: reached max iterations[/green]"
             )
-            if stage.stage_number == 1:
-                # For initial stage, if it didn't even find a working implementation until max iterations,
-                # end gracefully and stop the experiment.
-                logger.error(
-                    f"Initial stage {stage.name} did not find a working implementation after {stage.max_iterations} iterations. Consider increasing the max iterations or reducing the complexity of the research idea."
-                )
-                print(
-                    f"[red]Experiment ended: Could not find working implementation in initial stage after {stage.max_iterations} iterations[/red]"
-                )
-                self.current_stage = None  # This will cause the run loop to exit
-                return True, "Failed to find working implementation"
-            else:
-                return True, "Reached max iterations"
+            return True, "Reached max iterations"
 
         # For initial stage, complete when we have at least one working implementation
         if stage.stage_number == 1:
@@ -978,12 +979,10 @@ Your research idea:\n\n
                         if prev_best:
                             self.journals[self.current_stage.name].append(prev_best)
                         else:
-                            print(
-                                f"[red]No previous best implementation found for {self.current_stage.name}. Something went wrong so finishing the experiment...[/red]"
+                            raise ExperimentCannotContinueError(
+                                "No previous best implementation found for "
+                                f"{self.current_stage.name} from stage {prev_stage}"
                             )
-                            self.current_stage = None
-                            current_substage = None
-                            break
 
                     # Run until sub-stage completion
                     while True:
@@ -1051,12 +1050,10 @@ Your research idea:\n\n
                                             f"Failed to write stage completion summary: {exc}"
                                         )
                                 else:
-                                    logger.error(
-                                        f"No best node found for {current_substage.name} during multi-seed eval, something went wrong so finishing the experiment..."
+                                    raise ExperimentCannotContinueError(
+                                        "No best node found for "
+                                        f"{current_substage.name} during multi-seed evaluation"
                                     )
-                                    self.current_stage = None
-                                    current_substage = None
-                                    break
 
                             # Exit the loop to move to next main stage
                             current_substage = None
