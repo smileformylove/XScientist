@@ -329,7 +329,10 @@ def save_run(
         raise
     # save config
     try:
-        OmegaConf.save(config=cfg, f=save_dir / "config.yaml")
+        serialize.atomic_write_text(
+            save_dir / "config.yaml",
+            OmegaConf.to_yaml(cfg),
+        )
     except Exception as e:
         print(f"Error saving config: {e}")
         raise
@@ -346,15 +349,24 @@ def save_run(
         if best_node is None and allow_llm_selection:
             best_node = journal.get_best_node(only_good=False, cfg=cfg)
         if best_node is not None:
-            for existing_file in save_dir.glob("best_solution_*.py"):
-                existing_file.unlink()
-            # Create new best solution file
             filename = f"best_solution_{best_node.id}.py"
-            with open(save_dir / filename, "w") as f:
-                f.write(best_node.code)
-            # save best_node.id to a text file
-            with open(save_dir / "best_node_id.txt", "w") as f:
-                f.write(str(best_node.id))
+            best_solution_path = save_dir / filename
+            best_node_id_path = save_dir / "best_node_id.txt"
+            previous_best_id = (
+                best_node_id_path.read_text(encoding="utf-8").strip()
+                if best_node_id_path.is_file()
+                else None
+            )
+            serialize.atomic_write_text(best_solution_path, best_node.code)
+            try:
+                serialize.atomic_write_text(best_node_id_path, str(best_node.id))
+            except BaseException:
+                if previous_best_id != str(best_node.id):
+                    best_solution_path.unlink(missing_ok=True)
+                raise
+            for existing_file in save_dir.glob("best_solution_*.py"):
+                if existing_file != best_solution_path:
+                    existing_file.unlink()
         else:
             print("No best node found yet")
     except Exception as e:

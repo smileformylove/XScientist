@@ -1,11 +1,26 @@
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Type, TypeVar
 import re
+import uuid
 
 import dataclasses_json
 from ..journal import Journal, Node
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
@@ -31,9 +46,26 @@ def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
     return json.dumps(obj_dict, separators=(",", ":"))
 
 
+def atomic_write_text(path: str | Path, content: str, *, encoding: str = "utf-8") -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temp_path.open("w", encoding=encoding) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def dump_json(obj: dataclasses_json.DataClassJsonMixin, path: Path):
-    with open(path, "w") as f:
-        f.write(dumps_json(obj))
+    atomic_write_text(path, dumps_json(obj))
 
 
 G = TypeVar("G", bound=dataclasses_json.DataClassJsonMixin)
