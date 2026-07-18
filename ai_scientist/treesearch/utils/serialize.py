@@ -64,6 +64,25 @@ def atomic_write_text(path: str | Path, content: str, *, encoding: str = "utf-8"
             pass
 
 
+def atomic_write_json(
+    path: str | Path,
+    payload,
+    *,
+    indent: int | None = 2,
+    ensure_ascii: bool = False,
+    default=None,
+) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(
+            payload,
+            indent=indent,
+            ensure_ascii=ensure_ascii,
+            default=default,
+        ),
+    )
+
+
 def dump_json(obj: dataclasses_json.DataClassJsonMixin, path: Path):
     atomic_write_text(path, dumps_json(obj))
 

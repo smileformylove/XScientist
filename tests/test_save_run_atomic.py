@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 from omegaconf import OmegaConf
 
 from ai_scientist.treesearch.journal import Journal, Node
+from ai_scientist.treesearch.agent_manager import AgentManager, Stage
 from ai_scientist.treesearch.utils import serialize
 from ai_scientist.treesearch.utils.config import save_run
 from ai_scientist.treesearch.utils.metric import MetricValue
@@ -41,6 +43,63 @@ class SaveRunAtomicTests(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "previous")
             self.assertEqual(list(path.parent.glob(".journal.json.*.tmp")), [])
+
+    def test_atomic_json_payload_failure_preserves_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "status.json"
+            path.write_text('{"status":"previous"}', encoding="utf-8")
+
+            with self.assertRaises(TypeError):
+                serialize.atomic_write_json(path, {"invalid": object()})
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["status"],
+                "previous",
+            )
+            self.assertEqual(list(path.parent.glob(".status.json.*.tmp")), [])
+
+    def test_checkpoint_replace_failure_preserves_previous_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            log_dir = root / "logs"
+            workspace.mkdir()
+            log_dir.mkdir()
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc=(
+                    '{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                    '"Experiments":[],"Risk Factors and Limitations":[]}'
+                ),
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            manager.current_stage = Stage(
+                name="demo",
+                description="demo",
+                goals="demo",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+            manager.stages = [manager.current_stage]
+            checkpoint = log_dir / "stage_demo" / "checkpoint.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text('{"schema":"previous"}', encoding="utf-8")
+
+            with (
+                mock.patch.object(Path, "replace", side_effect=OSError("disk busy")),
+                self.assertRaisesRegex(OSError, "disk busy"),
+            ):
+                manager._save_checkpoint()
+
+            self.assertEqual(
+                json.loads(checkpoint.read_text(encoding="utf-8"))["schema"],
+                "previous",
+            )
+            self.assertEqual(list(checkpoint.parent.glob(".checkpoint.json.*.tmp")), [])
 
     def test_best_solution_pointer_failure_preserves_previous_solution(self) -> None:
         with tempfile.TemporaryDirectory() as td:

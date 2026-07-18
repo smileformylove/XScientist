@@ -11,7 +11,7 @@ import re
 from .backend import query, FunctionSpec
 import json
 from rich import print
-from .utils.serialize import parse_markdown_to_dict
+from .utils.serialize import atomic_write_json, parse_markdown_to_dict
 from .utils.metric import WorstMetricValue
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
@@ -316,12 +316,11 @@ Your research idea:\n\n
             "payload": checkpoint,
         }
         print("Saving checkpoint to ", save_path)
-        temp_path = save_path.with_suffix(save_path.suffix + ".tmp")
-        temp_path.write_text(
-            json.dumps(envelope, indent=2, ensure_ascii=False, default=str),
-            encoding="utf-8",
+        atomic_write_json(
+            save_path,
+            envelope,
+            default=str,
         )
-        temp_path.replace(save_path)
         return save_path
 
     @classmethod
@@ -1106,8 +1105,10 @@ Your research idea:\n\n
                 }
             }
 
-            with open(notes_dir / "stage_transition_analysis.json", "w") as f:
-                json.dump(analysis_data, f, indent=2)
+            atomic_write_json(
+                notes_dir / "stage_transition_analysis.json",
+                analysis_data,
+            )
 
         prompt_parts.append(
             "Based on the above comprehensive analysis, determine the appropriate "
@@ -1174,8 +1175,10 @@ Your research idea:\n\n
             }
         }
 
-        with open(notes_dir / "stage_completion_summary.json", "w") as f:
-            json.dump(completion_data, f, indent=2)
+        atomic_write_json(
+            notes_dir / "stage_completion_summary.json",
+            completion_data,
+        )
 
     def _get_response(self, prompt: str) -> Dict[str, Any]:
         """Get structured response from LLM for stage configuration.
