@@ -473,6 +473,106 @@ def _perform_experiments_bfts_locked(config_path: str):
         ]
         atomic_write_text(program_md_path, "\n".join(lines) + "\n")
 
+    def _publish_results_ledger(stage: Stage, journal: Journal) -> None:
+        now = datetime.now().isoformat()
+        stage_key = stage.name
+        stage_best_entry = stage_best.get(stage_key)
+        for node in journal.nodes:
+            node_id = getattr(node, "id", None)
+            if not node_id or node_id in logged_node_ids:
+                continue
+
+            is_seed = bool(getattr(node, "is_seed_node", False))
+            is_seed_agg = bool(getattr(node, "is_seed_agg_node", False))
+            kind = "seed_agg" if is_seed_agg else ("seed" if is_seed else "main")
+            parent_id = node.parent.id if getattr(node, "parent", None) else ""
+            loc = len((node.code or "").splitlines())
+            datasets = [
+                ds
+                for ds in (
+                    getattr(node, "datasets_successfully_tested", None) or []
+                )
+                if ds
+            ]
+            metric_mean, objective, metric_name, maximize = _metric_meta(node)
+            status = (
+                "ok" if (node.is_buggy is False and objective is not None) else "crash"
+            )
+
+            decision = ""
+            next_stage_best_entry = stage_best_entry
+            if kind != "main":
+                decision = kind
+            elif status != "ok":
+                decision = "discard"
+            else:
+                assert objective is not None
+                if (
+                    getattr(stage, "stage_number", None) == 2
+                    and len(set(datasets)) < 2
+                ):
+                    status = "invalid"
+                    decision = "discard"
+                    objective_for_keep = None
+                else:
+                    objective_for_keep = objective
+
+                if objective_for_keep is not None:
+                    eps = (
+                        max(1e-6, 1e-3 * abs(stage_best_entry["objective"]))
+                        if stage_best_entry
+                        else 1e-6
+                    )
+                    keep = False
+                    if stage_best_entry is None:
+                        keep = True
+                    elif objective_for_keep > stage_best_entry["objective"] + eps:
+                        keep = True
+                    elif abs(
+                        objective_for_keep - stage_best_entry["objective"]
+                    ) <= eps and loc < stage_best_entry.get("loc", loc):
+                        keep = True
+
+                    decision = "keep" if keep else "discard"
+                    if keep:
+                        next_stage_best_entry = {
+                            "objective": objective_for_keep,
+                            "loc": loc,
+                            "node_id": node_id,
+                        }
+
+            durable_append_text(
+                results_tsv_path,
+                "\t".join(
+                    [
+                        now,
+                        stage.name,
+                        str(getattr(node, "step", "")),
+                        kind,
+                        node_id,
+                        parent_id,
+                        status,
+                        decision,
+                        "" if objective is None else f"{objective:.12g}",
+                        "" if metric_mean is None else f"{metric_mean:.12g}",
+                        str(metric_name or ""),
+                        "" if maximize is None else str(bool(maximize)),
+                        ",".join(datasets),
+                        (
+                            ""
+                            if getattr(node, "exec_time", None) is None
+                            else f"{float(node.exec_time):.6f}"
+                        ),
+                        str(loc),
+                    ]
+                )
+                + "\n",
+            )
+            logged_node_ids.add(node_id)
+            if next_stage_best_entry is not stage_best_entry:
+                stage_best_entry = next_stage_best_entry
+                stage_best[stage_key] = stage_best_entry
+
     initialization_phase = (
         "checkpoint_restore" if cfg.resume_from else "manager_creation"
     )
@@ -485,6 +585,14 @@ def _perform_experiments_bfts_locked(config_path: str):
                     workspace_dir=Path(cfg.workspace_dir),
                     expected_task_desc=task_desc,
                 )
+                for restored_stage in manager.stages:
+                    restored_journal = manager.journals[restored_stage.name]
+                    _publish_results_ledger(restored_stage, restored_journal)
+                if manager.current_stage is not None:
+                    _write_program_md(
+                        manager.current_stage,
+                        manager.journals[manager.current_stage.name],
+                    )
                 print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
             else:
                 manager = AgentManager(
@@ -622,115 +730,7 @@ def _perform_experiments_bfts_locked(config_path: str):
 
             # Update autoresearch-style program snapshot and results ledger.
             _write_program_md(stage, journal)
-            now = datetime.now().isoformat()
-
-            stage_key = stage.name
-            stage_best_entry = stage_best.get(stage_key)
-            for node in journal.nodes:
-                node_id = getattr(node, "id", None)
-                if not node_id or node_id in logged_node_ids:
-                    continue
-
-                is_seed = bool(getattr(node, "is_seed_node", False))
-                is_seed_agg = bool(getattr(node, "is_seed_agg_node", False))
-                kind = "seed_agg" if is_seed_agg else ("seed" if is_seed else "main")
-                parent_id = node.parent.id if getattr(node, "parent", None) else ""
-
-                loc = len((node.code or "").splitlines())
-                datasets = [
-                    ds
-                    for ds in (
-                        getattr(node, "datasets_successfully_tested", None) or []
-                    )
-                    if ds
-                ]
-
-                metric_mean, objective, metric_name, maximize = _metric_meta(node)
-                status = (
-                    "ok"
-                    if (node.is_buggy is False and objective is not None)
-                    else "crash"
-                )
-
-                decision = ""
-                next_stage_best_entry = stage_best_entry
-                if kind != "main":
-                    decision = kind
-                elif status != "ok":
-                    decision = "discard"
-                else:
-                    assert objective is not None
-                    # Stage-specific validation constraints (mirrors AgentManager gating).
-                    if (
-                        getattr(stage, "stage_number", None) == 2
-                        and len(set(datasets)) < 2
-                    ):
-                        status = "invalid"
-                        decision = "discard"
-                        # Do not allow "keep" promotion if dataset coverage is insufficient.
-                        objective_for_keep = None
-                    else:
-                        objective_for_keep = objective
-
-                    if objective_for_keep is None:
-                        # Skip keep/discard evaluation beyond marking discard.
-                        pass
-                    else:
-                        # Autoresearch-style keep/discard based on objective improvement; break ties by simplicity.
-                        eps = (
-                            max(1e-6, 1e-3 * abs(stage_best_entry["objective"]))
-                            if stage_best_entry
-                            else 1e-6
-                        )
-                        keep = False
-                        if stage_best_entry is None:
-                            keep = True
-                        elif objective_for_keep > stage_best_entry["objective"] + eps:
-                            keep = True
-                        elif abs(
-                            objective_for_keep - stage_best_entry["objective"]
-                        ) <= eps and loc < stage_best_entry.get("loc", loc):
-                            keep = True
-
-                        decision = "keep" if keep else "discard"
-                        if keep:
-                            next_stage_best_entry = {
-                                "objective": objective_for_keep,
-                                "loc": loc,
-                                "node_id": node_id,
-                            }
-
-                durable_append_text(
-                    results_tsv_path,
-                    "\t".join(
-                        [
-                            now,
-                            stage.name,
-                            str(getattr(node, "step", "")),
-                            kind,
-                            node_id,
-                            parent_id,
-                            status,
-                            decision,
-                            "" if objective is None else f"{objective:.12g}",
-                            "" if metric_mean is None else f"{metric_mean:.12g}",
-                            str(metric_name or ""),
-                            "" if maximize is None else str(bool(maximize)),
-                            ",".join(datasets),
-                            (
-                                ""
-                                if getattr(node, "exec_time", None) is None
-                                else f"{float(node.exec_time):.6f}"
-                            ),
-                            str(loc),
-                        ]
-                    )
-                    + "\n",
-                )
-                logged_node_ids.add(node_id)
-                if next_stage_best_entry is not stage_best_entry:
-                    stage_best_entry = next_stage_best_entry
-                    stage_best[stage_key] = stage_best_entry
+            _publish_results_ledger(stage, journal)
             publishing_artifacts = False
 
         except Exception as e:

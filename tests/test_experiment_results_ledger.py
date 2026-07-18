@@ -336,6 +336,83 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             self.assertFalse((log_dir / "program.md").exists())
             self.assertEqual(FakeManager.checkpoint_calls, 2)
 
+    def test_resume_backfills_checkpoint_nodes_missing_from_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            checkpoint = log_dir / "stage_demo" / "checkpoint.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = checkpoint
+            cfg.generate_report = False
+            stage = Stage(
+                name="1_initial_implementation_1_preliminary",
+                description="preliminary",
+                goals="goal",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+            node = Node(
+                id="checkpoint-node",
+                plan="failed",
+                code="raise RuntimeError()",
+                metric=WorstMetricValue(),
+                is_buggy=True,
+            )
+            journal = Journal(nodes=[node])
+
+            class FakeManager:
+                def __init__(self):
+                    self.current_stage = stage
+                    self.current_stage_number = 1
+                    self.completed_stages = []
+                    self.stages = [stage]
+                    self.stage_history = []
+                    self.journals = {stage.name: journal}
+                    self.task_desc = {"Title": "T"}
+
+                def run(self, **_kwargs):
+                    return None
+
+            manager = FakeManager()
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager.from_checkpoint",
+                    return_value=manager,
+                ) as restore_mock,
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            logged, _stage_best = repair_results_tsv(log_dir / "results.tsv")
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(logged, {"checkpoint-node"})
+            self.assertIn(
+                "\tcheckpoint-node\t",
+                (log_dir / "results.tsv").read_text(encoding="utf-8"),
+            )
+            self.assertTrue((log_dir / "program.md").is_file())
+            restore_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
