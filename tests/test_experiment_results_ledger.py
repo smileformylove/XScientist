@@ -20,14 +20,21 @@ from ai_scientist.treesearch.utils.serialize import durable_append_text
 
 
 class ExperimentResultsLedgerTests(unittest.TestCase):
-    def _row(self, node_id: str) -> str:
+    def _row(
+        self,
+        node_id: str,
+        *,
+        kind: str = "main",
+        status: str = "ok",
+        decision: str = "keep",
+    ) -> str:
         values = ["" for _ in RESULTS_TSV_COLUMNS]
         values[0] = "2026-01-01T00:00:00"
         values[1] = "stage"
-        values[3] = "main"
+        values[3] = kind
         values[4] = node_id
-        values[6] = "ok"
-        values[7] = "keep"
+        values[6] = status
+        values[7] = decision
         values[8] = "1.0"
         values[14] = "1"
         return "\t".join(values) + "\n"
@@ -71,6 +78,48 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
                 repair_results_tsv(path)
 
             self.assertTrue(path.read_text(encoding="utf-8").endswith("bad\trow\n"))
+
+    def test_repair_rejects_duplicate_node_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            path.write_text(
+                header + self._row("node-1") + self._row("node-1"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate node id"):
+                repair_results_tsv(path)
+
+    def test_repair_rejects_invalid_ledger_enums(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            path.write_text(
+                header
+                + self._row(
+                    "node-1", kind="seed", status="ok", decision="discard"
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Invalid.*decision"):
+                repair_results_tsv(path)
+
+    def test_repair_rejects_keep_for_failed_node(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            path.write_text(
+                header
+                + self._row(
+                    "node-1", kind="main", status="crash", decision="keep"
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "keep decision"):
+                repair_results_tsv(path)
 
     def test_durable_append_retries_partial_os_writes(self) -> None:
         with tempfile.TemporaryDirectory() as td:

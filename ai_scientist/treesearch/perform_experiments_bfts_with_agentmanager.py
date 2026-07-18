@@ -148,20 +148,49 @@ def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
     stage_best: dict[str, dict] = {}
     data_lines = lines[1:]
     for index, line in enumerate(data_lines):
+        row_number = index + 2
         fields = line.rstrip("\n").split("\t")
         if len(fields) != len(RESULTS_TSV_COLUMNS) or not fields[4]:
-            raise ValueError(f"Malformed experiment results ledger row {index + 2}")
+            raise ValueError(f"Malformed experiment results ledger row {row_number}")
+        kind, node_id, status, decision = fields[3], fields[4], fields[6], fields[7]
+        if node_id in node_ids:
+            raise ValueError(
+                f"Duplicate node id in experiment results ledger row {row_number}: {node_id}"
+            )
+        if kind not in {"main", "seed", "seed_agg"}:
+            raise ValueError(
+                f"Invalid experiment results ledger kind at row {row_number}: {kind}"
+            )
+        if status not in {"ok", "crash", "invalid"}:
+            raise ValueError(
+                f"Invalid experiment results ledger status at row {row_number}: {status}"
+            )
+        expected_decisions = {
+            "main": {"keep", "discard"},
+            "seed": {"seed"},
+            "seed_agg": {"seed_agg"},
+        }
+        if decision not in expected_decisions[kind]:
+            raise ValueError(
+                f"Invalid experiment results ledger decision at row {row_number}: {decision}"
+            )
+        if status != "ok" and decision == "keep":
+            raise ValueError(
+                f"Invalid keep decision for non-ok ledger row {row_number}"
+            )
         valid_lines.append(line)
-        node_ids.add(fields[4])
-        if fields[3] == "main" and fields[7] == "keep" and fields[8]:
+        node_ids.add(node_id)
+        if kind == "main" and decision == "keep" and fields[8]:
             try:
                 stage_best[fields[1]] = {
                     "objective": float(fields[8]),
                     "loc": int(fields[14]),
-                    "node_id": fields[4],
+                    "node_id": node_id,
                 }
-            except ValueError:
-                pass
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid keep metrics in experiment results ledger row {row_number}"
+                ) from exc
 
     repaired = "".join(valid_lines)
     if repaired.encode("utf-8") != raw:
