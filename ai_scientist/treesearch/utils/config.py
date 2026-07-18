@@ -158,10 +158,19 @@ def _load_cfg(
 
 def load_cfg(path: Path = Path(__file__).parent / "config.yaml") -> Config:
     """Load config from .yaml file and CLI args, and set up logging directory."""
-    return prep_cfg(_load_cfg(path))
+    path = Path(path).expanduser().resolve()
+    return prep_cfg(_load_cfg(path), base_dir=path.parent)
 
 
-def prep_cfg(cfg: Config):
+def _resolve_config_path(value, *, base_dir: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve()
+
+
+def prep_cfg(cfg: Config, *, base_dir: str | Path | None = None):
+    base_dir = Path(base_dir or Path.cwd()).expanduser().resolve()
     if cfg.data_dir is None:
         raise ValueError("`data_dir` must be provided.")
 
@@ -170,22 +179,20 @@ def prep_cfg(cfg: Config):
             "You must provide either a description of the task goal (`goal=...`) or a path to a plaintext file containing the description (`desc_file=...`)."
         )
 
-    if cfg.data_dir.startswith("example_tasks/"):
-        cfg.data_dir = Path(__file__).parent.parent / cfg.data_dir
-    cfg.data_dir = Path(cfg.data_dir).resolve()
+    cfg.data_dir = _resolve_config_path(cfg.data_dir, base_dir=base_dir)
 
     if cfg.desc_file is not None:
-        cfg.desc_file = Path(cfg.desc_file).resolve()
+        cfg.desc_file = _resolve_config_path(cfg.desc_file, base_dir=base_dir)
 
-    top_log_dir = Path(cfg.log_dir).resolve()
+    top_log_dir = _resolve_config_path(cfg.log_dir, base_dir=base_dir)
     top_log_dir.mkdir(parents=True, exist_ok=True)
 
-    top_workspace_dir = Path(cfg.workspace_dir).resolve()
+    top_workspace_dir = _resolve_config_path(cfg.workspace_dir, base_dir=base_dir)
     top_workspace_dir.mkdir(parents=True, exist_ok=True)
 
     resume_from = getattr(cfg, "resume_from", None)
     if resume_from:
-        resume_from = Path(resume_from).expanduser().resolve()
+        resume_from = _resolve_config_path(resume_from, base_dir=base_dir)
         if not resume_from.is_file():
             raise FileNotFoundError(f"BFTS checkpoint not found: {resume_from}")
         run_name = resume_from.parent.parent.name

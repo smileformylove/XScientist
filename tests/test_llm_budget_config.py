@@ -11,11 +11,89 @@ from omegaconf import OmegaConf
 from ai_scientist.treesearch.agent_manager import AgentManager
 from ai_scientist.treesearch.journal import Node
 from ai_scientist.treesearch.utils.metric import MetricValue
-from ai_scientist.treesearch.utils.config import prep_cfg
+from ai_scientist.treesearch.utils.config import load_cfg, prep_cfg
 from ai_scientist.utils.llm_budget import llm_budget_manager
 
 
 class LLMBudgetConfigTests(unittest.TestCase):
+    def test_load_cfg_resolves_relative_paths_from_config_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "data").mkdir()
+            (config_dir / "idea.md").write_text("task", encoding="utf-8")
+            config_path = config_dir / "bfts.yaml"
+            config = OmegaConf.load("bfts_config.yaml")
+            config.data_dir = "data"
+            config.desc_file = "idea.md"
+            config.goal = None
+            config.log_dir = "logs"
+            config.workspace_dir = "workspaces"
+            config.resume_from = None
+            OmegaConf.save(config=config, f=config_path)
+
+            old_state = os.environ.get("AI_SCIENTIST_LLM_BUDGET_STATE")
+            os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+            try:
+                loaded = load_cfg(config_path)
+            finally:
+                if old_state is None:
+                    os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+                else:
+                    os.environ["AI_SCIENTIST_LLM_BUDGET_STATE"] = old_state
+                llm_budget_manager.configure(max_total_tokens=None, reset=True)
+                llm_budget_manager.export_environment()
+
+            self.assertEqual(loaded.data_dir, (config_dir / "data").resolve())
+            self.assertEqual(loaded.desc_file, (config_dir / "idea.md").resolve())
+            self.assertEqual(loaded.log_dir.parent, (config_dir / "logs").resolve())
+            self.assertEqual(
+                loaded.workspace_dir.parent,
+                (config_dir / "workspaces").resolve(),
+            )
+
+    def test_load_cfg_resolves_relative_checkpoint_from_config_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_dir = root / "config"
+            run_name = "0-run"
+            checkpoint = (
+                config_dir / "logs" / run_name / "stage_demo" / "checkpoint.json"
+            )
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            (config_dir / "workspaces" / run_name).mkdir(parents=True)
+            (config_dir / "data").mkdir()
+            config_path = config_dir / "bfts.yaml"
+            config = OmegaConf.load("bfts_config.yaml")
+            config.data_dir = "data"
+            config.desc_file = None
+            config.goal = "test"
+            config.log_dir = "logs"
+            config.workspace_dir = "workspaces"
+            config.resume_from = str(checkpoint.relative_to(config_dir))
+            OmegaConf.save(config=config, f=config_path)
+
+            old_state = os.environ.get("AI_SCIENTIST_LLM_BUDGET_STATE")
+            os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+            try:
+                loaded = load_cfg(config_path)
+            finally:
+                if old_state is None:
+                    os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+                else:
+                    os.environ["AI_SCIENTIST_LLM_BUDGET_STATE"] = old_state
+                llm_budget_manager.configure(max_total_tokens=None, reset=True)
+                llm_budget_manager.export_environment()
+
+            self.assertEqual(loaded.resume_from, checkpoint.resolve())
+            self.assertEqual(loaded.log_dir, (config_dir / "logs" / run_name).resolve())
+            self.assertEqual(
+                loaded.workspace_dir,
+                (config_dir / "workspaces" / run_name).resolve(),
+            )
+
     def test_bfts_config_creates_shared_budget_state_and_environment(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
