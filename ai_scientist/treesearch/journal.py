@@ -5,12 +5,12 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional, Any
 import copy
 import os
-import json
 
 from dataclasses_json import DataClassJsonMixin
 from .interpreter import ExecutionResult
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import trim_long_string
+from .utils.serialize import atomic_write_json, atomic_write_text
 from .backend import FunctionSpec, query
 
 from rich import print
@@ -704,13 +704,14 @@ class Journal:
                     }
                 )
                 # Save individual node summary
-                with open(
+                atomic_write_json(
                     os.path.join(
                         notes_dir, f"{stage_name}_node_{node.id}_summary.json"
                     ),
-                    "w",
-                ) as f:
-                    json.dump(summary, f, indent=2)
+                    summary,
+                    indent=2,
+                    ensure_ascii=True,
+                )
 
         summary_prompt = {
             "Introduction": "Synthesize the experimental findings from this stage",
@@ -737,5 +738,6 @@ class Journal:
             temperature=temperature
         )
 
-        with open(os.path.join(notes_dir, f"{stage_name}_summary.txt"), "w") as f:
-            f.write(stage_summary)
+        atomic_write_text(
+            os.path.join(notes_dir, f"{stage_name}_summary.txt"), stage_summary
+        )

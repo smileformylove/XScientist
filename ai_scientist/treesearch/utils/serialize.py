@@ -7,7 +7,6 @@ import re
 import uuid
 
 import dataclasses_json
-from ..journal import Journal, Node
 
 
 def _fsync_directory(path: Path) -> None:
@@ -25,6 +24,8 @@ def _fsync_directory(path: Path) -> None:
 
 def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
     """Serialize dataclasses (such as Journals) to JSON."""
+    from ..journal import Journal, Node
+
     if isinstance(obj, Journal):
         obj = copy.deepcopy(obj)
         node2parent = {}
@@ -124,6 +125,8 @@ G = TypeVar("G", bound=dataclasses_json.DataClassJsonMixin)
 
 def loads_json(s: str, cls: Type[G]) -> G:
     """Deserialize JSON to AIDE dataclasses."""
+    from ..journal import Journal
+
     obj_dict = json.loads(s)
     obj = cls.from_dict(obj_dict)
 
