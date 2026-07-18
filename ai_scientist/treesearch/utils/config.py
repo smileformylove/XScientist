@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import os
 from pathlib import Path
 from typing import Hashable, cast, Literal, Optional
 
@@ -99,6 +101,14 @@ class ExperimentConfig:
 
 
 @dataclass
+class LLMBudgetConfig:
+    max_total_tokens: Optional[int] = None
+    max_cost_usd: Optional[float] = None
+    max_wall_time_seconds: Optional[float] = None
+    prices_per_million: dict[str, dict[str, float]] = field(default_factory=dict)
+
+
+@dataclass
 class Config(Hashable):
     data_dir: Path
     desc_file: Path | None
@@ -120,6 +130,7 @@ class Config(Hashable):
     agent: AgentConfig
     experiment: ExperimentConfig
     debug: DebugConfig
+    llm_budget: LLMBudgetConfig = field(default_factory=LLMBudgetConfig)
 
 
 def _get_next_logindex(dir: Path) -> int:
@@ -178,6 +189,44 @@ def prep_cfg(cfg: Config):
 
     cfg.log_dir = (top_log_dir / cfg.exp_name).resolve()
     cfg.workspace_dir = (top_workspace_dir / cfg.exp_name).resolve()
+
+    from ai_scientist.utils.llm_budget import configure_llm_budget
+
+    budget_cfg = getattr(cfg, "llm_budget", None)
+    config_prices = dict(getattr(budget_cfg, "prices_per_million", {}) or {})
+    env_prices = {}
+    if not config_prices:
+        try:
+            env_prices = json.loads(
+                os.environ.get("AI_SCIENTIST_LLM_PRICES_JSON", "{}")
+            )
+        except json.JSONDecodeError:
+            env_prices = {}
+    configured_state_path = os.environ.get("AI_SCIENTIST_LLM_BUDGET_STATE")
+    configure_llm_budget(
+        max_total_tokens=(
+            getattr(budget_cfg, "max_total_tokens", None)
+            if getattr(budget_cfg, "max_total_tokens", None) is not None
+            else os.environ.get("AI_SCIENTIST_LLM_MAX_TOTAL_TOKENS")
+        ),
+        max_cost_usd=(
+            getattr(budget_cfg, "max_cost_usd", None)
+            if getattr(budget_cfg, "max_cost_usd", None) is not None
+            else os.environ.get("AI_SCIENTIST_LLM_MAX_COST_USD")
+        ),
+        max_wall_time_seconds=(
+            getattr(budget_cfg, "max_wall_time_seconds", None)
+            if getattr(budget_cfg, "max_wall_time_seconds", None) is not None
+            else os.environ.get("AI_SCIENTIST_LLM_MAX_WALL_TIME_SECONDS")
+        ),
+        prices_per_million=config_prices or env_prices,
+        state_path=(
+            configured_state_path
+            if configured_state_path
+            else cfg.workspace_dir / "llm_budget.json"
+        ),
+        reset=not bool(configured_state_path),
+    )
 
     # validate the config
     cfg_schema: Config = OmegaConf.structured(Config)

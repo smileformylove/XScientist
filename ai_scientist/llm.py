@@ -7,6 +7,7 @@ import time
 from typing import Any
 from ai_scientist.protocol.llm_trace import record_llm_call
 from ai_scientist.utils.token_tracker import track_token_usage
+from ai_scientist.utils.llm_budget import LLMBudgetExceeded, llm_budget_manager
 from ai_scientist.utils.optional_dependencies import (
     import_backoff,
     import_optional_module,
@@ -138,6 +139,28 @@ AVAILABLE_LLMS = [
 ]
 
 
+def _budgeted_provider_call(
+    *,
+    model: str,
+    prompt: Any,
+    system_message: Any,
+    max_output_tokens: int,
+    create,
+    output_multiplier: int = 1,
+):
+    reservation = llm_budget_manager.reserve(
+        model=model,
+        prompt=prompt,
+        system_message=system_message,
+        max_output_tokens=max_output_tokens,
+        output_multiplier=output_multiplier,
+    )
+    with reservation:
+        response = create(reservation.timeout_seconds)
+        reservation.settle(response=response)
+        return response
+
+
 # Get N responses from a single message, used for ensembling.
 @backoff.on_exception(
     backoff.expo,
@@ -161,16 +184,24 @@ def get_batch_responses_from_llm(
 
     if spec.provider == "ollama":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=OLLAMA_MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
+        response = _budgeted_provider_call(
+            model=model,
+            prompt=new_msg_history,
+            system_message=system_message,
+            max_output_tokens=OLLAMA_MAX_NUM_TOKENS,
+            output_multiplier=n_responses,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *new_msg_history,
+                ],
+                temperature=temperature,
+                max_tokens=OLLAMA_MAX_NUM_TOKENS,
+                n=n_responses,
+                stop=None,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
@@ -178,17 +209,25 @@ def get_batch_responses_from_llm(
         ]
     elif spec.request_style == "openai_chat":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
-            seed=0,
+        response = _budgeted_provider_call(
+            model=model,
+            prompt=new_msg_history,
+            system_message=system_message,
+            max_output_tokens=MAX_NUM_TOKENS,
+            output_multiplier=n_responses,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *new_msg_history,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                n=n_responses,
+                stop=None,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
@@ -245,40 +284,62 @@ def get_batch_responses_from_llm(
 def make_llm_call(client, model, temperature, system_message, prompt):
     spec = resolve_model_provider(model)
     if spec.provider == "ollama":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=OLLAMA_MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
+        return _budgeted_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            max_output_tokens=OLLAMA_MAX_NUM_TOKENS,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=OLLAMA_MAX_NUM_TOKENS,
+                n=1,
+                stop=None,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     elif spec.request_style == "openai_chat":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
+        return _budgeted_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            max_output_tokens=MAX_NUM_TOKENS,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                n=1,
+                stop=None,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     elif spec.request_style == "openai_reasoning":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *prompt,
-            ],
-            temperature=1,
-            n=1,
-            seed=0,
+        return _budgeted_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            max_output_tokens=MAX_NUM_TOKENS,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "user", "content": system_message},
+                    *prompt,
+                ],
+                temperature=1,
+                max_completion_tokens=MAX_NUM_TOKENS,
+                n=1,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     
     else:
@@ -317,12 +378,19 @@ def get_response_from_llm(
                 ],
             }
         ]
-        response = client.messages.create(
-            model=spec.client_model,
-            max_tokens=MAX_NUM_TOKENS,
-            temperature=temperature,
-            system=system_message,
-            messages=new_msg_history,
+        response = _budgeted_provider_call(
+            model=model,
+            prompt=new_msg_history,
+            system_message=system_message,
+            max_output_tokens=MAX_NUM_TOKENS,
+            create=lambda timeout: client.messages.create(
+                model=spec.client_model,
+                max_tokens=MAX_NUM_TOKENS,
+                temperature=temperature,
+                system=system_message,
+                messages=new_msg_history,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
         # response = make_llm_call(client, model, temperature, system_message=system_message, prompt=new_msg_history)
         content = response.content[0].text
@@ -339,16 +407,23 @@ def get_response_from_llm(
         ]
     elif spec.provider == "ollama":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=OLLAMA_MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
+        response = _budgeted_provider_call(
+            model=model,
+            prompt=new_msg_history,
+            system_message=system_message,
+            max_output_tokens=OLLAMA_MAX_NUM_TOKENS,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *new_msg_history,
+                ],
+                temperature=temperature,
+                max_tokens=OLLAMA_MAX_NUM_TOKENS,
+                n=1,
+                stop=None,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -377,18 +452,27 @@ def get_response_from_llm(
     elif spec.provider == "huggingface":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         try:
-            response = client.chat.completions.create(
-                model=spec.client_model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    *new_msg_history,
-                ],
-                temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
-                n=1,
-                stop=None,
+            response = _budgeted_provider_call(
+                model=model,
+                prompt=new_msg_history,
+                system_message=system_message,
+                max_output_tokens=MAX_NUM_TOKENS,
+                create=lambda timeout: client.chat.completions.create(
+                    model=spec.client_model,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        *new_msg_history,
+                    ],
+                    temperature=temperature,
+                    max_tokens=MAX_NUM_TOKENS,
+                    n=1,
+                    stop=None,
+                    **({"timeout": timeout} if timeout is not None else {}),
+                ),
             )
             content = response.choices[0].message.content
+        except LLMBudgetExceeded:
+            raise
         except Exception as e:
             # Fallback to direct API call if OpenAI client doesn't work with HuggingFace
             headers = {
@@ -406,10 +490,17 @@ def get_response_from_llm(
                     "return_full_text": False
                 }
             }
-            response = requests.post(
-                "https://api-inference.huggingface.co/models/agentica-org/DeepCoder-14B-Preview",
-                headers=headers,
-                json=payload
+            response = _budgeted_provider_call(
+                model=model,
+                prompt=new_msg_history,
+                system_message=system_message,
+                max_output_tokens=MAX_NUM_TOKENS,
+                create=lambda timeout: requests.post(
+                    "https://api-inference.huggingface.co/models/agentica-org/DeepCoder-14B-Preview",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout or 60,
+                ),
             )
             if response.status_code == 200:
                 content = response.json()["generated_text"]
@@ -547,17 +638,19 @@ def create_client(model) -> tuple[Any, str]:
         )
         return anthropic.Anthropic(
             timeout=60.0,
-            max_retries=10,
+            max_retries=0,
             http_client=_http_client,
         ), model
     if spec.client_family == "anthropic_bedrock":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
-        return anthropic.AnthropicBedrock(), model
+        return anthropic.AnthropicBedrock(max_retries=0), model
     if spec.client_family == "anthropic_vertex":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
-        return anthropic.AnthropicVertex(), model
+        return anthropic.AnthropicVertex(max_retries=0), model
     if spec.client_family == "openai_compatible":
-        kwargs, client_model = build_openai_compatible_client_kwargs(model, env=os.environ)
+        kwargs, client_model = build_openai_compatible_client_kwargs(
+            model, env=os.environ, max_retries=0
+        )
         print(f"Using {spec.display_name} API with model {client_model}.")
         return openai.OpenAI(**kwargs), client_model
     raise ValueError(f"Model {model} not supported.")

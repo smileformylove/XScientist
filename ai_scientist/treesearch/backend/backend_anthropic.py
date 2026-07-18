@@ -102,6 +102,13 @@ def query(
     message = backoff_create(
         client.messages.create,
         ANTHROPIC_TIMEOUT_EXCEPTIONS,
+        _budget_model=raw_model,
+        _budget_prompt={
+            "messages": messages,
+            "tools": filtered_kwargs.get("tools"),
+        },
+        _budget_system_message=system_message,
+        _budget_max_output_tokens=filtered_kwargs.get("max_tokens") or 8192,
         messages=messages,
         **filtered_kwargs,
     )

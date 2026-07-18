@@ -40,6 +40,16 @@ class _ResultWithoutCreated:
 
 
 class TokenTrackerCompatTests(unittest.TestCase):
+    def test_unknown_model_cost_is_not_reported_as_zero(self) -> None:
+        token_tracker.reset()
+        try:
+            token_tracker.add_tokens("unknown", 10, 5, 0, 0)
+            summary = token_tracker.get_summary()["unknown"]
+            self.assertIsNone(summary["cost (USD)"])
+            self.assertFalse(summary["priced"])
+        finally:
+            token_tracker.reset()
+
     def test_extract_usage_should_return_expected_token_tuple(self) -> None:
         result = _Result()
         usage = _extract_usage(result)

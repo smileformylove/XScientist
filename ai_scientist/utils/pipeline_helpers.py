@@ -211,19 +211,25 @@ def save_token_tracker(output_dir: str | Path) -> None:
 
     try:
         from ai_scientist.utils.token_tracker import token_tracker
+        from ai_scientist.utils.llm_budget import llm_budget_manager
 
         summary = token_tracker.get_summary()
         interactions = token_tracker.get_interactions()
+        budget = llm_budget_manager.snapshot()
     except ModuleNotFoundError as exc:
         print(f"Warning: token tracker unavailable: {exc}")
         summary = {}
         interactions = {}
+        budget = {"enabled": False, "error": str(exc)}
 
     with open(output_path / "token_tracker.json", "w") as f:
         json.dump(summary, f)
 
     with open(output_path / "token_tracker_interactions.json", "w") as f:
         json.dump(interactions, f)
+
+    with open(output_path / "llm_budget.json", "w") as f:
+        json.dump(budget, f, indent=2)
 
 
 def save_review_artifacts(

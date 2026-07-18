@@ -47,6 +47,14 @@ experiment:
 debug:
   stage4: False
 
+# Optional hard limits enforced before every LLM/VLM call. Null preserves the
+# existing unlimited behavior. Cost limits fail closed for unpriced models.
+llm_budget:
+  max_total_tokens: null
+  max_cost_usd: null
+  max_wall_time_seconds: null
+  prices_per_million: {}
+
 # agent hyperparams - CPU优化
 agent:
   type: parallel

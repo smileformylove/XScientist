@@ -9,6 +9,7 @@ from ai_scientist.utils.optional_dependencies import (
     import_backoff,
     import_optional_module,
 )
+from ai_scientist.utils.llm_budget import llm_budget_manager
 
 backoff = import_backoff()
 jsonschema = import_optional_module(
@@ -43,8 +44,27 @@ def backoff_create(
     *args,
     **kwargs,
 ):
+    budget_model = kwargs.pop("_budget_model", None)
+    budget_prompt = kwargs.pop("_budget_prompt", None)
+    budget_system_message = kwargs.pop("_budget_system_message", None)
+    budget_max_output_tokens = kwargs.pop("_budget_max_output_tokens", None)
+    reservation = None
+    if budget_model:
+        reservation = llm_budget_manager.reserve(
+            model=str(budget_model),
+            prompt=budget_prompt,
+            system_message=budget_system_message,
+            max_output_tokens=budget_max_output_tokens,
+        )
+        if reservation.timeout_seconds is not None and "timeout" not in kwargs:
+            kwargs["timeout"] = reservation.timeout_seconds
     try:
-        return create_fn(*args, **kwargs)
+        if reservation is None:
+            return create_fn(*args, **kwargs)
+        with reservation:
+            result = create_fn(*args, **kwargs)
+            reservation.settle(response=result)
+            return result
     except retry_exceptions as e:
         logger.info(f"Backoff exception: {e}")
         return False

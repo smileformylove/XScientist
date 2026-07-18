@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from ai_scientist.utils.token_tracker import track_token_usage
+from ai_scientist.utils.llm_budget import llm_budget_manager
 from ai_scientist.utils.optional_dependencies import (
     import_backoff,
     import_optional_module,
@@ -91,45 +92,79 @@ def encode_image_to_base64(image_path: str) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
+def budgeted_vlm_provider_call(
+    *, model, prompt, system_message, create, max_output_tokens=MAX_NUM_TOKENS
+):
+    reservation = llm_budget_manager.reserve(
+        model=model,
+        prompt=prompt,
+        system_message=system_message,
+        max_output_tokens=max_output_tokens,
+    )
+    with reservation:
+        response = create(reservation.timeout_seconds)
+        reservation.settle(response=response)
+        return response
+
+
 @track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
     spec = resolve_model_provider(model)
     if spec.provider == "ollama":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
+        return budgeted_vlm_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                n=1,
+                stop=None,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     elif spec.request_style == "openai_chat":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
+        return budgeted_vlm_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                n=1,
+                stop=None,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     elif spec.request_style == "openai_reasoning":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *prompt,
-            ],
-            temperature=1,
-            n=1,
-            seed=0,
+        return budgeted_vlm_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "user", "content": system_message},
+                    *prompt,
+                ],
+                temperature=1,
+                max_completion_tokens=MAX_NUM_TOKENS,
+                n=1,
+                seed=0,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -139,24 +174,36 @@ def make_llm_call(client, model, temperature, system_message, prompt):
 def make_vlm_call(client, model, temperature, system_message, prompt):
     spec = resolve_model_provider(model)
     if spec.provider == "ollama":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+        return budgeted_vlm_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     elif spec.request_style == "openai_chat":
-        return client.chat.completions.create(
-            model=spec.client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
+        return budgeted_vlm_provider_call(
+            model=model,
+            prompt=prompt,
+            system_message=system_message,
+            create=lambda timeout: client.chat.completions.create(
+                model=spec.client_model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    *prompt,
+                ],
+                temperature=temperature,
+                max_tokens=MAX_NUM_TOKENS,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
     else:
         raise ValueError(f"Model {model} not supported.")
@@ -247,7 +294,9 @@ def create_client(model: str) -> tuple[Any, str]:
     if not _is_supported_vlm_model(model):
         raise ValueError(f"Model {model} not supported by VLM client.")
     spec = resolve_model_provider(model)
-    kwargs, client_model = build_openai_compatible_client_kwargs(model, env=os.environ)
+    kwargs, client_model = build_openai_compatible_client_kwargs(
+        model, env=os.environ, max_retries=0
+    )
     print(f"Using {spec.display_name} API with model {client_model}.")
     return openai.OpenAI(**kwargs), client_model
 
@@ -325,7 +374,14 @@ def get_batch_responses_from_vlm(
         # Construct message with all images
         new_msg_history = msg_history + [{"role": "user", "content": content}]
 
-        if spec.provider == "ollama":
+        reservation = llm_budget_manager.reserve(
+            model=model,
+            prompt=new_msg_history,
+            system_message=system_message,
+            max_output_tokens=MAX_NUM_TOKENS,
+            output_multiplier=n_responses,
+        )
+        with reservation:
             response = client.chat.completions.create(
                 model=spec.client_model,
                 messages=[
@@ -336,20 +392,13 @@ def get_batch_responses_from_vlm(
                 max_tokens=MAX_NUM_TOKENS,
                 n=n_responses,
                 seed=0,
+                **(
+                    {"timeout": reservation.timeout_seconds}
+                    if reservation.timeout_seconds is not None
+                    else {}
+                ),
             )
-        else:
-            # Get multiple responses
-            response = client.chat.completions.create(
-                model=spec.client_model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    *new_msg_history,
-                ],
-                temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
-                n=n_responses,
-                seed=0,
-            )
+            reservation.settle(response=response)
 
         # Extract content from all responses
         contents = [r.message.content for r in response.choices]

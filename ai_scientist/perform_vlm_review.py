@@ -430,10 +430,19 @@ def detect_duplicate_figures(client, client_model, pdf_path):
         )
 
     try:
-        response = client.chat.completions.create(
+        from ai_scientist.vlm import budgeted_vlm_provider_call
+
+        response = budgeted_vlm_provider_call(
             model=client_model,
-            messages=messages,
-            max_tokens=1000,
+            prompt=messages,
+            system_message=messages[0]["content"],
+            max_output_tokens=1000,
+            create=lambda timeout: client.chat.completions.create(
+                model=client_model,
+                messages=messages,
+                max_tokens=1000,
+                **({"timeout": timeout} if timeout is not None else {}),
+            ),
         )
 
         analysis = response.choices[0].message.content
@@ -441,6 +450,10 @@ def detect_duplicate_figures(client, client_model, pdf_path):
         return analysis
 
     except Exception as e:
+        from ai_scientist.utils.llm_budget import LLMBudgetExceeded
+
+        if isinstance(e, LLMBudgetExceeded):
+            raise
         print(f"Error analyzing images: {e}")
         return {"error": str(e)}
 

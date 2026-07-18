@@ -6,6 +6,11 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 
+from ai_scientist.utils.llm_budget import (
+    DEFAULT_MODEL_PRICES_PER_MILLION,
+    llm_budget_manager,
+)
+
 
 class TokenTracker:
     def __init__(self):
@@ -22,42 +27,7 @@ class TokenTracker:
         )
         self.interactions = defaultdict(list)
 
-        self.MODEL_PRICES = {
-            "gpt-4o-2024-11-20": {
-                "prompt": 2.5 / 1000000,  # $2.50 per 1M tokens
-                "cached": 1.25 / 1000000,  # $1.25 per 1M tokens
-                "completion": 10 / 1000000,  # $10.00 per 1M tokens
-            },
-            "gpt-4o-2024-08-06": {
-                "prompt": 2.5 / 1000000,  # $2.50 per 1M tokens
-                "cached": 1.25 / 1000000,  # $1.25 per 1M tokens
-                "completion": 10 / 1000000,  # $10.00 per 1M tokens
-            },
-            "gpt-4o-2024-05-13": {  # this ver does not support cached tokens
-                "prompt": 5.0 / 1000000,  # $5.00 per 1M tokens
-                "completion": 15 / 1000000,  # $15.00 per 1M tokens
-            },
-            "gpt-4o-mini-2024-07-18": {
-                "prompt": 0.15 / 1000000,  # $0.15 per 1M tokens
-                "cached": 0.075 / 1000000,  # $0.075 per 1M tokens
-                "completion": 0.6 / 1000000,  # $0.60 per 1M tokens
-            },
-            "o1-2024-12-17": {
-                "prompt": 15 / 1000000,  # $15.00 per 1M tokens
-                "cached": 7.5 / 1000000,  # $7.50 per 1M tokens
-                "completion": 60 / 1000000,  # $60.00 per 1M tokens
-            },
-            "o1-preview-2024-09-12": {
-                "prompt": 15 / 1000000,  # $15.00 per 1M tokens
-                "cached": 7.5 / 1000000,  # $7.50 per 1M tokens
-                "completion": 60 / 1000000,  # $60.00 per 1M tokens
-            },
-            "o3-mini-2025-01-31": {
-                "prompt": 1.1 / 1000000,  # $1.10 per 1M tokens
-                "cached": 0.55 / 1000000,  # $0.55 per 1M tokens
-                "completion": 4.4 / 1000000,  # $4.40 per 1M tokens
-            },
-        }
+        self.MODEL_PRICES = DEFAULT_MODEL_PRICES_PER_MILLION
 
     def add_tokens(
         self,
@@ -104,34 +74,30 @@ class TokenTracker:
         self.interactions = defaultdict(list)
         # self._encoders = {}
 
-    def calculate_cost(self, model: str) -> float:
+    def calculate_cost(self, model: str) -> float | None:
         """Calculate the cost for a specific model based on token usage."""
-        if model not in self.MODEL_PRICES:
-            logging.warning(f"Price information not available for model {model}")
-            return 0.0
-
-        prices = self.MODEL_PRICES[model]
         tokens = self.token_counts[model]
+        cost = llm_budget_manager.estimate_cost(
+            model,
+            input_tokens=tokens["prompt"],
+            output_tokens=tokens["completion"],
+            cached_tokens=tokens["cached"],
+        )
+        if cost is None:
+            logging.warning(f"Price information not available for model {model}")
+            return None
+        return cost
 
-        # Calculate cost for prompt and completion tokens
-        if "cached" in prices:
-            prompt_cost = (tokens["prompt"] - tokens["cached"]) * prices["prompt"]
-            cached_cost = tokens["cached"] * prices["cached"]
-        else:
-            prompt_cost = tokens["prompt"] * prices["prompt"]
-            cached_cost = 0
-        completion_cost = tokens["completion"] * prices["completion"]
-
-        return prompt_cost + cached_cost + completion_cost
-
-    def get_summary(self) -> Dict[str, Dict[str, int]]:
+    def get_summary(self) -> Dict[str, Dict[str, Any]]:
         # return dict(self.token_counts)
         """Get summary of token usage and costs for all models."""
         summary = {}
         for model, tokens in self.token_counts.items():
+            cost = self.calculate_cost(model)
             summary[model] = {
                 "tokens": tokens.copy(),
-                "cost (USD)": self.calculate_cost(model),
+                "cost (USD)": cost,
+                "priced": cost is not None,
             }
         return summary
 

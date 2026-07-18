@@ -78,14 +78,13 @@ def query(
         system_message = None
         # model_kwargs["temperature"] = 0.5
         model_kwargs["reasoning_effort"] = "high"
-        model_kwargs["max_completion_tokens"] = 100000  # max_tokens
+        model_kwargs["max_completion_tokens"] = max_tokens or 8192
         # remove 'temperature' from model_kwargs
         model_kwargs.pop("temperature", None)
     else:
-        model_kwargs["max_tokens"] = max_tokens
+        model_kwargs["max_tokens"] = max_tokens or 8192
 
     query_func = _resolve_backend_module(model).query
-
     # 智谱模型不需要预先编译，backend_zhipu会处理
     # 其他模型需要编译为markdown
     if spec.provider == "zhipu":

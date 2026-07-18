@@ -50,6 +50,12 @@ experiment:
 debug:
   stage4: False
 
+llm_budget:
+  max_total_tokens: null
+  max_cost_usd: null
+  max_wall_time_seconds: null
+  prices_per_million: {}
+
 agent:
   type: parallel
   # Upper bound; will be capped to GPU count automatically if GPUs are present.

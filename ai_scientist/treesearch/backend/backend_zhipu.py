@@ -9,6 +9,7 @@ import time
 
 from ai_scientist.utils.provider_registry import resolve_model_provider
 from ai_scientist.utils.optional_dependencies import import_optional_module
+from ai_scientist.utils.llm_budget import llm_budget_manager
 
 from .utils import (
     FunctionSpec,
@@ -95,6 +96,7 @@ def get_ai_client(model: str, max_retries=2):
 
     client = zhipuai_sdk.ZhipuAI(
         api_key=api_key,
+        max_retries=max_retries,
     )
     return client
 
@@ -192,7 +194,20 @@ def query(
     t0 = time.time()
 
     try:
-        response = client.chat.completions.create(**request_params)
+        reservation = llm_budget_manager.reserve(
+            model=model,
+            prompt={
+                "messages": messages,
+                "tools": request_params.get("tools"),
+            },
+            system_message=system_message,
+            max_output_tokens=request_params.get("max_tokens") or 8192,
+        )
+        with reservation:
+            if reservation.timeout_seconds is not None:
+                request_params["timeout"] = reservation.timeout_seconds
+            response = client.chat.completions.create(**request_params)
+            reservation.settle(response=response)
     except Exception as e:
         logger.error(f"智谱API调用失败: {e}")
         logger.error(
