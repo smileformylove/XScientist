@@ -8,8 +8,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from ai_scientist.treesearch.agent_manager import AgentManager
-from ai_scientist.treesearch.journal import Node
+from ai_scientist.treesearch.agent_manager import AgentManager, Stage
+from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.utils.metric import MetricValue
 from ai_scientist.treesearch.utils.config import load_cfg, prep_cfg
 from ai_scientist.utils.llm_budget import llm_budget_manager
@@ -244,6 +244,77 @@ class LLMBudgetConfigTests(unittest.TestCase):
             self.assertEqual(len(restored_nodes), 2)
             self.assertIs(restored_nodes[1].parent, restored_nodes[0])
             self.assertIn(restored_nodes[1], restored_nodes[0].children)
+
+    def test_main_stage_transition_checkpoint_resumes_next_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            completed_stage = manager.current_stage
+
+            next_stage = manager._advance_main_stage()
+
+            self.assertIsNotNone(next_stage)
+            self.assertEqual(manager.current_stage, next_stage)
+            self.assertEqual(manager.completed_stages, [completed_stage.name])
+            checkpoint = log_dir / f"stage_{next_stage.name}" / "checkpoint.json"
+            restored = AgentManager.from_checkpoint(
+                checkpoint, cfg=cfg, workspace_dir=workspace
+            )
+            self.assertEqual(restored.current_stage.name, next_stage.name)
+            self.assertEqual(restored.completed_stages, [completed_stage.name])
+
+    def test_final_stage_checkpoint_records_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            final_stage = Stage(
+                name="4_ablation_studies_1_final",
+                description="final",
+                goals="final",
+                max_iterations=1,
+                num_drafts=0,
+                stage_number=4,
+            )
+            manager.stages = [final_stage]
+            manager.journals = {final_stage.name: Journal()}
+            manager.current_stage = final_stage
+            manager.current_stage_number = 4
+
+            next_stage = manager._advance_main_stage()
+
+            self.assertIsNone(next_stage)
+            self.assertIsNone(manager.current_stage)
+            self.assertEqual(manager.completed_stages, [final_stage.name])
+            checkpoint = log_dir / f"stage_{final_stage.name}" / "checkpoint.json"
+            restored = AgentManager.from_checkpoint(
+                checkpoint, cfg=cfg, workspace_dir=workspace
+            )
+            self.assertIsNone(restored.current_stage)
+            self.assertEqual(restored.completed_stages, [final_stage.name])
 
     def test_checkpoint_rejects_tampering_and_config_drift(self) -> None:
         with tempfile.TemporaryDirectory() as td:

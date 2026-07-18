@@ -858,6 +858,43 @@ Your research idea:\n\n
             stage_number=stage_number,
         )
 
+    def _advance_main_stage(self) -> Optional[Stage]:
+        """Commit a completed main-stage transition before checkpointing it."""
+
+        completed_stage = self.current_stage
+        if completed_stage is None:
+            self._save_checkpoint()
+            return None
+
+        next_main_stage = self._create_next_main_stage(
+            completed_stage,
+            self.journals[completed_stage.name],
+        )
+        if completed_stage.name not in self.completed_stages:
+            self.completed_stages.append(completed_stage.name)
+
+        if next_main_stage is not None:
+            self.stage_history.append(
+                StageTransition(
+                    from_stage=completed_stage.name,
+                    to_stage=next_main_stage.name,
+                    reason=f"Moving to {next_main_stage.description}",
+                    config_adjustments={},
+                )
+            )
+            self.stages.append(next_main_stage)
+            self.journals[next_main_stage.name] = Journal()
+            self.current_stage = next_main_stage
+        else:
+            logger.info(f"Completed stage: {completed_stage.name}")
+            logger.info("No more stages to run -- exiting the loop...")
+            self.current_stage = None
+
+        # Persist the state after the transition so resume starts from the next
+        # stage (or knows the run is terminal) instead of repeating completed work.
+        self._save_checkpoint()
+        return next_main_stage
+
     def run(self, exec_callback, step_callback=None):
         """Run the experiment through generated stages"""
         while self.current_stage:  # Main stage loop
@@ -1003,31 +1040,11 @@ Your research idea:\n\n
                                 # If no next sub-stage could be created, end this main stage
                                 current_substage = None
                             break
-            self._save_checkpoint()
             # Main stage complete - create next main stage
             if self.current_stage:
-                next_main_stage = self._create_next_main_stage(
-                    self.stages[-1], self.journals[self.stages[-1].name]
-                )
-                if next_main_stage:
-                    # Record main stage transition
-                    self.stage_history.append(
-                        StageTransition(
-                            from_stage=self.stages[-1].name,
-                            to_stage=next_main_stage.name,
-                            reason=f"Moving to {next_main_stage.description}",
-                            config_adjustments={},
-                        )
-                    )
-
-                    self.stages.append(next_main_stage)
-                    self.journals[next_main_stage.name] = Journal()
-                    self.current_stage = next_main_stage
-                else:
-                    # Exit the outer loop if no more main stages
-                    logger.info(f"Completed stage: {self.current_stage.name}")
-                    logger.info("No more stages to run -- exiting the loop...")
-                    self.current_stage = None
+                self._advance_main_stage()
+            else:
+                self._save_checkpoint()
 
     def _create_stage_analysis_prompt(
         self,
