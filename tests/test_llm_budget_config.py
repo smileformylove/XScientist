@@ -289,7 +289,6 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 cfg=cfg,
                 workspace_dir=workspace,
             )
-            manager.completed_stages = ["prior_stage"]
             journal = manager.journals[manager.current_stage.name]
             parent = Node(
                 plan="parent",
@@ -313,7 +312,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             )
 
             self.assertEqual(restored.current_stage.name, manager.current_stage.name)
-            self.assertEqual(restored.completed_stages, ["prior_stage"])
+            self.assertEqual(restored.completed_stages, [])
             self.assertEqual(set(restored.journals), set(manager.journals))
             restored_nodes = restored.journals[restored.current_stage.name].nodes
             self.assertEqual(len(restored_nodes), 2)
@@ -516,6 +515,35 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 ),
             )
             with self.assertRaisesRegex(ValueError, "invalid stage number"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["stage_history"].append(
+                    {
+                        "from_stage": payload["stages"][0]["name"],
+                        "to_stage": payload["stages"][0]["name"],
+                        "reason": "forged",
+                        "config_adjustments": {},
+                    }
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "history does not match"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["completed_stages"].append(
+                    payload["stages"][0]["name"]
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "do not match its lifecycle"):
                 AgentManager.from_checkpoint(
                     checkpoint, cfg=cfg, workspace_dir=workspace
                 )

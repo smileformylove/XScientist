@@ -415,6 +415,39 @@ Your research idea:\n\n
             raise ValueError(
                 f"BFTS checkpoint contains duplicate stages: {duplicate_stage_names}"
             )
+        for index in range(len(stage_numbers) - 1):
+            current_number = stage_numbers[index]
+            next_number = stage_numbers[index + 1]
+            if next_number < current_number or next_number > current_number + 1:
+                raise ValueError(
+                    "BFTS checkpoint contains an invalid stage number progression"
+                )
+
+        stage_history_payload = checkpoint.get("stage_history")
+        if not isinstance(stage_history_payload, list):
+            raise ValueError("BFTS checkpoint stage history must be a list")
+        if len(stage_history_payload) != len(stage_names) - 1:
+            raise ValueError(
+                "BFTS checkpoint stage history does not match the stage sequence"
+            )
+        for index, transition_payload in enumerate(stage_history_payload):
+            if not isinstance(transition_payload, dict):
+                raise ValueError(
+                    f"BFTS checkpoint stage transition {index} must be an object"
+                )
+            if (
+                transition_payload.get("from_stage") != stage_names[index]
+                or transition_payload.get("to_stage") != stage_names[index + 1]
+            ):
+                raise ValueError(
+                    "BFTS checkpoint stage history does not follow the stage sequence"
+                )
+            if not isinstance(transition_payload.get("reason"), str) or not isinstance(
+                transition_payload.get("config_adjustments"), dict
+            ):
+                raise ValueError(
+                    f"BFTS checkpoint stage transition {index} is malformed"
+                )
 
         stage_name_set = set(stage_names)
         journal_name_set = set(journals_payload)
@@ -459,6 +492,28 @@ Your research idea:\n\n
                 raise ValueError(
                     "BFTS checkpoint current stage number does not match current stage"
                 )
+            if current_stage_payload.get("name") != stage_names[-1]:
+                raise ValueError("BFTS checkpoint current stage is not the latest stage")
+
+        completed_stages_payload = checkpoint.get("completed_stages")
+        if not isinstance(completed_stages_payload, list) or any(
+            not isinstance(name, str) or not name
+            for name in completed_stages_payload
+        ):
+            raise ValueError("BFTS checkpoint completed stages must be a list of names")
+        if len(completed_stages_payload) != len(set(completed_stages_payload)):
+            raise ValueError("BFTS checkpoint contains duplicate completed stages")
+        expected_completed_stages = [
+            stage_names[index]
+            for index in range(len(stage_names) - 1)
+            if stage_numbers[index + 1] > stage_numbers[index]
+        ]
+        if current_stage_payload is None:
+            expected_completed_stages.append(stage_names[-1])
+        if completed_stages_payload != expected_completed_stages:
+            raise ValueError(
+                "BFTS checkpoint completed stages do not match its lifecycle"
+            )
 
         manager = cls(
             task_desc=json.dumps(checkpoint["task_desc"]),
@@ -477,9 +532,9 @@ Your research idea:\n\n
             transition
             if isinstance(transition, StageTransition)
             else StageTransition(**transition)
-            for transition in (checkpoint.get("stage_history") or [])
+            for transition in stage_history_payload
         ]
-        manager.completed_stages = list(checkpoint.get("completed_stages") or [])
+        manager.completed_stages = list(completed_stages_payload)
         manager.current_stage_number = current_stage_number
         current_stage = current_stage_payload
         if isinstance(current_stage, dict):
