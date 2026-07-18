@@ -371,6 +371,64 @@ Your research idea:\n\n
         if checkpoint_workspace != expected_workspace:
             raise ValueError("BFTS checkpoint workspace mismatch")
 
+        journals_payload = checkpoint["journals"]
+        if not isinstance(journals_payload, dict):
+            raise ValueError("BFTS checkpoint journals must be an object")
+        invalid_journal_names = [
+            name
+            for name, payload in journals_payload.items()
+            if not isinstance(name, str) or not name or not isinstance(payload, dict)
+        ]
+        if invalid_journal_names:
+            raise ValueError("BFTS checkpoint contains invalid journal entries")
+
+        stages_payload = checkpoint.get("stages")
+        if not isinstance(stages_payload, list) or not stages_payload:
+            raise ValueError("BFTS checkpoint must contain at least one stage")
+        stage_names = []
+        for index, stage_payload in enumerate(stages_payload):
+            if not isinstance(stage_payload, dict):
+                raise ValueError(f"BFTS checkpoint stage {index} must be an object")
+            stage_name = stage_payload.get("name")
+            if not isinstance(stage_name, str) or not stage_name:
+                raise ValueError(f"BFTS checkpoint stage {index} has an invalid name")
+            stage_names.append(stage_name)
+        duplicate_stage_names = sorted(
+            name for name in set(stage_names) if stage_names.count(name) > 1
+        )
+        if duplicate_stage_names:
+            raise ValueError(
+                f"BFTS checkpoint contains duplicate stages: {duplicate_stage_names}"
+            )
+
+        stage_name_set = set(stage_names)
+        journal_name_set = set(journals_payload)
+        missing_journals = sorted(stage_name_set - journal_name_set)
+        if missing_journals:
+            raise ValueError(
+                f"BFTS checkpoint stages are missing journals: {missing_journals}"
+            )
+        unknown_journals = sorted(journal_name_set - stage_name_set)
+        if unknown_journals:
+            raise ValueError(
+                f"BFTS checkpoint journals reference unknown stages: {unknown_journals}"
+            )
+
+        current_stage_payload = checkpoint["current_stage"]
+        if current_stage_payload is not None:
+            if not isinstance(current_stage_payload, dict):
+                raise ValueError("BFTS checkpoint current stage must be an object")
+            current_stage_name = current_stage_payload.get("name")
+            if current_stage_name not in stage_name_set:
+                raise ValueError(
+                    "BFTS checkpoint current stage is not present in the stage list"
+                )
+            canonical_stage_payload = stages_payload[stage_names.index(current_stage_name)]
+            if current_stage_payload != canonical_stage_payload:
+                raise ValueError(
+                    "BFTS checkpoint current stage does not match its stage definition"
+                )
+
         manager = cls(
             task_desc=json.dumps(checkpoint["task_desc"]),
             cfg=cfg,
@@ -378,11 +436,11 @@ Your research idea:\n\n
         )
         manager.journals = {
             name: payload if isinstance(payload, Journal) else Journal.from_dict(payload)
-            for name, payload in checkpoint["journals"].items()
+            for name, payload in journals_payload.items()
         }
         manager.stages = [
             stage if isinstance(stage, Stage) else Stage(**stage)
-            for stage in (checkpoint.get("stages") or [])
+            for stage in stages_payload
         ]
         manager.stage_history = [
             transition
@@ -392,7 +450,7 @@ Your research idea:\n\n
         ]
         manager.completed_stages = list(checkpoint.get("completed_stages") or [])
         manager.current_stage_number = int(checkpoint.get("current_stage_number") or 0)
-        current_stage = checkpoint["current_stage"]
+        current_stage = current_stage_payload
         if isinstance(current_stage, dict):
             current_stage = Stage(**current_stage)
         if current_stage is not None:
@@ -404,8 +462,6 @@ Your research idea:\n\n
         manager.task_desc = checkpoint["task_desc"]
         manager.cfg = cfg
         manager.workspace_dir = workspace_dir
-        if not manager.stages and manager.current_stage is not None:
-            manager.stages = [manager.current_stage]
         return manager
 
     def _create_agent_for_stage(self, stage: Stage) -> ParallelAgent:

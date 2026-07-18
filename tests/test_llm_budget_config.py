@@ -8,7 +8,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from ai_scientist.treesearch.agent_manager import AgentManager, Stage
+from ai_scientist.treesearch.agent_manager import AgentManager, Stage, _sha256_json
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.utils.metric import MetricValue
 from ai_scientist.treesearch.utils.config import load_cfg, prep_cfg
@@ -16,6 +16,12 @@ from ai_scientist.utils.llm_budget import llm_budget_manager
 
 
 class LLMBudgetConfigTests(unittest.TestCase):
+    def _rewrite_checkpoint_payload(self, checkpoint: Path, mutate) -> None:
+        envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+        mutate(envelope["payload"])
+        envelope["payload_hash"] = _sha256_json(envelope["payload"])
+        checkpoint.write_text(json.dumps(envelope), encoding="utf-8")
+
     def test_load_cfg_resolves_relative_paths_from_config_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -367,6 +373,58 @@ class LLMBudgetConfigTests(unittest.TestCase):
                         "Experiments": [],
                         "Risk Factors and Limitations": [],
                     },
+                )
+
+    def test_checkpoint_rejects_inconsistent_stage_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            log_dir = root / "logs" / "0-run"
+            workspace.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+
+            checkpoint = manager._save_checkpoint()
+            current_stage_name = manager.current_stage.name
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["journals"].pop(current_stage_name),
+            )
+            with self.assertRaisesRegex(ValueError, "missing journals"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["stages"].append(
+                    dict(payload["stages"][0])
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate stages"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+
+            checkpoint = manager._save_checkpoint()
+            self._rewrite_checkpoint_payload(
+                checkpoint,
+                lambda payload: payload["current_stage"].update(
+                    {"name": "9_missing_stage_1_invalid"}
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "current stage is not present"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
                 )
 
     def test_checkpoint_rejects_legacy_pickle_extension(self) -> None:
