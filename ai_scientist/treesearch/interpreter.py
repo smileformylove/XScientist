@@ -4,19 +4,25 @@ Supports:
 - captures stdout and stderr
 - captures exceptions and stack traces
 - limits execution time
+- optional Docker isolation for AI-generated code
 """
+
 from __future__ import annotations
 
 import logging
 import os
 import queue
+import shutil
 import signal
+import subprocess
 import sys
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
 from pathlib import Path
+from typing import Any, Literal
 
 import humanize
 from dataclasses_json import DataClassJsonMixin
@@ -36,6 +42,106 @@ class ExecutionResult(DataClassJsonMixin):
     exc_type: str | None
     exc_info: dict | None = None
     exc_stack: list[tuple] | None = None
+    execution_backend: str = "process"
+    isolation: dict[str, Any] | None = None
+
+
+class SandboxUnavailableError(RuntimeError):
+    """Raised when an isolated backend is required but cannot be started."""
+
+
+@dataclass(frozen=True)
+class SandboxPolicy:
+    """Execution policy for AI-generated experiment code."""
+
+    backend: Literal["auto", "process", "docker"] = "auto"
+    require_isolation: bool = False
+    docker_image: str = "xscientist-exec:latest"
+    network: Literal["none", "bridge"] = "none"
+    memory: str = "4g"
+    cpus: float = 2.0
+    pids_limit: int = 256
+    read_only_root: bool = True
+    read_only_mounts: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"auto", "process", "docker"}:
+            raise ValueError(f"Unsupported execution backend: {self.backend}")
+        if self.network not in {"none", "bridge"}:
+            raise ValueError(f"Unsupported Docker network mode: {self.network}")
+        if self.cpus <= 0:
+            raise ValueError("Sandbox CPU limit must be positive")
+        if self.pids_limit <= 0:
+            raise ValueError("Sandbox PID limit must be positive")
+
+
+def sandbox_policy_from_config(exec_config: Any | None) -> SandboxPolicy:
+    """Build a sandbox policy from an OmegaConf/dataclass execution config."""
+
+    if exec_config is None:
+        return SandboxPolicy()
+
+    return SandboxPolicy(
+        backend=str(getattr(exec_config, "backend", "auto") or "auto").lower(),
+        require_isolation=bool(getattr(exec_config, "require_isolation", False)),
+        docker_image=str(
+            getattr(exec_config, "docker_image", "xscientist-exec:latest")
+            or "xscientist-exec:latest"
+        ),
+        network=str(getattr(exec_config, "network", "none") or "none").lower(),
+        memory=str(getattr(exec_config, "memory", "4g") or "4g"),
+        cpus=float(getattr(exec_config, "cpus", 2.0) or 2.0),
+        pids_limit=int(getattr(exec_config, "pids_limit", 256) or 256),
+        read_only_root=bool(getattr(exec_config, "read_only_root", True)),
+        read_only_mounts=tuple(
+            str(item)
+            for item in (getattr(exec_config, "read_only_mounts", ()) or ())
+            if str(item).strip()
+        ),
+    )
+
+
+def docker_is_available() -> tuple[bool, str | None]:
+    """Return whether the Docker daemon is reachable, plus a failure reason."""
+
+    docker = shutil.which("docker")
+    if docker is None:
+        return False, "docker executable not found"
+    try:
+        probe = subprocess.run(
+            [docker, "info", "--format", "{{json .ServerVersion}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"docker availability check failed: {exc}"
+    if probe.returncode != 0:
+        reason = (probe.stderr or probe.stdout or "docker daemon unavailable").strip()
+        return False, reason
+    return True, None
+
+
+def docker_image_is_available(image: str) -> tuple[bool, str | None]:
+    """Return whether an executor image is already present locally."""
+
+    docker = shutil.which("docker")
+    if docker is None:
+        return False, "docker executable not found"
+    try:
+        probe = subprocess.run(
+            [docker, "image", "inspect", image],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"docker image check failed: {exc}"
+    if probe.returncode != 0:
+        return False, f"docker image is not available locally: {image}"
+    return True, None
 
 
 def exception_summary(e, working_dir, exec_file_name, format_tb_ipython):
@@ -86,7 +192,8 @@ class Interpreter:
         timeout: int = 3600,
         format_tb_ipython: bool = False,
         agent_file_name: str = "runfile.py",
-        env_vars: dict[str, str] = {},
+        env_vars: dict[str, str | None] | None = None,
+        sandbox_policy: SandboxPolicy | None = None,
     ):
         """
         Simulates a standalone Python REPL with an execution time limit.
@@ -96,7 +203,8 @@ class Interpreter:
             timeout (int, optional): Timeout for each code execution step. Defaults to 3600.
             format_tb_ipython (bool, optional): Whether to use IPython or default python REPL formatting for exceptions. Defaults to False.
             agent_file_name (str, optional): The name for the agent's code file. Defaults to "runfile.py".
-            env_vars (dict[str, str], optional): Environment variables to set in the child process. Defaults to {}.
+            env_vars: Explicit environment variables to expose to the generated code.
+            sandbox_policy: Selects process/Docker execution and isolation limits.
         """
         # this really needs to be a path, otherwise causes issues that don't raise exc
         self.working_dir = Path(working_dir).resolve()
@@ -107,7 +215,68 @@ class Interpreter:
         self.format_tb_ipython = format_tb_ipython
         self.agent_file_name = agent_file_name
         self.process: Process = None  # type: ignore
-        self.env_vars = env_vars
+        self.env_vars = {
+            str(key): str(value)
+            for key, value in (env_vars or {}).items()
+            if value is not None
+        }
+        self.sandbox_policy = sandbox_policy or SandboxPolicy(backend="process")
+        self.execution_backend, self.isolation_reason = self._resolve_backend()
+
+    def _resolve_backend(self) -> tuple[str, str | None]:
+        policy = self.sandbox_policy
+        if policy.backend == "process":
+            if policy.require_isolation:
+                raise SandboxUnavailableError(
+                    "Execution isolation is required, but backend='process' is not isolated."
+                )
+            return "process", "process backend explicitly selected"
+
+        available, reason = docker_is_available()
+        if available:
+            image_available, image_reason = docker_image_is_available(
+                policy.docker_image
+            )
+            if image_available:
+                return "docker", None
+            reason = image_reason
+        if policy.backend == "docker" or policy.require_isolation:
+            raise SandboxUnavailableError(
+                "Docker isolation was requested but is unavailable: " + str(reason)
+            )
+        logger.warning(
+            "Docker sandbox unavailable; falling back to the non-isolated process "
+            "backend. Set exec.require_isolation=true to fail closed. Reason: %s",
+            reason,
+        )
+        return "process", reason
+
+    def execution_metadata(self) -> dict[str, Any]:
+        policy = self.sandbox_policy
+        return {
+            "requested_backend": policy.backend,
+            "actual_backend": self.execution_backend,
+            "isolated": self.execution_backend == "docker",
+            "require_isolation": policy.require_isolation,
+            "fallback_reason": self.isolation_reason,
+            "docker_image": (
+                policy.docker_image if self.execution_backend == "docker" else None
+            ),
+            "network": policy.network if self.execution_backend == "docker" else "host",
+            "memory": policy.memory if self.execution_backend == "docker" else None,
+            "cpus": policy.cpus if self.execution_backend == "docker" else None,
+            "pids_limit": (
+                policy.pids_limit if self.execution_backend == "docker" else None
+            ),
+            "read_only_root": (
+                policy.read_only_root if self.execution_backend == "docker" else False
+            ),
+            "read_only_mounts": (
+                list(policy.read_only_mounts)
+                if self.execution_backend == "docker"
+                else []
+            ),
+        }
 
     def child_proc_setup(self, result_outq: Queue) -> None:
         # disable all warnings (before importing anything)
@@ -115,8 +284,16 @@ class Interpreter:
 
         shutup.mute_warnings()
 
-        for key, value in self.env_vars.items():
-            os.environ[key] = value
+        safe_process_env = {
+            "PATH": os.defpath,
+            "HOME": str(self.working_dir),
+            "TMPDIR": str(self.working_dir / ".tmp"),
+            "LANG": "C.UTF-8",
+        }
+        (self.working_dir / ".tmp").mkdir(parents=True, exist_ok=True)
+        os.environ.clear()
+        os.environ.update(safe_process_env)
+        os.environ.update(self.env_vars)
 
         # Default cache locations for faster repeated dataset/model downloads.
         # Do not override user-provided env vars.
@@ -221,6 +398,184 @@ class Interpreter:
         self.process.close()
         self.process = None  # type: ignore
 
+    def _docker_command(self) -> list[str]:
+        return self._docker_command_for_name(None)
+
+    def _docker_command_for_name(self, container_name: str | None) -> list[str]:
+        policy = self.sandbox_policy
+        docker = shutil.which("docker")
+        if docker is None:
+            raise SandboxUnavailableError(
+                "docker executable disappeared during execution"
+            )
+
+        command = [
+            docker,
+            "run",
+            "--rm",
+            "--init",
+            "--network",
+            policy.network,
+            "--memory",
+            policy.memory,
+            "--cpus",
+            str(policy.cpus),
+            "--pids-limit",
+            str(policy.pids_limit),
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--workdir",
+            "/workspace",
+            "--mount",
+            f"type=bind,src={self.working_dir},dst=/workspace,rw",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=1g",
+        ]
+        if container_name:
+            command[3:3] = ["--name", container_name]
+        if policy.read_only_root:
+            command.append("--read-only")
+        mounted_sources = {str(self.working_dir)}
+        for raw_mount in policy.read_only_mounts:
+            mount_path = Path(raw_mount).expanduser().resolve()
+            if not mount_path.exists():
+                logger.warning("Skipping missing read-only sandbox mount: %s", mount_path)
+                continue
+            source = str(mount_path)
+            if source in mounted_sources:
+                continue
+            mounted_sources.add(source)
+            command.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={source},dst={source},readonly",
+                ]
+            )
+        container_env = {
+            "HOME": "/workspace/.home",
+            "TMPDIR": "/tmp",
+            "XDG_CACHE_HOME": "/workspace/.cache",
+            "MPLCONFIGDIR": "/workspace/.cache/matplotlib",
+            "HF_HOME": "/workspace/.cache/huggingface",
+            "HF_DATASETS_CACHE": "/workspace/.cache/huggingface/datasets",
+            "HF_HUB_CACHE": "/workspace/.cache/huggingface/hub",
+            "TRANSFORMERS_CACHE": "/workspace/.cache/huggingface/transformers",
+            "TORCH_HOME": "/workspace/.cache/torch",
+        }
+        container_env.update(self.env_vars)
+        for key, value in sorted(container_env.items()):
+            command.extend(["--env", f"{key}={value}"])
+        command.extend(
+            [
+                policy.docker_image,
+                "python",
+                "-u",
+                f"/workspace/{self.agent_file_name}",
+            ]
+        )
+        return command
+
+    def _force_remove_container(self, container_name: str) -> None:
+        docker = shutil.which("docker")
+        if docker is None:
+            return
+        try:
+            subprocess.run(
+                [docker, "rm", "-f", container_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.warning("Failed to remove timed-out Docker container %s", container_name)
+
+    def _run_docker(self, code: str) -> ExecutionResult:
+        for directory in (
+            self.working_dir / ".home",
+            self.working_dir / ".cache" / "matplotlib",
+            self.working_dir / ".cache" / "huggingface",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        script_path = self.working_dir / self.agent_file_name
+        script_path.write_text(code, encoding="utf-8")
+        try:
+            script_path.chmod(0o664)
+        except OSError:
+            pass
+        started = time.monotonic()
+        metadata = self.execution_metadata()
+        container_name = f"xscientist-{uuid.uuid4().hex[:16]}"
+        try:
+            completed = subprocess.run(
+                self._docker_command_for_name(container_name),
+                cwd=self.working_dir,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+            exec_time = time.monotonic() - started
+        except subprocess.TimeoutExpired as exc:
+            self._force_remove_container(container_name)
+            output = []
+            if exc.stdout:
+                output.append(str(exc.stdout))
+            if exc.stderr:
+                output.append(str(exc.stderr))
+            output.append(
+                f"TimeoutError: Execution exceeded the time limit of "
+                f"{humanize.naturaldelta(self.timeout)}"
+            )
+            return ExecutionResult(
+                term_out=output,
+                exec_time=float(self.timeout),
+                exc_type="TimeoutError",
+                exc_info={"backend": "docker"},
+                exc_stack=[],
+                execution_backend="docker",
+                isolation=metadata,
+            )
+        except OSError as exc:
+            return ExecutionResult(
+                term_out=[f"SandboxUnavailableError: {exc}"],
+                exec_time=time.monotonic() - started,
+                exc_type="SandboxUnavailableError",
+                exc_info={"args": [str(exc)], "backend": "docker"},
+                exc_stack=[],
+                execution_backend="docker",
+                isolation=metadata,
+            )
+
+        output: list[str] = []
+        if completed.stdout:
+            output.append(completed.stdout)
+        if completed.stderr:
+            output.append(completed.stderr)
+        exc_type = None if completed.returncode == 0 else "ProcessExitError"
+        exc_info = (
+            None
+            if completed.returncode == 0
+            else {"returncode": completed.returncode, "backend": "docker"}
+        )
+        output.append(
+            f"Execution time: {humanize.naturaldelta(exec_time)} seconds "
+            f"(time limit is {humanize.naturaldelta(self.timeout)})."
+        )
+        return ExecutionResult(
+            term_out=output,
+            exec_time=exec_time,
+            exc_type=exc_type,
+            exc_info=exc_info,
+            exc_stack=[],
+            execution_backend="docker",
+            isolation=metadata,
+        )
+
     def run(self, code: str, reset_session=True) -> ExecutionResult:
         """
         Execute the provided Python command in a separate process and return its output.
@@ -234,7 +589,19 @@ class Interpreter:
 
         """
 
-        logger.debug(f"REPL is executing code (reset_session={reset_session})")
+        logger.debug(
+            "Interpreter is executing code (backend=%s, reset_session=%s)",
+            self.execution_backend,
+            reset_session,
+        )
+
+        if self.execution_backend == "docker":
+            if not reset_session:
+                logger.warning(
+                    "Docker backend does not preserve interactive globals; executing in a "
+                    "fresh isolated container."
+                )
+            return self._run_docker(code)
 
         if reset_session:
             if self.process is not None:
@@ -334,4 +701,12 @@ class Interpreter:
             output.append(
                 f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(self.timeout)})."
             )
-        return ExecutionResult(output, exec_time, e_cls_name, exc_info, exc_stack)
+        return ExecutionResult(
+            output,
+            exec_time,
+            e_cls_name,
+            exc_info,
+            exc_stack,
+            execution_backend="process",
+            isolation=self.execution_metadata(),
+        )

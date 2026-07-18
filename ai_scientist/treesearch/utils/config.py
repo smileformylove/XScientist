@@ -1,7 +1,8 @@
 """configuration and setup utils"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Hashable, cast, Literal, Optional
 
@@ -74,11 +75,22 @@ class AgentConfig:
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
 
+
 @dataclass
 class ExecConfig:
     timeout: int
     agent_file_name: str
     format_tb_ipython: bool
+    backend: str = "auto"
+    require_isolation: bool = False
+    docker_image: str = "xscientist-exec:latest"
+    network: str = "none"
+    allow_experiment_network: bool = False
+    memory: str = "4g"
+    cpus: float = 2.0
+    pids_limit: int = 256
+    read_only_root: bool = True
+    read_only_mounts: list[str] = field(default_factory=list)
 
 
 @dataclass

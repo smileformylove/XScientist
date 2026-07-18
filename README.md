@@ -158,6 +158,31 @@ python3 validate_repo.py
 make smoke
 ```
 
+### 5) Isolate AI-generated experiment code
+
+The BFTS executor supports `process`, `docker`, and `auto` backends under the
+`exec:` section of `bfts_config*.yaml`. `auto` prefers Docker and records any
+fallback to the non-isolated process backend in each node/ARA. For trusted,
+submission-grade runs, set `require_isolation: true` so execution fails closed
+when Docker is unavailable. The Docker policy drops capabilities, disables
+network access by default, uses a read-only root filesystem, and applies CPU,
+memory, and PID limits. The bundled image installs the CPU PyTorch build; GPU
+runs should use a CUDA-specific image and an explicit device policy. Build or
+provide an image containing the experiment dependencies and pin `docker_image`
+by digest for reproducible runs. Metric parsing and plotting remain offline.
+The experiment phase may use bridge networking when
+`allow_experiment_network: true` is enabled for dataset/model downloads;
+it is disabled by default and should be turned off again after inputs are
+cached. `require_isolation: true` rejects networked
+experiment execution, so strict runs must place required inputs in the run
+workspace before execution. Container downloads are cached inside that
+workspace rather than writing to shared host caches. Only the run workspace is
+writable; configured data and run-log directories are mounted read-only.
+
+```bash
+make executor-image
+```
+
 ---
 
 ## Configuration

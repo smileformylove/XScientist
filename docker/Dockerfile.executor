@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/xscientist
+COPY requirements.txt constraints-ci.txt ./
+RUN python -m pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+RUN python -m pip install --no-cache-dir \
+    -r requirements.txt -c constraints-ci.txt
+
+RUN useradd --create-home --uid 10001 scientist
+USER scientist
+WORKDIR /workspace
+
+CMD ["python", "--version"]

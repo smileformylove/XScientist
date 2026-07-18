@@ -72,6 +72,8 @@ class Node(DataClassJsonMixin):
     exc_type: str | None = field(default=None, kw_only=True)
     exc_info: dict | None = field(default=None, kw_only=True)
     exc_stack: list[tuple] | None = field(default=None, kw_only=True)
+    execution_backend: str | None = field(default=None, kw_only=True)
+    execution_isolation: dict[str, Any] | None = field(default=None, kw_only=True)
 
     # ---- parsing info ----
     parse_metrics_plan: str = field(default="", kw_only=True)
@@ -189,6 +191,8 @@ class Node(DataClassJsonMixin):
         self.exc_type = exec_result.exc_type
         self.exc_info = exec_result.exc_info
         self.exc_stack = exec_result.exc_stack
+        self.execution_backend = exec_result.execution_backend
+        self.execution_isolation = exec_result.isolation
 
     def absorb_plot_exec_result(self, plot_exec_result: ExecutionResult):
         """Absorb the result of executing the plotting code from this node."""
@@ -250,6 +254,8 @@ class Node(DataClassJsonMixin):
             "exc_type": self.exc_type,
             "exc_info": self.exc_info,
             "exc_stack": self.exc_stack,
+            "execution_backend": self.execution_backend,
+            "execution_isolation": self.execution_isolation,
             "analysis": self.analysis,
             "exp_results_dir": (
                 str(_safe_relative_to(Path(self.exp_results_dir).resolve()))

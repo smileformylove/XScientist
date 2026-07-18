@@ -21,6 +21,19 @@ exec:
   timeout: 3600
   agent_file_name: runfile.py
   format_tb_ipython: False
+  # auto uses Docker when available and otherwise reports a non-isolated fallback.
+  # Set require_isolation: true for runs that must fail closed.
+  backend: auto
+  require_isolation: false
+  docker_image: xscientist-exec:latest
+  network: none
+  # Experiment code may download declared datasets/models; metric parsing and
+  # plotting stay offline. Disable after inputs are cached.
+  allow_experiment_network: false
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  read_only_root: true
 
 generate_report: True
 # LLM settings for final report from journal

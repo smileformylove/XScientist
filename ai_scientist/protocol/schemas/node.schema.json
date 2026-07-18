@@ -12,6 +12,8 @@
     "exc_type": {"type": ["string", "null"]},
     "exc_info": {"type": ["object", "null"]},
     "exec_time": {"type": ["number", "null"]},
+    "execution_backend": {"type": ["string", "null"]},
+    "execution_isolation": {"type": ["object", "null"]},
     "content_hash": {"type": ["string", "null"]},
     "content_hash_inputs": {
       "type": "array",

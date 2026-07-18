@@ -7,7 +7,7 @@ from queue import Queue
 import logging
 import humanize
 from .backend import FunctionSpec, compile_prompt_to_md, query
-from .interpreter import ExecutionResult
+from .interpreter import ExecutionResult, sandbox_policy_from_config
 from .journal import Journal, Node
 from .utils import data_preview
 from .utils.config import Config
@@ -15,6 +15,7 @@ from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
 from ai_scientist.protocol import capture_llm_calls
 import copy
+import dataclasses
 import pickle
 from dataclasses import asdict
 from omegaconf import OmegaConf
@@ -27,6 +28,61 @@ import sys
 logger = logging.getLogger("ai-scientist")
 
 ExecCallbackType = Callable[[str, bool], ExecutionResult]
+
+
+def _sandbox_policy_for_workspace(cfg: Config):
+    """Expose only explicit read-only roots needed by experiment code."""
+
+    policy = sandbox_policy_from_config(cfg.exec)
+    read_only_mounts = set(policy.read_only_mounts)
+    data_dir = getattr(cfg, "data_dir", None)
+    if data_dir:
+        read_only_mounts.add(str(Path(data_dir).resolve()))
+    log_dir = getattr(cfg, "log_dir", None)
+    if log_dir:
+        read_only_mounts.add(str(Path(log_dir).resolve()))
+    return dataclasses.replace(
+        policy,
+        read_only_mounts=tuple(sorted(read_only_mounts)),
+    )
+
+
+def _experiment_execution_env() -> dict[str, str | None]:
+    allowed = (
+        "CUDA_VISIBLE_DEVICES",
+    )
+    return {name: os.getenv(name) for name in allowed}
+
+
+def _interpreter_for_workspace(
+    cfg: Config,
+    workspace: str | Path,
+    *,
+    allow_network: bool,
+):
+    from .interpreter import Interpreter
+
+    policy = _sandbox_policy_for_workspace(cfg)
+    if allow_network and policy.network == "none":
+        policy = dataclasses.replace(policy, network="bridge")
+    return Interpreter(
+        working_dir=workspace,
+        timeout=cfg.exec.timeout,
+        format_tb_ipython=cfg.exec.format_tb_ipython,
+        agent_file_name=cfg.exec.agent_file_name,
+        env_vars=_experiment_execution_env(),
+        sandbox_policy=policy,
+    )
+
+
+def _experiment_network_enabled(cfg: Config) -> bool:
+    requested = bool(getattr(cfg.exec, "allow_experiment_network", False))
+    if requested and bool(getattr(cfg.exec, "require_isolation", False)):
+        raise ValueError(
+            "Strict isolation cannot be combined with experiment network access; "
+            "set exec.allow_experiment_network=false and pre-cache inputs."
+        )
+    return requested
 
 
 def _safe_pickle_test(obj, name="object"):
@@ -1424,12 +1480,10 @@ class ParallelAgent:
 
                 # Execute aggregation plotting code
                 print("[blue]Creating Interpreter for seed node aggregation[/blue]")
-                process_interpreter = Interpreter(
-                    working_dir=self.cfg.workspace_dir,
-                    timeout=self.cfg.exec.timeout,
-                    format_tb_ipython=self.cfg.exec.format_tb_ipython,
-                    agent_file_name=self.cfg.exec.agent_file_name,
-                    env_vars={"AI_SCIENTIST_ROOT": os.getenv("AI_SCIENTIST_ROOT")},
+                process_interpreter = _interpreter_for_workspace(
+                    self.cfg,
+                    self.cfg.workspace_dir,
+                    allow_network=False,
                 )
 
                 try:
@@ -1501,7 +1555,6 @@ class ParallelAgent:
         seed_eval=False,
     ):
         """Wrapper function that creates a fresh environment for each process"""
-        from .interpreter import Interpreter
         from .journal import Node, Journal
         from copy import deepcopy
         import os
@@ -1536,11 +1589,15 @@ class ParallelAgent:
 
         # Create interpreter instance for worker process
         print("Creating Interpreter")
-        process_interpreter = Interpreter(
-            working_dir=workspace,
-            timeout=cfg.exec.timeout,
-            format_tb_ipython=cfg.exec.format_tb_ipython,
-            agent_file_name=cfg.exec.agent_file_name,
+        experiment_interpreter = _interpreter_for_workspace(
+            cfg,
+            workspace,
+            allow_network=_experiment_network_enabled(cfg),
+        )
+        analysis_interpreter = _interpreter_for_workspace(
+            cfg,
+            workspace,
+            allow_network=False,
         )
 
         try:
@@ -1601,8 +1658,8 @@ class ParallelAgent:
 
             # Execute and parse results
             print("Running code")
-            exec_result = process_interpreter.run(child_node.code, True)
-            process_interpreter.cleanup_session()
+            exec_result = experiment_interpreter.run(child_node.code, True)
+            experiment_interpreter.cleanup_session()
 
             print("Parsing execution results")
             worker_agent.parse_exec_result(
@@ -1674,10 +1731,10 @@ class ParallelAgent:
                     child_node.parse_metrics_code = parse_metrics_code
                 try:
                     # Execute the parsing code
-                    metrics_exec_result = process_interpreter.run(
+                    metrics_exec_result = analysis_interpreter.run(
                         parse_metrics_code, True
                     )
-                    process_interpreter.cleanup_session()
+                    analysis_interpreter.cleanup_session()
                     child_node.parse_term_out = metrics_exec_result.term_out
                     child_node.parse_exc_type = metrics_exec_result.exc_type
                     child_node.parse_exc_info = metrics_exec_result.exc_info
@@ -1782,8 +1839,8 @@ class ParallelAgent:
                             plotting_code = worker_agent._generate_plotting_code(
                                 child_node, working_dir, plot_code_from_prev_stage
                             )
-                        plot_exec_result = process_interpreter.run(plotting_code, True)
-                        process_interpreter.cleanup_session()
+                        plot_exec_result = analysis_interpreter.run(plotting_code, True)
+                        analysis_interpreter.cleanup_session()
                         child_node.plot_exec_result = plot_exec_result
                         if child_node.plot_exc_type and retry_count < 3:
                             print(
@@ -1884,6 +1941,9 @@ class ParallelAgent:
 
             traceback.print_exc()
             raise
+        finally:
+            experiment_interpreter.cleanup_session()
+            analysis_interpreter.cleanup_session()
 
     def _generate_hyperparam_tuning_idea(self) -> Optional[HyperparamTuningIdea]:
         """Generate the next hyperparam tuning idea based on what's been done.
@@ -2369,7 +2429,7 @@ class ParallelAgent:
                     experiment_data_path_list = # Make sure to use the correct experiment data path that's provided in the Experiment Data Path section
                     all_experiment_data = []
                     for experiment_data_path in experiment_data_path_list:
-                        experiment_data = np.load(os.path.join(os.getenv("AI_SCIENTIST_ROOT"), experiment_data_path), allow_pickle=True).item()
+                        experiment_data = np.load(experiment_data_path, allow_pickle=True).item()
                         all_experiment_data.append(experiment_data)
                 except Exception as e:
                     print(f'Error loading experiment data: {{e}}')

@@ -68,6 +68,12 @@ class ARAExporterTest(unittest.TestCase):
                 "metric": {"value": 0.1, "maximize": True, "name": "acc", "description": ""},
                 "analysis": "baseline drafted",
                 "is_buggy": False,
+                "execution_backend": "docker",
+                "execution_isolation": {
+                    "isolated": True,
+                    "network": "none",
+                    "docker_image": "xscientist-exec@sha256:test",
+                },
                 "parent_id": None,
                 "children": ["node_child"],
                 "plots": ["logs/0-run/plot.png"],
@@ -133,6 +139,16 @@ class ARAExporterTest(unittest.TestCase):
             self.assertTrue((result.root / "nodes" / node_id / "code.py").exists())
             self.assertTrue((result.root / "nodes" / node_id / "term_out.log").exists())
             self.assertTrue((result.root / "nodes" / node_id / "metrics.json").exists())
+
+        root_metrics = json.loads(
+            (result.root / "nodes" / "node_root" / "metrics.json").read_text()
+        )
+        self.assertEqual(root_metrics["execution_backend"], "docker")
+        self.assertTrue(root_metrics["execution_isolation"]["isolated"])
+        root_graph_node = {
+            node["id"]: node for node in graph["nodes"]
+        }["node_root"]
+        self.assertEqual(root_graph_node["execution_backend"], "docker")
 
         # ARA lives under `<project_dir>/ara/`.
         self.assertTrue(str(result.root).startswith(str(ara_root_for_project(self.project_dir))))

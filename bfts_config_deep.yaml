@@ -27,6 +27,15 @@ exec:
   timeout: 3600
   agent_file_name: runfile.py
   format_tb_ipython: False
+  backend: auto
+  require_isolation: false
+  docker_image: xscientist-exec:latest
+  network: none
+  allow_experiment_network: false
+  memory: 8g
+  cpus: 4.0
+  pids_limit: 512
+  read_only_root: true
 
 generate_report: True
 # LLM settings for final report from journal

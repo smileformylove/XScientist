@@ -289,6 +289,8 @@ def _export_nodes_from_journal(
             "exc_type": raw.get("exc_type"),
             "exc_info": raw.get("exc_info"),
             "exec_time": raw.get("exec_time"),
+            "execution_backend": raw.get("execution_backend"),
+            "execution_isolation": raw.get("execution_isolation"),
         }
         # Content hash lets downstream consumers match "the same experiment"
         # across ARA instances by payload, not path. Documented in SPEC.md.
@@ -363,6 +365,8 @@ def _export_nodes_from_journal(
                 "plan_excerpt": (raw.get("plan") or "")[:400],
                 "exp_results_dir": raw.get("exp_results_dir"),
                 "ctime": raw.get("ctime"),
+                "execution_backend": raw.get("execution_backend"),
+                "execution_isolation": raw.get("execution_isolation"),
                 "artifacts_dir": str(node_dir.relative_to(nodes_root.parent.parent)),
             }
         )
