@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from igraph import Graph
 from ..journal import Journal
+from .serialize import atomic_write_json, atomic_write_text
 
 from rich import print
 
@@ -385,10 +386,10 @@ def generate(cfg, jou: Journal, out_path: Path):
     try:
         # Save the tree data as a JSON file in the same directory
         data_path = out_path.parent / "tree_data.json"
-        with open(data_path, "w") as f:
-            json.dump(tree_struct, f)
+        atomic_write_json(data_path, tree_struct, indent=None)
     except Exception as e:
         print(f"Error saving tree data JSON: {e}")
+        raise
 
     try:
         tree_graph_str = json.dumps(tree_struct)
@@ -400,8 +401,7 @@ def generate(cfg, jou: Journal, out_path: Path):
     except Exception as e:
         print(f"Error in generate_html: {e}")
         raise
-    with open(out_path, "w") as f:
-        f.write(html)
+    atomic_write_text(out_path, html)
 
     # Create a unified tree visualization that shows all stages
     try:
@@ -478,7 +478,6 @@ def create_unified_viz(cfg, current_stage_viz_path):
     html = html.replace("<!-- placeholder -->", js)
 
     # Write the unified visualization
-    with open(unified_viz_path, "w") as f:
-        f.write(html)
+    atomic_write_text(unified_viz_path, html)
 
     print(f"[green]Created unified visualization at {unified_viz_path}[/green]")
