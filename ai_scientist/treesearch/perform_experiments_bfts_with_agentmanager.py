@@ -57,6 +57,15 @@ class ExperimentInitializationError(RuntimeError):
         super().__init__(f"Experiment initialization failed during {phase}: {cause}")
 
 
+class ExperimentInitializationInterrupted(KeyboardInterrupt):
+    """Wrap an interruption that occurs before the experiment run loop starts."""
+
+    def __init__(self, phase: str, cause: KeyboardInterrupt):
+        self.phase = phase
+        self.cause = cause
+        super().__init__(f"Experiment initialization interrupted during {phase}")
+
+
 class ExperimentTermination(KeyboardInterrupt):
     """Raised in the main thread so SIGTERM can use normal checkpoint cleanup."""
 
@@ -133,12 +142,13 @@ def manager_state_payload(manager, cfg, run_status: str) -> dict:
     return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
 
 
-def initialization_failure_result(
+def initialization_status_result(
     config_path: Path,
     lock_root: Path,
     *,
+    status: str,
     phase: str,
-    cause: Exception,
+    cause: BaseException,
 ) -> dict:
     status_dir = lock_root / ".xscientist" / "initialization_failures"
     status_path = status_dir / (
@@ -147,17 +157,31 @@ def initialization_failure_result(
     )
     payload = {
         "schema": INITIALIZATION_STATUS_SCHEMA,
-        "status": "initialization_failed",
+        "status": status,
         "updated_at": datetime.now().isoformat(),
         "config_path": str(config_path),
         "lock_root": str(lock_root),
         "initialization_phase": phase,
         "failure_error": {
             "type": type(cause).__name__,
-            "message": str(cause),
+            "message": (
+                str(cause)
+                or (
+                    "Experiment initialization interrupted by user"
+                    if isinstance(cause, KeyboardInterrupt)
+                    else type(cause).__name__
+                )
+            ),
         },
         "resumable": False,
     }
+    if isinstance(cause, ExperimentTermination):
+        payload["failure_error"].update(
+            {
+                "signal": cause.signal_name,
+                "signal_number": cause.signum,
+            }
+        )
     persistence_errors = []
     try:
         write_json_atomic(status_path, payload)
@@ -203,50 +227,53 @@ def _perform_experiments_bfts_locked(config_path: str):
     config_path = Path(config_path)
     initialization_phase = "configuration"
     try:
-        cfg = load_cfg(config_path)
-        logger.info(f'Starting run "{cfg.exp_name}"')
+        with termination_signal_guard():
+            cfg = load_cfg(config_path)
+            logger.info(f'Starting run "{cfg.exp_name}"')
 
-        initialization_phase = "task_loading"
-        task_desc = load_task_desc(cfg)
-        print(task_desc)
-        task_desc_str = backend.compile_prompt_to_md(task_desc)
+            initialization_phase = "task_loading"
+            task_desc = load_task_desc(cfg)
+            print(task_desc)
+            task_desc_str = backend.compile_prompt_to_md(task_desc)
 
-        initialization_phase = "workspace_preparation"
-        if not cfg.resume_from:
-            with Status("Preparing agent workspace (copying and extracting files) ..."):
-                prep_agent_workspace(cfg)
+            initialization_phase = "workspace_preparation"
+            if not cfg.resume_from:
+                with Status("Preparing agent workspace (copying and extracting files) ..."):
+                    prep_agent_workspace(cfg)
 
-        initialization_phase = "run_artifacts"
-        results_tsv_path = cfg.log_dir / "results.tsv"
-        program_md_path = cfg.log_dir / "program.md"
-        results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
+            initialization_phase = "run_artifacts"
+            results_tsv_path = cfg.log_dir / "results.tsv"
+            program_md_path = cfg.log_dir / "program.md"
+            results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not results_tsv_path.exists():
-            results_tsv_path.write_text(
-                "\t".join(
-                    [
-                        "time",
-                        "stage",
-                        "step",
-                        "kind",
-                        "node_id",
-                        "parent_id",
-                        "status",
-                        "decision",
-                        "objective",
-                        "metric_mean",
-                        "metric_name",
-                        "maximize",
-                        "datasets",
-                        "exec_time_sec",
-                        "loc",
-                    ]
+            if not results_tsv_path.exists():
+                results_tsv_path.write_text(
+                    "\t".join(
+                        [
+                            "time",
+                            "stage",
+                            "step",
+                            "kind",
+                            "node_id",
+                            "parent_id",
+                            "status",
+                            "decision",
+                            "objective",
+                            "metric_mean",
+                            "metric_name",
+                            "maximize",
+                            "datasets",
+                            "exec_time_sec",
+                            "loc",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
                 )
-                + "\n",
-                encoding="utf-8",
-            )
     except Exception as exc:
         raise ExperimentInitializationError(initialization_phase, exc) from exc
+    except KeyboardInterrupt as exc:
+        raise ExperimentInitializationInterrupted(initialization_phase, exc) from exc
 
     global_step = 0
 
@@ -378,64 +405,67 @@ def _perform_experiments_bfts_locked(config_path: str):
 
     initialization_phase = "checkpoint_restore" if cfg.resume_from else "manager_creation"
     try:
-        if cfg.resume_from:
-            manager = AgentManager.from_checkpoint(
-                cfg.resume_from,
-                cfg=cfg,
-                workspace_dir=Path(cfg.workspace_dir),
-                expected_task_desc=task_desc,
-            )
-            logged_node_ids.update(
-                node.id
-                for journal in manager.journals.values()
-                for node in journal.nodes
-                if getattr(node, "id", None)
-            )
-            for stage_name, journal in manager.journals.items():
-                candidates = []
-                for node in journal.good_nodes:
-                    if getattr(node, "is_seed_node", False) or getattr(
-                        node, "is_seed_agg_node", False
-                    ):
-                        continue
-                    _, objective, _, _ = _metric_meta(node)
-                    if objective is None:
-                        continue
-                    if stage_name.startswith("2_") and len(
-                        set(getattr(node, "datasets_successfully_tested", None) or [])
-                    ) < 2:
-                        continue
-                    candidates.append(
-                        {
-                            "objective": objective,
-                            "loc": len((node.code or "").splitlines()),
-                            "node_id": node.id,
-                        }
-                    )
-                if candidates:
-                    stage_best[stage_name] = max(
-                        candidates,
-                        key=lambda item: (item["objective"], -item["loc"]),
-                    )
-            print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
-        else:
-            manager = AgentManager(
-                task_desc=task_desc,
-                cfg=cfg,
-                workspace_dir=Path(cfg.workspace_dir),
-            )
+        with termination_signal_guard():
+            if cfg.resume_from:
+                manager = AgentManager.from_checkpoint(
+                    cfg.resume_from,
+                    cfg=cfg,
+                    workspace_dir=Path(cfg.workspace_dir),
+                    expected_task_desc=task_desc,
+                )
+                logged_node_ids.update(
+                    node.id
+                    for journal in manager.journals.values()
+                    for node in journal.nodes
+                    if getattr(node, "id", None)
+                )
+                for stage_name, journal in manager.journals.items():
+                    candidates = []
+                    for node in journal.good_nodes:
+                        if getattr(node, "is_seed_node", False) or getattr(
+                            node, "is_seed_agg_node", False
+                        ):
+                            continue
+                        _, objective, _, _ = _metric_meta(node)
+                        if objective is None:
+                            continue
+                        if stage_name.startswith("2_") and len(
+                            set(getattr(node, "datasets_successfully_tested", None) or [])
+                        ) < 2:
+                            continue
+                        candidates.append(
+                            {
+                                "objective": objective,
+                                "loc": len((node.code or "").splitlines()),
+                                "node_id": node.id,
+                            }
+                        )
+                    if candidates:
+                        stage_best[stage_name] = max(
+                            candidates,
+                            key=lambda item: (item["objective"], -item["loc"]),
+                        )
+                print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
+            else:
+                manager = AgentManager(
+                    task_desc=task_desc,
+                    cfg=cfg,
+                    workspace_dir=Path(cfg.workspace_dir),
+                )
 
-        initialization_phase = "progress_ui"
-        prog = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=20),
-            MofNCompleteColumn(),
-            TimeRemainingColumn(),
-        )
-        status = Status("[green]Running experiments...")
-        prog.add_task("Progress:", total=cfg.agent.steps, completed=global_step)
+            initialization_phase = "progress_ui"
+            prog = Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=20),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(),
+            )
+            status = Status("[green]Running experiments...")
+            prog.add_task("Progress:", total=cfg.agent.steps, completed=global_step)
     except Exception as exc:
         raise ExperimentInitializationError(initialization_phase, exc) from exc
+    except KeyboardInterrupt as exc:
+        raise ExperimentInitializationInterrupted(initialization_phase, exc) from exc
 
     def create_exec_callback(status_obj):
         def exec_callback(*args, **kwargs):
@@ -697,13 +727,16 @@ def _perform_experiments_bfts_locked(config_path: str):
         )
 
     try:
-        live = Live(
-            generate_live(manager),
-            refresh_per_second=16,
-            screen=True,
-        )
+        with termination_signal_guard():
+            live = Live(
+                generate_live(manager),
+                refresh_per_second=16,
+                screen=True,
+            )
     except Exception as exc:
         raise ExperimentInitializationError("progress_ui", exc) from exc
+    except KeyboardInterrupt as exc:
+        raise ExperimentInitializationInterrupted("progress_ui", exc) from exc
 
     run_status = "completed"
     budget_error = None
@@ -907,7 +940,8 @@ def perform_experiments_bfts(config_path: str):
     lock_root = experiment_lock_root(config_path)
     run_lock = ExperimentRunLock(lock_root, config_path=config_path)
     try:
-        run_lock.acquire()
+        with termination_signal_guard():
+            run_lock.acquire()
     except ExperimentRunLocked as exc:
         return {
             "status": "locked",
@@ -921,9 +955,20 @@ def perform_experiments_bfts(config_path: str):
             "resumable": False,
         }
     except Exception as exc:
-        return initialization_failure_result(
+        run_lock.release()
+        return initialization_status_result(
             config_path,
             lock_root,
+            status="initialization_failed",
+            phase="run_lock",
+            cause=exc,
+        )
+    except KeyboardInterrupt as exc:
+        run_lock.release()
+        return initialization_status_result(
+            config_path,
+            lock_root,
+            status="initialization_interrupted",
             phase="run_lock",
             cause=exc,
         )
@@ -931,9 +976,18 @@ def perform_experiments_bfts(config_path: str):
     try:
         return _perform_experiments_bfts_locked(str(config_path))
     except ExperimentInitializationError as exc:
-        return initialization_failure_result(
+        return initialization_status_result(
             config_path,
             lock_root,
+            status="initialization_failed",
+            phase=exc.phase,
+            cause=exc.cause,
+        )
+    except ExperimentInitializationInterrupted as exc:
+        return initialization_status_result(
+            config_path,
+            lock_root,
+            status="initialization_interrupted",
             phase=exc.phase,
             cause=exc.cause,
         )

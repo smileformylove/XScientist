@@ -447,6 +447,13 @@ if __name__ == "__main__":
                     f"{experiment_result.get('initialization_phase', 'unknown')}: "
                     f"{failure.get('message', '')}"
                 )
+            elif experiment_status == "initialization_interrupted":
+                failure = experiment_result.get("failure_error") or {}
+                print(
+                    "Experiment initialization was interrupted during "
+                    f"{experiment_result.get('initialization_phase', 'unknown')}. "
+                    f"{failure.get('message', '')}"
+                )
             else:
                 failure = experiment_result.get("failure_error") or {}
                 print(

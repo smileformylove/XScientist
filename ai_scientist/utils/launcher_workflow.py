@@ -62,6 +62,11 @@ def experiment_stop_exit_code(experiment_result: Any) -> int | None:
             (experiment_result.get("failure_error") or {}).get("signal_number") or 0
         )
         return 128 + signal_number if signal_number else INTERRUPTED_EXIT_CODE
+    if status == "initialization_interrupted":
+        signal_number = int(
+            (experiment_result.get("failure_error") or {}).get("signal_number") or 0
+        )
+        return 128 + signal_number if signal_number else INTERRUPTED_EXIT_CODE
     if status == "failed":
         return 1
     if status == "initialization_failed":
@@ -250,14 +255,25 @@ def run_experiment_phase(
     experiment_result = perform_experiments_bfts(idea_config_path)
     if (
         isinstance(experiment_result, dict)
-        and experiment_result.get("status") in {"locked", "initialization_failed"}
+        and experiment_result.get("status")
+        in {"locked", "initialization_failed", "initialization_interrupted"}
     ):
-        if experiment_result.get("status") == "initialization_failed":
+        if experiment_result.get("status") in {
+            "initialization_failed",
+            "initialization_interrupted",
+        }:
+            interrupted = (
+                experiment_result.get("status") == "initialization_interrupted"
+            )
             save_token_tracker(idea_dir)
             mark_stage_stopped(
                 idea_dir,
                 "experiment",
-                reason="experiment_initialization_failed",
+                reason=(
+                    "experiment_initialization_interrupted"
+                    if interrupted
+                    else "experiment_initialization_failed"
+                ),
                 artifacts={
                     "config_path": str(idea_config_path),
                     "initialization_status": experiment_result.get(

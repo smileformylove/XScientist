@@ -21,8 +21,12 @@ from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
 )
 from ai_scientist.treesearch.utils.config import save_run
 from ai_scientist.treesearch.utils.metric import WorstMetricValue
+from ai_scientist.utils.experiment_run_lock import ExperimentRunLock
 from ai_scientist.utils.llm_budget import LLMBudgetExceeded
-from ai_scientist.utils.launcher_workflow import run_experiment_phase
+from ai_scientist.utils.launcher_workflow import (
+    experiment_stop_exit_code,
+    run_experiment_phase,
+)
 from ai_scientist.utils.run_index import is_stage_complete, mark_stage_stopped
 
 
@@ -293,6 +297,90 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertEqual(result["failure_error"]["message"], "invalid configuration")
             self.assertTrue(Path(result["initialization_status_path"]).is_file())
 
+    def test_workspace_initialization_interrupt_is_structured_and_releases_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = None
+            cfg.generate_report = False
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.prep_agent_workspace",
+                    side_effect=KeyboardInterrupt(),
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            self.assertEqual(result["status"], "initialization_interrupted")
+            self.assertEqual(result["initialization_phase"], "workspace_preparation")
+            self.assertEqual(result["failure_error"]["type"], "KeyboardInterrupt")
+            self.assertFalse((root / ".xscientist-experiment.lock").exists())
+
+    def test_checkpoint_initialization_sigterm_records_signal_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = root / "checkpoint.json"
+            cfg.generate_report = False
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager.from_checkpoint",
+                    side_effect=ExperimentTermination(signal.SIGTERM),
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            self.assertEqual(result["status"], "initialization_interrupted")
+            self.assertEqual(result["initialization_phase"], "checkpoint_restore")
+            self.assertEqual(result["failure_error"]["signal"], "SIGTERM")
+            self.assertEqual(result["failure_error"]["signal_number"], signal.SIGTERM)
+            self.assertEqual(
+                experiment_stop_exit_code(result),
+                128 + signal.SIGTERM,
+            )
+
     def test_lock_acquisition_failure_is_structured(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -310,6 +398,30 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "run_lock")
             self.assertEqual(result["failure_error"]["type"], "PermissionError")
+
+    def test_interrupt_after_lock_acquisition_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                f"workspace_dir: {root / 'workspaces'}\n", encoding="utf-8"
+            )
+            real_acquire = ExperimentRunLock.acquire
+
+            def acquire_then_interrupt(lock):
+                real_acquire(lock)
+                raise KeyboardInterrupt()
+
+            with mock.patch(
+                "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.ExperimentRunLock.acquire",
+                autospec=True,
+                side_effect=acquire_then_interrupt,
+            ):
+                result = perform_experiments_bfts(config_path)
+
+            self.assertEqual(result["status"], "initialization_interrupted")
+            self.assertEqual(result["initialization_phase"], "run_lock")
+            self.assertFalse((root / "workspaces" / ".xscientist-experiment.lock").exists())
 
     def test_manager_state_failure_is_reported_without_losing_run_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -475,6 +587,53 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             mark_stopped_mock.call_args.kwargs["metadata"]["initialization_phase"],
             "checkpoint_restore",
         )
+
+    @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_stopped")
+    @mock.patch("ai_scientist.utils.launcher_workflow.save_token_tracker")
+    @mock.patch("ai_scientist.utils.launcher_workflow.perform_experiments_bfts")
+    @mock.patch("ai_scientist.utils.launcher_workflow.edit_bfts_config_file")
+    @mock.patch(
+        "ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=False
+    )
+    def test_launcher_marks_initialization_interrupt_stopped(
+        self,
+        _stage_complete_mock: mock.Mock,
+        edit_config_mock: mock.Mock,
+        perform_mock: mock.Mock,
+        save_tracker_mock: mock.Mock,
+        mark_stopped_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            idea_path = root / "idea.json"
+            idea_path.write_text("{}", encoding="utf-8")
+            edit_config_mock.return_value = str(root / "bfts_config.yaml")
+            perform_mock.return_value = {
+                "status": "initialization_interrupted",
+                "initialization_phase": "workspace_preparation",
+                "initialization_status_path": str(root / "initialization.json"),
+                "failure_error": {
+                    "type": "KeyboardInterrupt",
+                    "message": "Experiment initialization interrupted by user",
+                },
+                "resumable": False,
+            }
+
+            result = run_experiment_phase(
+                root,
+                idea_path,
+                "plot-model",
+                resume=False,
+                logger=lambda _message: None,
+            )
+
+        self.assertEqual(result["status"], "initialization_interrupted")
+        save_tracker_mock.assert_called_once_with(root)
+        self.assertEqual(
+            mark_stopped_mock.call_args.kwargs["reason"],
+            "experiment_initialization_interrupted",
+        )
+        self.assertEqual(experiment_stop_exit_code(result), 130)
 
     def test_stopped_stage_is_not_completed_by_artifact_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
