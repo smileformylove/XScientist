@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,6 +48,8 @@ class ExperimentRunLockTests(unittest.TestCase):
             self.assertEqual(ctx.exception.owner["pid"], os.getpid())
             self.assertEqual(ctx.exception.owner["hostname"], socket.gethostname())
             self.assertEqual(ctx.exception.owner["config_path"], str(config_path))
+            self.assertIn("heartbeat_at", ctx.exception.owner)
+            self.assertIn("lease_timeout_seconds", ctx.exception.owner)
 
     def test_context_exit_releases_lock(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -57,6 +60,57 @@ class ExperimentRunLockTests(unittest.TestCase):
             self.assertFalse((root / LOCK_DIR_NAME).exists())
             with ExperimentRunLock(root):
                 self.assertTrue((root / LOCK_DIR_NAME).is_dir())
+
+    def test_heartbeat_refreshes_owner_and_stops_on_release(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            lock = ExperimentRunLock(root, heartbeat_interval_seconds=60)
+            lock.acquire()
+            heartbeat_thread = lock.heartbeat_thread
+            owner_path = lock.lock_dir / OWNER_FILE_NAME
+            before = json.loads(owner_path.read_text(encoding="utf-8"))["heartbeat_at"]
+
+            with mock.patch(
+                "ai_scientist.utils.experiment_run_lock.time.time",
+                return_value=before + 10,
+            ):
+                self.assertTrue(lock._refresh_heartbeat())
+
+            after = json.loads(owner_path.read_text(encoding="utf-8"))["heartbeat_at"]
+            self.assertEqual(after, before + 10)
+            self.assertTrue(heartbeat_thread.is_alive())
+            lock.release()
+            self.assertFalse(heartbeat_thread.is_alive())
+            self.assertFalse(lock.lock_dir.exists())
+
+    def test_heartbeat_keeps_lease_after_transient_write_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            lock = ExperimentRunLock(root, heartbeat_interval_seconds=60)
+            lock.acquire()
+            with mock.patch.object(
+                lock, "_write_owner_atomic", side_effect=OSError("shared disk busy")
+            ):
+                self.assertIsNone(lock._refresh_heartbeat())
+
+            self.assertTrue(lock.acquired)
+            self.assertTrue(lock.lock_dir.is_dir())
+            lock.release()
+
+    def test_heartbeat_start_failure_removes_acquired_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            lock = ExperimentRunLock(root)
+            with (
+                mock.patch.object(
+                    lock, "_start_heartbeat", side_effect=RuntimeError("thread denied")
+                ),
+                self.assertRaisesRegex(RuntimeError, "thread denied"),
+            ):
+                lock.acquire()
+
+            self.assertFalse(lock.acquired)
+            self.assertFalse(lock.lock_dir.exists())
 
     def test_owner_write_failure_removes_partial_lock(self) -> None:
         failures = (OSError("disk unavailable"), KeyboardInterrupt())
@@ -120,6 +174,95 @@ class ExperimentRunLockTests(unittest.TestCase):
                     (lock_dir / OWNER_FILE_NAME).read_text(encoding="utf-8")
                 )
                 self.assertEqual(persisted["token"], owner["token"])
+
+    def test_expired_remote_lock_is_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            lock_dir = self._write_owner(
+                root,
+                {
+                    "token": "remote-dead",
+                    "pid": 1234,
+                    "hostname": "remote.example",
+                    "lease_timeout_seconds": 1,
+                },
+            )
+            owner_path = lock_dir / OWNER_FILE_NAME
+            stale_time = time.time() - 10
+            os.utime(owner_path, (stale_time, stale_time))
+
+            with ExperimentRunLock(
+                root,
+                heartbeat_interval_seconds=60,
+                lease_timeout_seconds=1,
+            ) as acquired:
+                owner = json.loads(
+                    (acquired.lock_dir / OWNER_FILE_NAME).read_text(encoding="utf-8")
+                )
+                self.assertEqual(owner["token"], acquired.token)
+
+    def test_remote_heartbeat_refresh_during_reclaim_prevents_steal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original_owner = {
+                "token": "remote-live",
+                "pid": 1234,
+                "hostname": "remote.example",
+                "lease_timeout_seconds": 1,
+                "heartbeat_at": time.time() - 10,
+            }
+            lock_dir = self._write_owner(root, original_owner)
+            owner_path = lock_dir / OWNER_FILE_NAME
+            stale_time = time.time() - 10
+            os.utime(owner_path, (stale_time, stale_time))
+            refreshed_owner = {**original_owner, "heartbeat_at": time.time()}
+
+            read_count = 0
+
+            def read_owner_with_refresh(_lock_dir: Path) -> dict:
+                nonlocal read_count
+                read_count += 1
+                if read_count == 1:
+                    return original_owner
+                if read_count == 2:
+                    owner_path.write_text(
+                        json.dumps(refreshed_owner), encoding="utf-8"
+                    )
+                return refreshed_owner
+
+            with (
+                mock.patch(
+                    "ai_scientist.utils.experiment_run_lock._read_owner",
+                    side_effect=read_owner_with_refresh,
+                ),
+                self.assertRaises(ExperimentRunLocked),
+            ):
+                ExperimentRunLock(
+                    root,
+                    heartbeat_interval_seconds=0.1,
+                    lease_timeout_seconds=1,
+                ).acquire()
+
+            self.assertTrue(lock_dir.is_dir())
+
+    def test_live_local_pid_is_not_reclaimed_when_heartbeat_is_old(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            lock_dir = self._write_owner(
+                root,
+                {
+                    "token": "local-live",
+                    "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
+                    "lease_timeout_seconds": 1,
+                },
+            )
+            owner_path = lock_dir / OWNER_FILE_NAME
+            stale_time = time.time() - 10
+            os.utime(owner_path, (stale_time, stale_time))
+
+            with self.assertRaises(ExperimentRunLocked):
+                ExperimentRunLock(root, lease_timeout_seconds=1).acquire()
 
     def test_lock_root_uses_generated_layout_config_and_safe_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:

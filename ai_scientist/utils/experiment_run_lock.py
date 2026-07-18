@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ import yaml
 
 LOCK_DIR_NAME = ".xscientist-experiment.lock"
 OWNER_FILE_NAME = "owner.json"
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+DEFAULT_LEASE_TIMEOUT_SECONDS = 120.0
 SENSITIVE_COMMAND_MARKERS = (
     "api-key",
     "api_key",
@@ -123,39 +126,120 @@ def _read_owner(lock_dir: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _is_stale(lock_dir: Path, owner: dict[str, Any]) -> bool:
+def _lease_timeout(owner: dict[str, Any], fallback: float) -> float:
+    try:
+        lease_timeout = float(owner.get("lease_timeout_seconds") or fallback)
+    except (TypeError, ValueError):
+        lease_timeout = fallback
+    return max(1.0, lease_timeout)
+
+
+def _owner_age_seconds(lock_dir: Path) -> float:
+    try:
+        heartbeat_mtime = (lock_dir / OWNER_FILE_NAME).stat().st_mtime
+    except OSError:
+        try:
+            heartbeat_mtime = lock_dir.stat().st_mtime
+        except OSError:
+            return float("inf")
+    return max(0.0, time.time() - heartbeat_mtime)
+
+
+def _is_stale(
+    lock_dir: Path,
+    owner: dict[str, Any],
+    *,
+    lease_timeout_seconds: float = DEFAULT_LEASE_TIMEOUT_SECONDS,
+) -> bool:
     local_host = socket.gethostname()
     if owner.get("hostname") == local_host and owner.get("pid") is not None:
         return not _pid_is_alive(owner.get("pid"))
-    if owner:
-        return False
-    try:
-        return time.time() - lock_dir.stat().st_mtime > 30.0
-    except OSError:
-        return True
+    lease_timeout = _lease_timeout(owner, lease_timeout_seconds)
+    return _owner_age_seconds(lock_dir) > lease_timeout
 
 
 @dataclass
 class ExperimentRunLock:
     root: Path
     config_path: Path | None = None
+    heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    lease_timeout_seconds: float = DEFAULT_LEASE_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).expanduser().resolve()
+        self.heartbeat_interval_seconds = max(
+            0.05, float(self.heartbeat_interval_seconds)
+        )
+        self.lease_timeout_seconds = max(
+            self.heartbeat_interval_seconds * 2,
+            float(self.lease_timeout_seconds),
+        )
         self.lock_dir = self.root / LOCK_DIR_NAME
         self.token = uuid.uuid4().hex
         self.acquired = False
+        self.heartbeat_stop = threading.Event()
+        self.heartbeat_thread: threading.Thread | None = None
 
     def _owner_payload(self) -> dict[str, Any]:
+        now = time.time()
         return {
             "schema": "xscientist.experiment-lock.v1",
             "token": self.token,
             "pid": os.getpid(),
             "hostname": socket.gethostname(),
-            "started_at": time.time(),
+            "started_at": now,
+            "heartbeat_at": now,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
+            "lease_timeout_seconds": self.lease_timeout_seconds,
             "config_path": str(self.config_path) if self.config_path else None,
             "command": _sanitized_command(),
         }
+
+    def _write_owner_atomic(self, owner: dict[str, Any]) -> None:
+        owner_path = self.lock_dir / OWNER_FILE_NAME
+        temp_path = self.lock_dir / f".{OWNER_FILE_NAME}.{self.token}.tmp"
+        temp_path.write_text(
+            json.dumps(owner, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temp_path.replace(owner_path)
+
+    def _refresh_heartbeat(self) -> bool | None:
+        if not self.lock_dir.is_dir():
+            return False
+        owner = _read_owner(self.lock_dir)
+        if not owner:
+            return None
+        if owner.get("token") != self.token:
+            return False
+        owner["heartbeat_at"] = time.time()
+        owner["lease_timeout_seconds"] = self.lease_timeout_seconds
+        try:
+            self._write_owner_atomic(owner)
+        except OSError:
+            return None
+        return True
+
+    def _heartbeat_loop(self) -> None:
+        while not self.heartbeat_stop.wait(self.heartbeat_interval_seconds):
+            if self._refresh_heartbeat() is False:
+                return
+
+    def _start_heartbeat(self) -> None:
+        self.heartbeat_stop.clear()
+        self.heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"xscientist-lock-heartbeat-{self.token[:8]}",
+            daemon=True,
+        )
+        self.heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        self.heartbeat_stop.set()
+        thread = self.heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+        self.heartbeat_thread = None
 
     def acquire(self) -> "ExperimentRunLock":
         self.root.mkdir(parents=True, exist_ok=True)
@@ -164,8 +248,19 @@ class ExperimentRunLock:
                 self.lock_dir.mkdir()
             except FileExistsError:
                 owner = _read_owner(self.lock_dir)
-                if not _is_stale(self.lock_dir, owner):
+                if not _is_stale(
+                    self.lock_dir,
+                    owner,
+                    lease_timeout_seconds=self.lease_timeout_seconds,
+                ):
                     raise ExperimentRunLocked(self.lock_dir, owner)
+                latest_owner = _read_owner(self.lock_dir)
+                if latest_owner != owner or not _is_stale(
+                    self.lock_dir,
+                    latest_owner,
+                    lease_timeout_seconds=self.lease_timeout_seconds,
+                ):
+                    continue
                 stale_dir = self.root / f"{LOCK_DIR_NAME}.stale-{uuid.uuid4().hex}"
                 try:
                     self.lock_dir.rename(stale_dir)
@@ -174,24 +269,28 @@ class ExperimentRunLock:
                 shutil.rmtree(stale_dir, ignore_errors=True)
                 continue
 
-            owner_path = self.lock_dir / OWNER_FILE_NAME
-            temp_path = owner_path.with_suffix(".tmp")
             try:
-                temp_path.write_text(
-                    json.dumps(self._owner_payload(), indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                temp_path.replace(owner_path)
+                self._write_owner_atomic(self._owner_payload())
             except BaseException:
                 shutil.rmtree(self.lock_dir, ignore_errors=True)
                 raise
             self.acquired = True
+            try:
+                self._start_heartbeat()
+            except BaseException:
+                owner = _read_owner(self.lock_dir)
+                if owner.get("token") == self.token:
+                    shutil.rmtree(self.lock_dir, ignore_errors=True)
+                self.acquired = False
+                self.heartbeat_thread = None
+                raise
             return self
         raise ExperimentRunLocked(self.lock_dir, _read_owner(self.lock_dir))
 
     def release(self) -> None:
         if not self.acquired:
             return
+        self._stop_heartbeat()
         owner = _read_owner(self.lock_dir)
         if owner.get("token") == self.token:
             shutil.rmtree(self.lock_dir, ignore_errors=True)
