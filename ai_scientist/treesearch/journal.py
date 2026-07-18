@@ -626,11 +626,54 @@ class Journal:
     def from_dict(cls, data: dict) -> "Journal":
         """Restore a journal and its parent/child relationships from a dictionary."""
 
-        journal = cls()
+        if not isinstance(data, dict):
+            raise ValueError("Journal payload must be an object")
+        nodes_payload = data.get("nodes", [])
+        if not isinstance(nodes_payload, list):
+            raise ValueError("Journal nodes must be a list")
+
         parent_ids: dict[str, str | None] = {}
-        for node_data in data.get("nodes", []):
-            payload = copy.deepcopy(node_data)
-            parent_ids[str(payload.get("id"))] = payload.get("parent_id")
+        node_payloads: list[dict] = []
+        for index, node_data in enumerate(nodes_payload):
+            if not isinstance(node_data, dict):
+                raise ValueError(f"Journal node {index} must be an object")
+            node_id = node_data.get("id")
+            if not isinstance(node_id, str) or not node_id:
+                raise ValueError(f"Journal node {index} has an invalid id")
+            if node_id in parent_ids:
+                raise ValueError(f"Journal contains duplicate node id: {node_id}")
+            parent_id = node_data.get("parent_id")
+            if parent_id is not None and (
+                not isinstance(parent_id, str) or not parent_id
+            ):
+                raise ValueError(f"Journal node {node_id} has an invalid parent id")
+            parent_ids[node_id] = parent_id
+            node_payloads.append(copy.deepcopy(node_data))
+
+        node_ids = set(parent_ids)
+        for node_id, parent_id in parent_ids.items():
+            if parent_id is not None and parent_id not in node_ids:
+                raise ValueError(
+                    f"Journal node {node_id} references missing parent {parent_id}"
+                )
+
+        visited: set[str] = set()
+        for start_node_id in parent_ids:
+            if start_node_id in visited:
+                continue
+            ancestry: list[str] = []
+            ancestry_positions: dict[str, int] = {}
+            node_id: str | None = start_node_id
+            while node_id is not None and node_id not in visited:
+                if node_id in ancestry_positions:
+                    raise ValueError(f"Journal parent cycle detected at node {node_id}")
+                ancestry_positions[node_id] = len(ancestry)
+                ancestry.append(node_id)
+                node_id = parent_ids[node_id]
+            visited.update(ancestry)
+
+        journal = cls()
+        for payload in node_payloads:
             node = Node.from_dict(payload, journal=None)
             node.children = set()
             journal.nodes.append(node)
@@ -638,7 +681,7 @@ class Journal:
         nodes_by_id = {node.id: node for node in journal.nodes}
         for node in journal.nodes:
             parent_id = parent_ids.get(node.id)
-            if parent_id and parent_id in nodes_by_id:
+            if parent_id is not None:
                 node.parent = nodes_by_id[parent_id]
                 node.parent.children.add(node)
         return journal

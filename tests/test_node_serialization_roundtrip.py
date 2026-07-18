@@ -20,7 +20,68 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_scientist.treesearch.journal import Node
+from ai_scientist.treesearch.journal import Journal, Node
+
+
+class JournalGraphValidationTests(unittest.TestCase):
+    def _node_payload(self, node_id: str, parent_id: str | None = None) -> dict:
+        return Node(id=node_id, code="c", plan="p").to_dict() | {
+            "parent_id": parent_id
+        }
+
+    def test_rejects_duplicate_node_ids(self) -> None:
+        payload = {
+            "nodes": [self._node_payload("same"), self._node_payload("same")]
+        }
+
+        with self.assertRaisesRegex(ValueError, "duplicate node id"):
+            Journal.from_dict(payload)
+
+    def test_rejects_missing_parent(self) -> None:
+        payload = {"nodes": [self._node_payload("child", "missing")]}
+
+        with self.assertRaisesRegex(ValueError, "references missing parent"):
+            Journal.from_dict(payload)
+
+    def test_rejects_parent_cycle(self) -> None:
+        payload = {
+            "nodes": [
+                self._node_payload("a", "b"),
+                self._node_payload("b", "a"),
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "parent cycle"):
+            Journal.from_dict(payload)
+
+    def test_restores_valid_parent_graph(self) -> None:
+        payload = {
+            "nodes": [
+                self._node_payload("root"),
+                self._node_payload("child", "root"),
+            ]
+        }
+
+        journal = Journal.from_dict(payload)
+
+        self.assertIs(journal.nodes[1].parent, journal.nodes[0])
+        self.assertIn(journal.nodes[1], journal.nodes[0].children)
+
+    def test_restores_deep_parent_graph_without_recursion(self) -> None:
+        payload = {
+            "nodes": [
+                self._node_payload(
+                    f"node-{index}",
+                    None if index == 0 else f"node-{index - 1}",
+                )
+                for index in range(1200)
+            ]
+        }
+
+        journal = Journal.from_dict(payload)
+
+        self.assertEqual(len(journal.nodes), 1200)
+        self.assertIs(journal.nodes[-1].parent, journal.nodes[-2])
 
 
 class NodeSerializationRoundTripTests(unittest.TestCase):
