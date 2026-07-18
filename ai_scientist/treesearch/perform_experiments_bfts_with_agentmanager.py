@@ -27,7 +27,7 @@ from rich.text import Text
 from rich.status import Status
 from rich.tree import Tree
 from .utils.config import load_task_desc, prep_agent_workspace, save_run, load_cfg
-from .utils.serialize import atomic_write_json
+from .utils.serialize import atomic_write_json, atomic_write_text, durable_append_text
 from .agent_manager import AgentManager
 from pathlib import Path
 from .agent_manager import Stage
@@ -43,10 +43,26 @@ from ai_scientist.utils.experiment_run_lock import (
     experiment_lock_root,
 )
 
-
 logger = logging.getLogger("ai-scientist")
 MANAGER_STATE_SCHEMA = "xscientist.bfts.manager-state.v1"
 INITIALIZATION_STATUS_SCHEMA = "xscientist.bfts.initialization-status.v1"
+RESULTS_TSV_COLUMNS = (
+    "time",
+    "stage",
+    "step",
+    "kind",
+    "node_id",
+    "parent_id",
+    "status",
+    "decision",
+    "objective",
+    "metric_mean",
+    "metric_name",
+    "maximize",
+    "datasets",
+    "exec_time_sec",
+    "loc",
+)
 
 
 class ExperimentInitializationError(RuntimeError):
@@ -65,6 +81,10 @@ class ExperimentInitializationInterrupted(KeyboardInterrupt):
         self.phase = phase
         self.cause = cause
         super().__init__(f"Experiment initialization interrupted during {phase}")
+
+
+class ExperimentArtifactPersistenceError(RuntimeError):
+    """Raised when a completed step cannot be durably published."""
 
 
 class ExperimentTermination(KeyboardInterrupt):
@@ -103,6 +123,52 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     atomic_write_json(path, payload)
 
 
+def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
+    """Drop a torn tail row and recover durable ledger decision state."""
+
+    header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+    if not path.exists() or path.stat().st_size == 0:
+        atomic_write_text(path, header)
+        return set(), {}
+
+    raw = path.read_bytes()
+    complete_length = raw.rfind(b"\n") + 1
+    complete = raw[:complete_length] if complete_length > 0 else b""
+    try:
+        text = complete.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Invalid UTF-8 in experiment results ledger: {exc}") from exc
+
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0] != header:
+        raise ValueError(f"Unexpected experiment results ledger header: {path}")
+
+    valid_lines = [lines[0]]
+    node_ids: set[str] = set()
+    stage_best: dict[str, dict] = {}
+    data_lines = lines[1:]
+    for index, line in enumerate(data_lines):
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) != len(RESULTS_TSV_COLUMNS) or not fields[4]:
+            raise ValueError(f"Malformed experiment results ledger row {index + 2}")
+        valid_lines.append(line)
+        node_ids.add(fields[4])
+        if fields[3] == "main" and fields[7] == "keep" and fields[8]:
+            try:
+                stage_best[fields[1]] = {
+                    "objective": float(fields[8]),
+                    "loc": int(fields[14]),
+                    "node_id": fields[4],
+                }
+            except ValueError:
+                pass
+
+    repaired = "".join(valid_lines)
+    if repaired.encode("utf-8") != raw:
+        atomic_write_text(path, repaired)
+    return node_ids, stage_best
+
+
 def manager_state_payload(manager, cfg, run_status: str) -> dict:
     current_stage = getattr(manager, "current_stage", None)
     payload = {
@@ -122,9 +188,7 @@ def manager_state_payload(manager, cfg, run_status: str) -> dict:
             for transition in (getattr(manager, "stage_history", None) or [])
         ],
         "completed_stages": list(getattr(manager, "completed_stages", None) or []),
-        "current_stage_number": int(
-            getattr(manager, "current_stage_number", 0) or 0
-        ),
+        "current_stage_number": int(getattr(manager, "current_stage_number", 0) or 0),
         "current_stage": (
             getattr(current_stage, "__dict__", current_stage)
             if current_stage is not None
@@ -234,38 +298,16 @@ def _perform_experiments_bfts_locked(config_path: str):
 
             initialization_phase = "workspace_preparation"
             if not cfg.resume_from:
-                with Status("Preparing agent workspace (copying and extracting files) ..."):
+                with Status(
+                    "Preparing agent workspace (copying and extracting files) ..."
+                ):
                     prep_agent_workspace(cfg)
 
             initialization_phase = "run_artifacts"
             results_tsv_path = cfg.log_dir / "results.tsv"
             program_md_path = cfg.log_dir / "program.md"
             results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if not results_tsv_path.exists():
-                results_tsv_path.write_text(
-                    "\t".join(
-                        [
-                            "time",
-                            "stage",
-                            "step",
-                            "kind",
-                            "node_id",
-                            "parent_id",
-                            "status",
-                            "decision",
-                            "objective",
-                            "metric_mean",
-                            "metric_name",
-                            "maximize",
-                            "datasets",
-                            "exec_time_sec",
-                            "loc",
-                        ]
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
+            logged_node_ids, stage_best = repair_results_tsv(results_tsv_path)
     except Exception as exc:
         raise ExperimentInitializationError(initialization_phase, exc) from exc
     except KeyboardInterrupt as exc:
@@ -273,10 +315,9 @@ def _perform_experiments_bfts_locked(config_path: str):
 
     global_step = 0
 
-    logged_node_ids: set[str] = set()
-    stage_best: dict[str, dict] = {}
-
-    def _metric_meta(node: Node) -> tuple[float | None, float | None, str | None, bool | None]:
+    def _metric_meta(
+        node: Node,
+    ) -> tuple[float | None, float | None, str | None, bool | None]:
         metric = getattr(node, "metric", None)
         if metric is None or getattr(metric, "value", None) is None:
             return None, None, None, None
@@ -299,7 +340,9 @@ def _perform_experiments_bfts_locked(config_path: str):
             except Exception:
                 metric_name = None
 
-        objective = metric_mean if (maximize is True or maximize is None) else -metric_mean
+        objective = (
+            metric_mean if (maximize is True or maximize is None) else -metric_mean
+        )
         return metric_mean, objective, metric_name, maximize
 
     def _write_program_md(stage: Stage, journal: Journal) -> None:
@@ -335,7 +378,9 @@ def _perform_experiments_bfts_locked(config_path: str):
                 {
                     "count": len(seed_values),
                     "mean": statistics.mean(seed_values),
-                    "stdev": statistics.pstdev(seed_values) if len(seed_values) > 1 else 0.0,
+                    "stdev": (
+                        statistics.pstdev(seed_values) if len(seed_values) > 1 else 0.0
+                    ),
                 }
                 if seed_values
                 else None
@@ -397,9 +442,11 @@ def _perform_experiments_bfts_locked(config_path: str):
             f"- results.tsv: {results_tsv_path}",
             "- stage_*/notes/stage_progress.json: per-step progress snapshots",
         ]
-        program_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write_text(program_md_path, "\n".join(lines) + "\n")
 
-    initialization_phase = "checkpoint_restore" if cfg.resume_from else "manager_creation"
+    initialization_phase = (
+        "checkpoint_restore" if cfg.resume_from else "manager_creation"
+    )
     try:
         with termination_signal_guard():
             if cfg.resume_from:
@@ -409,38 +456,6 @@ def _perform_experiments_bfts_locked(config_path: str):
                     workspace_dir=Path(cfg.workspace_dir),
                     expected_task_desc=task_desc,
                 )
-                logged_node_ids.update(
-                    node.id
-                    for journal in manager.journals.values()
-                    for node in journal.nodes
-                    if getattr(node, "id", None)
-                )
-                for stage_name, journal in manager.journals.items():
-                    candidates = []
-                    for node in journal.good_nodes:
-                        if getattr(node, "is_seed_node", False) or getattr(
-                            node, "is_seed_agg_node", False
-                        ):
-                            continue
-                        _, objective, _, _ = _metric_meta(node)
-                        if objective is None:
-                            continue
-                        if stage_name.startswith("2_") and len(
-                            set(getattr(node, "datasets_successfully_tested", None) or [])
-                        ) < 2:
-                            continue
-                        candidates.append(
-                            {
-                                "objective": objective,
-                                "loc": len((node.code or "").splitlines()),
-                                "node_id": node.id,
-                            }
-                        )
-                    if candidates:
-                        stage_best[stage_name] = max(
-                            candidates,
-                            key=lambda item: (item["objective"], -item["loc"]),
-                        )
                 print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
             else:
                 manager = AgentManager(
@@ -476,6 +491,7 @@ def _perform_experiments_bfts_locked(config_path: str):
         nonlocal global_step
         print("Step complete")
         global_step += 1
+        publishing_artifacts = False
         try:
             # Generate and save notes for this step
             notes_dir = cfg.log_dir / f"stage_{stage.name}" / "notes"
@@ -491,14 +507,13 @@ def _perform_experiments_bfts_locked(config_path: str):
                         summary,
                     )
 
-
             if cfg.agent.get("summary", None) is not None:
                 current_findings = journal.generate_summary(
-                    include_code=False, 
+                    include_code=False,
                     **{
-                        "model": cfg.agent.summary.model, 
-                        "temp": cfg.agent.summary.temp
-                    }
+                        "model": cfg.agent.summary.model,
+                        "temp": cfg.agent.summary.temp,
+                    },
                 )
             else:
                 current_findings = journal.generate_summary(include_code=False)
@@ -542,7 +557,11 @@ def _perform_experiments_bfts_locked(config_path: str):
                     seed_stats = {
                         "count": len(seed_values),
                         "mean": statistics.mean(seed_values),
-                        "stdev": statistics.pstdev(seed_values) if len(seed_values) > 1 else 0.0,
+                        "stdev": (
+                            statistics.pstdev(seed_values)
+                            if len(seed_values) > 1
+                            else 0.0
+                        ),
                         "values": seed_values[:10],
                     }
 
@@ -563,7 +582,13 @@ def _perform_experiments_bfts_locked(config_path: str):
                 "current_findings": current_findings,
             }
 
+            publishing_artifacts = True
             atomic_write_json(notes_dir / "stage_progress.json", stage_summary)
+
+            # Persist the journal before publishing the program and ledger. If a
+            # later write is interrupted, resume can rebuild missing ledger rows
+            # without ever referencing a node absent from the durable journal.
+            save_run(cfg, journal, stage_name=f"stage_{stage.name}")
 
             # Update autoresearch-style program snapshot and results ledger.
             _write_program_md(stage, journal)
@@ -575,7 +600,6 @@ def _perform_experiments_bfts_locked(config_path: str):
                 node_id = getattr(node, "id", None)
                 if not node_id or node_id in logged_node_ids:
                     continue
-                logged_node_ids.add(node_id)
 
                 is_seed = bool(getattr(node, "is_seed_node", False))
                 is_seed_agg = bool(getattr(node, "is_seed_agg_node", False))
@@ -584,7 +608,11 @@ def _perform_experiments_bfts_locked(config_path: str):
 
                 loc = len((node.code or "").splitlines())
                 datasets = [
-                    ds for ds in (getattr(node, "datasets_successfully_tested", None) or []) if ds
+                    ds
+                    for ds in (
+                        getattr(node, "datasets_successfully_tested", None) or []
+                    )
+                    if ds
                 ]
 
                 metric_mean, objective, metric_name, maximize = _metric_meta(node)
@@ -595,6 +623,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                 )
 
                 decision = ""
+                next_stage_best_entry = stage_best_entry
                 if kind != "main":
                     decision = kind
                 elif status != "ok":
@@ -602,7 +631,10 @@ def _perform_experiments_bfts_locked(config_path: str):
                 else:
                     assert objective is not None
                     # Stage-specific validation constraints (mirrors AgentManager gating).
-                    if getattr(stage, "stage_number", None) == 2 and len(set(datasets)) < 2:
+                    if (
+                        getattr(stage, "stage_number", None) == 2
+                        and len(set(datasets)) < 2
+                    ):
                         status = "invalid"
                         decision = "discard"
                         # Do not allow "keep" promotion if dataset coverage is insufficient.
@@ -625,52 +657,59 @@ def _perform_experiments_bfts_locked(config_path: str):
                             keep = True
                         elif objective_for_keep > stage_best_entry["objective"] + eps:
                             keep = True
-                        elif (
-                            abs(objective_for_keep - stage_best_entry["objective"])
-                            <= eps
-                            and loc < stage_best_entry.get("loc", loc)
-                        ):
+                        elif abs(
+                            objective_for_keep - stage_best_entry["objective"]
+                        ) <= eps and loc < stage_best_entry.get("loc", loc):
                             keep = True
 
                         decision = "keep" if keep else "discard"
                         if keep:
-                            stage_best_entry = {
+                            next_stage_best_entry = {
                                 "objective": objective_for_keep,
                                 "loc": loc,
                                 "node_id": node_id,
                             }
-                            stage_best[stage_key] = stage_best_entry
 
-                with open(results_tsv_path, "a", encoding="utf-8") as handle:
-                    handle.write(
-                        "\t".join(
-                            [
-                                now,
-                                stage.name,
-                                str(getattr(node, "step", "")),
-                                kind,
-                                node_id,
-                                parent_id,
-                                status,
-                                decision,
-                                "" if objective is None else f"{objective:.12g}",
-                                "" if metric_mean is None else f"{metric_mean:.12g}",
-                                str(metric_name or ""),
-                                "" if maximize is None else str(bool(maximize)),
-                                ",".join(datasets),
-                                "" if getattr(node, "exec_time", None) is None else f"{float(node.exec_time):.6f}",
-                                str(loc),
-                            ]
-                        )
-                        + "\n"
+                durable_append_text(
+                    results_tsv_path,
+                    "\t".join(
+                        [
+                            now,
+                            stage.name,
+                            str(getattr(node, "step", "")),
+                            kind,
+                            node_id,
+                            parent_id,
+                            status,
+                            decision,
+                            "" if objective is None else f"{objective:.12g}",
+                            "" if metric_mean is None else f"{metric_mean:.12g}",
+                            str(metric_name or ""),
+                            "" if maximize is None else str(bool(maximize)),
+                            ",".join(datasets),
+                            (
+                                ""
+                                if getattr(node, "exec_time", None) is None
+                                else f"{float(node.exec_time):.6f}"
+                            ),
+                            str(loc),
+                        ]
                     )
-
-            # Save the run as before
-            save_run(cfg, journal, stage_name=f"stage_{stage.name}")
+                    + "\n",
+                )
+                logged_node_ids.add(node_id)
+                if next_stage_best_entry is not stage_best_entry:
+                    stage_best_entry = next_stage_best_entry
+                    stage_best[stage_key] = stage_best_entry
+            publishing_artifacts = False
 
         except Exception as e:
             if is_llm_budget_exception(e):
                 raise
+            if publishing_artifacts:
+                raise ExperimentArtifactPersistenceError(
+                    f"Failed to persist artifacts for stage {stage.name}"
+                ) from e
             print(f"Error in step callback: {e}")
 
         print(f"Run saved at {cfg.log_dir / f'stage_{stage.name}'}")
@@ -791,9 +830,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                 "message": str(exc),
             }
             logger.exception("Experiment failed; saving a resumable checkpoint")
-            print(
-                f"[red]Experiment failed; saving a resumable checkpoint: {exc}[/red]"
-            )
+            print(f"[red]Experiment failed; saving a resumable checkpoint: {exc}[/red]")
     except KeyboardInterrupt as exc:
         run_status = "interrupted"
         failure_error = {

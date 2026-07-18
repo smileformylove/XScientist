@@ -46,7 +46,9 @@ def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
     return json.dumps(obj_dict, separators=(",", ":"))
 
 
-def atomic_write_text(path: str | Path, content: str, *, encoding: str = "utf-8") -> None:
+def atomic_write_text(
+    path: str | Path, content: str, *, encoding: str = "utf-8"
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
@@ -81,6 +83,36 @@ def atomic_write_json(
             default=default,
         ),
     )
+
+
+def durable_append_text(
+    path: str | Path,
+    content: str,
+    *,
+    encoding: str = "utf-8",
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = content.encode(encoding)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
+    original_size = os.fstat(descriptor).st_size
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("Failed to append experiment ledger row")
+            view = view[written:]
+        os.fsync(descriptor)
+    except BaseException:
+        try:
+            os.ftruncate(descriptor, original_size)
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
 
 
 def dump_json(obj: dataclasses_json.DataClassJsonMixin, path: Path):
