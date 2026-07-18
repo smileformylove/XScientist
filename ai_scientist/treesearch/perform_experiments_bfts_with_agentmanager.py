@@ -123,13 +123,15 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     atomic_write_json(path, payload)
 
 
-def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
+def repair_results_tsv(
+    path: Path,
+) -> tuple[set[str], dict[str, dict], dict[str, str]]:
     """Drop a torn tail row and recover durable ledger decision state."""
 
     header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
     if not path.exists() or path.stat().st_size == 0:
         atomic_write_text(path, header)
-        return set(), {}
+        return set(), {}, {}
 
     raw = path.read_bytes()
     complete_length = raw.rfind(b"\n") + 1
@@ -146,6 +148,7 @@ def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
     valid_lines = [lines[0]]
     node_ids: set[str] = set()
     stage_best: dict[str, dict] = {}
+    node_stages: dict[str, str] = {}
     data_lines = lines[1:]
     for index, line in enumerate(data_lines):
         row_number = index + 2
@@ -180,6 +183,7 @@ def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
             )
         valid_lines.append(line)
         node_ids.add(node_id)
+        node_stages[node_id] = fields[1]
         if kind == "main" and decision == "keep" and fields[8]:
             try:
                 stage_best[fields[1]] = {
@@ -195,7 +199,7 @@ def repair_results_tsv(path: Path) -> tuple[set[str], dict[str, dict]]:
     repaired = "".join(valid_lines)
     if repaired.encode("utf-8") != raw:
         atomic_write_text(path, repaired)
-    return node_ids, stage_best
+    return node_ids, stage_best, node_stages
 
 
 def manager_state_payload(manager, cfg, run_status: str) -> dict:
@@ -336,7 +340,9 @@ def _perform_experiments_bfts_locked(config_path: str):
             results_tsv_path = cfg.log_dir / "results.tsv"
             program_md_path = cfg.log_dir / "program.md"
             results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
-            logged_node_ids, stage_best = repair_results_tsv(results_tsv_path)
+            logged_node_ids, stage_best, logged_node_stages = repair_results_tsv(
+                results_tsv_path
+            )
     except Exception as exc:
         raise ExperimentInitializationError(initialization_phase, exc) from exc
     except KeyboardInterrupt as exc:
@@ -585,6 +591,30 @@ def _perform_experiments_bfts_locked(config_path: str):
                     workspace_dir=Path(cfg.workspace_dir),
                     expected_task_desc=task_desc,
                 )
+                checkpoint_node_stages: dict[str, set[str]] = {}
+                for restored_stage in manager.stages:
+                    for node in manager.journals[restored_stage.name].nodes:
+                        checkpoint_node_stages.setdefault(node.id, set()).add(
+                            restored_stage.name
+                        )
+                ledger_only_node_ids = sorted(
+                    logged_node_ids - set(checkpoint_node_stages)
+                )
+                if ledger_only_node_ids:
+                    raise ValueError(
+                        "Experiment results ledger is ahead of the selected checkpoint; "
+                        f"unknown nodes: {ledger_only_node_ids}"
+                    )
+                misplaced_node_ids = sorted(
+                    node_id
+                    for node_id, ledger_stage in logged_node_stages.items()
+                    if ledger_stage not in checkpoint_node_stages[node_id]
+                )
+                if misplaced_node_ids:
+                    raise ValueError(
+                        "Experiment results ledger stage assignments do not match the "
+                        f"selected checkpoint: {misplaced_node_ids}"
+                    )
                 for restored_stage in manager.stages:
                     restored_journal = manager.journals[restored_stage.name]
                     _publish_results_ledger(restored_stage, restored_journal)
@@ -595,6 +625,10 @@ def _perform_experiments_bfts_locked(config_path: str):
                     )
                 print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
             else:
+                if logged_node_ids:
+                    raise ValueError(
+                        "Existing experiment results ledger requires a resume checkpoint"
+                    )
                 manager = AgentManager(
                     task_desc=task_desc,
                     cfg=cfg,

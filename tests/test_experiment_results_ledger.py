@@ -45,10 +45,11 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
             path.write_bytes((header + self._row("node-1") + "partial\trow").encode())
 
-            logged, stage_best = repair_results_tsv(path)
+            logged, stage_best, node_stages = repair_results_tsv(path)
 
             self.assertEqual(logged, {"node-1"})
             self.assertEqual(stage_best["stage"]["node_id"], "node-1")
+            self.assertEqual(node_stages, {"node-1": "stage"})
             self.assertEqual(
                 path.read_text(encoding="utf-8"), header + self._row("node-1")
             )
@@ -403,15 +404,121 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             ):
                 result = perform_experiments_bfts(root / "config.yaml")
 
-            logged, _stage_best = repair_results_tsv(log_dir / "results.tsv")
+            logged, _stage_best, node_stages = repair_results_tsv(
+                log_dir / "results.tsv"
+            )
             self.assertEqual(result["status"], "completed")
             self.assertEqual(logged, {"checkpoint-node"})
+            self.assertEqual(node_stages, {"checkpoint-node": stage.name})
             self.assertIn(
                 "\tcheckpoint-node\t",
                 (log_dir / "results.tsv").read_text(encoding="utf-8"),
             )
             self.assertTrue((log_dir / "program.md").is_file())
             restore_mock.assert_called_once()
+
+    def test_resume_rejects_ledger_nodes_absent_from_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            checkpoint = log_dir / "stage_demo" / "checkpoint.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = checkpoint
+            cfg.generate_report = False
+            stage = Stage(
+                name="1_initial_implementation_1_preliminary",
+                description="preliminary",
+                goals="goal",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+            manager = mock.Mock(
+                current_stage=stage,
+                current_stage_number=1,
+                completed_stages=[],
+                stages=[stage],
+                stage_history=[],
+                journals={stage.name: Journal()},
+                task_desc={"Title": "T"},
+            )
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            (log_dir / "results.tsv").write_text(
+                header + self._row("newer-node"), encoding="utf-8"
+            )
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager.from_checkpoint",
+                    return_value=manager,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            self.assertEqual(result["status"], "initialization_failed")
+            self.assertEqual(result["initialization_phase"], "checkpoint_restore")
+            self.assertIn("ahead of the selected checkpoint", result["failure_error"]["message"])
+
+    def test_new_run_rejects_existing_populated_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = None
+            cfg.generate_report = False
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            (log_dir / "results.tsv").write_text(
+                header + self._row("old-node"), encoding="utf-8"
+            )
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.prep_agent_workspace"
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            self.assertEqual(result["status"], "initialization_failed")
+            self.assertEqual(result["initialization_phase"], "manager_creation")
+            self.assertIn("requires a resume checkpoint", result["failure_error"]["message"])
 
 
 if __name__ == "__main__":
