@@ -45,13 +45,28 @@ from ai_scientist.config.paths import (
 )
 
 LLM_BUDGET_EXIT_CODE = 75
+INTERRUPTED_EXIT_CODE = 130
+
+
+def experiment_stop_exit_code(experiment_result) -> int | None:
+    if not isinstance(experiment_result, dict):
+        return None
+    status = experiment_result.get("status")
+    if status == "budget_exhausted":
+        return LLM_BUDGET_EXIT_CODE
+    if status == "interrupted":
+        return INTERRUPTED_EXIT_CODE
+    if status == "failed":
+        return 1
+    return None
 
 
 def experiment_budget_exit_code(experiment_result) -> int | None:
-    if (
-        isinstance(experiment_result, dict)
-        and experiment_result.get("status") == "budget_exhausted"
-    ):
+    """Backward-compatible helper for budget-specific callers."""
+
+    if isinstance(experiment_result, dict) and experiment_result.get(
+        "status"
+    ) == "budget_exhausted":
         return LLM_BUDGET_EXIT_CODE
     return None
 
@@ -415,20 +430,31 @@ if __name__ == "__main__":
             resume=not args.force_rerun,
         )
 
-        budget_exit_code = experiment_budget_exit_code(experiment_result)
-        if budget_exit_code is not None:
-            if experiment_result.get("resumable"):
+        experiment_exit_code = experiment_stop_exit_code(experiment_result)
+        if experiment_exit_code is not None:
+            experiment_status = experiment_result.get("status")
+            if experiment_status == "budget_exhausted" and experiment_result.get(
+                "resumable"
+            ):
                 print(
                     "Experiment stopped because the configured LLM budget was exhausted. "
                     "A resumable checkpoint and budget audit were saved."
                 )
-            else:
+            elif experiment_status == "budget_exhausted":
                 print(
                     "Experiment stopped because the configured LLM budget was exhausted. "
                     "Partial artifacts and a budget audit were saved, but checkpoint "
                     "creation failed."
                 )
-            final_exit_code = budget_exit_code
+            elif experiment_status == "interrupted":
+                print("Experiment interrupted. Partial artifacts were saved.")
+            else:
+                failure = experiment_result.get("failure_error") or {}
+                print(
+                    "Experiment failed. Partial artifacts were saved. "
+                    + str(failure.get("message") or "")
+                )
+            final_exit_code = experiment_exit_code
             cleanup_child_processes(
                 include_orphans=True,
                 workspace_roots=[runtime.project_root, research_root],

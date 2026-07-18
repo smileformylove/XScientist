@@ -207,7 +207,7 @@ def run_experiment_phase(
         experiment_state = (
             load_workflow_state(idea_dir).get("stages", {}).get("experiment", {})
         )
-        if experiment_state.get("status") == "stopped":
+        if experiment_state.get("status") in {"stopped", "failed", "interrupted"}:
             candidate = experiment_state.get("metadata", {}).get("checkpoint_path")
             if candidate and Path(candidate).is_file():
                 resume_from = str(Path(candidate).resolve())
@@ -221,16 +221,23 @@ def run_experiment_phase(
     )
 
     experiment_result = perform_experiments_bfts(idea_config_path)
-    if (
-        isinstance(experiment_result, dict)
-        and experiment_result.get("status") == "budget_exhausted"
-    ):
+    if isinstance(experiment_result, dict) and experiment_result.get("status") in {
+        "budget_exhausted",
+        "failed",
+        "interrupted",
+    }:
+        experiment_status = experiment_result["status"]
+        reason = {
+            "budget_exhausted": "llm_budget_exhausted",
+            "failed": "experiment_failed",
+            "interrupted": "experiment_interrupted",
+        }[experiment_status]
         save_token_tracker(idea_dir)
         run_status_path = experiment_result.get("run_status_path")
         mark_stage_stopped(
             idea_dir,
             "experiment",
-            reason="llm_budget_exhausted",
+            reason=reason,
             artifacts={
                 "logs_dir": str(idea_dir / "logs"),
                 "config_path": str(idea_config_path),
@@ -239,16 +246,18 @@ def run_experiment_phase(
             },
             metadata={
                 "budget_error": experiment_result.get("budget_error"),
+                "failure_error": experiment_result.get("failure_error"),
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "resumable": bool(experiment_result.get("resumable")),
             },
         )
         return {
-            "status": "budget_exhausted",
+            "status": experiment_status,
             "resumable": bool(experiment_result.get("resumable")),
             "config_path": str(idea_config_path),
             "run_status_path": run_status_path,
             "budget_error": experiment_result.get("budget_error"),
+            "failure_error": experiment_result.get("failure_error"),
             "checkpoint_path": experiment_result.get("checkpoint_path"),
         }
 

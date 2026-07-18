@@ -21,6 +21,218 @@ from ai_scientist.utils.run_index import is_stage_complete, mark_stage_stopped
 
 
 class BudgetExhaustionPersistenceTests(unittest.TestCase):
+    def _run_manager_stop(self, exception: BaseException) -> tuple[dict, dict, bool]:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = None
+            cfg.generate_report = True
+            stage = Stage(
+                name="1_initial_implementation_1_preliminary",
+                description="preliminary",
+                goals="goal",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+
+            class FakeManager:
+                def __init__(self, **_kwargs):
+                    self.current_stage = stage
+                    self.completed_stages = []
+                    self.journals = {stage.name: Journal()}
+
+                def run(self, **_kwargs):
+                    raise exception
+
+                def _save_checkpoint(self):
+                    path = log_dir / f"stage_{stage.name}" / "checkpoint.pkl"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"checkpoint")
+                    return path
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.prep_agent_workspace"
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager",
+                    FakeManager,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.overall_summarize"
+                ) as report_mock,
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            status = json.loads(Path(result["run_status_path"]).read_text())
+            checkpoint_exists = Path(result["checkpoint_path"]).is_file()
+            report_mock.assert_not_called()
+            return result, status, checkpoint_exists
+
+    def test_runtime_failure_is_checkpointed_and_reported(self) -> None:
+        result, status, checkpoint_exists = self._run_manager_stop(
+            RuntimeError("worker crashed")
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(status["failure_error"]["type"], "RuntimeError")
+        self.assertEqual(status["failure_error"]["message"], "worker crashed")
+        self.assertTrue(result["resumable"])
+        self.assertTrue(checkpoint_exists)
+
+    def test_completed_step_prevents_atexit_workspace_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = None
+            cfg.generate_report = False
+            stage = Stage(
+                name="1_initial_implementation_1_preliminary",
+                description="preliminary",
+                goals="goal",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+
+            class FakeManager:
+                def __init__(self, **_kwargs):
+                    self.current_stage = stage
+                    self.completed_stages = []
+                    self.journals = {
+                        stage.name: Journal(
+                            nodes=[
+                                Node(
+                                    plan="failed",
+                                    code="raise RuntimeError()",
+                                    metric=WorstMetricValue(),
+                                    is_buggy=True,
+                                )
+                            ]
+                        )
+                    }
+
+                def run(self, **kwargs):
+                    kwargs["step_callback"](stage, self.journals[stage.name])
+
+            registered_cleanup = []
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.prep_agent_workspace"
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager",
+                    FakeManager,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.atexit.register",
+                    side_effect=registered_cleanup.append,
+                ),
+                mock.patch.object(Journal, "generate_summary", return_value="summary"),
+                mock.patch("ai_scientist.treesearch.utils.config.tree_export.generate"),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(len(registered_cleanup), 1)
+            registered_cleanup[0]()
+            self.assertTrue(workspace_dir.is_dir())
+
+    def test_keyboard_interrupt_is_checkpointed_and_reported(self) -> None:
+        result, status, checkpoint_exists = self._run_manager_stop(KeyboardInterrupt())
+
+        self.assertEqual(result["status"], "interrupted")
+        self.assertEqual(status["failure_error"]["type"], "KeyboardInterrupt")
+        self.assertTrue(result["resumable"])
+        self.assertTrue(checkpoint_exists)
+
+    @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_stopped")
+    @mock.patch("ai_scientist.utils.launcher_workflow.save_token_tracker")
+    @mock.patch("ai_scientist.utils.launcher_workflow.perform_experiments_bfts")
+    @mock.patch("ai_scientist.utils.launcher_workflow.edit_bfts_config_file")
+    @mock.patch(
+        "ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=False
+    )
+    def test_launcher_marks_runtime_failure_stopped(
+        self,
+        _stage_complete_mock: mock.Mock,
+        edit_config_mock: mock.Mock,
+        perform_mock: mock.Mock,
+        _save_tracker_mock: mock.Mock,
+        mark_stopped_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            idea_path = root / "idea.json"
+            idea_path.write_text("{}", encoding="utf-8")
+            edit_config_mock.return_value = str(root / "bfts_config.yaml")
+            perform_mock.return_value = {
+                "status": "failed",
+                "resumable": True,
+                "checkpoint_path": str(root / "checkpoint.pkl"),
+                "run_status_path": str(root / "run_status.json"),
+                "failure_error": {
+                    "type": "RuntimeError",
+                    "message": "worker crashed",
+                },
+            }
+
+            result = run_experiment_phase(
+                root,
+                idea_path,
+                "plot-model",
+                resume=False,
+                logger=lambda _message: None,
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            mark_stopped_mock.call_args.kwargs["reason"], "experiment_failed"
+        )
+        self.assertEqual(
+            mark_stopped_mock.call_args.kwargs["metadata"]["failure_error"]["type"],
+            "RuntimeError",
+        )
+
     def test_stopped_stage_is_not_completed_by_artifact_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
@@ -46,6 +258,15 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         )
         self.assertIsNone(
             launch_scientist_bfts.experiment_budget_exit_code({"status": "completed"})
+        )
+        self.assertEqual(
+            launch_scientist_bfts.experiment_stop_exit_code({"status": "failed"}), 1
+        )
+        self.assertEqual(
+            launch_scientist_bfts.experiment_stop_exit_code(
+                {"status": "interrupted"}
+            ),
+            130,
         )
 
     def test_save_run_offline_mode_never_calls_llm_selection(self) -> None:

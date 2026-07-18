@@ -307,7 +307,9 @@ def perform_experiments_bfts(config_path: str):
         return exec_callback
 
     def step_callback(stage, journal):
+        nonlocal global_step
         print("Step complete")
+        global_step += 1
         try:
             # Generate and save notes for this step
             notes_dir = cfg.log_dir / f"stage_{stage.name}" / "notes"
@@ -562,10 +564,11 @@ def perform_experiments_bfts(config_path: str):
 
     run_status = "completed"
     budget_error = None
+    failure_error = None
     checkpoint_path = None
     persistence_errors = []
 
-    def persist_budget_stop() -> None:
+    def persist_stopped_run() -> None:
         nonlocal checkpoint_path
         for stage_name, journal in manager.journals.items():
             if not journal.nodes:
@@ -583,7 +586,7 @@ def perform_experiments_bfts(config_path: str):
                     f"{persistence_exc}"
                 )
                 logger.warning(
-                    "Failed to persist stage %s during budget stop: %s",
+                    "Failed to persist stage %s during stopped run: %s",
                     stage_name,
                     persistence_exc,
                 )
@@ -593,30 +596,48 @@ def perform_experiments_bfts(config_path: str):
             persistence_errors.append(
                 f"checkpoint: {type(checkpoint_exc).__name__}: {checkpoint_exc}"
             )
-            logger.warning("Failed to save budget-stop checkpoint: %s", checkpoint_exc)
+            logger.warning("Failed to save stopped-run checkpoint: %s", checkpoint_exc)
 
     try:
         manager.run(
             exec_callback=create_exec_callback(status), step_callback=step_callback
         )
     except Exception as exc:
-        if not is_llm_budget_exception(exc):
-            raise
-        run_status = "budget_exhausted"
         preserve_workspace = True
-        budget_error = llm_budget_exception_payload(exc)
-        logger.warning(
-            "Stopping experiment because the LLM budget is exhausted: %s", exc
-        )
-        print(
-            f"[yellow]LLM budget exhausted; saving a resumable checkpoint: {exc}[/yellow]"
-        )
+        if is_llm_budget_exception(exc):
+            run_status = "budget_exhausted"
+            budget_error = llm_budget_exception_payload(exc)
+            logger.warning(
+                "Stopping experiment because the LLM budget is exhausted: %s", exc
+            )
+            print(
+                f"[yellow]LLM budget exhausted; saving a resumable checkpoint: {exc}[/yellow]"
+            )
+        else:
+            run_status = "failed"
+            failure_error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            logger.exception("Experiment failed; saving a resumable checkpoint")
+            print(
+                f"[red]Experiment failed; saving a resumable checkpoint: {exc}[/red]"
+            )
+    except KeyboardInterrupt as exc:
+        run_status = "interrupted"
+        preserve_workspace = True
+        failure_error = {
+            "type": type(exc).__name__,
+            "message": "Experiment interrupted by user",
+        }
+        logger.warning("Experiment interrupted; saving a resumable checkpoint")
+        print("[yellow]Experiment interrupted; saving a resumable checkpoint.[/yellow]")
     finally:
-        if run_status == "budget_exhausted":
-            persist_budget_stop()
+        if run_status != "completed":
+            persist_stopped_run()
 
     manager_pickle_path = cfg.log_dir / "manager.pkl"
-    if run_status == "budget_exhausted":
+    if run_status != "completed":
         try:
             with open(manager_pickle_path, "wb") as f:
                 pickle.dump(
@@ -681,15 +702,31 @@ def perform_experiments_bfts(config_path: str):
             print(f"- Research summary: {research_summary_path}")
             print(f"- Ablation summary: {ablation_summary_path}")
         except Exception as exc:
-            if not is_llm_budget_exception(exc):
-                raise
-            run_status = "budget_exhausted"
             preserve_workspace = True
-            budget_error = llm_budget_exception_payload(exc)
-            logger.warning(
-                "Stopping final report because the LLM budget is exhausted: %s", exc
-            )
-            persist_budget_stop()
+            if is_llm_budget_exception(exc):
+                run_status = "budget_exhausted"
+                budget_error = llm_budget_exception_payload(exc)
+                logger.warning(
+                    "Stopping final report because the LLM budget is exhausted: %s",
+                    exc,
+                )
+            else:
+                run_status = "failed"
+                failure_error = {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                logger.exception("Final report failed; saving a resumable checkpoint")
+            persist_stopped_run()
+        except KeyboardInterrupt as exc:
+            run_status = "interrupted"
+            preserve_workspace = True
+            failure_error = {
+                "type": type(exc).__name__,
+                "message": "Final report interrupted by user",
+            }
+            logger.warning("Final report interrupted; saving a resumable checkpoint")
+            persist_stopped_run()
 
     status_payload = {
         "status": run_status,
@@ -703,6 +740,7 @@ def perform_experiments_bfts(config_path: str):
         },
         "llm_budget": llm_budget_manager.snapshot(),
         "budget_error": budget_error,
+        "failure_error": failure_error,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,
@@ -717,6 +755,7 @@ def perform_experiments_bfts(config_path: str):
         "workspace_dir": str(cfg.workspace_dir),
         "run_status_path": str(run_status_path),
         "budget_error": budget_error,
+        "failure_error": failure_error,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,

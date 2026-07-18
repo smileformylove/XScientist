@@ -47,6 +47,7 @@ from ai_scientist.utils.workflow_modes import list_workflow_modes
 from ai_scientist.config.paths import (
     get_experiment_dir,
 )
+from launch_scientist_bfts import experiment_stop_exit_code
 
 
 def print_time():
@@ -453,13 +454,26 @@ if __name__ == "__main__":
         print("\n" + "=" * 80)
         print("🔬 开始实验阶段...")
         print("=" * 80)
-        run_experiment_phase(
+        experiment_result = run_experiment_phase(
             idea_dir,
             idea_path_json,
             args.model_agg_plots,
             config_path=args.bfts_config,
             resume=not args.force_rerun,
         )
+
+        experiment_exit_code = experiment_stop_exit_code(experiment_result)
+        if experiment_exit_code is not None:
+            print(
+                "实验阶段已停止，已保存可用的部分产物。状态: "
+                + str(experiment_result.get("status"))
+            )
+            final_exit_code = experiment_exit_code
+            cleanup_child_processes(
+                include_orphans=True,
+                workspace_roots=[runtime.project_root, research_root],
+            )
+            break
 
         exit_code = 0
         writeup_result = {"success": True}

@@ -3618,7 +3618,24 @@ def _process_single_paper(args):
             config_path, exp_dir, str(idea_path_json)
         )
 
-        perform_experiments_bfts(idea_config_path)
+        experiment_result = perform_experiments_bfts(idea_config_path)
+        if isinstance(experiment_result, dict) and experiment_result.get(
+            "status"
+        ) != "completed":
+            return {
+                "idea_idx": idea_idx,
+                "status": experiment_result.get("status", "failed"),
+                "stage": "experiment",
+                "error": (
+                    (experiment_result.get("failure_error") or {}).get("message")
+                    or (experiment_result.get("budget_error") or {}).get("message")
+                ),
+                "resumable": bool(experiment_result.get("resumable")),
+                "checkpoint_path": experiment_result.get("checkpoint_path"),
+                "run_status_path": experiment_result.get("run_status_path"),
+                "paper_type": paper_type,
+                "workflow_mode": workflow_mode,
+            }
 
         try:
             write_experiment_report(exp_dir)

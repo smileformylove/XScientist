@@ -973,7 +973,22 @@ def process_single_idea(args):
             config_path = osp.join(PROJECT_ROOT, config_path)
         idea_config_path = edit_bfts_config_file(config_path, exp_dir, idea_path_json)
 
-        perform_experiments_bfts(idea_config_path)
+        experiment_result = perform_experiments_bfts(idea_config_path)
+        if isinstance(experiment_result, dict) and experiment_result.get(
+            "status"
+        ) != "completed":
+            return {
+                "idea_idx": idea_idx,
+                "status": experiment_result.get("status", "failed"),
+                "stage": "experiment",
+                "error": (
+                    (experiment_result.get("failure_error") or {}).get("message")
+                    or (experiment_result.get("budget_error") or {}).get("message")
+                ),
+                "resumable": bool(experiment_result.get("resumable")),
+                "checkpoint_path": experiment_result.get("checkpoint_path"),
+                "run_status_path": experiment_result.get("run_status_path"),
+            }
 
         # 复制实验结果
         latest_run_dir = find_latest_bfts_run_dir(exp_dir, logs_subdir="logs")
