@@ -8,6 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from ai_scientist.utils.atomic_io import (
+    atomic_write_json,
+    atomic_write_text,
+    durable_append_text,
+)
+
 
 PIPELINE_SCHEMA_VERSION = 1
 
@@ -199,33 +205,34 @@ def load_jsonl_artifact(path: str | Path) -> list[dict[str, Any]]:
 
 def save_json_artifact(path: str | Path, payload: Any) -> str:
     artifact_path_obj = Path(path).expanduser().resolve()
-    artifact_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    with open(artifact_path_obj, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    atomic_write_json(
+        artifact_path_obj,
+        payload,
+        indent=2,
+        ensure_ascii=False,
+    )
     return str(artifact_path_obj)
 
 
 def save_jsonl_artifact(path: str | Path, rows: Iterable[dict[str, Any]]) -> str:
     artifact_path_obj = Path(path).expanduser().resolve()
-    artifact_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    with open(artifact_path_obj, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    content = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    atomic_write_text(artifact_path_obj, content)
     return str(artifact_path_obj)
 
 
 def append_jsonl_artifact(path: str | Path, row: dict[str, Any]) -> str:
     artifact_path_obj = Path(path).expanduser().resolve()
-    artifact_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    with open(artifact_path_obj, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    durable_append_text(
+        artifact_path_obj,
+        json.dumps(row, ensure_ascii=False) + "\n",
+    )
     return str(artifact_path_obj)
 
 
 def save_text_artifact(path: str | Path, text: str) -> str:
     artifact_path_obj = Path(path).expanduser().resolve()
-    artifact_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path_obj.write_text(text, encoding="utf-8")
+    atomic_write_text(artifact_path_obj, text)
     return str(artifact_path_obj)
 
 

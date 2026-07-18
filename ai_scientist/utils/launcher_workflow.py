@@ -45,7 +45,7 @@ from ai_scientist.utils.integrity_workflow import (
     integrity_report_payload,
     run_integrity_forensics_for_manuscript,
 )
-from ai_scientist.treesearch.utils.serialize import atomic_write_json
+from ai_scientist.utils.atomic_io import atomic_write_json
 
 LLM_BUDGET_EXIT_CODE = 75
 INTERRUPTED_EXIT_CODE = 130
