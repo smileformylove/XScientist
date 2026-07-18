@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,10 @@ from omegaconf import OmegaConf
 from ai_scientist.treesearch.agent_manager import Stage
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
+    ExperimentTermination,
     perform_experiments_bfts,
+    termination_signal_guard,
+    write_json_atomic,
 )
 from ai_scientist.treesearch.utils.config import save_run
 from ai_scientist.treesearch.utils.metric import WorstMetricValue
@@ -21,6 +25,38 @@ from ai_scientist.utils.run_index import is_stage_complete, mark_stage_stopped
 
 
 class BudgetExhaustionPersistenceTests(unittest.TestCase):
+    def test_sigterm_guard_raises_and_restores_previous_handler(self) -> None:
+        handlers = []
+        previous_handler = object()
+        with (
+            mock.patch("signal.getsignal", return_value=previous_handler),
+            mock.patch("signal.signal", side_effect=lambda _sig, handler: handlers.append(handler)),
+        ):
+            with self.assertRaises(ExperimentTermination) as ctx:
+                with termination_signal_guard():
+                    handlers[-1](signal.SIGTERM, None)
+
+        self.assertEqual(ctx.exception.signum, signal.SIGTERM)
+        self.assertIs(handlers[-1], previous_handler)
+
+    def test_run_status_write_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "run_status.json"
+            write_json_atomic(path, {"status": "completed"})
+
+            self.assertEqual(json.loads(path.read_text())["status"], "completed")
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_sigterm_interruption_payload_uses_signal_exit_code(self) -> None:
+        result, status, checkpoint_exists = self._run_manager_stop(
+            ExperimentTermination(signal.SIGTERM)
+        )
+
+        self.assertEqual(result["status"], "interrupted")
+        self.assertEqual(status["failure_error"]["signal"], "SIGTERM")
+        self.assertEqual(status["failure_error"]["signal_number"], signal.SIGTERM)
+        self.assertTrue(checkpoint_exists)
+
     def _run_manager_stop(self, exception: BaseException) -> tuple[dict, dict, bool]:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -267,6 +303,15 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
                 {"status": "interrupted"}
             ),
             130,
+        )
+        self.assertEqual(
+            launch_scientist_bfts.experiment_stop_exit_code(
+                {
+                    "status": "interrupted",
+                    "failure_error": {"signal_number": signal.SIGTERM},
+                }
+            ),
+            143,
         )
 
     def test_save_run_offline_mode_never_calls_llm_selection(self) -> None:

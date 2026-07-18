@@ -1,12 +1,15 @@
 from __future__ import annotations
 import atexit
+from contextlib import contextmanager
 from datetime import datetime
 import logging
 import math
 import shutil
 import json
 import pickle
+import signal
 import statistics
+import threading
 from . import backend
 from .journal import Journal, Node
 from .journal2report import journal2report
@@ -38,6 +41,47 @@ from ai_scientist.utils.llm_budget import (
 
 
 logger = logging.getLogger("ai-scientist")
+
+
+class ExperimentTermination(KeyboardInterrupt):
+    """Raised in the main thread so SIGTERM can use normal checkpoint cleanup."""
+
+    def __init__(self, signum: int):
+        self.signum = int(signum)
+        try:
+            self.signal_name = signal.Signals(signum).name
+        except ValueError:
+            self.signal_name = f"SIGNAL_{signum}"
+        super().__init__(f"Experiment received {self.signal_name}")
+
+
+@contextmanager
+def termination_signal_guard():
+    """Translate SIGTERM into a catchable interruption while work is active."""
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def handle_termination(signum, _frame):
+        raise ExperimentTermination(signum)
+
+    signal.signal(signal.SIGTERM, handle_termination)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    temp_path.replace(path)
 
 
 def journal_to_rich_tree(journal: Journal, cfg):
@@ -599,9 +643,10 @@ def perform_experiments_bfts(config_path: str):
             logger.warning("Failed to save stopped-run checkpoint: %s", checkpoint_exc)
 
     try:
-        manager.run(
-            exec_callback=create_exec_callback(status), step_callback=step_callback
-        )
+        with termination_signal_guard():
+            manager.run(
+                exec_callback=create_exec_callback(status), step_callback=step_callback
+            )
     except Exception as exc:
         preserve_workspace = True
         if is_llm_budget_exception(exc):
@@ -630,6 +675,14 @@ def perform_experiments_bfts(config_path: str):
             "type": type(exc).__name__,
             "message": "Experiment interrupted by user",
         }
+        if isinstance(exc, ExperimentTermination):
+            failure_error.update(
+                {
+                    "message": str(exc),
+                    "signal": exc.signal_name,
+                    "signal_number": exc.signum,
+                }
+            )
         logger.warning("Experiment interrupted; saving a resumable checkpoint")
         print("[yellow]Experiment interrupted; saving a resumable checkpoint.[/yellow]")
     finally:
@@ -673,12 +726,13 @@ def perform_experiments_bfts(config_path: str):
     if cfg.generate_report and run_status == "completed":
         try:
             print("Generating final report from all stages...")
-            (
-                draft_summary,
-                baseline_summary,
-                research_summary,
-                ablation_summary,
-            ) = overall_summarize(manager.journals.items(), cfg)
+            with termination_signal_guard():
+                (
+                    draft_summary,
+                    baseline_summary,
+                    research_summary,
+                    ablation_summary,
+                ) = overall_summarize(manager.journals.items(), cfg)
             draft_summary_path = cfg.log_dir / "draft_summary.json"
             baseline_summary_path = cfg.log_dir / "baseline_summary.json"
             research_summary_path = cfg.log_dir / "research_summary.json"
@@ -725,6 +779,14 @@ def perform_experiments_bfts(config_path: str):
                 "type": type(exc).__name__,
                 "message": "Final report interrupted by user",
             }
+            if isinstance(exc, ExperimentTermination):
+                failure_error.update(
+                    {
+                        "message": str(exc),
+                        "signal": exc.signal_name,
+                        "signal_number": exc.signum,
+                    }
+                )
             logger.warning("Final report interrupted; saving a resumable checkpoint")
             persist_stopped_run()
 
@@ -746,9 +808,7 @@ def perform_experiments_bfts(config_path: str):
         "persistence_errors": persistence_errors,
     }
     run_status_path = cfg.log_dir / "run_status.json"
-    run_status_path.write_text(
-        json.dumps(status_payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_json_atomic(run_status_path, status_payload)
     return {
         "status": run_status,
         "log_dir": str(cfg.log_dir),

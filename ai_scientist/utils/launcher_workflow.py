@@ -47,6 +47,25 @@ from ai_scientist.utils.integrity_workflow import (
     run_integrity_forensics_for_manuscript,
 )
 
+LLM_BUDGET_EXIT_CODE = 75
+INTERRUPTED_EXIT_CODE = 130
+
+
+def experiment_stop_exit_code(experiment_result: Any) -> int | None:
+    if not isinstance(experiment_result, dict):
+        return None
+    status = experiment_result.get("status")
+    if status == "budget_exhausted":
+        return LLM_BUDGET_EXIT_CODE
+    if status == "interrupted":
+        signal_number = int(
+            (experiment_result.get("failure_error") or {}).get("signal_number") or 0
+        )
+        return 128 + signal_number if signal_number else INTERRUPTED_EXIT_CODE
+    if status == "failed":
+        return 1
+    return None
+
 
 def create_client(*args, **kwargs):
     return load_module_attr("ai_scientist.llm", "create_client")(*args, **kwargs)

@@ -5,6 +5,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from ai_scientist.utils.launcher_workflow import (
+    LLM_BUDGET_EXIT_CODE,
+    experiment_stop_exit_code,
     prepare_idea_artifacts,
     run_experiment_phase,
     run_review_phase,
@@ -43,23 +45,6 @@ from ai_scientist.utils.workflow_modes import list_workflow_modes
 from ai_scientist.config.paths import (
     get_experiment_dir,
 )
-
-LLM_BUDGET_EXIT_CODE = 75
-INTERRUPTED_EXIT_CODE = 130
-
-
-def experiment_stop_exit_code(experiment_result) -> int | None:
-    if not isinstance(experiment_result, dict):
-        return None
-    status = experiment_result.get("status")
-    if status == "budget_exhausted":
-        return LLM_BUDGET_EXIT_CODE
-    if status == "interrupted":
-        return INTERRUPTED_EXIT_CODE
-    if status == "failed":
-        return 1
-    return None
-
 
 def experiment_budget_exit_code(experiment_result) -> int | None:
     """Backward-compatible helper for budget-specific callers."""

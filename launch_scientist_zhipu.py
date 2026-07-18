@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime
 from ai_scientist.utils.launcher_workflow import (
+    experiment_stop_exit_code,
     prepare_idea_artifacts,
     run_experiment_phase,
     run_review_phase,
@@ -47,7 +48,6 @@ from ai_scientist.utils.workflow_modes import list_workflow_modes
 from ai_scientist.config.paths import (
     get_experiment_dir,
 )
-from launch_scientist_bfts import experiment_stop_exit_code
 
 
 def print_time():
