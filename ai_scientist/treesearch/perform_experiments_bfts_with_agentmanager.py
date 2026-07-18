@@ -1,12 +1,9 @@
 from __future__ import annotations
-import atexit
 from contextlib import contextmanager
 from datetime import datetime
 import logging
 import math
-import shutil
 import json
-import pickle
 import signal
 import statistics
 import threading
@@ -46,6 +43,7 @@ from ai_scientist.utils.experiment_run_lock import (
 
 
 logger = logging.getLogger("ai-scientist")
+MANAGER_STATE_SCHEMA = "xscientist.bfts.manager-state.v1"
 
 
 class ExperimentTermination(KeyboardInterrupt):
@@ -89,6 +87,41 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     temp_path.replace(path)
 
 
+def manager_state_payload(manager, cfg, run_status: str) -> dict:
+    current_stage = getattr(manager, "current_stage", None)
+    payload = {
+        "schema": MANAGER_STATE_SCHEMA,
+        "status": run_status,
+        "updated_at": datetime.now().isoformat(),
+        "exp_name": str(getattr(cfg, "exp_name", "")),
+        "log_dir": str(cfg.log_dir),
+        "workspace_dir": str(cfg.workspace_dir),
+        "task_desc": getattr(manager, "task_desc", None),
+        "stages": [
+            getattr(stage, "__dict__", stage)
+            for stage in (getattr(manager, "stages", None) or [])
+        ],
+        "stage_history": [
+            getattr(transition, "__dict__", transition)
+            for transition in (getattr(manager, "stage_history", None) or [])
+        ],
+        "completed_stages": list(getattr(manager, "completed_stages", None) or []),
+        "current_stage_number": int(
+            getattr(manager, "current_stage_number", 0) or 0
+        ),
+        "current_stage": (
+            getattr(current_stage, "__dict__", current_stage)
+            if current_stage is not None
+            else None
+        ),
+        "journals": {
+            name: journal.to_dict()
+            for name, journal in (getattr(manager, "journals", None) or {}).items()
+        },
+    }
+    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+
+
 def journal_to_rich_tree(journal: Journal, cfg):
     best_node = journal.get_best_node_by_metric()
 
@@ -124,8 +157,6 @@ def _perform_experiments_bfts_locked(config_path: str):
     task_desc_str = backend.compile_prompt_to_md(task_desc)
 
     global_step = 0
-    preserve_workspace = False
-
     if not cfg.resume_from:
         with Status("Preparing agent workspace (copying and extracting files) ..."):
             prep_agent_workspace(cfg)
@@ -285,12 +316,6 @@ def _perform_experiments_bfts_locked(config_path: str):
             "- stage_*/notes/stage_progress.json: per-step progress snapshots",
         ]
         program_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def cleanup():
-        if global_step == 0 and not preserve_workspace:
-            shutil.rmtree(cfg.workspace_dir)
-
-    atexit.register(cleanup)
 
     if cfg.resume_from:
         manager = AgentManager.from_checkpoint(
@@ -654,7 +679,6 @@ def _perform_experiments_bfts_locked(config_path: str):
                 exec_callback=create_exec_callback(status), step_callback=step_callback
             )
     except Exception as exc:
-        preserve_workspace = True
         if is_llm_budget_exception(exc):
             run_status = "budget_exhausted"
             budget_error = llm_budget_exception_payload(exc)
@@ -676,7 +700,6 @@ def _perform_experiments_bfts_locked(config_path: str):
             )
     except KeyboardInterrupt as exc:
         run_status = "interrupted"
-        preserve_workspace = True
         failure_error = {
             "type": type(exc).__name__,
             "message": "Experiment interrupted by user",
@@ -694,40 +717,6 @@ def _perform_experiments_bfts_locked(config_path: str):
     finally:
         if run_status != "completed":
             persist_stopped_run()
-
-    manager_pickle_path = cfg.log_dir / "manager.pkl"
-    if run_status != "completed":
-        try:
-            with open(manager_pickle_path, "wb") as f:
-                pickle.dump(
-                    {
-                        name: journal.to_dict()
-                        for name, journal in manager.journals.items()
-                    },
-                    f,
-                )
-            logger.info(f"Saved manager journals to: {manager_pickle_path}")
-        except Exception as e:
-            logger.error(f"Failed to save manager journals: {e}")
-    else:
-        try:
-            with open(manager_pickle_path, "wb") as f:
-                pickle.dump(manager, f)
-            logger.info(f"Saved manager state to: {manager_pickle_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save full manager state: {e}")
-            try:
-                with open(manager_pickle_path, "wb") as f:
-                    pickle.dump(
-                        {
-                            name: journal.to_dict()
-                            for name, journal in manager.journals.items()
-                        },
-                        f,
-                    )
-                logger.info(f"Saved manager journals to: {manager_pickle_path}")
-            except Exception as e:
-                logger.error(f"Failed to save manager journals: {e}")
 
     if cfg.generate_report and run_status == "completed":
         try:
@@ -762,7 +751,6 @@ def _perform_experiments_bfts_locked(config_path: str):
             print(f"- Research summary: {research_summary_path}")
             print(f"- Ablation summary: {ablation_summary_path}")
         except Exception as exc:
-            preserve_workspace = True
             if is_llm_budget_exception(exc):
                 run_status = "budget_exhausted"
                 budget_error = llm_budget_exception_payload(exc)
@@ -780,7 +768,6 @@ def _perform_experiments_bfts_locked(config_path: str):
             persist_stopped_run()
         except KeyboardInterrupt as exc:
             run_status = "interrupted"
-            preserve_workspace = True
             failure_error = {
                 "type": type(exc).__name__,
                 "message": "Final report interrupted by user",
@@ -796,6 +783,19 @@ def _perform_experiments_bfts_locked(config_path: str):
             logger.warning("Final report interrupted; saving a resumable checkpoint")
             persist_stopped_run()
 
+    manager_state_path = cfg.log_dir / "manager_state.json"
+    try:
+        write_json_atomic(
+            manager_state_path,
+            manager_state_payload(manager, cfg, run_status),
+        )
+    except Exception as state_exc:
+        persistence_errors.append(
+            f"manager_state: {type(state_exc).__name__}: {state_exc}"
+        )
+        logger.warning("Failed to save manager state: %s", state_exc)
+        manager_state_path = None
+
     status_payload = {
         "status": run_status,
         "updated_at": datetime.now().isoformat(),
@@ -810,6 +810,9 @@ def _perform_experiments_bfts_locked(config_path: str):
         "budget_error": budget_error,
         "failure_error": failure_error,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "manager_state_path": (
+            str(manager_state_path) if manager_state_path is not None else None
+        ),
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,
     }
@@ -823,6 +826,9 @@ def _perform_experiments_bfts_locked(config_path: str):
         "budget_error": budget_error,
         "failure_error": failure_error,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "manager_state_path": (
+            str(manager_state_path) if manager_state_path is not None else None
+        ),
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,
     }

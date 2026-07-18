@@ -268,6 +268,7 @@ def run_experiment_phase(
                 "logs_dir": str(idea_dir / "logs"),
                 "config_path": str(idea_config_path),
                 "run_status": run_status_path,
+                "manager_state": experiment_result.get("manager_state_path"),
                 "llm_budget": str(idea_dir / "llm_budget.json"),
             },
             metadata={
@@ -282,6 +283,7 @@ def run_experiment_phase(
             "resumable": bool(experiment_result.get("resumable")),
             "config_path": str(idea_config_path),
             "run_status_path": run_status_path,
+            "manager_state_path": experiment_result.get("manager_state_path"),
             "budget_error": experiment_result.get("budget_error"),
             "failure_error": experiment_result.get("failure_error"),
             "checkpoint_path": experiment_result.get("checkpoint_path"),

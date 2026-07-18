@@ -3633,6 +3633,7 @@ def _process_single_paper(args):
                 "resumable": bool(experiment_result.get("resumable")),
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "run_status_path": experiment_result.get("run_status_path"),
+                "manager_state_path": experiment_result.get("manager_state_path"),
                 "lock_path": experiment_result.get("lock_path"),
                 "lock_owner": experiment_result.get("lock_owner"),
                 "paper_type": paper_type,
