@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from pathlib import Path
@@ -46,6 +45,7 @@ from ai_scientist.utils.integrity_workflow import (
     integrity_report_payload,
     run_integrity_forensics_for_manuscript,
 )
+from ai_scientist.treesearch.utils.serialize import atomic_write_json
 
 LLM_BUDGET_EXIT_CODE = 75
 INTERRUPTED_EXIT_CODE = 130
@@ -194,8 +194,12 @@ def prepare_idea_artifacts(
         idea["Code"] = added_code
 
     idea_path_json = idea_dir / "idea.json"
-    with open(idea_path_json, "w") as f:
-        json.dump(idea, f, indent=4)
+    atomic_write_json(
+        idea_path_json,
+        idea,
+        indent=4,
+        ensure_ascii=True,
+    )
 
     mark_stage_complete(
         idea_dir,
