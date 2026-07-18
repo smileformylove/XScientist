@@ -48,7 +48,10 @@ def experiment_lock_root(config_path: str | Path) -> Path:
     except (OSError, yaml.YAMLError):
         raw_config = None
     if isinstance(raw_config, dict) and raw_config.get("workspace_dir"):
-        workspace_root = _non_root_path(Path(str(raw_config["workspace_dir"])))
+        workspace_path = Path(str(raw_config["workspace_dir"])).expanduser()
+        if not workspace_path.is_absolute():
+            workspace_path = config_dir / workspace_path
+        workspace_root = _non_root_path(workspace_path)
         if workspace_root is not None:
             return workspace_root
 

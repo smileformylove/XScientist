@@ -64,6 +64,8 @@ def experiment_stop_exit_code(experiment_result: Any) -> int | None:
         return 128 + signal_number if signal_number else INTERRUPTED_EXIT_CODE
     if status == "failed":
         return 1
+    if status == "initialization_failed":
+        return 1
     if status == "locked":
         return LLM_BUDGET_EXIT_CODE
     return None
@@ -228,7 +230,11 @@ def run_experiment_phase(
         experiment_state = (
             load_workflow_state(idea_dir).get("stages", {}).get("experiment", {})
         )
-        if experiment_state.get("status") in {"stopped", "failed", "interrupted"}:
+        if experiment_state.get("status") in {
+            "stopped",
+            "failed",
+            "interrupted",
+        }:
             candidate = experiment_state.get("metadata", {}).get("checkpoint_path")
             if candidate and Path(candidate).is_file():
                 resume_from = str(Path(candidate).resolve())
@@ -244,8 +250,28 @@ def run_experiment_phase(
     experiment_result = perform_experiments_bfts(idea_config_path)
     if (
         isinstance(experiment_result, dict)
-        and experiment_result.get("status") == "locked"
+        and experiment_result.get("status") in {"locked", "initialization_failed"}
     ):
+        if experiment_result.get("status") == "initialization_failed":
+            save_token_tracker(idea_dir)
+            mark_stage_stopped(
+                idea_dir,
+                "experiment",
+                reason="experiment_initialization_failed",
+                artifacts={
+                    "config_path": str(idea_config_path),
+                    "initialization_status": experiment_result.get(
+                        "initialization_status_path"
+                    ),
+                },
+                metadata={
+                    "initialization_phase": experiment_result.get(
+                        "initialization_phase"
+                    ),
+                    "failure_error": experiment_result.get("failure_error"),
+                    "resumable": False,
+                },
+            )
         return experiment_result
     if isinstance(experiment_result, dict) and experiment_result.get("status") in {
         "budget_exhausted",

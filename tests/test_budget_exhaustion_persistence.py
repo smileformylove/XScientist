@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from ai_scientist.treesearch.agent_manager import Stage
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
+    INITIALIZATION_STATUS_SCHEMA,
     MANAGER_STATE_SCHEMA,
     ExperimentTermination,
     perform_experiments_bfts,
@@ -225,7 +226,9 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertIn(stage.name, manager_state["journals"])
             self.assertFalse((log_dir / "manager.pkl").exists())
 
-    def test_resume_initialization_failure_preserves_existing_workspace(self) -> None:
+    def test_resume_initialization_failure_is_structured_and_preserves_workspace(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             log_dir = root / "logs" / "0-run"
@@ -258,11 +261,55 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
                     "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager.from_checkpoint",
                     side_effect=ValueError("invalid checkpoint"),
                 ),
-                self.assertRaisesRegex(ValueError, "invalid checkpoint"),
             ):
-                perform_experiments_bfts(root / "config.yaml")
+                result = perform_experiments_bfts(root / "config.yaml")
 
+            self.assertEqual(result["status"], "initialization_failed")
+            self.assertEqual(result["initialization_phase"], "checkpoint_restore")
+            self.assertEqual(result["failure_error"]["type"], "ValueError")
+            status_path = Path(result["initialization_status_path"])
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["schema"], INITIALIZATION_STATUS_SCHEMA)
+            self.assertEqual(status["status"], "initialization_failed")
+            self.assertEqual(status_path.parent.name, "initialization_failures")
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+    def test_configuration_failure_is_structured_without_running_experiment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                f"workspace_dir: {root / 'workspaces'}\n", encoding="utf-8"
+            )
+
+            with mock.patch(
+                "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                side_effect=ValueError("invalid configuration"),
+            ):
+                result = perform_experiments_bfts(config_path)
+
+            self.assertEqual(result["status"], "initialization_failed")
+            self.assertEqual(result["initialization_phase"], "configuration")
+            self.assertEqual(result["failure_error"]["message"], "invalid configuration")
+            self.assertTrue(Path(result["initialization_status_path"]).is_file())
+
+    def test_lock_acquisition_failure_is_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                f"workspace_dir: {root / 'workspaces'}\n", encoding="utf-8"
+            )
+
+            with mock.patch(
+                "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.ExperimentRunLock.acquire",
+                side_effect=PermissionError("lock denied"),
+            ):
+                result = perform_experiments_bfts(config_path)
+
+            self.assertEqual(result["status"], "initialization_failed")
+            self.assertEqual(result["initialization_phase"], "run_lock")
+            self.assertEqual(result["failure_error"]["type"], "PermissionError")
 
     def test_manager_state_failure_is_reported_without_losing_run_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -379,6 +426,56 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             "RuntimeError",
         )
 
+    @mock.patch("ai_scientist.utils.launcher_workflow.mark_stage_stopped")
+    @mock.patch("ai_scientist.utils.launcher_workflow.save_token_tracker")
+    @mock.patch("ai_scientist.utils.launcher_workflow.perform_experiments_bfts")
+    @mock.patch("ai_scientist.utils.launcher_workflow.edit_bfts_config_file")
+    @mock.patch(
+        "ai_scientist.utils.launcher_workflow.is_stage_complete", return_value=False
+    )
+    def test_launcher_marks_initialization_failure_stopped(
+        self,
+        _stage_complete_mock: mock.Mock,
+        edit_config_mock: mock.Mock,
+        perform_mock: mock.Mock,
+        save_tracker_mock: mock.Mock,
+        mark_stopped_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            idea_path = root / "idea.json"
+            idea_path.write_text("{}", encoding="utf-8")
+            edit_config_mock.return_value = str(root / "bfts_config.yaml")
+            perform_mock.return_value = {
+                "status": "initialization_failed",
+                "initialization_phase": "checkpoint_restore",
+                "initialization_status_path": str(root / "initialization.json"),
+                "failure_error": {
+                    "type": "ValueError",
+                    "message": "invalid checkpoint",
+                },
+                "resumable": False,
+            }
+
+            result = run_experiment_phase(
+                root,
+                idea_path,
+                "plot-model",
+                resume=False,
+                logger=lambda _message: None,
+            )
+
+        self.assertEqual(result["status"], "initialization_failed")
+        save_tracker_mock.assert_called_once_with(root)
+        self.assertEqual(
+            mark_stopped_mock.call_args.kwargs["reason"],
+            "experiment_initialization_failed",
+        )
+        self.assertEqual(
+            mark_stopped_mock.call_args.kwargs["metadata"]["initialization_phase"],
+            "checkpoint_restore",
+        )
+
     def test_stopped_stage_is_not_completed_by_artifact_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
@@ -407,6 +504,12 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(
             launch_scientist_bfts.experiment_stop_exit_code({"status": "failed"}), 1
+        )
+        self.assertEqual(
+            launch_scientist_bfts.experiment_stop_exit_code(
+                {"status": "initialization_failed"}
+            ),
+            1,
         )
         self.assertEqual(
             launch_scientist_bfts.experiment_stop_exit_code(

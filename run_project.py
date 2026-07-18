@@ -989,6 +989,10 @@ def process_single_idea(args):
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "run_status_path": experiment_result.get("run_status_path"),
                 "manager_state_path": experiment_result.get("manager_state_path"),
+                "initialization_status_path": experiment_result.get(
+                    "initialization_status_path"
+                ),
+                "initialization_phase": experiment_result.get("initialization_phase"),
                 "lock_path": experiment_result.get("lock_path"),
                 "lock_owner": experiment_result.get("lock_owner"),
             }

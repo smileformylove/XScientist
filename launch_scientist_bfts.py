@@ -440,6 +440,13 @@ if __name__ == "__main__":
                     f"under pid {owner.get('pid', 'unknown')} on "
                     f"{owner.get('hostname', 'unknown')}. Retry after that run exits."
                 )
+            elif experiment_status == "initialization_failed":
+                failure = experiment_result.get("failure_error") or {}
+                print(
+                    "Experiment could not initialize during "
+                    f"{experiment_result.get('initialization_phase', 'unknown')}: "
+                    f"{failure.get('message', '')}"
+                )
             else:
                 failure = experiment_result.get("failure_error") or {}
                 print(

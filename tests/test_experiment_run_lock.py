@@ -138,6 +138,12 @@ class ExperimentRunLockTests(unittest.TestCase):
             )
             self.assertEqual(experiment_lock_root(configured), workspace.resolve())
 
+            relative = root / "relative.yaml"
+            relative.write_text("workspace_dir: nested/workspace\n", encoding="utf-8")
+            self.assertEqual(
+                experiment_lock_root(relative), (root / "nested/workspace").resolve()
+            )
+
             fallback = root / "missing.yaml"
             self.assertEqual(experiment_lock_root(fallback), root.resolve())
 

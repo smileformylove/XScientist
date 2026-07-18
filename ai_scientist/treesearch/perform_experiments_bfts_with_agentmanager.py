@@ -7,6 +7,7 @@ import json
 import signal
 import statistics
 import threading
+import uuid
 from . import backend
 from .journal import Journal, Node
 from .journal2report import journal2report
@@ -44,6 +45,16 @@ from ai_scientist.utils.experiment_run_lock import (
 
 logger = logging.getLogger("ai-scientist")
 MANAGER_STATE_SCHEMA = "xscientist.bfts.manager-state.v1"
+INITIALIZATION_STATUS_SCHEMA = "xscientist.bfts.initialization-status.v1"
+
+
+class ExperimentInitializationError(RuntimeError):
+    """Wrap a failure that occurs before the experiment run loop starts."""
+
+    def __init__(self, phase: str, cause: Exception):
+        self.phase = phase
+        self.cause = cause
+        super().__init__(f"Experiment initialization failed during {phase}: {cause}")
 
 
 class ExperimentTermination(KeyboardInterrupt):
@@ -122,6 +133,48 @@ def manager_state_payload(manager, cfg, run_status: str) -> dict:
     return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
 
 
+def initialization_failure_result(
+    config_path: Path,
+    lock_root: Path,
+    *,
+    phase: str,
+    cause: Exception,
+) -> dict:
+    status_dir = lock_root / ".xscientist" / "initialization_failures"
+    status_path = status_dir / (
+        f"initialization-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-"
+        f"{uuid.uuid4().hex}.json"
+    )
+    payload = {
+        "schema": INITIALIZATION_STATUS_SCHEMA,
+        "status": "initialization_failed",
+        "updated_at": datetime.now().isoformat(),
+        "config_path": str(config_path),
+        "lock_root": str(lock_root),
+        "initialization_phase": phase,
+        "failure_error": {
+            "type": type(cause).__name__,
+            "message": str(cause),
+        },
+        "resumable": False,
+    }
+    persistence_errors = []
+    try:
+        write_json_atomic(status_path, payload)
+    except Exception as status_exc:
+        persistence_errors.append(
+            f"initialization_status: {type(status_exc).__name__}: {status_exc}"
+        )
+        status_path = None
+    return {
+        **payload,
+        "initialization_status_path": (
+            str(status_path) if status_path is not None else None
+        ),
+        "persistence_errors": persistence_errors,
+    }
+
+
 def journal_to_rich_tree(journal: Journal, cfg):
     best_node = journal.get_best_node_by_metric()
 
@@ -147,49 +200,55 @@ def journal_to_rich_tree(journal: Journal, cfg):
 
 
 def _perform_experiments_bfts_locked(config_path: str):
-    # turn config path string into a path object
     config_path = Path(config_path)
-    cfg = load_cfg(config_path)
-    logger.info(f'Starting run "{cfg.exp_name}"')
+    initialization_phase = "configuration"
+    try:
+        cfg = load_cfg(config_path)
+        logger.info(f'Starting run "{cfg.exp_name}"')
 
-    task_desc = load_task_desc(cfg)
-    print(task_desc)
-    task_desc_str = backend.compile_prompt_to_md(task_desc)
+        initialization_phase = "task_loading"
+        task_desc = load_task_desc(cfg)
+        print(task_desc)
+        task_desc_str = backend.compile_prompt_to_md(task_desc)
+
+        initialization_phase = "workspace_preparation"
+        if not cfg.resume_from:
+            with Status("Preparing agent workspace (copying and extracting files) ..."):
+                prep_agent_workspace(cfg)
+
+        initialization_phase = "run_artifacts"
+        results_tsv_path = cfg.log_dir / "results.tsv"
+        program_md_path = cfg.log_dir / "program.md"
+        results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not results_tsv_path.exists():
+            results_tsv_path.write_text(
+                "\t".join(
+                    [
+                        "time",
+                        "stage",
+                        "step",
+                        "kind",
+                        "node_id",
+                        "parent_id",
+                        "status",
+                        "decision",
+                        "objective",
+                        "metric_mean",
+                        "metric_name",
+                        "maximize",
+                        "datasets",
+                        "exec_time_sec",
+                        "loc",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        raise ExperimentInitializationError(initialization_phase, exc) from exc
 
     global_step = 0
-    if not cfg.resume_from:
-        with Status("Preparing agent workspace (copying and extracting files) ..."):
-            prep_agent_workspace(cfg)
-
-    results_tsv_path = cfg.log_dir / "results.tsv"
-    program_md_path = cfg.log_dir / "program.md"
-
-    results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not results_tsv_path.exists():
-        results_tsv_path.write_text(
-            "\t".join(
-                [
-                    "time",
-                    "stage",
-                    "step",
-                    "kind",
-                    "node_id",
-                    "parent_id",
-                    "status",
-                    "decision",
-                    "objective",
-                    "metric_mean",
-                    "metric_name",
-                    "maximize",
-                    "datasets",
-                    "exec_time_sec",
-                    "loc",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
 
     logged_node_ids: set[str] = set()
     stage_best: dict[str, dict] = {}
@@ -317,60 +376,66 @@ def _perform_experiments_bfts_locked(config_path: str):
         ]
         program_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    if cfg.resume_from:
-        manager = AgentManager.from_checkpoint(
-            cfg.resume_from,
-            cfg=cfg,
-            workspace_dir=Path(cfg.workspace_dir),
-            expected_task_desc=task_desc,
-        )
-        logged_node_ids.update(
-            node.id
-            for journal in manager.journals.values()
-            for node in journal.nodes
-            if getattr(node, "id", None)
-        )
-        for stage_name, journal in manager.journals.items():
-            candidates = []
-            for node in journal.good_nodes:
-                if getattr(node, "is_seed_node", False) or getattr(
-                    node, "is_seed_agg_node", False
-                ):
-                    continue
-                _, objective, _, _ = _metric_meta(node)
-                if objective is None:
-                    continue
-                if stage_name.startswith("2_") and len(
-                    set(getattr(node, "datasets_successfully_tested", None) or [])
-                ) < 2:
-                    continue
-                candidates.append(
-                    {
-                        "objective": objective,
-                        "loc": len((node.code or "").splitlines()),
-                        "node_id": node.id,
-                    }
-                )
-            if candidates:
-                stage_best[stage_name] = max(
-                    candidates, key=lambda item: (item["objective"], -item["loc"])
-                )
-        print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
-    else:
-        manager = AgentManager(
-            task_desc=task_desc,
-            cfg=cfg,
-            workspace_dir=Path(cfg.workspace_dir),
-        )
+    initialization_phase = "checkpoint_restore" if cfg.resume_from else "manager_creation"
+    try:
+        if cfg.resume_from:
+            manager = AgentManager.from_checkpoint(
+                cfg.resume_from,
+                cfg=cfg,
+                workspace_dir=Path(cfg.workspace_dir),
+                expected_task_desc=task_desc,
+            )
+            logged_node_ids.update(
+                node.id
+                for journal in manager.journals.values()
+                for node in journal.nodes
+                if getattr(node, "id", None)
+            )
+            for stage_name, journal in manager.journals.items():
+                candidates = []
+                for node in journal.good_nodes:
+                    if getattr(node, "is_seed_node", False) or getattr(
+                        node, "is_seed_agg_node", False
+                    ):
+                        continue
+                    _, objective, _, _ = _metric_meta(node)
+                    if objective is None:
+                        continue
+                    if stage_name.startswith("2_") and len(
+                        set(getattr(node, "datasets_successfully_tested", None) or [])
+                    ) < 2:
+                        continue
+                    candidates.append(
+                        {
+                            "objective": objective,
+                            "loc": len((node.code or "").splitlines()),
+                            "node_id": node.id,
+                        }
+                    )
+                if candidates:
+                    stage_best[stage_name] = max(
+                        candidates,
+                        key=lambda item: (item["objective"], -item["loc"]),
+                    )
+            print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
+        else:
+            manager = AgentManager(
+                task_desc=task_desc,
+                cfg=cfg,
+                workspace_dir=Path(cfg.workspace_dir),
+            )
 
-    prog = Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=20),
-        MofNCompleteColumn(),
-        TimeRemainingColumn(),
-    )
-    status = Status("[green]Running experiments...")
-    prog.add_task("Progress:", total=cfg.agent.steps, completed=global_step)
+        initialization_phase = "progress_ui"
+        prog = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=20),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+        )
+        status = Status("[green]Running experiments...")
+        prog.add_task("Progress:", total=cfg.agent.steps, completed=global_step)
+    except Exception as exc:
+        raise ExperimentInitializationError(initialization_phase, exc) from exc
 
     def create_exec_callback(status_obj):
         def exec_callback(*args, **kwargs):
@@ -631,11 +696,14 @@ def _perform_experiments_bfts_locked(config_path: str):
             subtitle="Press [b]Ctrl+C[/b] to stop the run",
         )
 
-    live = Live(
-        generate_live(manager),
-        refresh_per_second=16,
-        screen=True,
-    )
+    try:
+        live = Live(
+            generate_live(manager),
+            refresh_per_second=16,
+            screen=True,
+        )
+    except Exception as exc:
+        raise ExperimentInitializationError("progress_ui", exc) from exc
 
     run_status = "completed"
     budget_error = None
@@ -837,9 +905,9 @@ def _perform_experiments_bfts_locked(config_path: str):
 def perform_experiments_bfts(config_path: str):
     config_path = Path(config_path).expanduser().resolve()
     lock_root = experiment_lock_root(config_path)
+    run_lock = ExperimentRunLock(lock_root, config_path=config_path)
     try:
-        with ExperimentRunLock(lock_root, config_path=config_path):
-            return _perform_experiments_bfts_locked(str(config_path))
+        run_lock.acquire()
     except ExperimentRunLocked as exc:
         return {
             "status": "locked",
@@ -852,9 +920,27 @@ def perform_experiments_bfts(config_path: str):
             },
             "resumable": False,
         }
+    except Exception as exc:
+        return initialization_failure_result(
+            config_path,
+            lock_root,
+            phase="run_lock",
+            cause=exc,
+        )
+
+    try:
+        return _perform_experiments_bfts_locked(str(config_path))
+    except ExperimentInitializationError as exc:
+        return initialization_failure_result(
+            config_path,
+            lock_root,
+            phase=exc.phase,
+            cause=exc.cause,
+        )
+    finally:
+        run_lock.release()
 
 
 if __name__ == "__main__":
     cfg_path = "treesearch/utils/config.yaml"
-    cfg = load_cfg(cfg_path)
     perform_experiments_bfts(cfg_path)
