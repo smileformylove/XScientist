@@ -6,6 +6,11 @@
   "type": "object",
   "properties": {
     "metric": {"type": ["object", "null"]},
+    "metric_provenance": {
+      "type": "string",
+      "enum": ["deterministic_verified", "agent_reported", "unavailable"]
+    },
+    "evaluation_report": {"type": ["object", "null"]},
     "analysis": {"type": ["string", "null"]},
     "is_buggy": {"type": ["boolean", "null"]},
     "is_buggy_plots": {"type": ["boolean", "null"]},
@@ -18,7 +23,7 @@
     "content_hash_inputs": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Which categories contributed to content_hash (e.g. ['code','metric'] or ['code','metric','llm_calls'])."
+      "description": "Which categories contributed to content_hash (e.g. ['code','metric'] or ['code','metric','evaluation','llm_calls'])."
     }
   },
   "additionalProperties": true

@@ -232,6 +232,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
          "fork layout".
     """
     from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+    from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
@@ -251,9 +252,18 @@ def cmd_fork(args: argparse.Namespace) -> int:
     parent_hash = parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
     parent_code = (node_dir / "code.py").read_text(encoding="utf-8") if (node_dir / "code.py").exists() else ""
     parent_metric = parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
+    evaluation_binding = evaluation_hash_binding(
+        parent_metrics.get("evaluation_report")
+        if isinstance(parent_metrics, dict)
+        else None
+    )
     if not parent_hash:
         try:
-            parent_hash = hash_node_payload(code=parent_code, metric=parent_metric)
+            parent_hash = hash_node_payload(
+                code=parent_code,
+                metric=parent_metric,
+                extras={"evaluation": evaluation_binding} if evaluation_binding else None,
+            )
         except Exception:  # pragma: no cover - defensive
             parent_hash = None
 
@@ -263,7 +273,12 @@ def cmd_fork(args: argparse.Namespace) -> int:
     # parent_content_hash) as a REFERENCE to the parent — those stay pointing
     # at the parent's original hash.
     try:
-        fork_hash = hash_node_payload(code=parent_code, metric=parent_metric, is_seed=True)
+        fork_hash = hash_node_payload(
+            code=parent_code,
+            metric=parent_metric,
+            extras={"evaluation": evaluation_binding} if evaluation_binding else None,
+            is_seed=True,
+        )
     except Exception:  # pragma: no cover - defensive
         fork_hash = parent_hash
 
@@ -275,7 +290,12 @@ def cmd_fork(args: argparse.Namespace) -> int:
     if isinstance(parent_metrics, dict) and fork_hash:
         fork_metrics = dict(parent_metrics)
         fork_metrics["content_hash"] = fork_hash
-        fork_metrics["content_hash_inputs"] = ["code", "metric", "seed"]
+        fork_metrics["content_hash_inputs"] = [
+            "code",
+            "metric",
+            *(["evaluation"] if evaluation_binding else []),
+            "seed",
+        ]
         (dest_nodes_dir / "metrics.json").write_text(
             json.dumps(fork_metrics, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
@@ -313,7 +333,12 @@ def cmd_fork(args: argparse.Namespace) -> int:
                     # part of the *parent's* identity, not the fork's. If a
                     # future fork variant wants to inherit refs, it should add
                     # 'llm_calls' back into content_hash_inputs at the same time.
-                    "content_hash_inputs": ["code", "metric", "seed"],
+                    "content_hash_inputs": [
+                        "code",
+                        "metric",
+                        *(["evaluation"] if evaluation_binding else []),
+                        "seed",
+                    ],
                     "llm_call_refs": [],
                     "stage": parent_node_entry.get("stage") or "forked",
                     "step": 0,
@@ -323,6 +348,9 @@ def cmd_fork(args: argparse.Namespace) -> int:
                     "is_seed_node": True,
                     "is_seed_agg_node": False,
                     "metric": parent_node_entry.get("metric") or parent_metrics.get("metric"),
+                    "metric_provenance": parent_metrics.get("metric_provenance")
+                    or "unavailable",
+                    "evaluation_report": parent_metrics.get("evaluation_report"),
                     "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[:400],
                     "exp_results_dir": None,
                     "ctime": parent_node_entry.get("ctime"),
@@ -839,6 +867,7 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
     sweep — keeps the classification rules in exactly one place.
     """
     from ai_scientist.protocol import hash_node_payload
+    from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     entries: list[dict[str, Any]] = []
@@ -860,6 +889,9 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
         llm_refs = [str(r) for r in llm_refs_raw if r]
         is_seed = bool(node.get("is_seed_node"))
         metric = metrics.get("metric") if isinstance(metrics, dict) else None
+        evaluation_binding = evaluation_hash_binding(
+            metrics.get("evaluation_report") if isinstance(metrics, dict) else None
+        )
 
         # Export skips writing code.py when the journal node's code is
         # empty/whitespace, but still stamps a content_hash computed with
@@ -883,6 +915,7 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             computed = hash_node_payload(
                 code=code_text,
                 metric=metric,
+                extras={"evaluation": evaluation_binding} if evaluation_binding else None,
                 llm_call_hashes=llm_refs or None,
                 is_seed=is_seed,
             )

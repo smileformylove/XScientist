@@ -95,6 +95,8 @@ class Node(DataClassJsonMixin):
     # post-execution result analysis (findings/feedback)
     analysis: str = field(default=None, kw_only=True)  # type: ignore
     metric: MetricValue = field(default=None, kw_only=True)  # type: ignore
+    metric_provenance: str = field(default="unavailable", kw_only=True)
+    evaluation_report: dict[str, Any] | None = field(default=None, kw_only=True)
     # whether the agent decided that the code is buggy
     # -> always True if exc_type is not None or no valid metric
     is_buggy: bool = field(default=None, kw_only=True)  # type: ignore
@@ -272,6 +274,8 @@ class Node(DataClassJsonMixin):
                     else None
                 ),
             },
+            "metric_provenance": self.metric_provenance,
+            "evaluation_report": self.evaluation_report,
             "is_buggy": self.is_buggy,
             "is_buggy_plots": self.is_buggy_plots,
             "parent_id": None if self.parent is None else self.parent.id,

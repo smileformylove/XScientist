@@ -131,7 +131,8 @@ Rules:
 - `metric.value` is coerced to `float` when possible.
 - Only `name`, `value`, `maximize` are hashed from the metric object.
 - `extras` is optional. Producers that want to bind additional stable inputs
-  (dataset name, seed) SHOULD do so via `extras`; unstable inputs
+  (dataset name, seed, verified evaluator/input/result hashes) SHOULD do so via
+  `extras`; unstable inputs
   (timestamps, memory addresses) MUST NOT enter the payload.
 
 Reference implementation: `ai_scientist.protocol.hash_node_payload`.
@@ -378,6 +379,8 @@ Two additive node-level fields make LLM provenance first-class:
 - **`content_hash_inputs`** on both `exploration_graph.nodes[]` and
   `nodes/<id>/metrics.json` — array declaring which categories fed the
   hash. Older ARAs omit this and are treated as `["code","metric"]`. Add
+  `"evaluation"` when a deterministic verified evaluation is bound through
+  `extras`. Add
   `"llm_calls"` when LLM-call hashes were bound in via `extras`. Add
   `"seed"` when `Node.is_seed_node` is True; this ensures a seed-derived
   node with identical code+metric hashes differently from a regular
@@ -391,7 +394,7 @@ Two additive node-level fields make LLM provenance first-class:
 }
 ```
 
-A hash declared with `["code","metric","llm_calls"]` will not collide with
+A hash declared with `["code","metric","evaluation","llm_calls"]` will not collide with
 one declared `["code","metric"]` even for identical code — cross-producer
 comparison stays sound. Consumers that don't understand these fields may
 safely ignore them.
@@ -648,7 +651,7 @@ under `<project>/ara/`. Aggregate rc follows severity: tampered > unlocked
 
 **`hash-check --ara <path> [--json]`** — Node-level integrity: for every
 node with code on disk, recompute `content_hash` from the same inputs
-`hash_node_payload` (§4) uses (code, metric, `llm_call_refs`,
+`hash_node_payload` (§4) uses (code, metric, verified evaluation hashes, `llm_call_refs`,
 `is_seed_node`) and diff against the value stored in
 `exploration_graph.json`. rc=1 on any drift, rc=2 if `code.py` is
 missing for a node the graph claims has code.

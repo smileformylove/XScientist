@@ -14,6 +14,7 @@ from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
 from ai_scientist.protocol import capture_llm_calls
+from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
 import copy
 import dataclasses
 import pickle
@@ -1658,6 +1659,11 @@ class ParallelAgent:
 
             # Execute and parse results
             print("Running code")
+            experiment_data_path = Path(working_dir) / "experiment_data.npy"
+            try:
+                experiment_data_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove stale experiment data: %s", exc)
             exec_result = experiment_interpreter.run(child_node.code, True)
             experiment_interpreter.cleanup_session()
 
@@ -1667,12 +1673,41 @@ class ParallelAgent:
             )
 
             # Add check for saved data files
-            data_files = [f for f in os.listdir(working_dir) if f.endswith(".npy")]
+            data_files = ["experiment_data.npy"] if experiment_data_path.is_file() else []
             if not data_files:
                 logger.warning(
                     "No .npy files found in working directory. Data may not have been saved properly."
                 )
-            else:
+            evaluation_report = evaluate_experiment_data(
+                experiment_data_path,
+                requested_metric=worker_agent.evaluation_metrics,
+            )
+            child_node.evaluation_report = evaluation_report
+            deterministic_metric = evaluation_report.get("metric")
+            if evaluation_report.get("status") == "verified" and isinstance(
+                deterministic_metric, dict
+            ):
+                child_node.metric = MetricValue(value=deterministic_metric)
+                child_node.metric_provenance = "deterministic_verified"
+                child_node.datasets_successfully_tested = (
+                    _extract_dataset_names_from_metric(child_node.metric)
+                )
+                logger.info(
+                    "Deterministically verified %s for node %s from experiment_data.npy",
+                    evaluation_report.get("selected_metric"),
+                    child_node.id,
+                )
+            elif not data_files:
+                child_node.metric = WorstMetricValue()
+                child_node.metric_provenance = "unavailable"
+                child_node.is_buggy = True
+                child_node.datasets_successfully_tested = []
+
+            if (
+                data_files
+                and evaluation_report.get("safe_for_legacy_parser") is True
+                and child_node.metric_provenance != "deterministic_verified"
+            ):
                 if seed_eval:
                     # Use the parent node's parse code to parse the same data files again
                     parse_metrics_code = parent_node.parse_metrics_code
@@ -1776,6 +1811,7 @@ class ParallelAgent:
                             child_node.metric = MetricValue(
                                 value={"metric_names": metrics_response["metric_names"]}
                             )
+                            child_node.metric_provenance = "agent_reported"
                             child_node.datasets_successfully_tested = (
                                 _extract_dataset_names_from_metric(child_node.metric)
                             )
@@ -1784,6 +1820,7 @@ class ParallelAgent:
                             )
                         else:
                             child_node.metric = WorstMetricValue()
+                            child_node.metric_provenance = "unavailable"
                             child_node.is_buggy = True
                             logger.error(
                                 f"No valid metrics received for node {child_node.id}"
@@ -1794,6 +1831,7 @@ class ParallelAgent:
                             f"Error executing metrics parsing code: {metrics_exec_result.exc_info}"
                         )
                         child_node.metric = WorstMetricValue()
+                        child_node.metric_provenance = "unavailable"
                         child_node.is_buggy = True
                         child_node.datasets_successfully_tested = []
 
@@ -1802,6 +1840,7 @@ class ParallelAgent:
                         f"Error parsing metrics for node {child_node.id}: {str(e)}"
                     )
                     child_node.metric = WorstMetricValue()
+                    child_node.metric_provenance = "unavailable"
                     child_node.is_buggy = True
                     child_node.parse_exc_type = str(e)
                     child_node.parse_exc_info = None
@@ -1811,6 +1850,15 @@ class ParallelAgent:
                         + str(e)
                     )
                     child_node.datasets_successfully_tested = []
+            elif data_files and child_node.metric_provenance != "deterministic_verified":
+                child_node.metric = WorstMetricValue()
+                child_node.metric_provenance = "unavailable"
+                child_node.is_buggy = True
+                child_node.datasets_successfully_tested = []
+                logger.error(
+                    "Refusing legacy metric parsing for unsafe experiment_data.npy: %s",
+                    evaluation_report.get("reason"),
+                )
 
             # if experiment was successful, generate and run plotting code
             if not child_node.is_buggy:

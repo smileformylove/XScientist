@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 from ai_scientist.utils.ara_graph import (
     graph_with_dag_metadata,
     write_exploration_graph_visualization,
@@ -283,6 +284,8 @@ def _export_nodes_from_journal(
         # 3. Metric + analysis snapshot.
         metrics_payload = {
             "metric": raw.get("metric"),
+            "metric_provenance": raw.get("metric_provenance") or "unavailable",
+            "evaluation_report": raw.get("evaluation_report"),
             "analysis": raw.get("analysis"),
             "is_buggy": raw.get("is_buggy"),
             "is_buggy_plots": raw.get("is_buggy_plots"),
@@ -307,7 +310,10 @@ def _export_nodes_from_journal(
         # of strings (or nothing at all on legacy runs / seed nodes).
         llm_refs = [str(r) for r in llm_refs_raw if r]
         is_seed = bool(raw.get("is_seed_node"))
+        evaluation_binding = evaluation_hash_binding(raw.get("evaluation_report"))
         hash_inputs = ["code", "metric"]
+        if evaluation_binding:
+            hash_inputs.append("evaluation")
         if llm_refs:
             hash_inputs.append("llm_calls")
         if is_seed:
@@ -316,6 +322,7 @@ def _export_nodes_from_journal(
             node_content_hash = hash_node_payload(
                 code=code if isinstance(code, str) else "",
                 metric=raw.get("metric"),
+                extras={"evaluation": evaluation_binding} if evaluation_binding else None,
                 llm_call_hashes=llm_refs or None,
                 is_seed=is_seed,
             )
@@ -325,6 +332,8 @@ def _export_nodes_from_journal(
             metrics_payload["content_hash"] = node_content_hash
             metrics_payload["content_hash_inputs"] = hash_inputs
         _safe_write_json(node_dir / "metrics.json", metrics_payload)
+        if isinstance(raw.get("evaluation_report"), dict):
+            _safe_write_json(node_dir / "evaluation.json", raw["evaluation_report"])
 
         # 4. Plot references.
         plots_payload = {
@@ -362,6 +371,8 @@ def _export_nodes_from_journal(
                 "is_seed_node": raw.get("is_seed_node"),
                 "is_seed_agg_node": raw.get("is_seed_agg_node"),
                 "metric": raw.get("metric"),
+                "metric_provenance": raw.get("metric_provenance") or "unavailable",
+                "evaluation_report": raw.get("evaluation_report"),
                 "plan_excerpt": (raw.get("plan") or "")[:400],
                 "exp_results_dir": raw.get("exp_results_dir"),
                 "ctime": raw.get("ctime"),

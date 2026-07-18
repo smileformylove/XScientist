@@ -277,6 +277,9 @@ def _which_categories_flipped(
     if m_a.get("metric") != m_b.get("metric"):
         cats.append("metric")
 
+    if m_a.get("evaluation_report") != m_b.get("evaluation_report"):
+        cats.append("evaluation")
+
     if set(entry_a["llm_call_refs"]) != set(entry_b["llm_call_refs"]):
         cats.append("llm_calls")
 

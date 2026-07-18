@@ -24,7 +24,7 @@
           "content_hash_inputs": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Which categories of input contributed to content_hash. Older ARAs omit this and are treated as ['code','metric']. Add 'llm_calls' when llm_call_hashes were bound in."
+            "description": "Which categories of input contributed to content_hash. Older ARAs omit this and are treated as ['code','metric']. Add 'evaluation' for a verified deterministic evaluation and 'llm_calls' when llm_call_hashes were bound in."
           },
           "llm_call_refs": {
             "type": "array",
@@ -39,6 +39,11 @@
           "is_seed_node": {"type": ["boolean", "null"]},
           "is_seed_agg_node": {"type": ["boolean", "null"]},
           "metric": {"type": ["object", "null"]},
+          "metric_provenance": {
+            "type": "string",
+            "enum": ["deterministic_verified", "agent_reported", "unavailable"]
+          },
+          "evaluation_report": {"type": ["object", "null"]},
           "plan_excerpt": {"type": "string"},
           "exp_results_dir": {"type": ["string", "null"]},
           "ctime": {"type": ["number", "null"]},
