@@ -74,6 +74,9 @@ class LLMBudgetExceeded(RuntimeError):
         self.dimension = dimension
         self.snapshot = dict(snapshot)
 
+    def __reduce__(self):
+        return (type(self), (self.dimension, str(self), self.snapshot))
+
 
 class UnknownModelPriceError(LLMBudgetExceeded):
     pass
@@ -81,6 +84,49 @@ class UnknownModelPriceError(LLMBudgetExceeded):
 
 class LLMBudgetStateError(RuntimeError):
     pass
+
+
+def _find_llm_budget_exception(
+    exc: BaseException | None,
+) -> LLMBudgetExceeded | None:
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, LLMBudgetExceeded):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def is_llm_budget_exception(exc: BaseException | None) -> bool:
+    """Recognize budget failures, including exceptions crossing process boundaries."""
+
+    if _find_llm_budget_exception(exc) is not None:
+        return True
+    text = str(exc or "").lower()
+    return (
+        "llm" in text
+        and "budget" in text
+        and ("exhaust" in text or "exceed" in text)
+    ) or "no price is configured for model" in text
+
+
+def llm_budget_exception_payload(exc: BaseException) -> dict[str, Any]:
+    budget_exc = _find_llm_budget_exception(exc)
+    if budget_exc is not None:
+        return {
+            "type": type(budget_exc).__name__,
+            "dimension": budget_exc.dimension,
+            "message": str(budget_exc),
+            "snapshot": dict(budget_exc.snapshot),
+        }
+    return {
+        "type": type(exc).__name__,
+        "dimension": "unknown",
+        "message": str(exc),
+        "snapshot": llm_budget_manager.snapshot(),
+    }
 
 
 def _nonnegative_int(value: Any) -> int | None:
@@ -282,6 +328,8 @@ class LLMBudgetManager:
         prices_per_million: Mapping[str, Mapping[str, Any]] | None = None,
         state_path: str | Path | None = None,
         reset: bool = False,
+        allow_limit_increase: bool = False,
+        reclaim_active_reservations: bool = False,
     ) -> None:
         custom_prices: dict[str, dict[str, float]] = {}
         for model, prices in (prices_per_million or {}).items():
@@ -305,7 +353,11 @@ class LLMBudgetManager:
             self.reset(remove_state=True)
         if self.enabled:
             with self._locked_state() as state:
-                self._sync_limits(state)
+                self._sync_limits(state, allow_limit_increase=allow_limit_increase)
+                if allow_limit_increase:
+                    self._resume_wall_clock(state)
+                if reclaim_active_reservations:
+                    self._reclaim_active_reservations(state)
 
     def configure_from_env(self) -> None:
         prices: dict[str, Any] = {}
@@ -376,7 +428,17 @@ class LLMBudgetManager:
             "denials": [],
         }
 
-    def _sync_limits(self, state: dict[str, Any]) -> None:
+    @staticmethod
+    def _limit_is_increase(old: Any, new: Any) -> bool:
+        if old is None:
+            return new is None
+        if new is None:
+            return True
+        return float(new) >= float(old)
+
+    def _sync_limits(
+        self, state: dict[str, Any], *, allow_limit_increase: bool = False
+    ) -> None:
         expected = {
             "max_total_tokens": self._limits.max_total_tokens,
             "max_cost_usd": self._limits.max_cost_usd,
@@ -385,10 +447,74 @@ class LLMBudgetManager:
         }
         existing = state.get("limits") or {}
         if existing and existing != expected:
-            raise LLMBudgetStateError(
-                "LLM budget policy differs from the existing shared state"
+            can_increase = (
+                allow_limit_increase
+                and existing.get("price_schedule_hash")
+                == expected.get("price_schedule_hash")
+                and all(
+                    self._limit_is_increase(existing.get(key), expected.get(key))
+                    for key in (
+                        "max_total_tokens",
+                        "max_cost_usd",
+                        "max_wall_time_seconds",
+                    )
+                )
             )
+            if not can_increase:
+                raise LLMBudgetStateError(
+                    "LLM budget policy differs from the existing shared state"
+                )
         state["limits"] = expected
+
+    @staticmethod
+    def _resume_wall_clock(state: dict[str, Any]) -> None:
+        """Exclude time spent stopped between the last state write and resume."""
+
+        elapsed_at_last_update = max(
+            0.0,
+            float(state.get("updated_at") or time.time()) - float(state["started_at"]),
+        )
+        state["started_at"] = time.time() - elapsed_at_last_update
+
+    def _reclaim_active_reservations(self, state: dict[str, Any]) -> None:
+        """Charge orphaned in-flight calls conservatively before resuming a run."""
+
+        active = list(state.get("active", {}).items())
+        for reservation_id, reservation in active:
+            state["active"].pop(reservation_id, None)
+            for key in ("input_tokens", "output_tokens"):
+                state["reserved"][key] -= reservation[key]
+                state["used"][key] += reservation[key]
+            state["reserved"]["cost_usd"] -= reservation["cost_usd"]
+            state["reserved"]["requests"] -= 1
+            state["used"]["cost_usd"] += reservation["cost_usd"]
+            state["used"]["requests"] += 1
+            per_model = state["per_model"].setdefault(
+                reservation["model"],
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                    "requests": 0,
+                },
+            )
+            per_model["input_tokens"] += reservation["input_tokens"]
+            per_model["output_tokens"] += reservation["output_tokens"]
+            per_model["cost_usd"] += reservation["cost_usd"]
+            per_model["requests"] += 1
+        if active:
+            state["denials"].append(
+                {
+                    "at": time.time(),
+                    "dimension": "resume",
+                    "model": "multiple",
+                    "reason": (
+                        f"charged {len(active)} orphaned active reservation(s) "
+                        "while resuming"
+                    ),
+                }
+            )
+            del state["denials"][:-100]
 
     def _price_schedule_hash(self) -> str:
         prices = dict(DEFAULT_MODEL_PRICES_PER_MILLION)
@@ -691,6 +817,8 @@ def configure_llm_budget(
     prices_per_million: Mapping[str, Mapping[str, Any]] | None = None,
     state_path: str | Path | None = None,
     reset: bool = False,
+    allow_limit_increase: bool = False,
+    reclaim_active_reservations: bool = False,
 ) -> LLMBudgetManager:
     llm_budget_manager.configure(
         max_total_tokens=max_total_tokens,
@@ -699,6 +827,8 @@ def configure_llm_budget(
         prices_per_million=prices_per_million,
         state_path=state_path,
         reset=reset,
+        allow_limit_increase=allow_limit_increase,
+        reclaim_active_reservations=reclaim_active_reservations,
     )
     llm_budget_manager.export_environment()
     return llm_budget_manager

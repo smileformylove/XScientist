@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import pickle
 import tempfile
 import threading
 import time
 import unittest
 import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -16,6 +18,8 @@ from ai_scientist.utils.llm_budget import (
     LLMBudgetStateError,
     UnknownModelPriceError,
     estimate_tokens,
+    is_llm_budget_exception,
+    llm_budget_exception_payload,
 )
 
 
@@ -28,7 +32,54 @@ def _response(input_tokens: int, output_tokens: int, cached_tokens: int = 0):
     return SimpleNamespace(usage=usage)
 
 
+def _raise_budget_error_in_worker() -> None:
+    raise LLMBudgetExceeded("tokens", "worker LLM budget exhausted", {"used": {}})
+
+
 class LLMBudgetTests(unittest.TestCase):
+    def test_budget_exception_survives_pickle_round_trip(self) -> None:
+        original = LLMBudgetExceeded(
+            "tokens",
+            "LLM token budget would be exceeded",
+            {"used": {"input_tokens": 10}},
+        )
+
+        restored = pickle.loads(pickle.dumps(original))
+
+        self.assertIsInstance(restored, LLMBudgetExceeded)
+        self.assertEqual(restored.dimension, "tokens")
+        self.assertEqual(restored.snapshot, original.snapshot)
+        self.assertTrue(is_llm_budget_exception(restored))
+
+    def test_budget_exception_survives_process_boundary(self) -> None:
+        with ProcessPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_raise_budget_error_in_worker)
+            with self.assertRaises(LLMBudgetExceeded) as ctx:
+                future.result(timeout=5)
+
+        self.assertEqual(ctx.exception.dimension, "tokens")
+        self.assertTrue(is_llm_budget_exception(ctx.exception))
+
+    def test_budget_exception_payload_unwraps_chained_exception(self) -> None:
+        budget_error = UnknownModelPriceError(
+            "cost",
+            "No price is configured for model 'custom'",
+            {"limits": {"max_cost_usd": 1.0}},
+        )
+        try:
+            raise RuntimeError("worker failed") from budget_error
+        except RuntimeError as wrapped:
+            payload = llm_budget_exception_payload(wrapped)
+
+        self.assertEqual(payload["type"], "UnknownModelPriceError")
+        self.assertEqual(payload["dimension"], "cost")
+        self.assertEqual(payload["snapshot"], budget_error.snapshot)
+
+    def test_budget_detection_does_not_match_unrelated_price_error(self) -> None:
+        self.assertFalse(
+            is_llm_budget_exception(RuntimeError("market price is configured wrong"))
+        )
+
     def test_reservation_denies_before_provider_call(self) -> None:
         manager = LLMBudgetManager()
         manager.configure(max_total_tokens=50)
@@ -173,6 +224,88 @@ class LLMBudgetTests(unittest.TestCase):
             second = LLMBudgetManager()
             with self.assertRaises(LLMBudgetStateError):
                 second.configure(max_total_tokens=200, state_path=state_path)
+
+    def test_resume_allows_only_budget_increases(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "budget.json"
+            first = LLMBudgetManager()
+            first.configure(max_total_tokens=100, state_path=state_path)
+
+            resumed = LLMBudgetManager()
+            resumed.configure(
+                max_total_tokens=200,
+                state_path=state_path,
+                allow_limit_increase=True,
+            )
+            self.assertEqual(resumed.snapshot()["limits"]["max_total_tokens"], 200)
+
+            reduced = LLMBudgetManager()
+            with self.assertRaises(LLMBudgetStateError):
+                reduced.configure(
+                    max_total_tokens=50,
+                    state_path=state_path,
+                    allow_limit_increase=True,
+                )
+
+    def test_resume_wall_time_does_not_charge_stopped_downtime(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "budget.json"
+            first = LLMBudgetManager()
+            first.configure(max_wall_time_seconds=100, state_path=state_path)
+            state = json.loads(state_path.read_text())
+            state["started_at"] = 1000.0
+            state["updated_at"] = 1010.0
+            state_path.write_text(json.dumps(state))
+
+            resumed = LLMBudgetManager()
+            resumed.configure(
+                max_wall_time_seconds=100,
+                state_path=state_path,
+                allow_limit_increase=True,
+            )
+
+            self.assertLess(resumed.snapshot()["elapsed_seconds"], 20.0)
+
+    def test_resume_reclaims_orphaned_reservations_conservatively(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            state_path = Path(td) / "budget.json"
+            first = LLMBudgetManager()
+            first.configure(max_total_tokens=1000, state_path=state_path)
+            first.reserve(model="test", prompt="x", max_output_tokens=20)
+
+            resumed = LLMBudgetManager()
+            resumed.configure(
+                max_total_tokens=1000,
+                state_path=state_path,
+                reclaim_active_reservations=True,
+            )
+            snapshot = resumed.snapshot()
+
+            self.assertEqual(snapshot["active_reservations"], 0)
+            self.assertEqual(snapshot["reserved"]["requests"], 0)
+            self.assertEqual(snapshot["used"]["requests"], 1)
+            self.assertEqual(snapshot["denials"][-1]["dimension"], "resume")
+
+    def test_report_retry_rethrows_budget_exhaustion(self) -> None:
+        from ai_scientist.treesearch import log_summarization
+
+        budget_error = LLMBudgetExceeded("tokens", "budget exhausted", {})
+        with mock.patch.object(
+            log_summarization,
+            "get_response_from_llm",
+            side_effect=budget_error,
+        ) as call_mock:
+            with self.assertRaises(LLMBudgetExceeded):
+                log_summarization.update_summary(
+                    {},
+                    "stage",
+                    SimpleNamespace(good_nodes=[]),
+                    {},
+                    "model",
+                    mock.Mock(),
+                )
+
+        call_mock.assert_called_once()
 
     def test_unbounded_image_estimate_counts_base64_bytes(self) -> None:
         small = estimate_tokens(

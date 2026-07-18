@@ -131,6 +131,7 @@ class Config(Hashable):
     experiment: ExperimentConfig
     debug: DebugConfig
     llm_budget: LLMBudgetConfig = field(default_factory=LLMBudgetConfig)
+    resume_from: Optional[Path] = None
 
 
 def _get_next_logindex(dir: Path) -> int:
@@ -182,13 +183,30 @@ def prep_cfg(cfg: Config):
     top_workspace_dir = Path(cfg.workspace_dir).resolve()
     top_workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    # generate experiment name and prefix with consecutive index
-    ind = max(_get_next_logindex(top_log_dir), _get_next_logindex(top_workspace_dir))
-    cfg.exp_name = cfg.exp_name or coolname.generate_slug(3)
-    cfg.exp_name = f"{ind}-{cfg.exp_name}"
+    resume_from = getattr(cfg, "resume_from", None)
+    if resume_from:
+        resume_from = Path(resume_from).expanduser().resolve()
+        if not resume_from.is_file():
+            raise FileNotFoundError(f"BFTS checkpoint not found: {resume_from}")
+        run_name = resume_from.parent.parent.name
+        cfg.exp_name = run_name
+        cfg.log_dir = (top_log_dir / run_name).resolve()
+        cfg.workspace_dir = (top_workspace_dir / run_name).resolve()
+        if not cfg.workspace_dir.is_dir():
+            raise FileNotFoundError(
+                f"BFTS workspace for checkpoint does not exist: {cfg.workspace_dir}"
+            )
+        cfg.resume_from = resume_from
+    else:
+        # generate experiment name and prefix with consecutive index
+        ind = max(
+            _get_next_logindex(top_log_dir), _get_next_logindex(top_workspace_dir)
+        )
+        cfg.exp_name = cfg.exp_name or coolname.generate_slug(3)
+        cfg.exp_name = f"{ind}-{cfg.exp_name}"
 
-    cfg.log_dir = (top_log_dir / cfg.exp_name).resolve()
-    cfg.workspace_dir = (top_workspace_dir / cfg.exp_name).resolve()
+        cfg.log_dir = (top_log_dir / cfg.exp_name).resolve()
+        cfg.workspace_dir = (top_workspace_dir / cfg.exp_name).resolve()
 
     from ai_scientist.utils.llm_budget import configure_llm_budget
 
@@ -221,11 +239,17 @@ def prep_cfg(cfg: Config):
         ),
         prices_per_million=config_prices or env_prices,
         state_path=(
-            configured_state_path
-            if configured_state_path
-            else cfg.workspace_dir / "llm_budget.json"
+            cfg.workspace_dir / "llm_budget.json"
+            if resume_from
+            else (
+                configured_state_path
+                if configured_state_path
+                else cfg.workspace_dir / "llm_budget.json"
+            )
         ),
-        reset=not bool(configured_state_path),
+        reset=not bool(configured_state_path) and not bool(resume_from),
+        allow_limit_increase=bool(resume_from),
+        reclaim_active_reservations=bool(resume_from),
     )
 
     # validate the config
@@ -278,7 +302,13 @@ def prep_agent_workspace(cfg: Config):
         preproc_data(cfg.workspace_dir / "input")
 
 
-def save_run(cfg: Config, journal, stage_name: str = None):
+def save_run(
+    cfg: Config,
+    journal,
+    stage_name: str = None,
+    *,
+    allow_llm_selection: bool = True,
+):
     if stage_name is None:
         stage_name = "NoStageRun"
     save_dir = cfg.log_dir / stage_name
@@ -306,7 +336,7 @@ def save_run(cfg: Config, journal, stage_name: str = None):
     try:
         # Prefer deterministic metric-based selection for performance and stability.
         best_node = journal.get_best_node_by_metric(only_good=True)
-        if best_node is None:
+        if best_node is None and allow_llm_selection:
             best_node = journal.get_best_node(only_good=False, cfg=cfg)
         if best_node is not None:
             for existing_file in save_dir.glob("best_solution_*.py"):

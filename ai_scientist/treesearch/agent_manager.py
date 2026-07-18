@@ -13,6 +13,7 @@ import json
 from rich import print
 from .utils.serialize import parse_markdown_to_dict
 from .utils.metric import WorstMetricValue
+from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 
 logger = logging.getLogger(__name__)
@@ -248,28 +249,87 @@ Your research idea:\n\n
 
     def _save_checkpoint(self):
         """Save the current state of the experiment"""
-        if self.current_stage is None:
-            logger.warning("Cannot save checkpoint: current_stage is None")
-            return
-        stage_name = "stage_" + self.current_stage.name
-        save_path = (
-            Path(self.workspace_dir).parent
-            / "logs"
-            / Path(self.workspace_dir).name
-            / stage_name
-            / "checkpoint.pkl"
+        checkpoint_stage = self.current_stage or (
+            self.stages[-1] if self.stages else None
         )
+        if checkpoint_stage is None:
+            logger.warning("Cannot save checkpoint: no stages are available")
+            return None
+        stage_name = "stage_" + checkpoint_stage.name
+        save_path = Path(self.cfg.log_dir) / stage_name / "checkpoint.pkl"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
-            "journals": self.journals,
-            "stage_history": self.stage_history,
+            "schema_version": 2,
+            "journals": {
+                name: journal.to_dict() for name, journal in self.journals.items()
+            },
+            "stages": [stage.__dict__ for stage in self.stages],
+            "stage_history": [transition.__dict__ for transition in self.stage_history],
+            "completed_stages": self.completed_stages,
+            "current_stage_number": self.current_stage_number,
             "task_desc": self.task_desc,
-            "cfg": self.cfg,
             "workspace_dir": self.workspace_dir,
-            "current_stage": self.current_stage,
+            "current_stage": (
+                checkpoint_stage.__dict__ if self.current_stage is not None else None
+            ),
         }
         print("Saving checkpoint to ", save_path)
-        with open(save_path, "wb") as f:
+        temp_path = save_path.with_suffix(".tmp")
+        with open(temp_path, "wb") as f:
             pickle.dump(checkpoint, f)
+        temp_path.replace(save_path)
+        return save_path
+
+    @classmethod
+    def from_checkpoint(
+        cls, checkpoint_path: str | Path, *, cfg: Any, workspace_dir: Path
+    ) -> "AgentManager":
+        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+        with open(checkpoint_path, "rb") as handle:
+            checkpoint = pickle.load(handle)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Invalid BFTS checkpoint payload")
+        required = {"journals", "task_desc", "current_stage"}
+        missing = sorted(required - set(checkpoint))
+        if missing:
+            raise ValueError(f"BFTS checkpoint is missing fields: {missing}")
+
+        manager = cls(
+            task_desc=json.dumps(checkpoint["task_desc"]),
+            cfg=cfg,
+            workspace_dir=workspace_dir,
+        )
+        manager.journals = {
+            name: payload if isinstance(payload, Journal) else Journal.from_dict(payload)
+            for name, payload in checkpoint["journals"].items()
+        }
+        manager.stages = [
+            stage if isinstance(stage, Stage) else Stage(**stage)
+            for stage in (checkpoint.get("stages") or [])
+        ]
+        manager.stage_history = [
+            transition
+            if isinstance(transition, StageTransition)
+            else StageTransition(**transition)
+            for transition in (checkpoint.get("stage_history") or [])
+        ]
+        manager.completed_stages = list(checkpoint.get("completed_stages") or [])
+        manager.current_stage_number = int(checkpoint.get("current_stage_number") or 0)
+        current_stage = checkpoint["current_stage"]
+        if isinstance(current_stage, dict):
+            current_stage = Stage(**current_stage)
+        if current_stage is not None:
+            current_stage = next(
+                (stage for stage in manager.stages if stage.name == current_stage.name),
+                current_stage,
+            )
+        manager.current_stage = current_stage
+        manager.task_desc = checkpoint["task_desc"]
+        manager.cfg = cfg
+        manager.workspace_dir = workspace_dir
+        if not manager.stages and manager.current_stage is not None:
+            manager.stages = [manager.current_stage]
+        return manager
 
     def _create_agent_for_stage(self, stage: Stage) -> ParallelAgent:
         """Create a ParallelAgent configured for the given stage"""
@@ -388,6 +448,8 @@ Your research idea:\n\n
                 )
                 return False, "Missing criteria: " + missing
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             logger.error(
                 f"Error in sub-stage {current_substage.name} completion evaluation: {e}"
             )
@@ -508,6 +570,8 @@ Your research idea:\n\n
                     )
                     return False, "Missing criteria: " + missing
             except Exception as e:
+                if is_llm_budget_exception(e):
+                    raise
                 logger.error(f"Error in stage 2 completion evaluation: {e}")
                 return False, "Error in stage 2 completion evaluation"
 
@@ -653,6 +717,8 @@ Your research idea:\n\n
             return goal_str.strip(), response["sub_stage_name"]
 
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             logger.error(f"Error generating sub-stage goals: {e}")
             # Provide fallback goals if LLM fails
             return f"""
@@ -731,7 +797,10 @@ Your research idea:\n\n
 
                 with self._create_agent_for_stage(current_substage) as agent:
                     # Initialize with best result from previous sub-stage if available
-                    if self.stage_history:
+                    if (
+                        self.stage_history
+                        and not self.journals[current_substage.name].nodes
+                    ):
                         prev_stage = self.stage_history[-1].from_stage
                         print(f"[cyan]prev_stage: {prev_stage}[/cyan]")
                         print(f"[cyan]self.stage_history: {self.stage_history}[/cyan]")
@@ -806,7 +875,11 @@ Your research idea:\n\n
                                                     + str(evaluation.get("suggested_focus"))
                                                 )
                                     except Exception as exc:
-                                        logger.error(f"Failed to write stage completion summary: {exc}")
+                                        if is_llm_budget_exception(exc):
+                                            raise
+                                        logger.error(
+                                            f"Failed to write stage completion summary: {exc}"
+                                        )
                                 else:
                                     logger.error(
                                         f"No best node found for {current_substage.name} during multi-seed eval, something went wrong so finishing the experiment..."
@@ -1079,6 +1152,8 @@ Your research idea:\n\n
             return response
 
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             logger.error(f"Error getting LLM response: {e}")
             # Provide a fallback configuration in case of errors
             return {
@@ -1372,6 +1447,8 @@ Your research idea:\n\n
             return evaluation
 
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             logger.error(f"Error in stage progression evaluation: {e}")
             return {
                 "ready_for_next_stage": False,

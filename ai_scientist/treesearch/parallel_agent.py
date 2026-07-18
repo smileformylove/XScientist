@@ -15,6 +15,7 @@ from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
 from ai_scientist.protocol import capture_llm_calls
 from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
+from ai_scientist.utils.llm_budget import is_llm_budget_exception
 import copy
 import dataclasses
 import pickle
@@ -1086,6 +1087,8 @@ class MinimalAgent:
                             logger.warning(f"Invalid plot path received: {plot_path}")
 
             except Exception as e:
+                if is_llm_budget_exception(e):
+                    raise
                 logger.error(
                     f"Error in plot selection: {str(e)}; falling back to first 10 plots"
                 )
@@ -1296,10 +1299,10 @@ class ParallelAgent:
             logger.info(f"Limiting workers to {self.num_workers} to match GPU count")
 
         self.timeout = self.cfg.exec.timeout
-        self.executor = ProcessPoolExecutor(max_workers=self.num_workers)
         self._is_shutdown = False
         # Define the metric once at initialization
         self.evaluation_metrics = self._define_global_metrics()
+        self.executor = ProcessPoolExecutor(max_workers=self.num_workers)
         self._ablation_state = {  # store ablation names
             "completed_ablations": set(),
         }
@@ -1452,6 +1455,10 @@ class ParallelAgent:
                 seed_nodes.append(self.journal.get_node_by_id(result_node.id))
                 print("Added result node to journal")
             except Exception as e:
+                if is_llm_budget_exception(e):
+                    for pending in futures:
+                        pending.cancel()
+                    raise
                 logger.error(f"Error in multi-seed evaluation: {str(e)}")
             finally:
                 if (
@@ -1537,6 +1544,8 @@ class ParallelAgent:
                         process_interpreter.cleanup_session()
 
             except Exception as e:
+                if is_llm_budget_exception(e):
+                    raise
                 print(f"Error in seed result aggregation: {str(e)}")
 
     @staticmethod
@@ -1836,6 +1845,8 @@ class ParallelAgent:
                         child_node.datasets_successfully_tested = []
 
                 except Exception as e:
+                    if is_llm_budget_exception(e):
+                        raise
                     logger.error(
                         f"Error parsing metrics for node {child_node.id}: {str(e)}"
                     )
@@ -1960,6 +1971,8 @@ class ParallelAgent:
                             logger.debug(f"Plot absolute path: {final_path.absolute()}")
                             logger.debug(f"Plot web path: {web_path}")
                 except Exception as e:
+                    if is_llm_budget_exception(e):
+                        raise
                     logger.error(
                         f"Error generating plots for node {child_node.id}: {str(e)}"
                     )
@@ -1971,6 +1984,8 @@ class ParallelAgent:
                             f"Generated VLM analysis for plots in node {child_node.id}"
                         )
                     except Exception as e:
+                        if is_llm_budget_exception(e):
+                            raise
                         logger.error(
                             f"Error analyzing plots for node {child_node.id}: {str(e)}"
                         )
@@ -2385,6 +2400,9 @@ class ParallelAgent:
                 print("Worker process timed out, couldn't get the result")
                 logger.error(f"Worker process timed out, couldn't get the result")
             except Exception as e:
+                if is_llm_budget_exception(e):
+                    for pending in futures:
+                        pending.cancel()
                 print(f"Error processing node: {str(e)}")
                 logger.error(f"Error processing node: {str(e)}")
                 import traceback
@@ -2555,19 +2573,18 @@ class ParallelAgent:
                     for process_id in list(self.gpu_manager.gpu_assignments.keys()):
                         self.gpu_manager.release_gpu(process_id)
 
-                # Shutdown executor first
-                self.executor.shutdown(wait=False, cancel_futures=True)
+                executor = getattr(self, "executor", None)
+                processes = list(
+                    (getattr(executor, "_processes", None) or {}).values()
+                )
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
                 # Force terminate all worker processes
-                if self.executor._processes:
-                    ## Get copy of processes
-                    processes = list(self.executor._processes.values())
-
-                    # Then terminate processes if they're still alive
-                    for process in processes:
-                        if process.is_alive():
-                            process.terminate()
-                            process.join(timeout=1)
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=1)
 
                 print("Executor shutdown complete")
 

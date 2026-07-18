@@ -193,6 +193,8 @@ def is_stage_complete(run_dir: str | Path, stage: str) -> bool:
     stage_state = state.get("stages", {}).get(stage, {})
     if stage_state.get("status") == "completed":
         return True
+    if stage_state.get("status") in {"stopped", "failed", "blocked"}:
+        return False
     return _stage_artifact_defaults(run_dir, stage)
 
 
@@ -207,6 +209,30 @@ def mark_stage_complete(
     state = load_workflow_state(run_dir)
     state.setdefault("stages", {})[stage] = {
         "status": "completed",
+        "updated_at": _now(),
+        "artifacts": artifacts or {},
+        "metadata": metadata or {},
+    }
+    if artifacts:
+        state.setdefault("artifacts", {}).update(artifacts)
+    save_workflow_state(run_dir, state)
+    update_run_index_entry(run_dir, state=state)
+    return state
+
+
+def mark_stage_stopped(
+    run_dir: str | Path,
+    stage: str,
+    *,
+    reason: str,
+    artifacts: Optional[dict] = None,
+    metadata: Optional[dict] = None,
+) -> dict:
+    run_dir = Path(run_dir)
+    state = load_workflow_state(run_dir)
+    state.setdefault("stages", {})[stage] = {
+        "status": "stopped",
+        "reason": reason,
         "updated_at": _now(),
         "artifacts": artifacts or {},
         "metadata": metadata or {},

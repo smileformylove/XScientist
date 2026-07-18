@@ -34,7 +34,9 @@ def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
         # Add the code to the markdown file
         if load_code:
             # Assert that the code file exists before trying to open it
-            assert os.path.exists(load_code), f"Code path at {load_code} must exist if using the 'load_code' flag. This is an optional code prompt that you may choose to include; if not, please do not set 'load_code'."
+            assert os.path.exists(
+                load_code
+            ), f"Code path at {load_code} must exist if using the 'load_code' flag. This is an optional code prompt that you may choose to include; if not, please do not set 'load_code'."
             f.write(f"## Code To Potentially Use\n\n")
             f.write(f"Use the following code as context for your experiments:\n\n")
             with open(load_code, "r") as code_file:
@@ -42,7 +44,13 @@ def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
                 f.write(f"```python\n{code}\n```\n\n")
 
 
-def edit_bfts_config_file(config_path: str, idea_dir: str, idea_path: str) -> str:
+def edit_bfts_config_file(
+    config_path: str,
+    idea_dir: str,
+    idea_path: str,
+    *,
+    resume_from: str | None = None,
+) -> str:
     """
     Edit the bfts_config.yaml file to point to the idea.md file
 
@@ -70,6 +78,7 @@ def edit_bfts_config_file(config_path: str, idea_dir: str, idea_path: str) -> st
     log_dir = osp.join(idea_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
     config["log_dir"] = log_dir
+    config["resume_from"] = resume_from
 
     with open(run_config_path, "w") as f:
         yaml.dump(config, f)

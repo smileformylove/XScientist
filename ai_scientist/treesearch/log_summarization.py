@@ -8,7 +8,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
 sys.path.insert(0, parent_dir)
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
 from ai_scientist.treesearch.backend import get_ai_client
-
+from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 report_summarizer_sys_msg = """You are an expert machine learning researcher.
 You are given multiple experiment logs, each representing a node in a stage of exploring scientific ideas and implementations.
@@ -215,6 +215,8 @@ def update_summary(
         summary_json = extract_json_between_markers(response[0])
         assert summary_json
     except Exception as e:
+        if is_llm_budget_exception(e):
+            raise
         if max_retry > 0:
             print(f"Error occurred: {e}. Retrying... ({max_retry} attempts left)")
             return update_summary(
@@ -272,7 +274,9 @@ def annotate_history(journal, cfg=None):
                     if cfg.agent.get("summary", None) is not None:
                         model = cfg.agent.summary.model
                     else:
-                        model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
+                        model = os.environ.get(
+                            "ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1"
+                        )
                     client = get_ai_client(model)
                     response = get_response_from_llm(
                         overall_plan_summarizer_prompt.format(
@@ -288,6 +292,8 @@ def annotate_history(journal, cfg=None):
                     ]
                     break
                 except Exception as e:
+                    if is_llm_budget_exception(e):
+                        raise
                     retry_count += 1
                     if retry_count == max_retries:
                         print(f"Failed after {max_retries} attempts. Error: {e}")

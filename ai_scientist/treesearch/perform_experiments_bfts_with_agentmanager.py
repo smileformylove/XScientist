@@ -30,6 +30,11 @@ from .agent_manager import AgentManager
 from pathlib import Path
 from .agent_manager import Stage
 from .log_summarization import overall_summarize
+from ai_scientist.utils.llm_budget import (
+    is_llm_budget_exception,
+    llm_budget_exception_payload,
+    llm_budget_manager,
+)
 
 
 logger = logging.getLogger("ai-scientist")
@@ -70,9 +75,11 @@ def perform_experiments_bfts(config_path: str):
     task_desc_str = backend.compile_prompt_to_md(task_desc)
 
     global_step = 0
+    preserve_workspace = False
 
-    with Status("Preparing agent workspace (copying and extracting files) ..."):
-        prep_agent_workspace(cfg)
+    if not cfg.resume_from:
+        with Status("Preparing agent workspace (copying and extracting files) ..."):
+            prep_agent_workspace(cfg)
 
     results_tsv_path = cfg.log_dir / "results.tsv"
     program_md_path = cfg.log_dir / "program.md"
@@ -231,16 +238,55 @@ def perform_experiments_bfts(config_path: str):
         program_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def cleanup():
-        if global_step == 0:
+        if global_step == 0 and not preserve_workspace:
             shutil.rmtree(cfg.workspace_dir)
 
     atexit.register(cleanup)
 
-    manager = AgentManager(
-        task_desc=task_desc,
-        cfg=cfg,
-        workspace_dir=Path(cfg.workspace_dir),
-    )
+    if cfg.resume_from:
+        manager = AgentManager.from_checkpoint(
+            cfg.resume_from,
+            cfg=cfg,
+            workspace_dir=Path(cfg.workspace_dir),
+        )
+        logged_node_ids.update(
+            node.id
+            for journal in manager.journals.values()
+            for node in journal.nodes
+            if getattr(node, "id", None)
+        )
+        for stage_name, journal in manager.journals.items():
+            candidates = []
+            for node in journal.good_nodes:
+                if getattr(node, "is_seed_node", False) or getattr(
+                    node, "is_seed_agg_node", False
+                ):
+                    continue
+                _, objective, _, _ = _metric_meta(node)
+                if objective is None:
+                    continue
+                if stage_name.startswith("2_") and len(
+                    set(getattr(node, "datasets_successfully_tested", None) or [])
+                ) < 2:
+                    continue
+                candidates.append(
+                    {
+                        "objective": objective,
+                        "loc": len((node.code or "").splitlines()),
+                        "node_id": node.id,
+                    }
+                )
+            if candidates:
+                stage_best[stage_name] = max(
+                    candidates, key=lambda item: (item["objective"], -item["loc"])
+                )
+        print(f"[cyan]Resuming BFTS run from {cfg.resume_from}[/cyan]")
+    else:
+        manager = AgentManager(
+            task_desc=task_desc,
+            cfg=cfg,
+            workspace_dir=Path(cfg.workspace_dir),
+        )
 
     prog = Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -456,6 +502,8 @@ def perform_experiments_bfts(config_path: str):
             save_run(cfg, journal, stage_name=f"stage_{stage.name}")
 
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             print(f"Error in step callback: {e}")
 
         print(f"Run saved at {cfg.log_dir / f'stage_{stage.name}'}")
@@ -512,52 +560,167 @@ def perform_experiments_bfts(config_path: str):
         screen=True,
     )
 
-    manager.run(exec_callback=create_exec_callback(status), step_callback=step_callback)
+    run_status = "completed"
+    budget_error = None
+    checkpoint_path = None
+    persistence_errors = []
+
+    def persist_budget_stop() -> None:
+        nonlocal checkpoint_path
+        for stage_name, journal in manager.journals.items():
+            if not journal.nodes:
+                continue
+            try:
+                save_run(
+                    cfg,
+                    journal,
+                    stage_name=f"stage_{stage_name}",
+                    allow_llm_selection=False,
+                )
+            except Exception as persistence_exc:
+                persistence_errors.append(
+                    f"stage_{stage_name}: {type(persistence_exc).__name__}: "
+                    f"{persistence_exc}"
+                )
+                logger.warning(
+                    "Failed to persist stage %s during budget stop: %s",
+                    stage_name,
+                    persistence_exc,
+                )
+        try:
+            checkpoint_path = manager._save_checkpoint()
+        except Exception as checkpoint_exc:
+            persistence_errors.append(
+                f"checkpoint: {type(checkpoint_exc).__name__}: {checkpoint_exc}"
+            )
+            logger.warning("Failed to save budget-stop checkpoint: %s", checkpoint_exc)
+
+    try:
+        manager.run(
+            exec_callback=create_exec_callback(status), step_callback=step_callback
+        )
+    except Exception as exc:
+        if not is_llm_budget_exception(exc):
+            raise
+        run_status = "budget_exhausted"
+        preserve_workspace = True
+        budget_error = llm_budget_exception_payload(exc)
+        logger.warning(
+            "Stopping experiment because the LLM budget is exhausted: %s", exc
+        )
+        print(
+            f"[yellow]LLM budget exhausted; saving a resumable checkpoint: {exc}[/yellow]"
+        )
+    finally:
+        if run_status == "budget_exhausted":
+            persist_budget_stop()
 
     manager_pickle_path = cfg.log_dir / "manager.pkl"
-    try:
-        with open(manager_pickle_path, "wb") as f:
-            pickle.dump(manager, f)
-        logger.info(f"Saved manager state to: {manager_pickle_path}")
-    except Exception as e:
-        logger.warning(f"Failed to save full manager state: {e}")
+    if run_status == "budget_exhausted":
         try:
             with open(manager_pickle_path, "wb") as f:
-                pickle.dump(manager.journals.items(), f)
+                pickle.dump(
+                    {
+                        name: journal.to_dict()
+                        for name, journal in manager.journals.items()
+                    },
+                    f,
+                )
             logger.info(f"Saved manager journals to: {manager_pickle_path}")
         except Exception as e:
             logger.error(f"Failed to save manager journals: {e}")
+    else:
+        try:
+            with open(manager_pickle_path, "wb") as f:
+                pickle.dump(manager, f)
+            logger.info(f"Saved manager state to: {manager_pickle_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save full manager state: {e}")
+            try:
+                with open(manager_pickle_path, "wb") as f:
+                    pickle.dump(
+                        {
+                            name: journal.to_dict()
+                            for name, journal in manager.journals.items()
+                        },
+                        f,
+                    )
+                logger.info(f"Saved manager journals to: {manager_pickle_path}")
+            except Exception as e:
+                logger.error(f"Failed to save manager journals: {e}")
 
-    if cfg.generate_report:
-        print("Generating final report from all stages...")
-        (
-            draft_summary,
-            baseline_summary,
-            research_summary,
-            ablation_summary,
-        ) = overall_summarize(manager.journals.items(), cfg)
-        draft_summary_path = cfg.log_dir / "draft_summary.json"
-        baseline_summary_path = cfg.log_dir / "baseline_summary.json"
-        research_summary_path = cfg.log_dir / "research_summary.json"
-        ablation_summary_path = cfg.log_dir / "ablation_summary.json"
+    if cfg.generate_report and run_status == "completed":
+        try:
+            print("Generating final report from all stages...")
+            (
+                draft_summary,
+                baseline_summary,
+                research_summary,
+                ablation_summary,
+            ) = overall_summarize(manager.journals.items(), cfg)
+            draft_summary_path = cfg.log_dir / "draft_summary.json"
+            baseline_summary_path = cfg.log_dir / "baseline_summary.json"
+            research_summary_path = cfg.log_dir / "research_summary.json"
+            ablation_summary_path = cfg.log_dir / "ablation_summary.json"
 
-        with open(draft_summary_path, "w") as draft_file:
-            json.dump(draft_summary, draft_file, indent=2)
+            with open(draft_summary_path, "w") as draft_file:
+                json.dump(draft_summary, draft_file, indent=2)
 
-        with open(baseline_summary_path, "w") as baseline_file:
-            json.dump(baseline_summary, baseline_file, indent=2)
+            with open(baseline_summary_path, "w") as baseline_file:
+                json.dump(baseline_summary, baseline_file, indent=2)
 
-        with open(research_summary_path, "w") as research_file:
-            json.dump(research_summary, research_file, indent=2)
+            with open(research_summary_path, "w") as research_file:
+                json.dump(research_summary, research_file, indent=2)
 
-        with open(ablation_summary_path, "w") as ablation_file:
-            json.dump(ablation_summary, ablation_file, indent=2)
+            with open(ablation_summary_path, "w") as ablation_file:
+                json.dump(ablation_summary, ablation_file, indent=2)
 
-        print(f"Summary reports written to files:")
-        print(f"- Draft summary: {draft_summary_path}")
-        print(f"- Baseline summary: {baseline_summary_path}")
-        print(f"- Research summary: {research_summary_path}")
-        print(f"- Ablation summary: {ablation_summary_path}")
+            print(f"Summary reports written to files:")
+            print(f"- Draft summary: {draft_summary_path}")
+            print(f"- Baseline summary: {baseline_summary_path}")
+            print(f"- Research summary: {research_summary_path}")
+            print(f"- Ablation summary: {ablation_summary_path}")
+        except Exception as exc:
+            if not is_llm_budget_exception(exc):
+                raise
+            run_status = "budget_exhausted"
+            preserve_workspace = True
+            budget_error = llm_budget_exception_payload(exc)
+            logger.warning(
+                "Stopping final report because the LLM budget is exhausted: %s", exc
+            )
+            persist_budget_stop()
+
+    status_payload = {
+        "status": run_status,
+        "updated_at": datetime.now().isoformat(),
+        "current_stage": (
+            manager.current_stage.name if manager.current_stage is not None else None
+        ),
+        "completed_stages": list(manager.completed_stages),
+        "journal_node_counts": {
+            name: len(journal.nodes) for name, journal in manager.journals.items()
+        },
+        "llm_budget": llm_budget_manager.snapshot(),
+        "budget_error": budget_error,
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "resumable": bool(checkpoint_path),
+        "persistence_errors": persistence_errors,
+    }
+    run_status_path = cfg.log_dir / "run_status.json"
+    run_status_path.write_text(
+        json.dumps(status_payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return {
+        "status": run_status,
+        "log_dir": str(cfg.log_dir),
+        "workspace_dir": str(cfg.workspace_dir),
+        "run_status_path": str(run_status_path),
+        "budget_error": budget_error,
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "resumable": bool(checkpoint_path),
+        "persistence_errors": persistence_errors,
+    }
 
 
 if __name__ == "__main__":

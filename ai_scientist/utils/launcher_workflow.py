@@ -26,7 +26,12 @@ from ai_scientist.utils.fallback_audit import (
     format_strict_fallback_error,
     record_quality_fallback_if_needed,
 )
-from ai_scientist.utils.run_index import is_stage_complete, mark_stage_complete
+from ai_scientist.utils.run_index import (
+    is_stage_complete,
+    load_workflow_state,
+    mark_stage_complete,
+    mark_stage_stopped,
+)
 from ai_scientist.utils.experiment_report import write_experiment_report
 from ai_scientist.utils.workflow_runtime import (
     build_workflow_runtime_plan,
@@ -184,7 +189,7 @@ def run_experiment_phase(
     config_path: str = "bfts_config.yaml",
     resume: bool = True,
     logger: Callable[[str], None] = print,
-) -> str:
+) -> str | dict[str, Any]:
     idea_dir = Path(idea_dir)
     if resume and is_stage_complete(idea_dir, "experiment") and (idea_dir / "logs").exists():
         logger(f"Resume: skipping experiment phase for {idea_dir}")
@@ -197,13 +202,55 @@ def run_experiment_phase(
                 pass
         return str(idea_dir / "logs")
 
+    resume_from = None
+    if resume:
+        experiment_state = (
+            load_workflow_state(idea_dir).get("stages", {}).get("experiment", {})
+        )
+        if experiment_state.get("status") == "stopped":
+            candidate = experiment_state.get("metadata", {}).get("checkpoint_path")
+            if candidate and Path(candidate).is_file():
+                resume_from = str(Path(candidate).resolve())
+                logger(f"Resume: continuing experiment from {resume_from}")
+
     idea_config_path = edit_bfts_config_file(
         config_path,
         str(idea_dir),
         str(idea_path_json),
+        resume_from=resume_from,
     )
 
-    perform_experiments_bfts(idea_config_path)
+    experiment_result = perform_experiments_bfts(idea_config_path)
+    if (
+        isinstance(experiment_result, dict)
+        and experiment_result.get("status") == "budget_exhausted"
+    ):
+        save_token_tracker(idea_dir)
+        run_status_path = experiment_result.get("run_status_path")
+        mark_stage_stopped(
+            idea_dir,
+            "experiment",
+            reason="llm_budget_exhausted",
+            artifacts={
+                "logs_dir": str(idea_dir / "logs"),
+                "config_path": str(idea_config_path),
+                "run_status": run_status_path,
+                "llm_budget": str(idea_dir / "llm_budget.json"),
+            },
+            metadata={
+                "budget_error": experiment_result.get("budget_error"),
+                "checkpoint_path": experiment_result.get("checkpoint_path"),
+                "resumable": bool(experiment_result.get("resumable")),
+            },
+        )
+        return {
+            "status": "budget_exhausted",
+            "resumable": bool(experiment_result.get("resumable")),
+            "config_path": str(idea_config_path),
+            "run_status_path": run_status_path,
+            "budget_error": experiment_result.get("budget_error"),
+            "checkpoint_path": experiment_result.get("checkpoint_path"),
+        }
 
     latest_run_dir = find_latest_bfts_run_dir(idea_dir, logs_subdir="logs")
     experiment_results_dir = (

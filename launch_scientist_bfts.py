@@ -44,6 +44,17 @@ from ai_scientist.config.paths import (
     get_experiment_dir,
 )
 
+LLM_BUDGET_EXIT_CODE = 75
+
+
+def experiment_budget_exit_code(experiment_result) -> int | None:
+    if (
+        isinstance(experiment_result, dict)
+        and experiment_result.get("status") == "budget_exhausted"
+    ):
+        return LLM_BUDGET_EXIT_CODE
+    return None
+
 
 def print_time():
     print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -396,13 +407,33 @@ if __name__ == "__main__":
             echo_added_code=True,
         )
 
-        run_experiment_phase(
+        experiment_result = run_experiment_phase(
             idea_dir,
             idea_path_json,
             args.model_agg_plots,
             config_path=args.bfts_config,
             resume=not args.force_rerun,
         )
+
+        budget_exit_code = experiment_budget_exit_code(experiment_result)
+        if budget_exit_code is not None:
+            if experiment_result.get("resumable"):
+                print(
+                    "Experiment stopped because the configured LLM budget was exhausted. "
+                    "A resumable checkpoint and budget audit were saved."
+                )
+            else:
+                print(
+                    "Experiment stopped because the configured LLM budget was exhausted. "
+                    "Partial artifacts and a budget audit were saved, but checkpoint "
+                    "creation failed."
+                )
+            final_exit_code = budget_exit_code
+            cleanup_child_processes(
+                include_orphans=True,
+                workspace_roots=[runtime.project_root, research_root],
+            )
+            break
 
         exit_code = 0
         writeup_result = {"success": True}

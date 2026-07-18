@@ -17,6 +17,7 @@ from rich import print
 
 import logging
 from pathlib import Path
+from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +532,8 @@ class Journal:
                 return max(nodes, key=lambda n: n.metric)
 
         except Exception as e:
+            if is_llm_budget_exception(e):
+                raise
             logger.error(f"Error in LLM selection process: {e}")
             logger.warning("Falling back to metric-based selection")
             return max(nodes, key=lambda n: n.metric)
@@ -618,6 +621,27 @@ class Journal:
     def to_dict(self):
         """Convert journal to a JSON-serializable dictionary"""
         return {"nodes": [node.to_dict() for node in self.nodes]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Journal":
+        """Restore a journal and its parent/child relationships from a dictionary."""
+
+        journal = cls()
+        parent_ids: dict[str, str | None] = {}
+        for node_data in data.get("nodes", []):
+            payload = copy.deepcopy(node_data)
+            parent_ids[str(payload.get("id"))] = payload.get("parent_id")
+            node = Node.from_dict(payload, journal=None)
+            node.children = set()
+            journal.nodes.append(node)
+
+        nodes_by_id = {node.id: node for node in journal.nodes}
+        for node in journal.nodes:
+            parent_id = parent_ids.get(node.id)
+            if parent_id and parent_id in nodes_by_id:
+                node.parent = nodes_by_id[parent_id]
+                node.parent.children.add(node)
+        return journal
 
     def save_experiment_notes(self, workspace_dir: str, stage_name: str, cfg: Any) -> None:
         """Save experimental notes and summaries to files"""
