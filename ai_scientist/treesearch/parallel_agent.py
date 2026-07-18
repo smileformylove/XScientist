@@ -13,6 +13,7 @@ from .utils import data_preview
 from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
+from .utils.serialize import atomic_write_text
 from ai_scientist.protocol import capture_llm_calls
 from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
@@ -30,6 +31,15 @@ import sys
 logger = logging.getLogger("ai-scientist")
 
 ExecCallbackType = Callable[[str, bool], ExecutionResult]
+
+
+def _publish_source_artifacts(
+    output_dir: str | Path, artifacts: Dict[str, str]
+) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename, content in artifacts.items():
+        atomic_write_text(output_dir / filename, content)
 
 
 def _sandbox_policy_for_workspace(cfg: Config):
@@ -1513,13 +1523,10 @@ class ParallelAgent:
                             / f"seed_aggregation_{agg_node.id}"
                         )
                         print("[red]exp_results_dir[/red]", exp_results_dir)
-                        exp_results_dir.mkdir(parents=True, exist_ok=True)
-
-                        # Save plotting code
-                        with open(
-                            exp_results_dir / "aggregation_plotting_code.py", "w"
-                        ) as f:
-                            f.write(agg_plotting_code)
+                        _publish_source_artifacts(
+                            exp_results_dir,
+                            {"aggregation_plotting_code.py": agg_plotting_code},
+                        )
 
                         # Move generated plots
                         for plot_file in plots_dir.glob("*.png"):
@@ -1932,15 +1939,16 @@ class ParallelAgent:
                             / f"experiment_{child_node.id}_proc_{os.getpid()}"
                         )
                         child_node.exp_results_dir = exp_results_dir
-                        exp_results_dir.mkdir(parents=True, exist_ok=True)
+                        _publish_source_artifacts(
+                            exp_results_dir,
+                            {
+                                "plotting_code.py": plotting_code,
+                                "experiment_code.py": child_node.code,
+                            },
+                        )
                         plot_code_path = exp_results_dir / "plotting_code.py"
-                        with open(plot_code_path, "w") as f:
-                            f.write(plotting_code)
                         logger.info(f"Saved plotting code to {plot_code_path}")
-                        # Save experiment code to experiment_results directory
                         exp_code_path = exp_results_dir / "experiment_code.py"
-                        with open(exp_code_path, "w") as f:
-                            f.write(child_node.code)
                         logger.info(f"Saved experiment code to {exp_code_path}")
                         # Move experiment data files to experiment_results directory
                         for exp_data_file in plots_dir.glob("*.npy"):
