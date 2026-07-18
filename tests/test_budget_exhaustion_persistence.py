@@ -213,6 +213,12 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
                 def run(self, **kwargs):
                     kwargs["step_callback"](stage, self.journals[stage.name])
 
+                def _save_checkpoint(self):
+                    path = log_dir / f"stage_{stage.name}" / "checkpoint.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"checkpoint")
+                    return path
+
             with (
                 mock.patch(
                     "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",

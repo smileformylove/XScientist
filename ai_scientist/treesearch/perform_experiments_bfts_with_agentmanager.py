@@ -618,6 +618,7 @@ def _perform_experiments_bfts_locked(config_path: str):
             # later write is interrupted, resume can rebuild missing ledger rows
             # without ever referencing a node absent from the durable journal.
             save_run(cfg, journal, stage_name=f"stage_{stage.name}")
+            manager._save_checkpoint()
 
             # Update autoresearch-style program snapshot and results ledger.
             _write_program_md(stage, journal)

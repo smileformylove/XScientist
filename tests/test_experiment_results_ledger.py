@@ -202,6 +202,8 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             )
 
             class FakeManager:
+                checkpoint_calls = 0
+
                 def __init__(self, **_kwargs):
                     self.current_stage = stage
                     self.completed_stages = []
@@ -209,6 +211,10 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
 
                 def run(self, **kwargs):
                     kwargs["step_callback"](stage, journal)
+
+                def _save_checkpoint(self):
+                    type(self).checkpoint_calls += 1
+                    return None
 
             with (
                 mock.patch(
@@ -244,6 +250,91 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
                 (log_dir / "results.tsv").read_text(encoding="utf-8"), header
             )
             self.assertFalse((log_dir / "program.md").exists())
+            self.assertEqual(FakeManager.checkpoint_calls, 1)
+
+    def test_failed_checkpoint_does_not_publish_derived_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            log_dir = root / "logs" / "0-run"
+            workspace_dir = root / "workspaces" / "0-run"
+            log_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg.exp_name = "0-run"
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace_dir
+            cfg.resume_from = None
+            cfg.generate_report = False
+            stage = Stage(
+                name="1_initial_implementation_1_preliminary",
+                description="preliminary",
+                goals="goal",
+                max_iterations=1,
+                num_drafts=1,
+                stage_number=1,
+            )
+            journal = Journal(
+                nodes=[
+                    Node(
+                        plan="failed",
+                        code="raise RuntimeError()",
+                        metric=WorstMetricValue(),
+                        is_buggy=True,
+                    )
+                ]
+            )
+
+            class FakeManager:
+                checkpoint_calls = 0
+
+                def __init__(self, **_kwargs):
+                    self.current_stage = stage
+                    self.completed_stages = []
+                    self.journals = {stage.name: journal}
+
+                def run(self, **kwargs):
+                    kwargs["step_callback"](stage, journal)
+
+                def _save_checkpoint(self):
+                    type(self).checkpoint_calls += 1
+                    if type(self).checkpoint_calls == 1:
+                        raise OSError("checkpoint disk full")
+                    return None
+
+            with (
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_cfg",
+                    return_value=cfg,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.load_task_desc",
+                    return_value='{"Title":"T"}',
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.prep_agent_workspace"
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.AgentManager",
+                    FakeManager,
+                ),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.backend.compile_prompt_to_md",
+                    return_value="task",
+                ),
+                mock.patch.object(Journal, "generate_summary", return_value="summary"),
+                mock.patch(
+                    "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager.save_run"
+                ),
+            ):
+                result = perform_experiments_bfts(root / "config.yaml")
+
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(
+                (log_dir / "results.tsv").read_text(encoding="utf-8"), header
+            )
+            self.assertFalse((log_dir / "program.md").exists())
+            self.assertEqual(FakeManager.checkpoint_calls, 2)
 
 
 if __name__ == "__main__":
