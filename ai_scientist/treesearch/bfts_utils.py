@@ -1,8 +1,9 @@
 import os
 import os.path as osp
-import shutil
 import uuid
 import yaml
+
+from .utils.serialize import atomic_write_text
 
 
 def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
@@ -14,35 +15,35 @@ def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
         output_path: Path where the markdown file will be saved
         load_code: Path to a code file to include in the markdown
     """
-    with open(output_path, "w", encoding="utf-8") as f:
-        for key, value in data.items():
-            # Convert key to title format and make it a header
-            header = key.replace("_", " ").title()
-            f.write(f"## {header}\n\n")
+    lines = []
+    for key, value in data.items():
+        header = key.replace("_", " ").title()
+        lines.append(f"## {header}\n\n")
+        if isinstance(value, (list, tuple)):
+            lines.extend(f"- {item}\n" for item in value)
+            lines.append("\n")
+        elif isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                lines.append(f"### {sub_key}\n")
+                lines.append(f"{sub_value}\n\n")
+        else:
+            lines.append(f"{value}\n\n")
 
-            # Handle different value types
-            if isinstance(value, (list, tuple)):
-                for item in value:
-                    f.write(f"- {item}\n")
-                f.write("\n")
-            elif isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    f.write(f"### {sub_key}\n")
-                    f.write(f"{sub_value}\n\n")
-            else:
-                f.write(f"{value}\n\n")
+    if load_code:
+        assert os.path.exists(
+            load_code
+        ), f"Code path at {load_code} must exist if using the 'load_code' flag. This is an optional code prompt that you may choose to include; if not, please do not set 'load_code'."
+        with open(load_code, "r", encoding="utf-8") as code_file:
+            code = code_file.read()
+        lines.extend(
+            [
+                "## Code To Potentially Use\n\n",
+                "Use the following code as context for your experiments:\n\n",
+                f"```python\n{code}\n```\n\n",
+            ]
+        )
 
-        # Add the code to the markdown file
-        if load_code:
-            # Assert that the code file exists before trying to open it
-            assert os.path.exists(
-                load_code
-            ), f"Code path at {load_code} must exist if using the 'load_code' flag. This is an optional code prompt that you may choose to include; if not, please do not set 'load_code'."
-            f.write(f"## Code To Potentially Use\n\n")
-            f.write(f"Use the following code as context for your experiments:\n\n")
-            with open(load_code, "r") as code_file:
-                code = code_file.read()
-                f.write(f"```python\n{code}\n```\n\n")
+    atomic_write_text(output_path, "".join(lines))
 
 
 def edit_bfts_config_file(
@@ -68,8 +69,7 @@ def edit_bfts_config_file(
     run_config_path = osp.join(
         config_dir, f"bfts_config-{os.getpid()}-{uuid.uuid4().hex}.yaml"
     )
-    shutil.copy(config_path, run_config_path)
-    with open(run_config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
     config["desc_file"] = idea_path
     config["workspace_dir"] = idea_dir
@@ -85,6 +85,5 @@ def edit_bfts_config_file(
     config["log_dir"] = log_dir
     config["resume_from"] = resume_from
 
-    with open(run_config_path, "w") as f:
-        yaml.dump(config, f)
+    atomic_write_text(run_config_path, yaml.dump(config))
     return run_config_path
