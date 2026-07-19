@@ -15,6 +15,26 @@ class OpenSourceHygieneTests(unittest.TestCase):
             f"root-level Python modules should live under packages or compat/: {root_modules}",
         )
 
+    def test_repository_root_has_no_runtime_yaml_configs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        root_configs = sorted(
+            path.name
+            for pattern in ("*.yaml", "*.yml")
+            for path in repo_root.glob(pattern)
+        )
+        self.assertEqual(
+            root_configs,
+            [],
+            f"runtime YAML configs should live under configs/: {root_configs}",
+        )
+
+    def test_ci_dependency_files_live_under_requirements(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertFalse((repo_root / "constraints-ci.txt").exists())
+        self.assertFalse((repo_root / "requirements-smoke.txt").exists())
+        self.assertTrue((repo_root / "requirements" / "constraints-ci.txt").is_file())
+        self.assertTrue((repo_root / "requirements" / "smoke.txt").is_file())
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = Path(__file__).resolve().parents[1]
@@ -25,8 +45,8 @@ class OpenSourceHygieneTests(unittest.TestCase):
         cls.release_workflow_path = (
             cls.repo_root / ".github" / "workflows" / "release.yml"
         )
-        cls.constraints_path = cls.repo_root / "constraints-ci.txt"
-        cls.smoke_requirements_path = cls.repo_root / "requirements-smoke.txt"
+        cls.constraints_path = cls.repo_root / "requirements" / "constraints-ci.txt"
+        cls.smoke_requirements_path = cls.repo_root / "requirements" / "smoke.txt"
         portable_sources = [
             cls.readme_path,
             *sorted((cls.repo_root / "docs").glob("**/*.md")),
@@ -75,19 +95,19 @@ class OpenSourceHygieneTests(unittest.TestCase):
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertTrue(
             self.constraints_path.exists(),
-            msg="constraints-ci.txt should exist for reproducible CI installs",
+            msg="requirements/constraints-ci.txt should exist for reproducible CI installs",
         )
         self.assertTrue(
             self.smoke_requirements_path.exists(),
-            msg="requirements-smoke.txt should exist for lightweight CI installs",
+            msg="requirements/smoke.txt should exist for lightweight CI installs",
         )
         self.assertIn(
-            "-c constraints-ci.txt",
+            "-c requirements/constraints-ci.txt",
             workflow_text,
-            msg="Smoke workflow should install dependencies with constraints-ci.txt",
+            msg="Smoke workflow should use requirements/constraints-ci.txt",
         )
         self.assertIn(
-            "-r requirements-smoke.txt",
+            "-r requirements/smoke.txt",
             workflow_text,
             msg="Smoke workflow should install the dedicated smoke dependency set",
         )

@@ -1,6 +1,6 @@
 # 深度实验配置（更接近“投稿级证据链”）
 # 使用方式:
-#   python launch_scientist_zhipu.py ... --bfts-config bfts_config_deep.yaml
+#   python -m xscientist zhipu ... --bfts-config deep
 #
 # 说明:
 # - 该配置符合当前 BFTS/AgentManager 的真实 schema（可直接生效），不是示意/套壳配置。

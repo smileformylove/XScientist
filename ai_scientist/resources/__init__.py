@@ -38,7 +38,7 @@ def bfts_config_path(profile: str = "default") -> Path:
 def resolve_bfts_config_path(
     value: str | Path | None = None, *, base_dir: str | Path | None = None
 ) -> Path:
-    """Resolve an explicit path or a packaged ``default``/``deep`` profile."""
+    """Resolve an explicit path, source config, or packaged profile."""
 
     if value is None:
         return bfts_config_path("default")
@@ -56,6 +56,11 @@ def resolve_bfts_config_path(
         relative_candidate = Path(base_dir or Path.cwd()).expanduser() / candidate
         if relative_candidate.is_file():
             return relative_candidate.resolve()
+        source_root = Path(__file__).resolve().parents[2]
+        if (source_root / "pyproject.toml").is_file():
+            source_candidate = source_root / "configs" / "bfts" / candidate.name
+            if source_candidate.is_file():
+                return source_candidate.resolve()
     profile = profile_aliases.get(text.lower()) or profile_aliases.get(
         candidate.name.lower()
     )

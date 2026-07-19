@@ -8,6 +8,8 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 
+from ai_scientist.resources import resolve_bfts_config_path
+
 from ai_scientist.treesearch.agent_manager import Stage
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
@@ -98,9 +100,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
             path.write_text(
                 header
-                + self._row(
-                    "node-1", kind="seed", status="ok", decision="discard"
-                ),
+                + self._row("node-1", kind="seed", status="ok", decision="discard"),
                 encoding="utf-8",
             )
 
@@ -113,9 +113,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
             path.write_text(
                 header
-                + self._row(
-                    "node-1", kind="main", status="crash", decision="keep"
-                ),
+                + self._row("node-1", kind="main", status="crash", decision="keep"),
                 encoding="utf-8",
             )
 
@@ -177,7 +175,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -260,7 +258,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -347,7 +345,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             checkpoint = log_dir / "stage_demo" / "checkpoint.json"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_text("{}", encoding="utf-8")
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -427,7 +425,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             checkpoint = log_dir / "stage_demo" / "checkpoint.json"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_text("{}", encoding="utf-8")
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -477,7 +475,9 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "checkpoint_restore")
-            self.assertIn("ahead of the selected checkpoint", result["failure_error"]["message"])
+            self.assertIn(
+                "ahead of the selected checkpoint", result["failure_error"]["message"]
+            )
 
     def test_new_run_rejects_existing_populated_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -486,7 +486,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -518,7 +518,9 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "manager_creation")
-            self.assertIn("requires a resume checkpoint", result["failure_error"]["message"])
+            self.assertIn(
+                "requires a resume checkpoint", result["failure_error"]["message"]
+            )
 
 
 if __name__ == "__main__":

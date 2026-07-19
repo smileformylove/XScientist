@@ -153,9 +153,14 @@ class DistributionBuildTests(unittest.TestCase):
                 "sdist should retain repository-only validation",
             )
             for source_asset in (
+                "configs/bfts/bfts_config.yaml",
+                "configs/bfts/bfts_config_deep.yaml",
+                "configs/bfts/bfts_config_enhanced.yaml",
                 "docs/CONFIG_REFERENCE.md",
                 "docs/OPERATIONS_CHECKLIST.md",
                 "examples/example_topic.md",
+                "requirements/constraints-ci.txt",
+                "requirements/smoke.txt",
             ):
                 self.assertIn(
                     f"{sdist_root}/{source_asset}",
@@ -174,7 +179,11 @@ class DistributionBuildTests(unittest.TestCase):
                         "preflight_check, ai_scientist.apps.manager, run_ara_fork, "
                         "run_project, validate_repo; "
                         "import ai_scientist.apps.project as project; "
-                        "assert run_project is project"
+                        "from ai_scientist.resources import ("
+                        "bfts_config_path, resolve_bfts_config_path); "
+                        "assert run_project is project; "
+                        "assert resolve_bfts_config_path('bfts_config.yaml') "
+                        "== bfts_config_path('default')"
                     ),
                 ],
                 cwd=out_dir,

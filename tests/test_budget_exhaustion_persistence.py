@@ -9,6 +9,8 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 
+from ai_scientist.resources import resolve_bfts_config_path
+
 from ai_scientist.treesearch.agent_manager import (
     ExperimentCannotContinueError,
     Stage,
@@ -39,7 +41,10 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         previous_handler = object()
         with (
             mock.patch("signal.getsignal", return_value=previous_handler),
-            mock.patch("signal.signal", side_effect=lambda _sig, handler: handlers.append(handler)),
+            mock.patch(
+                "signal.signal",
+                side_effect=lambda _sig, handler: handlers.append(handler),
+            ),
         ):
             with self.assertRaises(ExperimentTermination) as ctx:
                 with termination_signal_guard():
@@ -73,7 +78,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -136,9 +141,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             checkpoint_exists = Path(result["checkpoint_path"]).is_file()
             self.assertEqual(manager_state["schema"], MANAGER_STATE_SCHEMA)
             self.assertEqual(manager_state["status"], result["status"])
-            self.assertEqual(
-                status["manager_state_path"], result["manager_state_path"]
-            )
+            self.assertEqual(status["manager_state_path"], result["manager_state_path"])
             self.assertFalse(
                 Path(result["manager_state_path"]).with_suffix(".json.tmp").exists()
             )
@@ -166,19 +169,19 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         self.assertEqual(
             status["failure_error"]["type"], "ExperimentCannotContinueError"
         )
-        self.assertEqual(
-            status["failure_error"]["message"], "no viable implementation"
-        )
+        self.assertEqual(status["failure_error"]["message"], "no viable implementation")
         self.assertTrue(checkpoint_exists)
 
-    def test_completed_run_preserves_workspace_and_writes_json_manager_state(self) -> None:
+    def test_completed_run_preserves_workspace_and_writes_json_manager_state(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             log_dir = root / "logs" / "0-run"
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -264,7 +267,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             marker = workspace_dir / "keep.txt"
             marker.write_text("preserve", encoding="utf-8")
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -301,7 +304,9 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertEqual(status_path.parent.name, "initialization_failures")
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
 
-    def test_configuration_failure_is_structured_without_running_experiment(self) -> None:
+    def test_configuration_failure_is_structured_without_running_experiment(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             config_path = root / "config.yaml"
@@ -317,7 +322,9 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "configuration")
-            self.assertEqual(result["failure_error"]["message"], "invalid configuration")
+            self.assertEqual(
+                result["failure_error"]["message"], "invalid configuration"
+            )
             self.assertTrue(Path(result["initialization_status_path"]).is_file())
 
     def test_workspace_initialization_interrupt_is_structured_and_releases_lock(
@@ -329,7 +336,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -368,7 +375,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -444,7 +451,9 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_interrupted")
             self.assertEqual(result["initialization_phase"], "run_lock")
-            self.assertFalse((root / "workspaces" / ".xscientist-experiment.lock").exists())
+            self.assertFalse(
+                (root / "workspaces" / ".xscientist-experiment.lock").exists()
+            )
 
     def test_manager_state_failure_is_reported_without_losing_run_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -453,7 +462,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir
@@ -694,9 +703,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            launch_scientist_bfts.experiment_stop_exit_code(
-                {"status": "interrupted"}
-            ),
+            launch_scientist_bfts.experiment_stop_exit_code({"status": "interrupted"}),
             130,
         )
         self.assertEqual(
@@ -711,7 +718,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
 
     def test_save_run_offline_mode_never_calls_llm_selection(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = Path(td)
             journal = Journal(
                 nodes=[
@@ -867,7 +874,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             workspace_dir = root / "workspaces" / "0-run"
             log_dir.mkdir(parents=True)
             workspace_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.exp_name = "0-run"
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace_dir

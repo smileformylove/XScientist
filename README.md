@@ -146,7 +146,7 @@ pip install -e ".[full,service,dev]"
 More reproducible (CI-style) install (optional):
 
 ```bash
-pip install -r requirements.txt -c constraints-ci.txt
+pip install -r requirements.txt -c requirements/constraints-ci.txt
 ```
 
 Verify the installation:
@@ -424,7 +424,7 @@ Typical layout:
 
 #### Science Exploration Tree View
 
-Every ARA records a paper run as a directed acyclic graph (DAG): the root is usually the initial plan or baseline, while child nodes are experiments, ablations, repairs, failed branches, or manuscript candidates. Users can open `exploration_graph.html` directly to browse this science exploration tree, or run `run_ara_fork.py graph --json` to read the same graph as structured data.
+Every ARA records a paper run as a directed acyclic graph (DAG): the root is usually the initial plan or baseline, while child nodes are experiments, ablations, repairs, failed branches, or manuscript candidates. Users can open `exploration_graph.html` directly to browse this science exploration tree, or run `xscientist ara graph --json` to read the same graph as structured data.
 
 Conceptually:
 

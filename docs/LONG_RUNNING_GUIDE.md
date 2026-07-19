@@ -23,7 +23,7 @@ This guide covers best practices for running XScientist in long-running, product
 The daemon is designed for continuous, autonomous operation:
 
 ```bash
-python3 continuous_research_daemon.py \
+python -m xscientist daemon \
   --source-config configs/sources/stable_source_priority.example.json \
   --duration-hours 24 \
   --enable-rewrite-followup \
@@ -348,7 +348,7 @@ python3 continuous_research_daemon.py \
 Optimize experiment execution:
 
 ```yaml
-# In bfts_config.yaml
+# In configs/bfts/bfts_config.yaml
 max_depth: 5  # Reduce for faster experiments
 max_iterations: 20  # Limit iterations
 timeout_per_step: 300  # Shorter timeouts

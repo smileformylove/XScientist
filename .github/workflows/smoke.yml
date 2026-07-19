@@ -28,8 +28,8 @@ jobs:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: |
-            requirements-smoke.txt
-            constraints-ci.txt
+            requirements/smoke.txt
+            requirements/constraints-ci.txt
             pyproject.toml
 
       - name: Prepare CI logs
@@ -40,7 +40,7 @@ jobs:
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel 2>&1 | tee .ci-output/logs/pip-bootstrap.log
           python -m pip install build 2>&1 | tee .ci-output/logs/pip-build-install.log
-          python -m pip install --retries 5 --timeout 60 -r requirements-smoke.txt -c constraints-ci.txt 2>&1 | tee .ci-output/logs/pip-install.log
+          python -m pip install --retries 5 --timeout 60 -r requirements/smoke.txt -c requirements/constraints-ci.txt 2>&1 | tee .ci-output/logs/pip-install.log
 
       - name: Seed login session for CI
         run: |

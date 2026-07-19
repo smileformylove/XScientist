@@ -14,7 +14,7 @@ It is an implementation and operations summary, not a guarantee that generated p
 
 ## Enhanced Experiment Configuration
 
-`bfts_config_enhanced.yaml` provides a stronger BFTS configuration for deeper runs.
+`configs/bfts/bfts_config_enhanced.yaml` is an experimental planning draft for deeper runs. For a configuration supported by the current runtime schema, use the `deep` profile.
 
 Typical enhancements include:
 
@@ -28,9 +28,9 @@ Typical enhancements include:
 Example:
 
 ```bash
-python3 continuous_paper_generator.py \
+python -m xscientist batch \
   --topic examples/example_topic.md \
-  --bfts-config bfts_config_enhanced.yaml \
+  --bfts-config deep \
   --paper-types normal \
   --target-venue neurips \
   --high-quality-mode
@@ -94,7 +94,7 @@ Prefer explicit provider-prefixed model names when using non-default providers, 
 ## Recommended High-Quality Command
 
 ```bash
-python3 continuous_paper_generator.py \
+python -m xscientist batch \
   --topic examples/example_topic.md \
   --paper-types normal \
   --target-venue neurips \
@@ -106,7 +106,7 @@ python3 continuous_paper_generator.py \
   --quality-preset publishable \
   --review-strategy depth \
   --improvement-rounds 3 \
-  --bfts-config bfts_config_enhanced.yaml
+  --bfts-config deep
 ```
 
 ## Quality Checklist
@@ -119,7 +119,7 @@ Before treating an output as submission-ready, check:
 - baseline selection is appropriate
 - metrics are reproducible
 - review issues and repair tasks are resolved or explicitly waived
-- `research_manager.py submission-board` and `repair-board` do not show unresolved blockers
+- `xscientist manager submission-board` and `repair-board` do not show unresolved blockers
 
 ## Related Guides
 

@@ -161,7 +161,7 @@ pip install -e ".[full,service,dev]"
 更稳定的"CI 风格"安装（可选）：
 
 ```bash
-pip install -r requirements.txt -c constraints-ci.txt
+pip install -r requirements.txt -c requirements/constraints-ci.txt
 ```
 
 验证安装：
@@ -406,7 +406,7 @@ XScientist 会在最终稿阶段运行一组 deterministic integrity forensics �
 
 #### 科技探索树视图
 
-每一份 ARA 都把一次小论文生成过程记录成一个有向无环图（DAG）：根节点通常是初始方案或 baseline，子节点是后续实验、消融、修复、失败分支或候选稿改写。用户可以直接打开 `exploration_graph.html` 查看这棵科技探索树，也可以用 `run_ara_fork.py graph --json` 读取同一份结构化图。
+每一份 ARA 都把一次小论文生成过程记录成一个有向无环图（DAG）：根节点通常是初始方案或 baseline，子节点是后续实验、消融、修复、失败分支或候选稿改写。用户可以直接打开 `exploration_graph.html` 查看这棵科技探索树，也可以用 `xscientist ara graph --json` 读取同一份结构化图。
 
 示意图如下：
 

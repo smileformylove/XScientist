@@ -43,6 +43,13 @@ class PublicSdkTests(unittest.TestCase):
             bfts_config_path("default"),
         )
 
+    def test_source_checkout_alias_uses_repository_config(self) -> None:
+        resolved = resolve_bfts_config_path("bfts_config.yaml")
+
+        self.assertEqual(resolved.name, "bfts_config.yaml")
+        self.assertEqual(resolved.parent.name, "bfts")
+        self.assertEqual(resolved.parent.parent.name, "configs")
+
     def test_relative_custom_config_resolves_from_current_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

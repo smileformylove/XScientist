@@ -9,11 +9,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/xscientist
-COPY requirements.txt constraints-ci.txt ./
+COPY requirements.txt ./
+COPY requirements/constraints-ci.txt requirements/constraints-ci.txt
 RUN python -m pip install --no-cache-dir \
     torch --index-url https://download.pytorch.org/whl/cpu
 RUN python -m pip install --no-cache-dir \
-    -r requirements.txt -c constraints-ci.txt
+    -r requirements.txt -c requirements/constraints-ci.txt
 
 RUN useradd --create-home --uid 10001 scientist
 USER scientist

@@ -8,6 +8,8 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 
+from ai_scientist.resources import resolve_bfts_config_path
+
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.agent_manager import AgentManager, Stage
 from ai_scientist.treesearch.utils import serialize
@@ -65,7 +67,7 @@ class SaveRunAtomicTests(unittest.TestCase):
             log_dir = root / "logs"
             workspace.mkdir()
             log_dir.mkdir()
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -104,11 +106,13 @@ class SaveRunAtomicTests(unittest.TestCase):
     def test_best_solution_pointer_failure_preserves_previous_solution(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = root
             stage_dir = root / "stage_x"
 
-            with mock.patch("ai_scientist.treesearch.utils.config.tree_export.generate"):
+            with mock.patch(
+                "ai_scientist.treesearch.utils.config.tree_export.generate"
+            ):
                 save_run(cfg, self._journal("old", 1.0, "print('old')"), "stage_x")
 
             real_atomic_write = serialize.atomic_write_text
@@ -140,11 +144,13 @@ class SaveRunAtomicTests(unittest.TestCase):
     def test_successful_save_replaces_best_solution_without_temp_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = root
             stage_dir = root / "stage_x"
 
-            with mock.patch("ai_scientist.treesearch.utils.config.tree_export.generate"):
+            with mock.patch(
+                "ai_scientist.treesearch.utils.config.tree_export.generate"
+            ):
                 save_run(cfg, self._journal("old", 1.0, "print('old')"), "stage_x")
                 save_run(cfg, self._journal("new", 2.0, "print('new')"), "stage_x")
 

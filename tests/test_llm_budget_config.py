@@ -8,6 +8,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+from ai_scientist.resources import resolve_bfts_config_path
+
 from ai_scientist.treesearch.agent_manager import (
     AgentManager,
     ExperimentCannotContinueError,
@@ -35,7 +37,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             (config_dir / "data").mkdir()
             (config_dir / "idea.md").write_text("task", encoding="utf-8")
             config_path = config_dir / "bfts.yaml"
-            config = OmegaConf.load("bfts_config.yaml")
+            config = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             config.data_dir = "data"
             config.desc_file = "idea.md"
             config.goal = None
@@ -77,7 +79,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             (config_dir / "workspaces" / run_name).mkdir(parents=True)
             (config_dir / "data").mkdir()
             config_path = config_dir / "bfts.yaml"
-            config = OmegaConf.load("bfts_config.yaml")
+            config = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             config.data_dir = "data"
             config.desc_file = None
             config.goal = "test"
@@ -109,7 +111,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "data").mkdir()
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.data_dir = str(root / "data")
             cfg.desc_file = None
             cfg.goal = "test"
@@ -134,7 +136,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "data").mkdir()
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.data_dir = str(root / "data")
             cfg.desc_file = None
             cfg.goal = "test"
@@ -169,7 +171,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -200,7 +202,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -219,9 +221,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 )
             )
 
-            completed, reason = manager._check_stage_completion(
-                manager.current_stage
-            )
+            completed, reason = manager._check_stage_completion(manager.current_stage)
 
             self.assertTrue(completed)
             self.assertEqual(reason, "Reached max iterations")
@@ -239,7 +239,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             (workspaces_dir / run_name).mkdir(parents=True)
             data_dir.mkdir()
 
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.data_dir = str(data_dir)
             cfg.desc_file = None
             cfg.goal = "test"
@@ -251,9 +251,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
             try:
                 loaded = prep_cfg(cfg)
-                resumed_budget_path = os.environ[
-                    "AI_SCIENTIST_LLM_BUDGET_STATE"
-                ]
+                resumed_budget_path = os.environ["AI_SCIENTIST_LLM_BUDGET_STATE"]
             finally:
                 if old_state is None:
                     os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
@@ -280,7 +278,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -326,7 +324,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -358,7 +356,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -399,7 +397,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -452,7 +450,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             log_dir = root / "logs" / "0-run"
             workspace.mkdir(parents=True)
             log_dir.mkdir(parents=True)
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             cfg.log_dir = log_dir
             cfg.workspace_dir = workspace
             manager = AgentManager(
@@ -476,9 +474,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             checkpoint = manager._save_checkpoint()
             self._rewrite_checkpoint_payload(
                 checkpoint,
-                lambda payload: payload["stages"].append(
-                    dict(payload["stages"][0])
-                ),
+                lambda payload: payload["stages"].append(dict(payload["stages"][0])),
             )
             with self.assertRaisesRegex(ValueError, "duplicate stages"):
                 AgentManager.from_checkpoint(
@@ -510,9 +506,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             checkpoint = manager._save_checkpoint()
             self._rewrite_checkpoint_payload(
                 checkpoint,
-                lambda payload: payload["stages"][0].update(
-                    {"stage_number": "one"}
-                ),
+                lambda payload: payload["stages"][0].update({"stage_number": "one"}),
             )
             with self.assertRaisesRegex(ValueError, "invalid stage number"):
                 AgentManager.from_checkpoint(
@@ -552,7 +546,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             checkpoint = Path(td) / "checkpoint.pkl"
             checkpoint.write_bytes(b"not loaded")
-            cfg = OmegaConf.load("bfts_config.yaml")
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
             with self.assertRaisesRegex(ValueError, "Unsafe legacy checkpoint"):
                 AgentManager.from_checkpoint(
                     checkpoint, cfg=cfg, workspace_dir=Path(td)
