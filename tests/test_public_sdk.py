@@ -277,13 +277,20 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_reload_server_does_not_create_a_second_app(self) -> None:
+        uvicorn = mock.Mock()
         with (
-            mock.patch("uvicorn.run") as uvicorn_run,
+            mock.patch.dict("sys.modules", {"uvicorn": uvicorn}),
             mock.patch("xscientist.service.create_app") as create_app_mock,
         ):
             run_server(reload=True)
 
-        uvicorn_run.assert_called_once()
+        uvicorn.run.assert_called_once_with(
+            "xscientist.service:create_app",
+            factory=True,
+            host="127.0.0.1",
+            port=8000,
+            reload=True,
+        )
         create_app_mock.assert_not_called()
 
     def test_http_service_submits_and_reports_jobs(self) -> None:
