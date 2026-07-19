@@ -50,11 +50,11 @@ def ara_main(argv: Sequence[str] | None = None) -> int:
 
 
 def auth_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("auth_cli", argv)
+    return _call_main("ai_scientist.apps.auth", argv)
 
 
 def feedback_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("feedback_cli", argv)
+    return _call_main("ai_scientist.apps.feedback", argv)
 
 
 def validate_main(argv: Sequence[str] | None = None) -> int:

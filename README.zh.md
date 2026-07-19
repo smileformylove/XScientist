@@ -186,8 +186,8 @@ export S2_API_KEY="..."
 ### 3) 登录（必需）
 
 ```bash
-python3 auth_cli.py login --user <your_name>
-python3 auth_cli.py status
+xscientist auth login --user <your_name>
+xscientist auth status
 ```
 
 登录守卫说明：`docs/LOGIN_GUARDRAIL.md`
@@ -315,17 +315,17 @@ bash run_stable_daemon.sh source-plan
 
 ```bash
 # 查看系统健康状态
-python3 feedback_cli.py --feedback-dir ./feedback status
+xscientist feedback --feedback-dir ./feedback status
 
 # 查看推荐行动
-python3 feedback_cli.py --feedback-dir ./feedback actions
+xscientist feedback --feedback-dir ./feedback actions
 
 # 分析趋势
-python3 feedback_cli.py --feedback-dir ./feedback trends \
+xscientist feedback --feedback-dir ./feedback trends \
   --metrics quality_score success_rate error_rate
 
 # 导出报告
-python3 feedback_cli.py --feedback-dir ./feedback report
+xscientist feedback --feedback-dir ./feedback report
 ```
 
 更多用法：`docs/guides/FEEDBACK_QUICKSTART.md`

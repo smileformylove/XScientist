@@ -170,8 +170,8 @@ export S2_API_KEY="..."
 ### 3) Login (required)
 
 ```bash
-python3 auth_cli.py login --user <your_name>
-python3 auth_cli.py status
+xscientist auth login --user <your_name>
+xscientist auth status
 ```
 
 Login guard doc: `docs/LOGIN_GUARDRAIL.md`
@@ -330,17 +330,17 @@ bash run_stable_daemon.sh source-plan
 
 ```bash
 # Check system health
-python3 feedback_cli.py --feedback-dir ./feedback status
+xscientist feedback --feedback-dir ./feedback status
 
 # View recommended actions
-python3 feedback_cli.py --feedback-dir ./feedback actions
+xscientist feedback --feedback-dir ./feedback actions
 
 # Analyze trends
-python3 feedback_cli.py --feedback-dir ./feedback trends \
+xscientist feedback --feedback-dir ./feedback trends \
   --metrics quality_score success_rate error_rate
 
 # Export report
-python3 feedback_cli.py --feedback-dir ./feedback report
+xscientist feedback --feedback-dir ./feedback report
 ```
 
 More usage: `docs/guides/FEEDBACK_QUICKSTART.md`

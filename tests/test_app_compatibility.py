@@ -109,6 +109,18 @@ class AppCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
 
+    def test_auth_cli_aliases_internal_application(self) -> None:
+        legacy = importlib.import_module("auth_cli")
+        internal = importlib.import_module("ai_scientist.apps.auth")
+
+        self.assertIs(legacy, internal)
+
+    def test_feedback_cli_aliases_internal_application(self) -> None:
+        legacy = importlib.import_module("feedback_cli")
+        internal = importlib.import_module("ai_scientist.apps.feedback")
+
+        self.assertIs(legacy, internal)
+
 
 if __name__ == "__main__":
     unittest.main()

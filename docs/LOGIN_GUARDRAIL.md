@@ -13,13 +13,13 @@ Use the new CLI:
 
 ```bash
 # Login
-python3 auth_cli.py login --user <your_name>
+xscientist auth login --user <your_name>
 
 # Check current status
-python3 auth_cli.py status
+xscientist auth status
 
 # Logout
-python3 auth_cli.py logout
+xscientist auth logout
 ```
 
 Session file default path:
