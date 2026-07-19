@@ -4,6 +4,20 @@
 
 XScientist is designed as a **research operating system** that can run continuously, stay observable, and produce handoff-ready artifacts for iterative improvement and collaboration.
 
+## Repository Boundaries
+
+| Layer | Location | Stability | Responsibility |
+|---|---|---|---|
+| Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
+| Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
+| Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
+| Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
+| Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
+
+New application code should import from `xscientist`. The root workflow scripts
+contain no business logic; they keep existing automation working while the
+installed CLI dispatches directly to `ai_scientist.apps`.
+
 ## System Architecture
 
 ```
@@ -148,7 +162,7 @@ Persistent memory system:
 - Playbook management
 
 ### 8. Daemon Strategy & Scheduling
-**Location**: `continuous_research_daemon.py`
+**Location**: `ai_scientist/apps/daemon.py`
 
 Long-running orchestration:
 - Source queue management

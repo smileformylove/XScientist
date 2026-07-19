@@ -107,6 +107,10 @@ Legacy-compatible entrypoints:
 - `research_manager.py`: index + boards (filtering, exporting, packaging)
 - `run_ara_fork.py`: inspect / re-execute / fork a single node from an ARA bundle
 
+The four main workflow scripts are thin aliases. Their implementations live in
+`ai_scientist/apps/{project,batch,daemon,manager}.py`; PyPI users should prefer
+the `xscientist` commands above.
+
 ---
 
 ## Quick Start
@@ -298,13 +302,13 @@ Submission-grade and high-quality runs enable deterministic integrity forensics 
 
 ```bash
 # Force integrity forensics for the final manuscript.
-python3 run_project.py my_project \
+xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --integrity-forensics
 
 # Temporarily disable it during high-quality debugging.
-python3 continuous_paper_generator.py \
+xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --paper-types icbinb \
@@ -356,15 +360,15 @@ XScientist writes structured artifacts under the output root (directory names ma
 - `reports/`: trends/handoff reports (daemon)
 - `knowledge_base/`: cross-project memory (e.g., self-evolution history/playbook)
 
-Common index/board commands (see `research_manager.py --help` for more):
+Common index/board commands (see `xscientist manager --help` for more):
 
 ```bash
-python3 research_manager.py rebuild-index
-python3 research_manager.py submission-board --top 5 --require-gate
-python3 research_manager.py rewrite-board --top 10
-python3 research_manager.py repair-board --top 20 --priority-tier p0
-python3 research_manager.py evolution-board --top 20
-python3 research_manager.py process-board --status blocked --top 30
+xscientist manager rebuild-index
+xscientist manager submission-board --top 5 --require-gate
+xscientist manager rewrite-board --top 10
+xscientist manager repair-board --top 20 --priority-tier p0
+xscientist manager evolution-board --top 20
+xscientist manager process-board --status blocked --top 30
 ```
 
 ### Integrity Forensics

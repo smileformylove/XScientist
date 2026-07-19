@@ -1,8 +1,9 @@
 # XScientist SDK and API
 
 XScientist exposes one public package, `xscientist`. The historical
-`ai_scientist` package and repository-root scripts remain compatibility
-implementation details; new integrations should depend on `xscientist` only.
+`ai_scientist` package contains the workflow implementation, while
+repository-root scripts remain compatibility adapters. Application consumers
+should depend on `xscientist`; contributors may work in `ai_scientist`.
 
 ## Installation profiles
 
@@ -23,17 +24,32 @@ xscientist/                 Public, versioned integration surface
 ├── service.py              Optional FastAPI service
 └── entrypoints.py          Compatibility workflow dispatch
 
-ai_scientist/               Internal implementation and ARA protocol
+ai_scientist/               Internal workflow implementation
+├── apps/                   Installed project/batch/daemon/manager apps
 ├── protocol/               Stable on-disk research protocol
 ├── resources/              Packaged configs and resource lookup
 ├── treesearch/             Experiment search engine
 └── utils/                  Internal workflow components
 
-run_project.py and peers    Legacy adapters; avoid importing in new apps
+run_project.py and peers    Thin legacy aliases to ai_scientist.apps
 ```
 
 Public compatibility follows semantic versioning for symbols exported by
 `xscientist.__all__`. Internal modules can evolve more quickly.
+
+The four primary workflows have one implementation each:
+
+| Workflow | Installed command | Internal application | Legacy alias |
+|---|---|---|---|
+| Single project | `xscientist project` | `ai_scientist.apps.project` | `run_project.py` |
+| Batch generation | `xscientist batch` | `ai_scientist.apps.batch` | `continuous_paper_generator.py` |
+| Long-running daemon | `xscientist daemon` | `ai_scientist.apps.daemon` | `continuous_research_daemon.py` |
+| Research boards | `xscientist manager` | `ai_scientist.apps.manager` | `research_manager.py` |
+
+The legacy modules alias the internal modules rather than copying or wrapping
+their symbols. Existing imports and `mock.patch("run_project...")`-style tests
+therefore remain compatible, but new integrations should use the public SDK or
+unified CLI.
 
 ## Python SDK
 
@@ -68,6 +84,7 @@ xscientist info
 xscientist project demo --topic topic.md
 xscientist batch --help
 xscientist daemon --help
+xscientist manager --help
 xscientist ara --help
 xscientist auth status
 ```
@@ -122,10 +139,10 @@ Example request:
 }
 ```
 
-The bundled service is intended for local/team integration. Internet-facing
-deployments should add authentication, rate limits, persistent job storage,
-and a dedicated queue/worker system. Job stdout/stderr is kept in memory and
-truncated to `max_output_chars` per stream.
+The bundled service is intended for local/team integration. It includes API-key
+authentication and persistent job metadata. Internet-facing deployments should
+also add rate limits, durable external queues/workers, TLS, and centralized
+observability. Job stdout/stderr is truncated to `max_output_chars` per stream.
 
 Job metadata is atomically persisted under
 `<output-root>/.xscientist/api/jobs` (or `--state-dir`). Completed jobs survive
@@ -141,3 +158,19 @@ The wheel includes runtime assets previously available only from a Git clone:
 - review few-shot examples;
 - ARA JSON schemas;
 - experiment-tree visualization templates.
+
+## API service handoff
+
+For a small internal deployment:
+
+```bash
+pip install "xscientist[full,service]"
+export XSCIENTIST_API_KEY="replace-with-a-secret"
+xscientist serve --host 0.0.0.0 --port 8000 --output-root /srv/xscientist
+```
+
+The HTTP layer deliberately submits the heavy workflow through the same
+`XScientist` SDK used by Python callers. This keeps provider SDKs and workflow
+environment mutations isolated in child processes. For larger deployments,
+replace the in-process executor with a durable queue while preserving
+`ProjectRequest` and `CommandResult` as the adapter boundary.

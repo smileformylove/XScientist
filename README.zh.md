@@ -123,6 +123,10 @@ flowchart LR
 - `research_manager.py`：索引与看板（筛选、导出、打包）
 - `run_ara_fork.py`：从 ARA 工件里 inspect / re-exec / fork 单个节点
 
+四个核心工作流脚本现在都是薄兼容别名，实际实现位于
+`ai_scientist/apps/{project,batch,daemon,manager}.py`。通过 PyPI 使用时，
+优先选择上面的 `xscientist` 统一命令。
+
 ---
 
 ## 快速开始
@@ -283,13 +287,13 @@ xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 
 ```bash
 # 强制启用最终稿完整性取证
-python3 run_project.py my_project \
+xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --integrity-forensics
 
 # 在高质量调试中临时关闭
-python3 continuous_paper_generator.py \
+xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --paper-types icbinb \
@@ -341,15 +345,15 @@ python3 feedback_cli.py --feedback-dir ./feedback report
 - `reports/`：趋势报告/交接报告等（daemon 场景）
 - `knowledge_base/`：跨项目沉淀（例如 self-evolution history/playbook）
 
-常用看板/索引命令（更多见 `research_manager.py --help`）：
+常用看板/索引命令（更多见 `xscientist manager --help`）：
 
 ```bash
-python3 research_manager.py rebuild-index
-python3 research_manager.py submission-board --top 5 --require-gate
-python3 research_manager.py rewrite-board --top 10
-python3 research_manager.py repair-board --top 20 --priority-tier p0
-python3 research_manager.py evolution-board --top 20
-python3 research_manager.py process-board --status blocked --top 30
+xscientist manager rebuild-index
+xscientist manager submission-board --top 5 --require-gate
+xscientist manager rewrite-board --top 10
+xscientist manager repair-board --top 20 --priority-tier p0
+xscientist manager evolution-board --top 20
+xscientist manager process-board --status blocked --top 30
 ```
 
 ### 科研完整性取证（Integrity Forensics）
