@@ -76,6 +76,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/apps/manager.py",
                 "continuous_research_daemon.py",
                 "ai_scientist/apps/daemon.py",
+                "ai_scientist/apps/daemon_dashboard.py",
                 "auth_cli.py",
                 "ai_scientist/apps/auth.py",
                 "feedback_cli.py",

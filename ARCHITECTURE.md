@@ -10,6 +10,7 @@ XScientist is designed as a **research operating system** that can run continuou
 |---|---|---|---|
 | Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
+| Daemon presentation | `ai_scientist/apps/daemon_dashboard.py` | Internal | Pure trend transformation and HTML rendering for daemon dashboards |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
@@ -190,6 +191,12 @@ Long-running orchestration:
 - Evidence strategy feedback
 - Dashboard serving
 - Graceful degradation
+
+The daemon entrypoint owns scheduling, state, control files, and artifact I/O.
+Dashboard trend transformation and HTML rendering live separately in
+`ai_scientist/apps/daemon_dashboard.py`, keeping presentation code independent
+from the long-running orchestration loop while preserving compatibility exports
+from `ai_scientist.apps.daemon`.
 
 ## Data Flow
 
