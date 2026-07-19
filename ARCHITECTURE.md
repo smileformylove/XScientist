@@ -45,7 +45,8 @@ injects environment-derived defaults and keeps legacy module behavior intact.
 
 `ai_scientist/apps/project.py` owns single-project execution. Its reusable
 argument contract lives in `ai_scientist/apps/project_cli.py`; `main()` injects
-environment-derived defaults and remains compatible with `run_project.py`.
+environment-derived defaults and remains compatible with the wheel's
+`run_project` module alias.
 
 The daemon state machine remains in `ai_scientist/apps/daemon.py`. Persistent
 operator-control defaults, validation, expiry, atomic storage, and event history
@@ -461,9 +462,9 @@ $RESEARCH_OUTPUT_DIR/
 - Timing information
 
 ### Debugging Tools
-- `research_manager.py`: Index and boards
-- `preflight_check.py`: System validation
-- `validate_repo.py`: Repository health
+- `python -m xscientist manager`: Index and boards
+- `python -m xscientist preflight`: System validation
+- `python -m xscientist validate`: Repository health
 
 ## Future Directions
 

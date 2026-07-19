@@ -107,7 +107,7 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
-- **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `run_ara_fork.py` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
+- **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `xscientist ara` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
 公共入口：
 
@@ -115,17 +115,16 @@ flowchart LR
 - `from xscientist import XScientist, ProjectRequest`：稳定 Python SDK
 - `from xscientist import create_app`：可选 FastAPI 应用工厂
 
-兼容入口脚本：
+源码仓库命令：
 
-- `run_project.py`：单项目端到端（适合本地调试/复现实验）
-- `continuous_paper_generator.py`：批量/连续运行入口
-- `continuous_research_daemon.py`：长期自治调度入口
-- `research_manager.py`：索引与看板（筛选、导出、打包）
-- `run_ara_fork.py`：从 ARA 工件里 inspect / re-exec / fork 单个节点
+- `python -m xscientist project`：单项目端到端
+- `python -m xscientist batch`：批量/连续运行
+- `python -m xscientist daemon`：长期自治调度
+- `python -m xscientist manager`：索引与看板
+- `python -m xscientist ara`：从 ARA 工件 inspect / re-exec / fork 节点
 
-四个核心工作流脚本现在都是薄兼容别名，实际实现位于
-`ai_scientist/apps/{project,batch,daemon,manager}.py`。通过 PyPI 使用时，
-优先选择上面的 `xscientist` 统一命令。
+实际实现位于 `ai_scientist/apps/`。PyPI wheel 仍发布原顶层模块名作为
+兼容别名，但源码仓库根目录不再放置 Python 模块。
 
 ---
 
@@ -373,13 +372,13 @@ XScientist 会在最终稿阶段运行一组 deterministic integrity forensics �
 - `--submission-mode` 或 `--high-quality-mode` 下默认启用。
 - 其他普通运行默认关闭，但可用 `--integrity-forensics` 强制启用。
 - 调试或成本敏感场景可用 `--no-integrity-forensics` 显式关闭。
-- 入口覆盖 `run_project.py`、`continuous_paper_generator.py`、`launch_scientist_bfts.py` 与 `launch_scientist_zhipu.py`。
+- 入口覆盖 `xscientist project`、`xscientist batch`、`xscientist bfts` 与 `xscientist zhipu`。
 
 每篇稿件的取证产物写入对应运行目录下的 `integrity_forensics/`，通常包括 JSON 报告和 Markdown 摘要。批量/项目 summary 会记录 `integrity_forensics_status`、`integrity_forensics_verdict`、finding 数量和报告路径，并在 shortlist 中展示。`HARD_FLAGS` 会阻断 submission-ready 判定；`SOFT_FLAGS` 会被报告出来，但不会单独阻断。
 
 ### ARA 工件（面向下游智能体）
 
-除了给人看的 PDF，每次成功跑完 `run_project.py` 之后，还会在 `<project_dir>/ara/<timestamp>_<idea>/` 下写入一份「机读」的研究工件（Agent-Native Research Artifact，简称 ARA），设计目标是让另一个 AI Scientist 可以直接 fork / re-execute，而不必去逆向 PDF。
+除了给人看的 PDF，每次成功跑完 `xscientist project` 之后，还会在 `<project_dir>/ara/<timestamp>_<idea>/` 下写入一份「机读」的研究工件（Agent-Native Research Artifact，简称 ARA），设计目标是让另一个 AI Scientist 可以直接 fork / re-execute，而不必去逆向 PDF。
 
 典型目录结构：
 
@@ -436,7 +435,7 @@ flowchart TD
 
 这棵树和 git-like 记录、CLI log、节点 diff 使用的是同一份 provenance：`exploration_graph.json` 是源数据，`exploration_graph.html`、`exploration_graph.summary.json`、`run_ara_fork.py log`、`run_ara_fork.py diff --only-node` 和 `run_ara_fork.py fork` 都是它的不同视图。如果把 ARA 目录提交进 git，git 记录的是这份图数据的文件级快照；XScientist 的 log/diff/fork 则给出节点级历史。因此某篇小论文的结论如果来自 `candidate2`，就能继续追到它的父实验、失败修复、消融对照，以及可以从哪个节点 fork 出下一轮研究。
 
-配套 CLI：`run_ara_fork.py` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` 等子命令：
+配套 CLI：`xscientist ara` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` 等子命令：
 
 ```bash
 # 打印某个节点的 metric / analysis / 代码大小
@@ -476,7 +475,7 @@ xscientist ara verify \
 
 写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。`ai_scientist/utils/claim_coverage.py` 会把这些标记聚合成 `coverage_score` 与 severity（`ok` / `sparse` / `unresolved` / `insufficient` / `none`），存入 `ara/.../claims/coverage.json`，供质量门禁 / 排行 / dossier 打分使用。
 
-可选：批量 re-execution 验证。设置环境变量后，`run_project.py` 结束时会挑选 top-metric 节点重跑并生成 verify 报告：
+可选：批量 re-execution 验证。设置环境变量后，`xscientist project` 结束时会挑选 top-metric 节点重跑并生成 verify 报告：
 
 ```bash
 export AI_SCIENTIST_ARA_REEXEC=1
@@ -543,7 +542,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 ## 文档索引
 
-- `docs/guides/PROJECT_USAGE.md`：`run_project.py` 项目流用法与参数说明
+- `docs/guides/PROJECT_USAGE.md`：项目流用法与参数说明
 - `docs/guides/FEEDBACK_QUICKSTART.md`：反馈系统快速入门指南
 - `docs/CONFIG_REFERENCE.md`：更细的配置/参数参考
 - `docs/SOURCE_ORCHESTRATION.md`：source queue 编排与运行姿态建议
@@ -551,7 +550,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
 - `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
 - `ARCHITECTURE.md`：系统架构文档
-- `OPTIMIZATION_SUMMARY.md`：优化总结
+- `docs/guides/OPTIMIZATION_SUMMARY.md`：优化总结
 
 ---
 

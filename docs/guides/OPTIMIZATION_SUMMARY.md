@@ -26,7 +26,7 @@ The output root contains:
 
 ## Continuous Paper Generation
 
-`continuous_paper_generator.py` supports:
+`python -m xscientist batch` supports:
 
 - topic-based ideation
 - existing ideas files
@@ -49,7 +49,7 @@ Use `--target-venue` for venue intent and `--auto-adjust-paper-type` when you wa
 
 ## Research Management
 
-`research_manager.py` provides:
+`python -m xscientist manager` provides:
 
 - batch listing and summaries
 - paper listing and search
@@ -60,11 +60,11 @@ Use `--target-venue` for venue intent and `--auto-adjust-paper-type` when you wa
 Useful commands:
 
 ```bash
-python3 research_manager.py rebuild-index
-python3 research_manager.py submission-board --top 5 --require-gate
-python3 research_manager.py rewrite-board --top 10
-python3 research_manager.py repair-board --top 20
-python3 research_manager.py process-board --status blocked --top 30
+python -m xscientist manager rebuild-index
+python -m xscientist manager submission-board --top 5 --require-gate
+python -m xscientist manager rewrite-board --top 10
+python -m xscientist manager repair-board --top 20
+python -m xscientist manager process-board --status blocked --top 30
 ```
 
 ## Guardrails
@@ -80,7 +80,7 @@ XScientist now includes:
 
 ## Long-Running Operation
 
-`continuous_research_daemon.py` and `run_stable_daemon.sh` support:
+`python -m xscientist daemon` and `run_stable_daemon.sh` support:
 
 - source queues
 - day/night profiles
@@ -96,8 +96,8 @@ XScientist now includes:
 Recommended local checks:
 
 ```bash
-xscientist preflight --strict
-python3 validate_repo.py
+python -m xscientist preflight --strict
+python -m xscientist validate --full-import-smoke
 make smoke
 ```
 
@@ -105,10 +105,10 @@ make smoke
 
 ## Related Files
 
-- `continuous_paper_generator.py`
-- `continuous_research_daemon.py`
-- `research_manager.py`
-- `run_project.py`
+- `ai_scientist/apps/batch.py`
+- `ai_scientist/apps/daemon.py`
+- `ai_scientist/apps/manager.py`
+- `ai_scientist/apps/project.py`
 - `ai_scientist/config/paths.py`
 - `docs/guides/OUTPUT_DIRECTORIES.md`
 - `docs/guides/RESEARCH_GENERATOR_README.md`

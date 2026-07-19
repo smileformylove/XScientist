@@ -39,19 +39,19 @@ Public compatibility follows semantic versioning for symbols exported by
 
 The four primary workflows have one implementation each:
 
-| Workflow | Installed command | Internal application | Legacy alias |
+| Workflow | Installed/source command | Internal application | Wheel compatibility alias |
 |---|---|---|---|
 | Single project | `xscientist project` | `ai_scientist.apps.project` | `run_project.py` |
 | Batch generation | `xscientist batch` | `ai_scientist.apps.batch` | `continuous_paper_generator.py` |
 | Long-running daemon | `xscientist daemon` | `ai_scientist.apps.daemon` | `continuous_research_daemon.py` |
 | Research boards | `xscientist manager` | `ai_scientist.apps.manager` | `research_manager.py` |
 
-The legacy modules alias the internal modules rather than copying or wrapping
-their symbols. Existing imports and `mock.patch("run_project...")`-style tests
-therefore remain compatible, but new integrations should use the public SDK or
-unified CLI.
+The compatibility modules are published at the wheel root and alias the
+internal applications. They are intentionally absent from a source checkout;
+new integrations should use the public SDK or unified CLI.
 
-`run_daemon_profile.py`, `run_daemon_rehearsal.py`, `run_stable_daemon.sh`, and
+`scripts/daemon/run_daemon_profile.py`,
+`scripts/daemon/run_daemon_rehearsal.py`, `run_stable_daemon.sh`, and
 `start_research.sh` are source-checkout operations tools. They depend on the
 repository's example profiles and shell layout, so they are intentionally not
 installed by the wheel. Use `xscientist daemon` for portable installed usage.

@@ -91,7 +91,7 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
-- Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion CLI `run_ara_fork.py` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
+- Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
 Public interfaces:
 
@@ -99,17 +99,17 @@ Public interfaces:
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
 
-Legacy-compatible entrypoints:
+Source-checkout commands:
 
-- `run_project.py`: single-project end-to-end run (good for local debugging and reproducing a run)
-- `continuous_paper_generator.py`: continuous/batch generation
-- `continuous_research_daemon.py`: long-running autonomous scheduling
-- `research_manager.py`: index + boards (filtering, exporting, packaging)
-- `run_ara_fork.py`: inspect / re-execute / fork a single node from an ARA bundle
+- `python -m xscientist project`: single-project end-to-end run
+- `python -m xscientist batch`: continuous/batch generation
+- `python -m xscientist daemon`: long-running autonomous scheduling
+- `python -m xscientist manager`: index + boards
+- `python -m xscientist ara`: inspect / re-execute / fork ARA nodes
 
-The four main workflow scripts are thin aliases. Their implementations live in
-`ai_scientist/apps/{project,batch,daemon,manager}.py`; PyPI users should prefer
-the `xscientist` commands above.
+The implementations live in `ai_scientist/apps/`. PyPI wheels still publish
+the former top-level module names as compatibility aliases, but the source
+checkout intentionally keeps Python modules out of the repository root.
 
 ---
 
@@ -390,13 +390,13 @@ Default behavior:
 - Enabled automatically when `--submission-mode` or `--high-quality-mode` is active.
 - Disabled by default for ordinary runs, but `--integrity-forensics` forces it on.
 - `--no-integrity-forensics` explicitly disables it for debugging or cost-sensitive runs.
-- Supported by `run_project.py`, `continuous_paper_generator.py`, `launch_scientist_bfts.py`, and `launch_scientist_zhipu.py`.
+- Supported by `xscientist project`, `xscientist batch`, `xscientist bfts`, and `xscientist zhipu`.
 
 Per-manuscript artifacts are written under that run's `integrity_forensics/` directory, usually including a JSON report and a Markdown summary. Project and batch summaries record `integrity_forensics_status`, `integrity_forensics_verdict`, finding counts, and report paths, and shortlists surface the same signal. `HARD_FLAGS` blocks submission-ready acceptance; `SOFT_FLAGS` is reported but does not block by itself.
 
 ### ARA bundles (agent-facing artifact)
 
-Every successful `run_project.py` also emits a machine-readable "Agent-Native Research Artifact" under `<project_dir>/ara/<timestamp>_<idea>/`. The goal: another AI scientist can fork or re-execute prior work directly, without having to decode the PDF.
+Every successful `xscientist project` run also emits a machine-readable "Agent-Native Research Artifact" under `<project_dir>/ara/<timestamp>_<idea>/`. The goal: another AI scientist can fork or re-execute prior work directly, without having to decode the PDF.
 
 Typical layout:
 
@@ -453,7 +453,7 @@ flowchart TD
 
 This tree shares provenance with the git-like record, CLI logs, and node diffs: `exploration_graph.json` is the source of truth, while `exploration_graph.html`, `exploration_graph.summary.json`, `run_ara_fork.py log`, `run_ara_fork.py diff --only-node`, and `run_ara_fork.py fork` are different views over the same graph. If the ARA directory is committed to git, git captures the file-level snapshot of that graph; XScientist's log/diff/fork commands expose the node-level history. So if a paper claim comes from `candidate2`, you can trace back through its parent experiment, failed repair path, ablation evidence, and the node that can seed the next fork.
 
-The `run_ara_fork.py` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
+The `xscientist ara` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
 
 ```bash
 # Print a node's metric / analysis / code size.
@@ -494,7 +494,7 @@ xscientist ara verify \
 
 During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them. `ai_scientist/utils/claim_coverage.py` aggregates those markers into a `coverage_score` and a severity band (`ok` / `sparse` / `unresolved` / `insufficient` / `none`), persisted at `ara/.../claims/coverage.json` for quality gating, ranking, and dossier scoring.
 
-Optional: batch re-execution verification. Set the env flag and `run_project.py` will re-run a handful of top-metric nodes at the end and save a verify report:
+Optional: batch re-execution verification. Set the env flag and `xscientist project` will re-run a handful of top-metric nodes at the end and save a verify report:
 
 ```bash
 export AI_SCIENTIST_ARA_REEXEC=1
@@ -561,7 +561,7 @@ Currently organized example files:
 
 ## Docs
 
-- `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
+- `docs/guides/PROJECT_USAGE.md`: project workflow usage and flags
 - `docs/guides/SDK_AND_API.md`: PyPI installation, Python SDK, CLI, and HTTP API
 - `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide
 - `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
@@ -570,7 +570,7 @@ Currently organized example files:
 - `docs/LOGIN_GUARDRAIL.md`: login guard and session management
 - `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
 - `ARCHITECTURE.md`: System architecture documentation
-- `OPTIMIZATION_SUMMARY.md`: Optimization summary
+- `docs/guides/OPTIMIZATION_SUMMARY.md`: Optimization summary
 
 ---
 

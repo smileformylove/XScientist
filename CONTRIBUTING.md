@@ -21,9 +21,9 @@ pip install -r requirements.txt
 ## Running tests / checks
 
 ```bash
-python -m compileall -q ai_scientist *.py tests
+python -m compileall -q ai_scientist xscientist compat scripts tools tests
 python -m pytest -q
-python validate_repo.py
+python -m xscientist validate --full-import-smoke
 ```
 
 ## Code style
@@ -45,4 +45,3 @@ python validate_repo.py
 
 - Use GitHub Issues for bugs/feature requests.
 - For security issues, please follow `SECURITY.md`.
-
