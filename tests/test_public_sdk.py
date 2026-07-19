@@ -102,7 +102,7 @@ class PublicSdkTests(unittest.TestCase):
             ProjectRequest(project="demo", topic="topic.md")
         )
 
-        self.assertEqual(command[1:3], ["-m", "run_project"])
+        self.assertEqual(command[1:3], ["-m", "ai_scientist.apps.project"])
         self.assertIn("--output-root", command)
         config_path = Path(command[command.index("--bfts-config") + 1])
         self.assertTrue(config_path.is_file())
@@ -122,13 +122,33 @@ class PublicSdkTests(unittest.TestCase):
         payload = json.loads(printer.call_args.args[0])
         self.assertEqual(payload["name"], "xscientist")
 
+    def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
+        project = mock.Mock(return_value=0)
+        with mock.patch.dict("xscientist.cli._DELEGATES", {"project": project}):
+            exit_code = cli_main(
+                ["project", "demo", "--topic", "topic.md", "--num-ideas", "2"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        project.assert_called_once_with(
+            ["demo", "--topic", "topic.md", "--num-ideas", "2"]
+        )
+
+    def test_cli_forwards_workflow_help_to_the_selected_entrypoint(self) -> None:
+        project = mock.Mock(return_value=0)
+        with mock.patch.dict("xscientist.cli._DELEGATES", {"project": project}):
+            exit_code = cli_main(["project", "--help"])
+
+        self.assertEqual(exit_code, 0)
+        project.assert_called_once_with(["--help"])
+
     def test_workflow_entrypoint_reports_missing_full_dependencies_cleanly(
         self,
     ) -> None:
         real_import = __import__("importlib").import_module
 
         def fail_run_project(name: str, package=None):
-            if name == "run_project":
+            if name == "ai_scientist.apps.project":
                 error = ModuleNotFoundError("No module named 'numpy'")
                 error.name = "numpy"
                 raise error
@@ -160,7 +180,7 @@ class PublicSdkTests(unittest.TestCase):
             self.skipTest("service extras not installed")
 
         completed = xscientist.CommandResult(
-            command=("python", "-m", "run_project"),
+            command=("python", "-m", "ai_scientist.apps.project"),
             returncode=0,
             stdout="0123456789",
             stderr="abcdefghij",
@@ -213,7 +233,7 @@ class PublicSdkTests(unittest.TestCase):
             self.skipTest("service extras not installed")
 
         completed = xscientist.CommandResult(
-            command=("python", "-m", "run_project"),
+            command=("python", "-m", "ai_scientist.apps.project"),
             returncode=0,
             stdout="done",
             stderr="",

@@ -30,7 +30,7 @@ def _call_main(module_name: str, argv: Sequence[str] | None = None) -> int:
 
 
 def project_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("run_project", argv)
+    return _call_main("ai_scientist.apps.project", argv)
 
 
 def batch_main(argv: Sequence[str] | None = None) -> int:

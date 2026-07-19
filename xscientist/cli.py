@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 
 from ._version import __version__
@@ -68,10 +69,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] in _DELEGATES:
+        return _DELEGATES[raw_argv[0]](raw_argv[1:])
+
     parser = _build_parser()
-    parsed = parser.parse_args(argv)
-    if parsed.command in _DELEGATES:
-        return _DELEGATES[parsed.command](parsed.args)
+    parsed = parser.parse_args(raw_argv)
     if parsed.command == "serve":
         from .service import run_server
 

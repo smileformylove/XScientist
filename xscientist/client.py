@@ -58,7 +58,7 @@ class XScientist:
                     base_dir=self.work_dir,
                 )
             )
-        return [self.python_executable, "-m", "run_project", *argv]
+        return [self.python_executable, "-m", "ai_scientist.apps.project", *argv]
 
     def run_project(
         self,
