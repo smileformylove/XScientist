@@ -1,0 +1,64 @@
+data_dir: "data"
+preprocess_data: false
+goal: null
+eval: null
+log_dir: logs
+workspace_dir: workspaces
+copy_data: true
+exp_name: run
+exec:
+  timeout: 3600
+  agent_file_name: runfile.py
+  format_tb_ipython: false
+  backend: auto
+  require_isolation: false
+  docker_image: xscientist-exec:latest
+  network: none
+  allow_experiment_network: false
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  read_only_root: true
+generate_report: true
+report:
+  model: glm-4-flash
+  temp: 1.0
+experiment:
+  num_syn_datasets: 1
+debug:
+  stage4: false
+llm_budget:
+  max_total_tokens: null
+  max_cost_usd: null
+  max_wall_time_seconds: null
+  prices_per_million: {}
+agent:
+  type: parallel
+  num_workers: 1
+  stages:
+    stage1_max_iters: 10
+    stage2_max_iters: 8
+    stage3_max_iters: 8
+    stage4_max_iters: 10
+  steps: 3
+  k_fold_validation: 1
+  multi_seed_eval:
+    num_seeds: 1
+  expose_prediction: false
+  data_preview: false
+  code:
+    model: glm-4-flash
+    temp: 1.0
+    max_tokens: 8192
+  feedback:
+    model: glm-4-flash
+    temp: 0.5
+    max_tokens: 4096
+  vlm_feedback:
+    model: glm-4-flash
+    temp: 0.5
+    max_tokens: null
+  search:
+    max_debug_depth: 2
+    debug_prob: 0.3
+    num_drafts: 1

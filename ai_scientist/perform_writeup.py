@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import traceback
+
+from ai_scientist.resources import latex_template_dir
 import unicodedata
 import uuid
 
@@ -565,7 +567,7 @@ def perform_writeup(
         # Prepare a new fresh latex folder
         if not osp.exists(osp.join(latex_folder, "template.tex")):
             shutil.copytree(
-                "ai_scientist/blank_icml_latex", latex_folder, dirs_exist_ok=True
+                latex_template_dir("icml"), latex_folder, dirs_exist_ok=True
             )
 
         writeup_file = osp.join(latex_folder, "template.tex")

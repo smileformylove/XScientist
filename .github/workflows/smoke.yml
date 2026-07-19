@@ -30,6 +30,7 @@ jobs:
           cache-dependency-path: |
             requirements-smoke.txt
             constraints-ci.txt
+            pyproject.toml
 
       - name: Prepare CI logs
         run: mkdir -p .ci-output/logs
@@ -38,6 +39,7 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel 2>&1 | tee .ci-output/logs/pip-bootstrap.log
+          python -m pip install build 2>&1 | tee .ci-output/logs/pip-build-install.log
           python -m pip install --retries 5 --timeout 60 -r requirements-smoke.txt -c constraints-ci.txt 2>&1 | tee .ci-output/logs/pip-install.log
 
       - name: Seed login session for CI
@@ -68,7 +70,7 @@ jobs:
       - name: Run syntax checks
         run: |
           set -o pipefail
-          python -m compileall -q ai_scientist *.py tests 2>&1 | tee .ci-output/logs/syntax.log
+          python -m compileall -q ai_scientist xscientist *.py tests 2>&1 | tee .ci-output/logs/syntax.log
           bash -n run_stable_daemon.sh 2>&1 | tee .ci-output/logs/run_stable_daemon_syntax.log
           bash -n start_research.sh 2>&1 | tee .ci-output/logs/start_research_syntax.log
 
@@ -128,6 +130,11 @@ jobs:
         run: |
           set -o pipefail
           python validate_repo.py --full-import-smoke 2>&1 | tee .ci-output/logs/validate_repo.log
+
+      - name: Build distribution artifacts
+        run: |
+          set -o pipefail
+          python -m build --sdist --wheel 2>&1 | tee .ci-output/logs/package-build.log
 
       - name: Run preflight
         run: |

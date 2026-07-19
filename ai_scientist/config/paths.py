@@ -83,6 +83,7 @@ def _default_research_dir() -> Path:
         platform_name=os.name,
         xdg_data_home=os.environ.get("XDG_DATA_HOME"),
         legacy_documents_dir_exists=legacy_documents_dir.exists(),
+        prefer_project_sibling=(PROJECT_ROOT / "pyproject.toml").is_file(),
     )
 
 

@@ -7,10 +7,10 @@ PYTHON ?= $(shell \
 AUTH_FILE ?=
 PREFLIGHT_AUTH_ARG := $(if $(AUTH_FILE),--auth-file $(AUTH_FILE),)
 
-.PHONY: syntax test validate preflight smoke doctor format executor-image
+.PHONY: syntax test validate preflight smoke doctor format package executor-image
 
 syntax:
-	$(PYTHON) -m compileall -q ai_scientist *.py tests
+	$(PYTHON) -m compileall -q ai_scientist xscientist *.py tests
 	bash -n run_stable_daemon.sh
 	bash -n start_research.sh
 
@@ -28,7 +28,10 @@ smoke: syntax test validate
 doctor: smoke preflight
 
 format:
-	$(PYTHON) -m black ai_scientist tests *.py
+	$(PYTHON) -m black ai_scientist xscientist tests *.py
+
+package:
+	$(PYTHON) -m build --sdist --wheel
 
 executor-image:
 	docker build -f docker/Dockerfile.executor -t xscientist-exec:latest .

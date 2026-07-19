@@ -93,7 +93,13 @@ flowchart LR
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion CLI `run_ara_fork.py` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
-Entrypoints:
+Public interfaces:
+
+- `xscientist`: unified CLI installed from PyPI
+- `from xscientist import XScientist, ProjectRequest`: stable Python SDK
+- `from xscientist import create_app`: optional FastAPI application factory
+
+Legacy-compatible entrypoints:
 
 - `run_project.py`: single-project end-to-end run (good for local debugging and reproducing a run)
 - `continuous_paper_generator.py`: continuous/batch generation
@@ -115,19 +121,35 @@ Entrypoints:
 
 > GPU/CUDA is optional. If you need GPU acceleration, install the matching PyTorch build following the official PyTorch instructions.
 
-### 1) Install (conda recommended)
+### 1) Install
+
+From PyPI (recommended for users):
+
+```bash
+pip install "xscientist[full]"
+pip install "xscientist[full,service]"  # include the HTTP API
+```
+
+For repository development:
 
 ```bash
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
-pip install -r requirements.txt
+pip install -e ".[full,service,dev]"
 ```
 
 More reproducible (CI-style) install (optional):
 
 ```bash
 pip install -r requirements.txt -c constraints-ci.txt
+```
+
+Verify the installation:
+
+```bash
+xscientist info
+python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 
 ### 2) Configure API keys (as needed)
@@ -212,7 +234,7 @@ Most scripts support stricter quality gates. During local debugging you may choo
 ### A) Run a single project from a topic
 
 ```bash
-python3 run_project.py my_project \
+xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md
 ```
@@ -222,7 +244,7 @@ More usage: `docs/guides/PROJECT_USAGE.md`
 ### B) Continuous/batch generation
 
 ```bash
-python3 continuous_paper_generator.py \
+xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --paper-types icbinb
@@ -231,7 +253,7 @@ python3 continuous_paper_generator.py \
 ### C) Long-running daemon (recommended for continuous iteration)
 
 ```bash
-python3 continuous_research_daemon.py \
+xscientist daemon \
   --source-config configs/sources/stable_source_priority.example.json \
   --duration-hours 24 \
   --enable-rewrite-followup \
@@ -244,6 +266,30 @@ python3 continuous_research_daemon.py \
   --serve-dashboard \
   -- --submission-mode --num-ideas 3
 ```
+
+Python SDK:
+
+```python
+from xscientist import ProjectRequest, XScientist
+
+client = XScientist(output_root="./research-output")
+result = client.run_project(
+    ProjectRequest(project="my_project", topic="examples/example_topic.md")
+)
+print(result.returncode, result.stdout)
+```
+
+HTTP API:
+
+```bash
+xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
+curl -X POST http://127.0.0.1:8000/v1/projects \
+  -H 'content-type: application/json' \
+  -d '{"project":"demo","topic":"examples/example_topic.md"}'
+```
+
+See [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md) for the public
+package structure, SDK contract, API endpoints, and deployment guidance.
 
 Submission-grade and high-quality runs enable deterministic integrity forensics by default. You can also control it explicitly:
 
@@ -500,6 +546,7 @@ Currently organized example files:
 ## Docs
 
 - `docs/guides/PROJECT_USAGE.md`: `run_project.py` usage and flags
+- `docs/guides/SDK_AND_API.md`: PyPI installation, Python SDK, CLI, and HTTP API
 - `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide
 - `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
 - `docs/SOURCE_ORCHESTRATION.md`: source queue orchestration and recommended run postures

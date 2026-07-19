@@ -1,0 +1,2 @@
+exclude tests/*
+global-exclude __pycache__ *.py[cod] .DS_Store

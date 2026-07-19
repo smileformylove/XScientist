@@ -3,25 +3,132 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-scientist-autonomous-research-lab"
-version = "0.1.0"
+name = "xscientist"
+version = "0.2.0"
 description = "Autonomous research pipeline with structured review, repair, and self-evolution loops."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "AI Scientist Contributors" },
 ]
-dynamic = ["dependencies"]
+keywords = [
+  "ai-scientist",
+  "autonomous-research",
+  "research-agents",
+  "scientific-discovery",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "jsonschema>=4.18",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+full = [
+  "anthropic",
+  "backoff",
+  "black>=24.0",
+  "openai",
+  "zhipuai",
+  "matplotlib",
+  "pillow",
+  "pandas",
+  "pypdf",
+  "pymupdf",
+  "pymupdf4llm",
+  "seaborn",
+  "numpy",
+  "psutil",
+  "requests",
+  "scikit-learn",
+  "transformers",
+  "datasets",
+  "tiktoken",
+  "wandb",
+  "tqdm",
+  "rich",
+  "humanize",
+  "dataclasses-json",
+  "funcy",
+  "genson",
+  "shutup",
+  "python-igraph",
+  "coolname",
+  "omegaconf",
+  "botocore",
+  "boto3",
+  "huggingface-hub",
+]
+service = [
+  "fastapi>=0.115",
+  "pydantic>=2.5",
+  "uvicorn[standard]>=0.30",
+]
+dev = [
+  "black>=24.0",
+  "build>=1.2",
+  "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/smileformylove/XScientist"
+Repository = "https://github.com/smileformylove/XScientist"
+Issues = "https://github.com/smileformylove/XScientist/issues"
+
+[project.scripts]
+xscientist = "xscientist.cli:main"
+xscientist-api = "xscientist.service:main"
+xscientist-project = "xscientist.entrypoints:project_main"
+xscientist-batch = "xscientist.entrypoints:batch_main"
+xscientist-daemon = "xscientist.entrypoints:daemon_main"
+xscientist-ara = "xscientist.entrypoints:ara_main"
 
 [tool.setuptools]
 include-package-data = true
+py-modules = [
+  "auth_cli",
+  "continuous_paper_generator",
+  "continuous_research_daemon",
+  "feedback_cli",
+  "launch_scientist_bfts",
+  "launch_scientist_zhipu",
+  "preflight_check",
+  "research_manager",
+  "run_ara_fork",
+  "run_daemon_profile",
+  "run_daemon_rehearsal",
+  "run_project",
+  "validate_repo",
+]
 
 [tool.setuptools.packages.find]
-include = ["ai_scientist*"]
+include = ["ai_scientist*", "xscientist*"]
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+[tool.setuptools.package-data]
+ai_scientist = [
+  "blank_icbinb_latex/*",
+  "blank_icml_latex/*",
+  "fewshot_examples/*.json",
+  "fewshot_examples/*.pdf",
+  "fewshot_examples/*.txt",
+  "ideas/*.json",
+  "ideas/*.md",
+  "protocol/SPEC.md",
+  "protocol/schemas/*.json",
+  "resources/configs/*.yaml",
+  "treesearch/utils/viz_templates/*.html",
+  "treesearch/utils/viz_templates/*.js",
+]
 
 [tool.black]
 line-length = 88

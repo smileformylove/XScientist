@@ -3,6 +3,8 @@ import os.path as osp
 import uuid
 import yaml
 
+from ai_scientist.resources import resolve_bfts_config_path
+
 from .utils.serialize import atomic_write_text
 
 
@@ -69,7 +71,8 @@ def edit_bfts_config_file(
     run_config_path = osp.join(
         config_dir, f"bfts_config-{os.getpid()}-{uuid.uuid4().hex}.yaml"
     )
-    with open(config_path, "r", encoding="utf-8") as f:
+    resolved_config_path = resolve_bfts_config_path(config_path)
+    with open(resolved_config_path, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
     config["desc_file"] = idea_path
     config["workspace_dir"] = idea_dir

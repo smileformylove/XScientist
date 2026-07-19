@@ -96,7 +96,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_smoke_workflow_should_run_syntax_checks(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "python -m compileall -q ai_scientist *.py tests",
+            "python -m compileall -q ai_scientist xscientist *.py tests",
             workflow_text,
             msg="Smoke workflow should compile Python sources for syntax regressions",
         )
@@ -110,6 +110,14 @@ class OpenSourceHygieneTests(unittest.TestCase):
             workflow_text,
             msg="Smoke workflow should validate start_research.sh syntax",
         )
+
+    def test_pyproject_should_expose_public_package_and_entrypoints(self) -> None:
+        text = self.pyproject_path.read_text(encoding="utf-8")
+        self.assertIn('name = "xscientist"', text)
+        self.assertIn("[project.scripts]", text)
+        self.assertIn('xscientist = "xscientist.cli:main"', text)
+        self.assertIn("[project.optional-dependencies]", text)
+        self.assertIn("service = [", text)
 
     def test_pyproject_should_define_python_floor_and_black_config(self) -> None:
         text = self.pyproject_path.read_text(encoding="utf-8")

@@ -3055,6 +3055,9 @@ Results are preliminary.
 
 def run_import_smoke() -> None:
     modules = [
+        "xscientist",
+        "xscientist.cli",
+        "xscientist.client",
         "ai_scientist.config.paths",
         "ai_scientist.utils.high_quality_pipeline",
         "ai_scientist.utils.idea_ranking",

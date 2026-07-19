@@ -109,7 +109,13 @@ flowchart LR
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
 - **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `run_ara_fork.py` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
-相关入口脚本：
+公共入口：
+
+- `xscientist`：通过 PyPI 安装后的统一 CLI
+- `from xscientist import XScientist, ProjectRequest`：稳定 Python SDK
+- `from xscientist import create_app`：可选 FastAPI 应用工厂
+
+兼容入口脚本：
 
 - `run_project.py`：单项目端到端（适合本地调试/复现实验）
 - `continuous_paper_generator.py`：批量/连续运行入口
@@ -131,19 +137,35 @@ flowchart LR
 
 > GPU/CUDA 并非必需；如需 GPU，请按 PyTorch 官方指引安装匹配版本。
 
-### 1) 安装（推荐 conda）
+### 1) 安装
+
+普通用户建议直接从 PyPI 安装：
+
+```bash
+pip install "xscientist[full]"
+pip install "xscientist[full,service]"  # 包含 HTTP API
+```
+
+仓库开发环境：
 
 ```bash
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
-pip install -r requirements.txt
+pip install -e ".[full,service,dev]"
 ```
 
 更稳定的"CI 风格"安装（可选）：
 
 ```bash
 pip install -r requirements.txt -c constraints-ci.txt
+```
+
+验证安装：
+
+```bash
+xscientist info
+python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 
 ### 2) 配置 API Key（按需）
@@ -203,7 +225,7 @@ export RESEARCH_OUTPUT_DIR="/path/to/my_xscientist_outputs"
 ### A) 从 Topic 跑一个项目（最常用）
 
 ```bash
-python3 run_project.py my_project \
+xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md
 ```
@@ -213,7 +235,7 @@ python3 run_project.py my_project \
 ### B) 连续运行/批量生成（适合跑一段时间）
 
 ```bash
-python3 continuous_paper_generator.py \
+xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
   --topic examples/example_topic.md \
   --paper-types icbinb
@@ -222,7 +244,7 @@ python3 continuous_paper_generator.py \
 ### C) Daemon 长期自治运行（推荐用于"持续迭代"）
 
 ```bash
-python3 continuous_research_daemon.py \
+xscientist daemon \
   --source-config configs/sources/stable_source_priority.example.json \
   --duration-hours 24 \
   --enable-rewrite-followup \
@@ -235,6 +257,24 @@ python3 continuous_research_daemon.py \
   --serve-dashboard \
   -- --submission-mode --num-ideas 3
 ```
+
+Python SDK：
+
+```python
+from xscientist import ProjectRequest, XScientist
+
+client = XScientist(output_root="./research-output")
+result = client.run_project(ProjectRequest(project="demo", topic="topic.md"))
+print(result.returncode, result.stdout)
+```
+
+HTTP API：
+
+```bash
+xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
+```
+
+完整说明见 [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md)。
 
 投稿级/高质量运行会默认启用 deterministic integrity forensics。你也可以显式控制：
 
