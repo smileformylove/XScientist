@@ -59,3 +59,15 @@ def feedback_main(argv: Sequence[str] | None = None) -> int:
 
 def validate_main(argv: Sequence[str] | None = None) -> int:
     return _call_main("ai_scientist.apps.validate", argv)
+
+
+def bfts_main(argv: Sequence[str] | None = None) -> int:
+    return _call_main("ai_scientist.apps.bfts", argv)
+
+
+def zhipu_main(argv: Sequence[str] | None = None) -> int:
+    return _call_main("ai_scientist.apps.zhipu", argv)
+
+
+def preflight_main(argv: Sequence[str] | None = None) -> int:
+    return _call_main("ai_scientist.apps.preflight", argv)

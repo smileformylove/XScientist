@@ -462,7 +462,7 @@ Key log files:
 
 1. Check documentation: `docs/`
 2. Review examples: `examples/`
-3. Run preflight checks: `python3 preflight_check.py --strict`
+3. Run preflight checks: `xscientist preflight --strict`
 4. Open an issue: https://github.com/YOUR_ORG/ai_scientist/issues
 
 ---

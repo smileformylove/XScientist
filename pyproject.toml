@@ -96,6 +96,9 @@ xscientist-manager = "xscientist.entrypoints:manager_main"
 xscientist-auth = "xscientist.entrypoints:auth_main"
 xscientist-feedback = "xscientist.entrypoints:feedback_main"
 xscientist-validate = "xscientist.entrypoints:validate_main"
+xscientist-bfts = "xscientist.entrypoints:bfts_main"
+xscientist-zhipu = "xscientist.entrypoints:zhipu_main"
+xscientist-preflight = "xscientist.entrypoints:preflight_main"
 
 [tool.setuptools]
 include-package-data = true

@@ -179,7 +179,7 @@ Login guard doc: `docs/LOGIN_GUARDRAIL.md`
 ### 4) Preflight (recommended)
 
 ```bash
-python3 preflight_check.py --strict
+xscientist preflight --strict
 xscientist validate
 make smoke
 ```

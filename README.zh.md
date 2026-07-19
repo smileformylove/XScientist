@@ -195,7 +195,7 @@ xscientist auth status
 ### 4) 预检（推荐）
 
 ```bash
-python3 preflight_check.py --strict
+xscientist preflight --strict
 xscientist validate
 make smoke
 ```

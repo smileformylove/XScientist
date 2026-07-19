@@ -10,11 +10,14 @@ from .entrypoints import (
     ara_main,
     auth_main,
     batch_main,
+    bfts_main,
     daemon_main,
     feedback_main,
     manager_main,
+    preflight_main,
     project_main,
     validate_main,
+    zhipu_main,
 )
 
 _DELEGATES = {
@@ -26,6 +29,9 @@ _DELEGATES = {
     "auth": auth_main,
     "feedback": feedback_main,
     "validate": validate_main,
+    "bfts": bfts_main,
+    "zhipu": zhipu_main,
+    "preflight": preflight_main,
 }
 
 
@@ -45,6 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
         ("auth", "Manage local login sessions."),
         ("feedback", "Inspect feedback and improvement signals."),
         ("validate", "Run repository/package validation."),
+        ("bfts", "Run the low-level BFTS experiment launcher."),
+        ("zhipu", "Run the Zhipu-oriented experiment launcher."),
+        ("preflight", "Check runtime dependencies and credentials."),
     ):
         subparser = subparsers.add_parser(
             name,

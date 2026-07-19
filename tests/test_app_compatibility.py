@@ -146,6 +146,31 @@ class AppCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
 
+    def test_low_level_launchers_alias_internal_applications(self) -> None:
+        for legacy_name, internal_name in (
+            ("launch_scientist_bfts", "ai_scientist.apps.bfts"),
+            ("launch_scientist_zhipu", "ai_scientist.apps.zhipu"),
+            ("preflight_check", "ai_scientist.apps.preflight"),
+        ):
+            with self.subTest(module=legacy_name):
+                legacy = importlib.import_module(legacy_name)
+                internal = importlib.import_module(internal_name)
+                self.assertIs(legacy, internal)
+
+    def test_low_level_launcher_help_does_not_require_login(self) -> None:
+        for module_name in ("ai_scientist.apps.bfts", "ai_scientist.apps.zhipu"):
+            with self.subTest(module=module_name):
+                internal = importlib.import_module(module_name)
+                with (
+                    mock.patch.object(sys, "argv", [module_name, "--help"]),
+                    mock.patch.object(internal, "require_login") as require_login,
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    internal.main()
+
+                self.assertEqual(raised.exception.code, 0)
+                require_login.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,7 +96,7 @@ XScientist now includes:
 Recommended local checks:
 
 ```bash
-python3 preflight_check.py --strict
+xscientist preflight --strict
 python3 validate_repo.py
 make smoke
 ```
