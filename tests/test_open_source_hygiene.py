@@ -86,7 +86,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_smoke_workflow_should_upload_ci_artifacts(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "actions/upload-artifact@v4",
+            "actions/upload-artifact@v7",
             workflow_text,
             msg="Smoke workflow should upload failure artifacts for diagnosis",
         )
@@ -95,6 +95,23 @@ class OpenSourceHygieneTests(unittest.TestCase):
             workflow_text,
             msg="Smoke workflow should use a stable artifact name",
         )
+        self.assertIn(
+            "include-hidden-files: true",
+            workflow_text,
+            msg="Smoke workflow should upload the hidden .ci-output directory",
+        )
+
+    def test_workflows_should_use_node24_actions(self) -> None:
+        smoke_text = self.workflow_path.read_text(encoding="utf-8")
+        release_text = self.release_workflow_path.read_text(encoding="utf-8")
+        for expected in (
+            "actions/checkout@v7",
+            "actions/setup-python@v6",
+            "actions/upload-artifact@v7",
+        ):
+            self.assertIn(expected, smoke_text)
+            self.assertIn(expected, release_text)
+        self.assertIn("actions/download-artifact@v8", release_text)
 
     def test_smoke_workflow_should_run_syntax_checks(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
