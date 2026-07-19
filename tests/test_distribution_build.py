@@ -76,6 +76,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "research_manager.py",
                 "ai_scientist/apps/manager.py",
                 "ai_scientist/apps/manager_ranking.py",
+                "ai_scientist/apps/manager_reports.py",
                 "continuous_research_daemon.py",
                 "ai_scientist/apps/daemon.py",
                 "ai_scientist/apps/daemon_dashboard.py",

@@ -12,7 +12,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
 | Batch experiment artifacts | `ai_scientist/apps/batch_experiment_artifacts.py` | Internal | Build experiment TODOs, ledgers, agendas, and per-paper follow-up artifacts |
 | Daemon presentation | `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Pure dashboard transformation plus HTML and Markdown rendering |
-| Manager ranking rules | `ai_scientist/apps/manager_ranking.py` | Internal | Pure submission filtering, ranking, and rewrite-next-step recommendations |
+| Manager read models | `ai_scientist/apps/manager_ranking.py`, `ai_scientist/apps/manager_reports.py` | Internal | Pure submission ranking/filtering plus Markdown rendering for manager boards |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
@@ -26,7 +26,9 @@ installed CLI dispatches directly to `ai_scientist.apps`.
 `ResearchManager` retains its existing methods, while stateless submission and
 rewrite ranking rules live in `ai_scientist/apps/manager_ranking.py`. This lets
 read-only integrations reuse ranking logic without constructing a manager or
-touching the filesystem.
+touching the filesystem. Board and shortlist Markdown rendering is similarly
+available from `ai_scientist/apps/manager_reports.py`; the manager export
+methods remain responsible for path creation and file writes.
 
 Source-operation helpers are included in Git and the source distribution, but
 not in the wheel. Installed users run `xscientist daemon`; repository operators
