@@ -309,7 +309,7 @@ xscientist batch \
 
 下面的 shell 运维命令只在源码 checkout 或 sdist 中提供，wheel 安装不包含它们。
 
-公共 Python SDK 和 HTTP 服务也提供只读的论文列表、shortlist、投稿看板和重写看板，且始终绑定服务配置的输出根目录；详见 `docs/guides/SDK_AND_API.md`。
+公共 Python SDK 和 HTTP 服务也提供只读的论文列表/详情、shortlist、投稿看板和重写看板，且始终绑定服务配置的输出根目录；详见 `docs/guides/SDK_AND_API.md`。
 
 ```bash
 bash run_stable_daemon.sh status

@@ -116,7 +116,9 @@ class PublicSdkTests(unittest.TestCase):
 
     def test_client_exposes_read_only_research_views(self) -> None:
         manager = mock.Mock()
+        manager.papers_dir = Path("/tmp/xscientist-output/papers")
         manager.list_papers.return_value = [{"name": "paper-a"}, {"name": "paper-b"}]
+        manager.get_paper_details.return_value = {"folder": "paper-a"}
         manager.shortlist_papers.return_value = [{"name": "paper-a"}]
         manager.submission_board.return_value = {"iclr": [{"name": "paper-a"}]}
         manager.rewrite_board.return_value = [{"name": "paper-b"}]
@@ -124,6 +126,7 @@ class PublicSdkTests(unittest.TestCase):
 
         with mock.patch.object(client, "_research_manager", return_value=manager):
             self.assertEqual(client.list_papers(limit=1), [{"name": "paper-a"}])
+            self.assertEqual(client.get_paper("paper-a"), {"folder": "paper-a"})
             self.assertEqual(client.shortlist_papers(top_n=2), [{"name": "paper-a"}])
             self.assertEqual(
                 client.submission_board(top_n_per_venue=2),
@@ -135,6 +138,7 @@ class PublicSdkTests(unittest.TestCase):
             paper_type=None,
             sort_by="modified",
         )
+        manager.get_paper_details.assert_called_once_with("paper-a")
         manager.shortlist_papers.assert_called_once()
         manager.submission_board.assert_called_once()
         manager.rewrite_board.assert_called_once()
@@ -155,6 +159,20 @@ class PublicSdkTests(unittest.TestCase):
                 client.rewrite_board(top_n=0)
 
         manager.assert_not_called()
+
+    def test_client_paper_details_reject_path_escape_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output_root = Path(td) / "output"
+            papers_root = output_root / "papers"
+            papers_root.mkdir(parents=True)
+            outside = Path(td) / "outside"
+            outside.mkdir()
+            (papers_root / "linked").symlink_to(outside, target_is_directory=True)
+            client = XScientist(output_root=output_root)
+
+            for folder in ("../escape", "nested/paper", "~", " linked ", "linked"):
+                with self.subTest(folder=folder), self.assertRaises(ValueError):
+                    client.get_paper(folder)
 
     def test_cli_info_has_machine_readable_output(self) -> None:
         with mock.patch("builtins.print") as printer:
@@ -322,6 +340,11 @@ class PublicSdkTests(unittest.TestCase):
                     XScientist, "list_papers", return_value=views["papers"]
                 ),
                 mock.patch.object(
+                    XScientist,
+                    "get_paper",
+                    return_value={"folder": "demo", "path": str(inside)},
+                ),
+                mock.patch.object(
                     XScientist, "shortlist_papers", return_value=views["shortlist"]
                 ),
                 mock.patch.object(
@@ -336,6 +359,7 @@ class PublicSdkTests(unittest.TestCase):
                 )
                 with TestClient(app) as client:
                     papers = client.get("/v1/papers?limit=10").json()
+                    detail = client.get("/v1/papers/demo").json()
                     shortlist = client.get("/v1/shortlist?top_n=2").json()
                     submission = client.get(
                         "/v1/boards/submission?top_n_per_venue=2"
@@ -344,6 +368,7 @@ class PublicSdkTests(unittest.TestCase):
 
             self.assertEqual(papers["items"][0]["path"], "papers/demo")
             self.assertIsNone(papers["items"][0]["private"])
+            self.assertEqual(detail["paper"]["path"], "papers/demo")
             self.assertEqual(shortlist["count"], 1)
             self.assertEqual(submission["count"], 1)
             self.assertEqual(rewrite["count"], 1)
@@ -367,6 +392,25 @@ class PublicSdkTests(unittest.TestCase):
             all(response.status_code == 422 for response in responses),
             [(response.status_code, response.text) for response in responses],
         )
+
+    def test_http_paper_details_maps_invalid_and_missing_folders(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        app = xscientist.create_app(ServiceSettings(max_workers=1))
+        with mock.patch.object(
+            XScientist,
+            "get_paper",
+            side_effect=[ValueError("invalid folder"), None],
+        ):
+            with TestClient(app) as client:
+                invalid = client.get("/v1/papers/invalid")
+                missing = client.get("/v1/papers/missing")
+
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(missing.status_code, 404)
 
     def test_http_service_confines_requests_to_service_directories(self) -> None:
         try:

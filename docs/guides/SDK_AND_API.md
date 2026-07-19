@@ -86,6 +86,7 @@ The same client exposes read-only views over its configured `output_root`:
 
 ```python
 papers = client.list_papers(sort_by="quality", limit=20)
+paper = client.get_paper("paper-folder-name")
 shortlist = client.shortlist_papers(
     target_venue="iclr",
     require_gate=True,
@@ -152,6 +153,7 @@ Endpoints:
 - `GET /v1/jobs`
 - `GET /v1/jobs/{job_id}`
 - `GET /v1/papers`
+- `GET /v1/papers/{folder}`
 - `GET /v1/shortlist`
 - `GET /v1/boards/submission`
 - `GET /v1/boards/rewrite`
@@ -185,6 +187,9 @@ curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
   "http://127.0.0.1:8000/v1/papers?sort_by=quality&limit=20"
 
 curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
+  "http://127.0.0.1:8000/v1/papers/paper-folder-name"
+
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
   "http://127.0.0.1:8000/v1/shortlist?target_venue=iclr&require_gate=true&top_n=5"
 
 curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
@@ -194,7 +199,9 @@ curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
 The service always reads these views from its configured `output_root`;
 requests cannot select another research directory. Absolute artifact paths
 inside that root are returned as relative paths, and absolute paths outside the
-root are redacted.
+root are redacted. A paper-detail `folder` must be one directory name directly
+under `<output_root>/papers`; absolute paths, nested paths, traversal, and
+symlink escapes are rejected.
 
 The bundled service is intended for local/team integration. It includes API-key
 authentication and persistent job metadata. Internet-facing deployments should

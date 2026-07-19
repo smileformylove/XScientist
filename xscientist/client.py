@@ -54,6 +54,30 @@ class XScientist:
             raise ValueError(f"{label} must not exceed 1000")
         return limit
 
+    @staticmethod
+    def _validate_paper_folder(folder: str, *, papers_root: Path) -> str:
+        raw_name = str(folder or "")
+        name = raw_name.strip()
+        if (
+            not name
+            or name != raw_name
+            or name in {".", ".."}
+            or name.startswith(("-", "~"))
+            or Path(name).is_absolute()
+            or "/" in name
+            or "\\" in name
+            or any(ord(char) < 32 for char in raw_name)
+        ):
+            raise ValueError("folder must be a single paper directory name")
+        candidate = (papers_root / name).resolve()
+        try:
+            candidate.relative_to(papers_root)
+        except ValueError as exc:
+            raise ValueError(
+                "folder must stay within the configured output_root"
+            ) from exc
+        return name
+
     def list_papers(
         self,
         *,
@@ -71,6 +95,14 @@ class XScientist:
             sort_by=sort_by,
         )
         return items[:validated_limit]
+
+    def get_paper(self, folder: str) -> dict[str, object] | None:
+        """Load one generated paper by its folder under the configured output root."""
+
+        manager = self._research_manager()
+        papers_root = manager.papers_dir.resolve()
+        name = self._validate_paper_folder(folder, papers_root=papers_root)
+        return manager.get_paper_details(name)
 
     def shortlist_papers(
         self,

@@ -280,6 +280,16 @@ def create_app(settings: ServiceSettings | None = None):
             "count": len(items),
         }
 
+    @app.get("/v1/papers/{folder}")
+    def get_paper(folder: str) -> dict[str, Any]:
+        try:
+            paper = client.get_paper(folder)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if paper is None:
+            raise HTTPException(status_code=404, detail="paper not found")
+        return {"paper": _service_output_view(paper, output_root=output_root)}
+
     @app.get("/v1/shortlist")
     def shortlist_papers(
         paper_type: str | None = None,
