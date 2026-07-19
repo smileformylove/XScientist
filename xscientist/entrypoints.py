@@ -46,7 +46,7 @@ def manager_main(argv: Sequence[str] | None = None) -> int:
 
 
 def ara_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("run_ara_fork", argv)
+    return _call_main("ai_scientist.apps.ara", argv)
 
 
 def auth_main(argv: Sequence[str] | None = None) -> int:
@@ -58,4 +58,4 @@ def feedback_main(argv: Sequence[str] | None = None) -> int:
 
 
 def validate_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("validate_repo", argv)
+    return _call_main("ai_scientist.apps.validate", argv)

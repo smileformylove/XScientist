@@ -180,7 +180,7 @@ Login guard doc: `docs/LOGIN_GUARDRAIL.md`
 
 ```bash
 python3 preflight_check.py --strict
-python3 validate_repo.py
+xscientist validate
 make smoke
 ```
 
@@ -447,35 +447,35 @@ The `run_ara_fork.py` CLI ships `inspect` / `exec` / `fork` / `freeze` / `valida
 
 ```bash
 # Print a node's metric / analysis / code size.
-python3 run_ara_fork.py inspect \
+xscientist ara inspect \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
 # Re-execute a node and write a verify report (fresh vs recorded metric).
-python3 run_ara_fork.py exec \
+xscientist ara exec \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
 # Fork a node into a fresh directory that is itself a valid ARA
 # (own manifest, single-node exploration graph, provenance to parent).
-python3 run_ara_fork.py fork \
+xscientist ara fork \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id> \
   --dest /path/to/fork_seed
 
 # Snapshot the current interpreter's pip freeze into env/.
-python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+xscientist ara freeze --ara <project_dir>/ara/<timestamp>_<idea>
 
 # Run conformance validation against ai_scientist/protocol/SPEC.md.
-python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
+xscientist ara validate --ara <project_dir>/ara/<timestamp>_<idea>
 
 # Check the DAG invariant and regenerate the visualization if needed.
-python3 run_ara_fork.py graph \
+xscientist ara graph \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --write-html
 
 # Batch re-execute a handful of nodes and write verify/reexec_batch_*.json.
-python3 run_ara_fork.py verify \
+xscientist ara verify \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --limit 3
 ```

@@ -5,7 +5,7 @@ This checklist is meant for running the daemon in a practical, repeatable way.
 ## Before a long run
 
 - Confirm model/API credentials are present.
-- Run `python validate_repo.py`.
+- Run `xscientist validate`.
 - Run a dry-run rehearsal:
   - `python run_daemon_rehearsal.py`
 - Prefer the conservative preset for a first real 24-hour run:

@@ -74,7 +74,9 @@ mv experiments/* "$RESEARCH_OUTPUT_DIR/experiments/" 2>/dev/null || true
 ## Validation
 
 ```bash
-python3 validate_repo.py
+xscientist validate
 ```
 
-`validate_repo.py` checks repository structure and key imports. Full runs still require login, model credentials, and any required system dependencies.
+`xscientist validate` checks the source repository when run from a checkout and
+checks installed package modules/resources when run from a wheel. Full workflow
+runs still require login, model credentials, and required system dependencies.

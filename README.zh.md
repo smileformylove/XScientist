@@ -196,7 +196,7 @@ xscientist auth status
 
 ```bash
 python3 preflight_check.py --strict
-python3 validate_repo.py
+xscientist validate
 make smoke
 ```
 
@@ -432,34 +432,34 @@ flowchart TD
 
 ```bash
 # 打印某个节点的 metric / analysis / 代码大小
-python3 run_ara_fork.py inspect \
+xscientist ara inspect \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
 # 重跑一个节点并把 fresh vs recorded metric 写进 verify/*.json
-python3 run_ara_fork.py exec \
+xscientist ara exec \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id>
 
 # 把节点拷贝出一份「本身也是合规 ARA」的 fork 目录（可再次 fork / validate）
-python3 run_ara_fork.py fork \
+xscientist ara fork \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --node-id <node_id> \
   --dest /path/to/fork_seed
 
 # 快照当前解释器的 pip freeze
-python3 run_ara_fork.py freeze --ara <project_dir>/ara/<timestamp>_<idea>
+xscientist ara freeze --ara <project_dir>/ara/<timestamp>_<idea>
 
 # 对照 ai_scientist/protocol/SPEC.md 做 conformance 校验
-python3 run_ara_fork.py validate --ara <project_dir>/ara/<timestamp>_<idea>
+xscientist ara validate --ara <project_dir>/ara/<timestamp>_<idea>
 
 # 检查 DAG invariant，并按需重建可视化
-python3 run_ara_fork.py graph \
+xscientist ara graph \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --write-html
 
 # 批量重跑若干节点并写一份 verify/reexec_batch_*.json（对齐 CI 门禁）
-python3 run_ara_fork.py verify \
+xscientist ara verify \
   --ara <project_dir>/ara/<timestamp>_<idea> \
   --limit 3
 ```
