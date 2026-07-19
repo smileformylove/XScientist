@@ -112,8 +112,6 @@ py-modules = [
   "preflight_check",
   "research_manager",
   "run_ara_fork",
-  "run_daemon_profile",
-  "run_daemon_rehearsal",
   "run_project",
   "validate_repo",
 ]

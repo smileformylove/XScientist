@@ -51,6 +51,11 @@ their symbols. Existing imports and `mock.patch("run_project...")`-style tests
 therefore remain compatible, but new integrations should use the public SDK or
 unified CLI.
 
+`run_daemon_profile.py`, `run_daemon_rehearsal.py`, `run_stable_daemon.sh`, and
+`start_research.sh` are source-checkout operations tools. They depend on the
+repository's example profiles and shell layout, so they are intentionally not
+installed by the wheel. Use `xscientist daemon` for portable installed usage.
+
 ## Python SDK
 
 ```python

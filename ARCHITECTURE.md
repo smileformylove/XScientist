@@ -13,10 +13,15 @@ XScientist is designed as a **research operating system** that can run continuou
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
+| Source operations | `run_daemon_profile.py`, `run_daemon_rehearsal.py`, shell wrappers | Checkout-only | Profile overlays, rehearsals, and operator workflows tied to repository configs |
 
 New application code should import from `xscientist`. The root workflow scripts
 contain no business logic; they keep existing automation working while the
 installed CLI dispatches directly to `ai_scientist.apps`.
+
+Source-operation helpers are included in Git and the source distribution, but
+not in the wheel. Installed users run `xscientist daemon`; repository operators
+may additionally use the profile, rehearsal, and shell workflows.
 
 ## System Architecture
 

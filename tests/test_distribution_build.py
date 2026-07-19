@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -21,7 +22,7 @@ class DistributionBuildTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "build",
-                    "--wheel",
+                    "--sdist",
                     "--no-isolation",
                     "--outdir",
                     str(out_dir),
@@ -37,6 +38,28 @@ class DistributionBuildTests(unittest.TestCase):
             ):
                 self.skipTest("build frontend not installed")
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            sdist = next(out_dir.glob("xscientist-*.tar.gz"))
+            with tarfile.open(sdist) as archive:
+                sdist_names = set(archive.getnames())
+                archive.extractall(out_dir)
+            sdist_root = next(iter(sdist_names)).split("/", 1)[0]
+            extracted_root = out_dir / sdist_root
+            wheel_build = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "build",
+                    "--wheel",
+                    "--no-isolation",
+                    "--outdir",
+                    str(out_dir),
+                ],
+                cwd=extracted_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(wheel_build.returncode, 0, wheel_build.stderr)
             wheel = next(out_dir.glob("xscientist-*.whl"))
             with zipfile.ZipFile(wheel) as archive:
                 names = set(archive.namelist())
@@ -78,6 +101,20 @@ class DistributionBuildTests(unittest.TestCase):
             self.assertFalse(
                 any(name.startswith("tests/") for name in names),
                 "wheel should not include the repository test suite",
+            )
+            source_only = {"run_daemon_profile.py", "run_daemon_rehearsal.py"}
+            self.assertFalse(
+                source_only & names,
+                f"wheel should not include source-only ops: {source_only & names}",
+            )
+            missing_source_ops = {
+                path
+                for path in source_only
+                if f"{sdist_root}/{path}" not in sdist_names
+            }
+            self.assertFalse(
+                missing_source_ops,
+                f"sdist is missing source-only ops: {missing_source_ops}",
             )
 
 

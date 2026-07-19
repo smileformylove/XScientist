@@ -1,2 +1,7 @@
 prune tests
+include run_daemon_profile.py
+include run_daemon_rehearsal.py
+include run_stable_daemon.sh
+include start_research.sh
+graft configs
 global-exclude __pycache__ *.py[cod] .DS_Store
