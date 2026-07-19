@@ -65,6 +65,28 @@ class ProjectRequest:
         argv.extend(str(arg) for arg in self.extra_args)
         return argv
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project": self.project,
+            "topic": _path_text(self.topic),
+            "ideas": _path_text(self.ideas),
+            "output_root": _path_text(self.output_root),
+            "num_ideas": self.num_ideas,
+            "parallel": self.parallel,
+            "num_workers": self.num_workers,
+            "workflow_mode": self.workflow_mode,
+            "target_venue": self.target_venue,
+            "submission_mode": self.submission_mode,
+            "breakthrough_mode": self.breakthrough_mode,
+            "high_quality_mode": self.high_quality_mode,
+            "bfts_config": _path_text(self.bfts_config),
+            "extra_args": list(self.extra_args),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ProjectRequest":
+        return cls(**dict(payload))
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -92,6 +114,13 @@ class CommandResult:
             "finished_at": self.finished_at,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "CommandResult":
+        data = dict(payload)
+        data.pop("ok", None)
+        data["command"] = tuple(data.get("command") or ())
+        return cls(**data)
+
 
 @dataclass(frozen=True)
 class ServiceSettings:
@@ -103,6 +132,7 @@ class ServiceSettings:
     max_workers: int = 2
     max_output_chars: int = 200_000
     api_key: str | None = None
+    state_dir: str | Path | None = None
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:

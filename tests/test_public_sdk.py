@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -234,6 +235,137 @@ class PublicSdkTests(unittest.TestCase):
                         break
                 self.assertEqual(status["status"], "succeeded")
                 self.assertEqual(status["result"]["stdout"], "done")
+
+    def test_http_jobs_survive_service_restart(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        completed = xscientist.CommandResult(
+            command=("python", "-m", "run_project"),
+            returncode=0,
+            stdout="persisted",
+            stderr="",
+            started_at="start",
+            finished_at="finish",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            settings = ServiceSettings(max_workers=1, state_dir=td)
+            with mock.patch.object(XScientist, "run_project", return_value=completed):
+                first_app = xscientist.create_app(settings)
+                with TestClient(first_app) as client:
+                    job_id = client.post(
+                        "/v1/projects",
+                        json={"project": "demo", "topic": "topic.md"},
+                    ).json()["id"]
+                    for _ in range(50):
+                        payload = client.get(f"/v1/jobs/{job_id}").json()
+                        if payload["status"] == "succeeded":
+                            break
+                        time.sleep(0.01)
+
+            self.assertTrue((Path(td) / f"{job_id}.json").is_file())
+            second_app = xscientist.create_app(settings)
+            with TestClient(second_app) as client:
+                restored = client.get(f"/v1/jobs/{job_id}").json()
+
+            self.assertEqual(restored["status"], "succeeded")
+            self.assertEqual(restored["result"]["stdout"], "persisted")
+
+    def test_service_marks_incomplete_restored_job_interrupted(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "unfinished"
+            payload = {
+                "id": job_id,
+                "status": "running",
+                "created_at": "created",
+                "started_at": "started",
+                "finished_at": None,
+                "error": None,
+                "request": ProjectRequest(project="demo", topic="topic.md").to_dict(),
+                "result": None,
+            }
+            (Path(td) / f"{job_id}.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+
+            app = xscientist.create_app(ServiceSettings(max_workers=1, state_dir=td))
+            with TestClient(app) as client:
+                restored = client.get(f"/v1/jobs/{job_id}").json()
+
+            self.assertEqual(restored["status"], "interrupted")
+            self.assertIn("restarted", restored["error"])
+
+    def test_service_rejects_job_when_initial_state_cannot_persist(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            app = xscientist.create_app(ServiceSettings(max_workers=1, state_dir=td))
+            with (
+                mock.patch(
+                    "xscientist.service.atomic_write_json",
+                    side_effect=OSError("disk busy"),
+                ),
+                TestClient(app, raise_server_exceptions=False) as client,
+            ):
+                response = client.post(
+                    "/v1/projects",
+                    json={"project": "demo", "topic": "topic.md"},
+                )
+                jobs = client.get("/v1/jobs").json()["items"]
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(jobs, [])
+
+    def test_worker_reports_running_transition_persistence_failure(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            app = xscientist.create_app(ServiceSettings(max_workers=1, state_dir=td))
+            from ai_scientist.utils.atomic_io import (
+                atomic_write_json as real_atomic_write_json,
+            )
+
+            calls = 0
+
+            def fail_second_write(path, payload):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("disk busy")
+                return real_atomic_write_json(path, payload)
+
+            with (
+                mock.patch(
+                    "xscientist.service.atomic_write_json",
+                    side_effect=fail_second_write,
+                ),
+                TestClient(app) as client,
+            ):
+                job_id = client.post(
+                    "/v1/projects",
+                    json={"project": "demo", "topic": "topic.md"},
+                ).json()["id"]
+                for _ in range(50):
+                    payload = client.get(f"/v1/jobs/{job_id}").json()
+                    if payload["status"] == "failed":
+                        break
+                    time.sleep(0.01)
+
+            self.assertEqual(payload["status"], "failed")
+            self.assertIn("disk busy", payload["error"])
 
 
 if __name__ == "__main__":

@@ -127,6 +127,11 @@ deployments should add authentication, rate limits, persistent job storage,
 and a dedicated queue/worker system. Job stdout/stderr is kept in memory and
 truncated to `max_output_chars` per stream.
 
+Job metadata is atomically persisted under
+`<output-root>/.xscientist/api/jobs` (or `--state-dir`). Completed jobs survive
+service restarts; queued/running jobs recovered after a restart are marked
+`interrupted` because the original child process cannot be safely reattached.
+
 ## Packaged resources
 
 The wheel includes runtime assets previously available only from a Git clone:

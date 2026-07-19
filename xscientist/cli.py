@@ -59,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--output-root", default=None)
     serve_parser.add_argument("--max-workers", type=int, default=2)
     serve_parser.add_argument("--max-output-chars", type=int, default=200_000)
+    serve_parser.add_argument("--state-dir", default=None)
     serve_parser.add_argument("--reload", action="store_true")
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
@@ -81,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=parsed.output_root,
             max_workers=parsed.max_workers,
             max_output_chars=parsed.max_output_chars,
+            state_dir=parsed.state_dir,
             reload=parsed.reload,
         )
         return 0

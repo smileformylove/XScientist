@@ -3,13 +3,18 @@ from __future__ import annotations
 import argparse
 from contextlib import asynccontextmanager
 import hmac
+import json
 import os
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+from ai_scientist.utils.atomic_io import atomic_write_json
+from ai_scientist.config.paths import resolve_output_path
 
 from ._version import __version__
 from .client import XScientist
@@ -85,24 +90,37 @@ class _Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "error": self.error,
-            "request": {
-                "project": self.request.project,
-                "topic": str(self.request.topic) if self.request.topic else None,
-                "ideas": str(self.request.ideas) if self.request.ideas else None,
-                "output_root": (
-                    str(self.request.output_root)
-                    if self.request.output_root is not None
-                    else None
-                ),
-                "workflow_mode": self.request.workflow_mode,
-            },
+            "request": self.request.to_dict(),
             "result": self.result.to_dict() if self.result is not None else None,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "_Job":
+        result_payload = payload.get("result")
+        return cls(
+            id=str(payload["id"]),
+            request=ProjectRequest.from_dict(payload["request"]),
+            status=str(payload.get("status") or "failed"),
+            created_at=str(payload.get("created_at") or _now_iso()),
+            started_at=payload.get("started_at"),
+            finished_at=payload.get("finished_at"),
+            result=(
+                CommandResult.from_dict(result_payload)
+                if isinstance(result_payload, dict)
+                else None
+            ),
+            error=payload.get("error"),
+        )
 
 
 class _JobStore:
     def __init__(
-        self, client: XScientist, *, max_workers: int, max_output_chars: int
+        self,
+        client: XScientist,
+        *,
+        max_workers: int,
+        max_output_chars: int,
+        state_dir: str | Path,
     ) -> None:
         self.client = client
         self.max_output_chars = max_output_chars
@@ -112,20 +130,47 @@ class _JobStore:
         self.jobs: dict[str, _Job] = {}
         self.futures: dict[str, Future[None]] = {}
         self.lock = threading.Lock()
+        self.state_dir = Path(state_dir).expanduser().resolve()
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._restore()
+
+    def _job_path(self, job_id: str) -> Path:
+        return self.state_dir / f"{job_id}.json"
+
+    def _persist_locked(self, job: _Job) -> None:
+        atomic_write_json(self._job_path(job.id), job.to_dict())
+
+    def _restore(self) -> None:
+        for path in sorted(self.state_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                job = _Job.from_dict(payload)
+            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+                continue
+            if job.status in {"queued", "running"}:
+                job.status = "interrupted"
+                job.finished_at = _now_iso()
+                job.error = "Service restarted before the job completed"
+                atomic_write_json(path, job.to_dict())
+            self.jobs[job.id] = job
 
     def submit(self, request: ProjectRequest) -> _Job:
         job = _Job(id=uuid.uuid4().hex, request=request)
         with self.lock:
+            self._persist_locked(job)
             self.jobs[job.id] = job
             self.futures[job.id] = self.executor.submit(self._run, job.id)
         return job
 
     def _run(self, job_id: str) -> None:
-        with self.lock:
-            job = self.jobs[job_id]
-            job.status = "running"
-            job.started_at = _now_iso()
+        job = self.jobs[job_id]
         try:
+            with self.lock:
+                job.status = "running"
+                job.started_at = _now_iso()
+                self._persist_locked(job)
             result = self.client.run_project(job.request)
             result = CommandResult(
                 command=result.command,
@@ -145,6 +190,11 @@ class _JobStore:
         finally:
             with self.lock:
                 job.finished_at = _now_iso()
+                try:
+                    self._persist_locked(job)
+                except OSError as exc:
+                    job.status = "failed"
+                    job.error = f"StatePersistenceError: {exc}"
 
     def get(self, job_id: str) -> _Job | None:
         with self.lock:
@@ -172,10 +222,17 @@ def create_app(settings: ServiceSettings | None = None):
         output_root=resolved.output_root,
         env=resolved.env,
     )
+    output_root = (
+        Path(resolved.output_root).expanduser().resolve()
+        if resolved.output_root is not None
+        else resolve_output_path().resolve()
+    )
+    state_dir = resolved.state_dir or output_root / ".xscientist" / "api" / "jobs"
     store = _JobStore(
         client,
         max_workers=resolved.max_workers,
         max_output_chars=resolved.max_output_chars,
+        state_dir=state_dir,
     )
 
     @asynccontextmanager
@@ -239,6 +296,7 @@ def run_server(
     max_workers: int = 2,
     max_output_chars: int = 200_000,
     api_key: str | None = None,
+    state_dir: str | None = None,
     reload: bool = False,
 ) -> None:
     try:
@@ -265,6 +323,7 @@ def run_server(
             max_workers=max_workers,
             max_output_chars=max_output_chars,
             api_key=api_key or os.environ.get("XSCIENTIST_API_KEY"),
+            state_dir=state_dir,
         )
     )
     uvicorn.run(app, host=host, port=port)
@@ -278,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--max-output-chars", type=int, default=200_000)
+    parser.add_argument("--state-dir", default=None)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args(argv)
     run_server(
@@ -287,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         output_root=args.output_root,
         max_workers=args.max_workers,
         max_output_chars=args.max_output_chars,
+        state_dir=args.state_dir,
         reload=args.reload,
     )
     return 0
