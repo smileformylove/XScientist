@@ -42,7 +42,7 @@ def daemon_main(argv: Sequence[str] | None = None) -> int:
 
 
 def manager_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("research_manager", argv)
+    return _call_main("ai_scientist.apps.manager", argv)
 
 
 def ara_main(argv: Sequence[str] | None = None) -> int:

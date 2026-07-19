@@ -63,6 +63,26 @@ class AppCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
 
+    def test_research_manager_aliases_internal_manager_application(self) -> None:
+        legacy = importlib.import_module("research_manager")
+        internal = importlib.import_module("ai_scientist.apps.manager")
+
+        self.assertIs(legacy, internal)
+        self.assertIs(legacy.ResearchManager, internal.ResearchManager)
+
+    def test_manager_help_does_not_require_a_login_session(self) -> None:
+        internal = importlib.import_module("ai_scientist.apps.manager")
+
+        with (
+            mock.patch.object(sys, "argv", ["xscientist manager", "--help"]),
+            mock.patch.object(internal, "require_login") as require_login,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            internal.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        require_login.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

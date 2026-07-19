@@ -49,6 +49,8 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/apps/project.py",
                 "continuous_paper_generator.py",
                 "ai_scientist/apps/batch.py",
+                "research_manager.py",
+                "ai_scientist/apps/manager.py",
                 "ai_scientist/resources/configs/bfts_default.yaml",
                 "ai_scientist/blank_icbinb_latex/template.tex",
                 "ai_scientist/treesearch/utils/viz_templates/template.html",
