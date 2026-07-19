@@ -32,7 +32,7 @@ from ai_scientist.utils.ara_seed import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FORK_SCRIPT = REPO_ROOT / "run_ara_fork.py"
+FORK_COMMAND = [sys.executable, "-m", "ai_scientist.apps.ara"]
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
@@ -88,7 +88,7 @@ class ForkToSeedManifestTest(unittest.TestCase):
         self.fork_dir = self.tmp / "forked"
         completed = subprocess.run(
             [
-                sys.executable, str(FORK_SCRIPT), "fork",
+                *FORK_COMMAND, "fork",
                 "--ara", str(self.ara_root),
                 "--node-id", self.node_id,
                 "--dest", str(self.fork_dir),

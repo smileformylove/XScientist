@@ -20,13 +20,13 @@ def build_parser(
 示例用法:
 
 1. 生成3个想法并并行写成论文:
-   python run_project.py my_project --topic topic.md --num-ideas 3 --parallel
+   python -m xscientist project my_project --topic topic.md --num-ideas 3 --parallel
 
 2. 并行处理已有想法的前2个:
-   python run_project.py my_project --ideas ideas.json --idea-indices 0,1 --parallel
+   python -m xscientist project my_project --ideas ideas.json --idea-indices 0,1 --parallel
 
 3. 自动改进2轮:
-   python run_project.py my_project --topic topic.md --improvement-rounds 2
+   python -m xscientist project my_project --topic topic.md --improvement-rounds 2
         """,
     )
 

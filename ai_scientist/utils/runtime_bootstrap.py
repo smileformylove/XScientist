@@ -41,10 +41,7 @@ def format_project_relative_path(
     base_root = (
         Path(project_root).expanduser()
         if project_root is not None
-        else Path(
-            os.environ.get(PROJECT_ROOT_ENV_VAR)
-            or Path.cwd()
-        ).expanduser()
+        else Path(os.environ.get(PROJECT_ROOT_ENV_VAR) or Path.cwd()).expanduser()
     )
     try:
         return os.path.relpath(target, base_root)
@@ -108,14 +105,19 @@ def require_model_credentials(
 def initialize_runtime(
     *,
     source_file: str | Path,
+    project_root: str | Path | None = None,
     output_root: str | Path | None = None,
     set_project_root_env: bool = True,
     ensure_dirs: bool = True,
     apply_cache: bool = True,
 ) -> RuntimeContext:
-    project_root = resolve_entrypoint_project_root(source_file)
+    resolved_project_root = (
+        Path(project_root).expanduser().resolve()
+        if project_root is not None
+        else resolve_entrypoint_project_root(source_file)
+    )
     if set_project_root_env:
-        os.environ[PROJECT_ROOT_ENV_VAR] = str(project_root)
+        os.environ[PROJECT_ROOT_ENV_VAR] = str(resolved_project_root)
 
     if output_root is None:
         research_root = resolve_output_path().resolve()
@@ -132,7 +134,7 @@ def initialize_runtime(
         else {}
     )
     return RuntimeContext(
-        project_root=project_root,
+        project_root=resolved_project_root,
         research_root=research_root,
         applied_cache_env=applied_cache_env,
     )

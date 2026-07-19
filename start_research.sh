@@ -126,7 +126,7 @@ PY
     fi
 
     print_error "未登录，无法继续执行任何操作"
-    print_info "请先执行: python3 auth_cli.py login --user <你的用户名>"
+    print_info "请先执行: python3 -m xscientist auth login --user <你的用户名>"
     return 1
 }
 
@@ -205,13 +205,13 @@ quick_start() {
     num_ideas=${num_ideas:-3}
 
     print_info "开始生成..."
-    "$PYTHON_BIN" continuous_paper_generator.py \
+    "$PYTHON_BIN" -m xscientist batch \
         --topic "$topic_file" \
         --num-ideas "$num_ideas" \
         --paper-types icbinb
 
     print_success "完成！使用以下命令查看结果:"
-    echo "  $PYTHON_BIN research_manager.py list-papers --type icbinb"
+    echo "  $PYTHON_BIN -m xscientist manager list-papers --type icbinb"
 }
 
 # 生成所有类型
@@ -229,14 +229,14 @@ generate_all_types() {
     num_workers=${num_workers:-1}
 
     print_info "开始生成所有类型论文..."
-    "$PYTHON_BIN" continuous_paper_generator.py \
+    "$PYTHON_BIN" -m xscientist batch \
         --topic "$topic_file" \
         --num-ideas "$num_ideas" \
         --all-types \
         --num-workers "$num_workers"
 
     print_success "完成！使用以下命令查看结果:"
-    echo "  $PYTHON_BIN research_manager.py list-papers"
+    echo "  $PYTHON_BIN -m xscientist manager list-papers"
 }
 
 # 自定义生成
@@ -261,7 +261,7 @@ custom_generate() {
 
     read -r -p "想法索引 (逗号分隔，留空处理全部): " idea_indices
 
-    local -a cmd=("$PYTHON_BIN" continuous_paper_generator.py)
+    local -a cmd=("$PYTHON_BIN" -m xscientist batch)
 
     if [[ "$input_file" == *.md ]]; then
         cmd+=(--topic "$input_file")
@@ -306,21 +306,21 @@ manage_research() {
     read -r -p "请输入选项 [1-7]: " mgmt_choice
 
     case "$mgmt_choice" in
-        1) "$PYTHON_BIN" research_manager.py list-batches ;;
-        2) "$PYTHON_BIN" research_manager.py list-papers ;;
-        3) "$PYTHON_BIN" research_manager.py list-ideas ;;
+        1) "$PYTHON_BIN" -m xscientist manager list-batches ;;
+        2) "$PYTHON_BIN" -m xscientist manager list-papers ;;
+        3) "$PYTHON_BIN" -m xscientist manager list-ideas ;;
         4)
             read -r -p "输入搜索关键词: " query
-            "$PYTHON_BIN" research_manager.py search-papers "$query"
+            "$PYTHON_BIN" -m xscientist manager search-papers "$query"
             ;;
-        5) "$PYTHON_BIN" research_manager.py stats ;;
+        5) "$PYTHON_BIN" -m xscientist manager stats ;;
         6)
             read -r -p "删除多少天前的文件 [默认: 30]: " days
             days=${days:-30}
-            "$PYTHON_BIN" research_manager.py cleanup --days "$days" --dry-run
+            "$PYTHON_BIN" -m xscientist manager cleanup --days "$days" --dry-run
             read -r -p "确认删除? [y/N]: " confirm
             if [[ "$confirm" == "y" ]]; then
-                "$PYTHON_BIN" research_manager.py cleanup --days "$days"
+                "$PYTHON_BIN" -m xscientist manager cleanup --days "$days"
             fi
             ;;
         7) return ;;
@@ -332,13 +332,13 @@ manage_research() {
 view_batch_status() {
     print_header "批次状态"
 
-    "$PYTHON_BIN" research_manager.py list-batches
+    "$PYTHON_BIN" -m xscientist manager list-batches
 
     echo ""
     read -r -p "输入批次名称查看详情 (留空跳过): " batch_name
 
     if [[ -n "$batch_name" ]]; then
-        "$PYTHON_BIN" research_manager.py batch-summary "$batch_name"
+        "$PYTHON_BIN" -m xscientist manager batch-summary "$batch_name"
     fi
 }
 
@@ -346,7 +346,7 @@ view_batch_status() {
 daemon_rehearsal() {
     print_header "守护模式演练"
     print_info "运行 dry-run 演练，检查守护模式关键产物是否能正确生成..."
-    "$PYTHON_BIN" run_daemon_rehearsal.py
+    "$PYTHON_BIN" scripts/daemon/run_daemon_rehearsal.py
     print_info "如需额外做严格预检，可执行: bash run_stable_daemon.sh doctor"
 }
 
@@ -389,8 +389,8 @@ start_stable_daemon() {
         echo "  bash run_stable_daemon.sh status"
         echo "  bash run_stable_daemon.sh open-dashboard"
         echo "  bash run_stable_daemon.sh logs --lines 80"
-        echo "  $PYTHON_BIN research_manager.py submission-board --top 5"
-        echo "  $PYTHON_BIN research_manager.py rewrite-board --top 10"
+        echo "  $PYTHON_BIN -m xscientist manager submission-board --top 5"
+        echo "  $PYTHON_BIN -m xscientist manager rewrite-board --top 10"
     fi
 }
 

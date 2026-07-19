@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from continuous_research_daemon import (
+from ai_scientist.apps.daemon import (
     _default_control_payload,
     _load_control_payload,
     _load_recent_control_events,

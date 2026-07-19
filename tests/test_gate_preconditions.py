@@ -13,8 +13,8 @@ from ai_scientist.utils.gate_preconditions import (
 )
 from ai_scientist.utils.decision_log import load_decision_log
 from ai_scientist.utils.research_planning import build_idea_cards, build_research_plan
-from continuous_paper_generator import _process_single_paper
-from run_project import process_single_idea
+from ai_scientist.apps.batch import _process_single_paper
+from ai_scientist.apps.project import process_single_idea
 
 
 class GatePreconditionTests(unittest.TestCase):
@@ -114,7 +114,7 @@ class GatePreconditionTests(unittest.TestCase):
         self.assertIn("truth_contract_invalid", result["reasons"])
         self.assertIn("hallucination_checks_invalid", result["reasons"])
 
-    @mock.patch("run_project.perform_experiments_bfts")
+    @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
     def test_process_single_idea_should_fail_fast_before_bfts_on_static_gate_conflict(
         self,
         perform_bfts_mock: mock.Mock,
@@ -185,11 +185,11 @@ class GatePreconditionTests(unittest.TestCase):
         self.assertEqual(decisions[0]["metadata"]["requested_workflow_mode"], "adaptive")
         self.assertEqual(decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline")
 
-    @mock.patch("run_project.gather_citations")
-    @mock.patch("run_project.write_experiment_report", side_effect=RuntimeError("no report"))
-    @mock.patch("run_project.perform_experiments_bfts")
-    @mock.patch("run_project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml")
-    @mock.patch("run_project.idea_to_markdown")
+    @mock.patch("ai_scientist.apps.project.gather_citations")
+    @mock.patch("ai_scientist.apps.project.write_experiment_report", side_effect=RuntimeError("no report"))
+    @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
+    @mock.patch("ai_scientist.apps.project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml")
+    @mock.patch("ai_scientist.apps.project.idea_to_markdown")
     def test_process_single_idea_should_log_sample_gate_block_decision(
         self,
         _idea_to_markdown_mock: mock.Mock,
@@ -272,13 +272,13 @@ class GatePreconditionTests(unittest.TestCase):
             "sample gate did not pass, so full generation remains blocked",
         )
 
-    @mock.patch("run_project.gather_citations")
-    @mock.patch("run_project.write_experiment_report")
-    @mock.patch("run_project.perform_experiments_bfts")
+    @mock.patch("ai_scientist.apps.project.gather_citations")
+    @mock.patch("ai_scientist.apps.project.write_experiment_report")
+    @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
     @mock.patch(
-        "run_project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml"
+        "ai_scientist.apps.project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml"
     )
-    @mock.patch("run_project.idea_to_markdown")
+    @mock.patch("ai_scientist.apps.project.idea_to_markdown")
     def test_process_single_idea_should_stop_when_experiment_is_locked(
         self,
         _idea_to_markdown_mock: mock.Mock,
@@ -319,7 +319,7 @@ class GatePreconditionTests(unittest.TestCase):
         write_report_mock.assert_not_called()
         gather_citations_mock.assert_not_called()
 
-    @mock.patch("continuous_paper_generator.perform_experiments_bfts", create=True)
+    @mock.patch("ai_scientist.apps.batch.perform_experiments_bfts", create=True)
     def test_process_single_paper_should_fail_fast_before_bfts_on_static_gate_conflict(
         self,
         perform_bfts_mock: mock.Mock,
@@ -391,11 +391,11 @@ class GatePreconditionTests(unittest.TestCase):
         self.assertEqual(decisions[0]["metadata"]["requested_workflow_mode"], "adaptive")
         self.assertEqual(decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline")
 
-    @mock.patch("continuous_paper_generator.gather_citations", create=True)
-    @mock.patch("continuous_paper_generator.write_experiment_report", side_effect=RuntimeError("no report"))
-    @mock.patch("continuous_paper_generator.perform_experiments_bfts", create=True)
-    @mock.patch("continuous_paper_generator.edit_bfts_config_file", create=True, return_value="/tmp/demo_config.yaml")
-    @mock.patch("continuous_paper_generator.idea_to_markdown", create=True)
+    @mock.patch("ai_scientist.apps.batch.gather_citations", create=True)
+    @mock.patch("ai_scientist.apps.batch.write_experiment_report", side_effect=RuntimeError("no report"))
+    @mock.patch("ai_scientist.apps.batch.perform_experiments_bfts", create=True)
+    @mock.patch("ai_scientist.apps.batch.edit_bfts_config_file", create=True, return_value="/tmp/demo_config.yaml")
+    @mock.patch("ai_scientist.apps.batch.idea_to_markdown", create=True)
     def test_process_single_paper_should_log_sample_gate_block_decision(
         self,
         _idea_to_markdown_mock: mock.Mock,
@@ -479,15 +479,15 @@ class GatePreconditionTests(unittest.TestCase):
             "sample gate did not pass, so full generation remains blocked",
         )
 
-    @mock.patch("continuous_paper_generator.gather_citations", create=True)
-    @mock.patch("continuous_paper_generator.write_experiment_report")
-    @mock.patch("continuous_paper_generator.perform_experiments_bfts", create=True)
+    @mock.patch("ai_scientist.apps.batch.gather_citations", create=True)
+    @mock.patch("ai_scientist.apps.batch.write_experiment_report")
+    @mock.patch("ai_scientist.apps.batch.perform_experiments_bfts", create=True)
     @mock.patch(
-        "continuous_paper_generator.edit_bfts_config_file",
+        "ai_scientist.apps.batch.edit_bfts_config_file",
         create=True,
         return_value="/tmp/demo_config.yaml",
     )
-    @mock.patch("continuous_paper_generator.idea_to_markdown", create=True)
+    @mock.patch("ai_scientist.apps.batch.idea_to_markdown", create=True)
     def test_process_single_paper_should_stop_when_experiment_is_locked(
         self,
         _idea_to_markdown_mock: mock.Mock,

@@ -41,7 +41,7 @@ class BatchCliTests(unittest.TestCase):
         with contextlib.redirect_stdout(help_output):
             parser.print_help()
         self.assertIn(
-            "continuous_paper_generator.py \\\n     --topic", help_output.getvalue()
+            "python -m xscientist batch \\\n     --topic", help_output.getvalue()
         )
 
     def test_batch_main_accepts_argv_and_help_skips_runtime_guards(self) -> None:

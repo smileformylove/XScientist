@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import tempfile
@@ -16,12 +15,7 @@ from ai_scientist.utils.ara_diff import diff_ara
 
 # Load run_ara_fork.py as a module so we can drive the diff CLI in-process,
 # matching the pattern used in tests/test_ara_fork_cli.py.
-_spec = importlib.util.spec_from_file_location(
-    "_run_ara_fork_for_diff_cli",
-    Path(__file__).resolve().parent.parent / "run_ara_fork.py",
-)
-run_ara_fork = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(run_ara_fork)  # type: ignore[union-attr]
+from ai_scientist.apps import ara as run_ara_fork
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:

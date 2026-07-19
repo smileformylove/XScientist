@@ -15,7 +15,7 @@ from ai_scientist.utils.pipeline_contracts import (
     record_fallback_event,
     save_contract_artifact,
 )
-from research_manager import ResearchManager
+from ai_scientist.apps.manager import ResearchManager
 
 
 def _write_json(path: Path, payload: dict) -> None:

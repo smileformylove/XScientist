@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from ai_scientist.utils.auth_session import require_login
 
 try:
@@ -18,7 +21,6 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         _toml_loader = None
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 PATH_KEYS = {"research_dir", "source_config", "topic", "ideas"}
 PATH_LIST_KEYS = {"topic_files", "ideas_files"}
 
@@ -341,7 +343,7 @@ def _validate_profile(payload: dict[str, Any]) -> list[str]:
 
 
 def _build_command(profile: dict[str, Any], *, dry_run: bool = False) -> list[str]:
-    cmd = [sys.executable, str(PROJECT_ROOT / "continuous_research_daemon.py")]
+    cmd = [sys.executable, "-m", "ai_scientist.apps.daemon"]
     for key, flag in SCALAR_FLAGS.items():
         value = profile.get(key)
         if value is not None:

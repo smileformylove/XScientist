@@ -117,7 +117,13 @@ py-modules = [
   "validate_repo",
 ]
 
+[tool.setuptools.package-dir]
+"" = "compat"
+ai_scientist = "ai_scientist"
+xscientist = "xscientist"
+
 [tool.setuptools.packages.find]
+where = ["compat", "."]
 include = ["ai_scientist*", "xscientist*"]
 
 [tool.setuptools.package-data]

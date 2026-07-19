@@ -10,7 +10,7 @@ PREFLIGHT_AUTH_ARG := $(if $(AUTH_FILE),--auth-file $(AUTH_FILE),)
 .PHONY: syntax test validate preflight smoke doctor format package executor-image
 
 syntax:
-	$(PYTHON) -m compileall -q ai_scientist xscientist *.py tests
+	$(PYTHON) -m compileall -q ai_scientist xscientist compat scripts tools tests
 	bash -n run_stable_daemon.sh
 	bash -n start_research.sh
 
@@ -18,17 +18,17 @@ test:
 	$(PYTHON) -m unittest discover -s tests -p "test_*.py"
 
 validate:
-	$(PYTHON) validate_repo.py --full-import-smoke
+	$(PYTHON) -m xscientist validate --full-import-smoke
 
 preflight:
-	$(PYTHON) preflight_check.py --strict $(PREFLIGHT_AUTH_ARG)
+	$(PYTHON) -m xscientist preflight --strict $(PREFLIGHT_AUTH_ARG)
 
 smoke: syntax test validate
 
 doctor: smoke preflight
 
 format:
-	$(PYTHON) -m black ai_scientist xscientist tests *.py
+	$(PYTHON) -m black ai_scientist xscientist compat scripts tools tests
 
 package:
 	$(PYTHON) -m build --sdist --wheel

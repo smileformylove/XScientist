@@ -673,7 +673,7 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertFalse(is_stage_complete(run_dir, "experiment"))
 
     def test_budget_exhaustion_maps_to_temporary_failure_exit_code(self) -> None:
-        import launch_scientist_bfts
+        from ai_scientist.apps import bfts as launch_scientist_bfts
 
         self.assertEqual(
             launch_scientist_bfts.experiment_budget_exit_code(

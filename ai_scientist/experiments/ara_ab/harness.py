@@ -14,7 +14,7 @@ Modes
 - ``stub``  Ships with the repo; no API keys or GPUs required. Instantiates
             ``MinimalAgent._draft`` twice against a fake plan-and-code query
             and asserts the seed short-circuits. Runs in CI.
-- ``real``  Shells out to ``run_project.py`` twice with matching flags. You
+- ``real``  Shells out to ``xscientist project`` twice with matching flags. You
             pay for the LLM calls. Not run in CI.
 """
 
@@ -168,7 +168,7 @@ def run_stub_arm(
 
 
 # ---------------------------------------------------------------------------
-# Real mode — shells out to run_project.py. Requires API keys.
+# Real mode — shells out to xscientist project. Requires API keys.
 # ---------------------------------------------------------------------------
 
 
@@ -181,7 +181,7 @@ def run_real_arm(
     seed_node_id: str | None,
     dry_run: bool,
 ) -> ArmResult:
-    cmd = [sys.executable, "run_project.py", "--project-dir", str(project_dir)]
+    cmd = [sys.executable, "-m", "xscientist", "project", str(project_dir)]
     if seed_from_ara:
         cmd.extend(["--seed-from-ara", seed_from_ara])
     if seed_node_id:
@@ -255,7 +255,9 @@ def _summarise_latest_ara(project_dir: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def compute_hash_overlap(baseline: ArmResult | None, ara_seed: ArmResult | None) -> dict[str, Any]:
+def compute_hash_overlap(
+    baseline: ArmResult | None, ara_seed: ArmResult | None
+) -> dict[str, Any]:
     if not baseline or not ara_seed:
         return {}
     b = set(baseline.node_content_hashes or [])
@@ -332,7 +334,9 @@ def render_console_summary(report: ABReport) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_conformance_check(ara_root: Path | None, *, strict: bool) -> dict[str, Any] | None:
+def _run_conformance_check(
+    ara_root: Path | None, *, strict: bool
+) -> dict[str, Any] | None:
     """Delegate to protocol.validate_ara — imported lazily so the harness has
     zero import-time coupling to the protocol package.
     """
@@ -369,7 +373,11 @@ def run_ab_stub(
     baseline = run_stub_arm(arm="baseline", seed_manifest_path=None)
     seeded = run_stub_arm(arm="ara_seed", seed_manifest_path=seed_manifest_path)
     conformance = _run_conformance_check(
-        Path(ara_root_for_conformance).expanduser() if ara_root_for_conformance else None,
+        (
+            Path(ara_root_for_conformance).expanduser()
+            if ara_root_for_conformance
+            else None
+        ),
         strict=strict_conformance,
     )
     report = ABReport(
@@ -437,33 +445,40 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     stub = sub.add_parser("stub", help="CI-safe stub. No API keys required.")
-    stub.add_argument("--seed-manifest", required=True, help="Path to a staged ara_seed.json")
+    stub.add_argument(
+        "--seed-manifest", required=True, help="Path to a staged ara_seed.json"
+    )
     stub.add_argument("--out-dir", required=True)
     stub.add_argument("--idea-hint", default=None)
     stub.add_argument(
         "--check-ara",
         default=None,
         help="Optional ARA directory to run `validate_ara(..., strict=True)` on. "
-             "Exit non-zero if conformance fails.",
+        "Exit non-zero if conformance fails.",
     )
     stub.add_argument(
-        "--no-strict-conformance", action="store_true",
+        "--no-strict-conformance",
+        action="store_true",
         help="Downgrade the paired conformance check from strict to lenient.",
     )
     stub.set_defaults(func=_cmd_stub)
 
-    real = sub.add_parser("real", help="Shell out to run_project.py twice. Requires API keys.")
+    real = sub.add_parser(
+        "real", help="Shell out to xscientist project twice. Requires API keys."
+    )
     real.add_argument("--project-dir-baseline", required=True)
     real.add_argument("--project-dir-seeded", required=True)
     real.add_argument("--seed-from-ara", required=True)
     real.add_argument("--seed-node-id", default=None)
     real.add_argument("--out-dir", required=True)
-    real.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    real.add_argument(
+        "--dry-run", action="store_true", help="Print commands without executing"
+    )
     real.add_argument("--idea-hint", default=None)
     real.add_argument(
         "extra",
         nargs=argparse.REMAINDER,
-        help="Extra args forwarded to run_project.py (place after `--`).",
+        help="Extra args forwarded to xscientist project (place after `--`).",
     )
     real.set_defaults(func=_cmd_real)
 
@@ -486,7 +501,9 @@ def _cmd_stub(args: argparse.Namespace) -> int:
     #   2. Paired ARA fails strict conformance (protocol bug).
     if report.ara_seed is None or not report.ara_seed.used_seed:
         return 1
-    if report.ara_conformance is not None and not report.ara_conformance.get("ok", True):
+    if report.ara_conformance is not None and not report.ara_conformance.get(
+        "ok", True
+    ):
         return 2
     return 0
 

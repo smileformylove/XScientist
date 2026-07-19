@@ -4,7 +4,7 @@ their advertised ``content_hash``.
 Two known producers besides ``export_ara`` mint seed nodes:
 
 - ``ai_scientist.utils.ara_minimal.export_minimal_ara`` (manuscript-only
-  ARAs from ``continuous_paper_generator``).
+  ARAs from ``ai_scientist.apps.batch``).
 - ``run_ara_fork.py`` ``cmd_fork`` (the fork command reuses the parent's
   code+metric and marks the fork ``is_seed_node: True``).
 
@@ -30,7 +30,7 @@ from ai_scientist.utils.ara_minimal import export_minimal_ara
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FORK_SCRIPT = REPO_ROOT / "run_ara_fork.py"
+FORK_COMMAND = [sys.executable, "-m", "ai_scientist.apps.ara"]
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
@@ -118,7 +118,7 @@ class ForkSeedBindingTest(unittest.TestCase):
             dest = tmp_path / "forked"
             subprocess.run(
                 [
-                    sys.executable, str(FORK_SCRIPT), "fork",
+                    *FORK_COMMAND, "fork",
                     "--ara", str(ara_root),
                     "--node-id", node_id,
                     "--dest", str(dest),

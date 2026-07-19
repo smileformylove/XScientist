@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-import preflight_check
+from ai_scientist.apps import preflight as preflight_check
 
 
 def _write_session(path: Path, *, username: str = "smoke-user") -> None:

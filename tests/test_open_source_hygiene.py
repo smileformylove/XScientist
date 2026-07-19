@@ -6,6 +6,15 @@ from pathlib import Path
 
 
 class OpenSourceHygieneTests(unittest.TestCase):
+    def test_repository_root_has_no_python_modules(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        root_modules = sorted(path.name for path in repo_root.glob("*.py"))
+        self.assertEqual(
+            root_modules,
+            [],
+            f"root-level Python modules should live under packages or compat/: {root_modules}",
+        )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = Path(__file__).resolve().parents[1]
@@ -116,7 +125,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_smoke_workflow_should_run_syntax_checks(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "python -m compileall -q ai_scientist xscientist *.py tests",
+            "python -m compileall -q ai_scientist xscientist compat scripts tools tests",
             workflow_text,
             msg="Smoke workflow should compile Python sources for syntax regressions",
         )

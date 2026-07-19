@@ -2364,7 +2364,8 @@ def main(argv=None):
     if ablation_config["disable_owner_aware_repair"]:
         print("🧪 Benchmark ablation active: owner-aware repair routing disabled.")
     runtime = initialize_runtime(
-        source_file=Path(PROJECT_ROOT) / "run_project.py",
+        source_file=__file__,
+        project_root=PROJECT_ROOT,
         output_root=args.output_root,
         ensure_dirs=True,
         apply_cache=True,

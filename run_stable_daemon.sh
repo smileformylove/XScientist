@@ -42,7 +42,7 @@ PY
   then
     return 0
   fi
-  echo "Login required: please run 'python3 auth_cli.py login --user <your_name>' first." >&2
+  echo "Login required: please run 'python3 -m xscientist auth login --user <your_name>' first." >&2
   return 1
 }
 
@@ -83,7 +83,7 @@ Launch modes:
   night      Use configs/daemon/stable_night_daemon_profile.example.json.
 
 Ops commands:
-  rehearsal            Run run_daemon_rehearsal.py.
+  rehearsal            Run scripts/daemon/run_daemon_rehearsal.py.
   doctor               Run rehearsal plus strict preflight; with --full also run full import smoke.
   program              Print the latest autonomous research program.
   experiment-ledger    Print recent autonomous experiment ledger rows.
@@ -135,7 +135,7 @@ Options:
   --report-date DATE   Select a specific archived daily report date (YYYY-MM-DD).
   --report-kind KIND   Choose `daily`, `handoff`, or `all` for list-reports (default: all).
   --top N              Maximum number of report entries to show (default: 10).
-  --full               For doctor, also run validate_repo.py --full-import-smoke.
+  --full               For doctor, also run xscientist validate --full-import-smoke.
 
 Auto overlay behavior:
   If a matching `*.local.json` exists next to the chosen profile, it is applied automatically.
@@ -179,7 +179,7 @@ project_root = Path(sys.argv[1])
 profile_path = Path(sys.argv[2]).resolve()
 overlay_path = sys.argv[3].strip()
 sys.path.insert(0, str(project_root))
-from run_daemon_profile import _load_profile_with_overlays  # noqa: E402
+from scripts.daemon.run_daemon_profile import _load_profile_with_overlays  # noqa: E402
 
 profile, _ = _load_profile_with_overlays(
     profile_path,
@@ -826,10 +826,10 @@ PY
 
 run_doctor() {
   local full="$1"
-  "$PYTHON_BIN" "$PROJECT_ROOT/run_daemon_rehearsal.py"
-  "$PYTHON_BIN" "$PROJECT_ROOT/preflight_check.py" --strict
+  "$PYTHON_BIN" "$PROJECT_ROOT/scripts/daemon/run_daemon_rehearsal.py"
+  "$PYTHON_BIN" -m xscientist preflight --strict
   if [[ "$full" == true ]]; then
-    "$PYTHON_BIN" "$PROJECT_ROOT/validate_repo.py" --full-import-smoke
+    "$PYTHON_BIN" -m xscientist validate --full-import-smoke
   fi
 }
 
@@ -928,7 +928,7 @@ main() {
 
   case "$command" in
     rehearsal)
-      exec "$PYTHON_BIN" "$PROJECT_ROOT/run_daemon_rehearsal.py"
+      exec "$PYTHON_BIN" "$PROJECT_ROOT/scripts/daemon/run_daemon_rehearsal.py"
       ;;
     doctor)
       run_doctor "$full"
@@ -1004,7 +1004,7 @@ main() {
     return 1
   fi
 
-  local -a cmd=("$PYTHON_BIN" "$PROJECT_ROOT/run_daemon_profile.py" "$profile_path")
+  local -a cmd=("$PYTHON_BIN" "$PROJECT_ROOT/scripts/daemon/run_daemon_profile.py" "$profile_path")
   [[ -n "$overlay_path" ]] && cmd+=(--overlay "$overlay_path")
   [[ "$dry_run" == true ]] && cmd+=(--dry-run)
   [[ "$print_command" == true ]] && cmd+=(--print-command)

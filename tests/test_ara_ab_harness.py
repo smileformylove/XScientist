@@ -228,7 +228,7 @@ class RealDryRunTest(unittest.TestCase):
             self.assertEqual(report.mode, "real_dry_run")
             self.assertEqual(report.baseline.exit_code, 0)
             self.assertEqual(report.ara_seed.exit_code, 0)
-            self.assertTrue(any("run_project.py" in n for n in report.baseline.notes))
+            self.assertTrue(any("-m xscientist project" in n for n in report.baseline.notes))
             self.assertTrue(any("--seed-from-ara" in n for n in report.ara_seed.notes))
 
 

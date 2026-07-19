@@ -20,23 +20,23 @@ def build_parser(
 示例用法:
 
 1. 生成想法并为所有类型生成论文:
-   python continuous_paper_generator.py \\
+   python -m xscientist batch \\
      --topic my_topic.md \\
      --num-ideas 5 \\
      --all-types
 
 2. 仅生成workshop论文:
-   python continuous_paper_generator.py \\
+   python -m xscientist batch \\
      --topic my_topic.md \\
      --paper-types icbinb
 
 3. 从已有想法生成:
-   python continuous_paper_generator.py \\
+   python -m xscientist batch \\
      --ideas existing_ideas.json \\
      --paper-types normal journal
 
 4. 并行处理:
-   python continuous_paper_generator.py \\
+   python -m xscientist batch \\
      --topic my_topic.md \\
      --all-types \\
      --num-workers 2

@@ -8,7 +8,6 @@ the empty-result invariant.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import tempfile
@@ -16,12 +15,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-_spec = importlib.util.spec_from_file_location(
-    "_run_ara_fork_cli_provenance",
-    Path(__file__).resolve().parent.parent / "run_ara_fork.py",
-)
-run_ara_fork = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(run_ara_fork)  # type: ignore[union-attr]
+from ai_scientist.apps import ara as run_ara_fork
 
 from ai_scientist.utils.ara_artifact import export_ara
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import tempfile
@@ -14,12 +13,7 @@ from ai_scientist.utils.ara_artifact import export_ara, update_manifest_claim_co
 from ai_scientist.utils.ara_log import ara_log, walk_node_ancestry
 
 # Load the CLI module under a private name so the log-CLI tests can drive main().
-_spec = importlib.util.spec_from_file_location(
-    "_run_ara_fork_cli_log",
-    Path(__file__).resolve().parent.parent / "run_ara_fork.py",
-)
-_run_ara_fork = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(_run_ara_fork)  # type: ignore[union-attr]
+from ai_scientist.apps import ara as _run_ara_fork
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:

@@ -395,7 +395,8 @@ def main() -> int:
         ),
     )
     runtime = initialize_runtime(
-        source_file=PROJECT_ROOT / "launch_scientist_bfts.py",
+        source_file=__file__,
+        project_root=PROJECT_ROOT,
         ensure_dirs=True,
         apply_cache=True,
     )

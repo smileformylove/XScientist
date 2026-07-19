@@ -8,11 +8,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_scientist.utils.auth_session import require_login
-from run_daemon_profile import _load_profile_with_overlays
+from scripts.daemon.run_daemon_profile import _load_profile_with_overlays
 
 REQUIRED_ARTIFACTS = [
     "daemon_status.json",
@@ -77,7 +77,7 @@ def main() -> int:
 
         cmd = [
             args.python,
-            str(PROJECT_ROOT / "run_daemon_profile.py"),
+            str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
             str(temp_profile),
             "--dry-run",
         ]

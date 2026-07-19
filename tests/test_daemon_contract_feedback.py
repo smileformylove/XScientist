@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from continuous_research_daemon import (
+from ai_scientist.apps.daemon import (
     _apply_auto_source_plan,
     _apply_pipeline_contract_feedback,
     _build_source_batch_plan_rows,
@@ -37,9 +37,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         )
         source = {"type": "topic", "value": "topic.md"}
         with mock.patch(
-            "continuous_research_daemon._select_source", return_value=source
+            "ai_scientist.apps.daemon._select_source", return_value=source
         ), mock.patch(
-            "continuous_research_daemon._effective_generator_args",
+            "ai_scientist.apps.daemon._effective_generator_args",
             return_value=["--num-ideas", "2"],
         ):
             command = _build_generator_command(parsed, "batch", {})
@@ -61,9 +61,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         passthrough = ["--num-ideas", "4", "--quality-rewrite-rounds", "1"]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -96,9 +96,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 2,
@@ -151,9 +151,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -192,9 +192,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 1,
@@ -237,9 +237,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -279,9 +279,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -325,9 +325,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -376,9 +376,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -436,9 +436,9 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon.ResearchManager", return_value=object()
+            "ai_scientist.apps.daemon.ResearchManager", return_value=object()
         ), mock.patch(
-            "continuous_research_daemon._build_pipeline_contract_summary",
+            "ai_scientist.apps.daemon._build_pipeline_contract_summary",
             return_value={
                 "enabled": True,
                 "blocked_project_count": 0,
@@ -472,7 +472,7 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as td, mock.patch(
-            "continuous_research_daemon.ThreadingHTTPServer",
+            "ai_scientist.apps.daemon.ThreadingHTTPServer",
             side_effect=PermissionError("sandbox denied"),
         ):
             daemon_dir = Path(td)
@@ -527,7 +527,7 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon._load_source_queue",
+            "ai_scientist.apps.daemon._load_source_queue",
             return_value=queue,
         ):
             rows = _build_source_runtime_rows(parsed, status)
@@ -576,7 +576,7 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         ]
 
         with mock.patch(
-            "continuous_research_daemon._load_source_queue",
+            "ai_scientist.apps.daemon._load_source_queue",
             return_value=queue,
         ):
             rows = _build_source_runtime_rows(parsed, status)

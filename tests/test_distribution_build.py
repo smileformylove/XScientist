@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,8 @@ class DistributionBuildTests(unittest.TestCase):
                     name for name in names if name.endswith(".dist-info/METADATA")
                 )
                 metadata = archive.read(metadata_name).decode("utf-8")
+                install_root = out_dir / "wheel-install"
+                archive.extractall(install_root)
 
             required = {
                 "xscientist/__init__.py",
@@ -121,7 +124,10 @@ class DistributionBuildTests(unittest.TestCase):
                 any(name.startswith("tests/") for name in names),
                 "wheel should not include the repository test suite",
             )
-            source_only = {"run_daemon_profile.py", "run_daemon_rehearsal.py"}
+            source_only = {
+                "scripts/daemon/run_daemon_profile.py",
+                "scripts/daemon/run_daemon_rehearsal.py",
+            }
             self.assertFalse(
                 source_only & names,
                 f"wheel should not include source-only ops: {source_only & names}",
@@ -156,6 +162,49 @@ class DistributionBuildTests(unittest.TestCase):
                     sdist_names,
                     f"sdist should retain source operation asset: {source_asset}",
                 )
+
+            legacy_import_smoke = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import auth_cli, ai_scientist.apps.batch, "
+                        "ai_scientist.apps.daemon, feedback_cli, "
+                        "launch_scientist_bfts, launch_scientist_zhipu, "
+                        "preflight_check, ai_scientist.apps.manager, run_ara_fork, "
+                        "run_project, validate_repo; "
+                        "import ai_scientist.apps.project as project; "
+                        "assert run_project is project"
+                    ),
+                ],
+                cwd=out_dir,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(install_root),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                legacy_import_smoke.returncode, 0, legacy_import_smoke.stderr
+            )
+            for legacy_module in ("run_project", "ai_scientist.apps.batch"):
+                legacy_help = subprocess.run(
+                    [sys.executable, "-m", legacy_module, "--help"],
+                    cwd=out_dir,
+                    env={
+                        **os.environ,
+                        "PYTHONPATH": str(install_root),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(legacy_help.returncode, 0, legacy_help.stderr)
+                self.assertIn("usage:", legacy_help.stdout.lower())
 
 
 if __name__ == "__main__":

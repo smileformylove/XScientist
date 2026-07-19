@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import stat
@@ -13,6 +12,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from ai_scientist.apps import ara as ara_app
 from ai_scientist.utils.ara_artifact import export_ara
 from ai_scientist.utils.ara_reexec import (
     reexec_ara,
@@ -22,15 +22,11 @@ from ai_scientist.utils.ara_reexec import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FORK_SCRIPT = REPO_ROOT / "run_ara_fork.py"
+FORK_COMMAND = [sys.executable, "-m", "ai_scientist.apps.ara"]
 
 
 def _load_fork_module():
-    spec = importlib.util.spec_from_file_location("_ara_fork", FORK_SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return ara_app
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
@@ -106,7 +102,7 @@ class ForkCLITest(unittest.TestCase):
 
     def test_inspect_prints_key_fields(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "inspect", "--ara", str(self.ara_root), "--node-id", self.node_id],
+            [*FORK_COMMAND, "inspect", "--ara", str(self.ara_root), "--node-id", self.node_id],
             capture_output=True, text=True, check=True,
         )
         self.assertIn("Node " + self.node_id, completed.stdout)
@@ -114,7 +110,7 @@ class ForkCLITest(unittest.TestCase):
 
     def test_exec_re_runs_and_writes_verify_report(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "exec", "--ara", str(self.ara_root), "--node-id", self.node_id],
+            [*FORK_COMMAND, "exec", "--ara", str(self.ara_root), "--node-id", self.node_id],
             capture_output=True, text=True,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
@@ -129,7 +125,7 @@ class ForkCLITest(unittest.TestCase):
     def test_fork_copies_node_bundle(self) -> None:
         dest = self.tmp / "forked"
         completed = subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(self.ara_root),
+            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
              "--node-id", self.node_id, "--dest", str(dest)],
             capture_output=True, text=True, check=True,
         )
@@ -147,7 +143,7 @@ class ForkCLITest(unittest.TestCase):
 
         dest = self.tmp / "forked_conformant"
         subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(self.ara_root),
+            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
              "--node-id", self.node_id, "--dest", str(dest)],
             capture_output=True, text=True, check=True,
         )
@@ -160,14 +156,14 @@ class ForkCLITest(unittest.TestCase):
 
         intermediate = self.tmp / "fork_1"
         subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(self.ara_root),
+            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
              "--node-id", self.node_id, "--dest", str(intermediate)],
             capture_output=True, text=True, check=True,
         )
         # Second fork uses the same node_id (only node in the intermediate ARA).
         grand = self.tmp / "fork_2"
         subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "fork", "--ara", str(intermediate),
+            [*FORK_COMMAND, "fork", "--ara", str(intermediate),
              "--node-id", self.node_id, "--dest", str(grand)],
             capture_output=True, text=True, check=True,
         )
@@ -205,7 +201,7 @@ class VerifyCLITest(unittest.TestCase):
 
     def test_verify_batch_reports_and_zero_exit(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "verify",
+            [*FORK_COMMAND, "verify",
              "--ara", str(self.ara_root), "--limit", "1"],
             capture_output=True, text=True,
         )
@@ -219,7 +215,7 @@ class VerifyCLITest(unittest.TestCase):
 
     def test_verify_explicit_node_ids(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(FORK_SCRIPT), "verify",
+            [*FORK_COMMAND, "verify",
              "--ara", str(self.ara_root), "--node-ids", self.node_id],
             capture_output=True, text=True,
         )

@@ -1,4 +1,4 @@
-"""Tests for ara_pipeline — the high-level glue used by run_project.py."""
+"""Tests for ara_pipeline — the high-level glue used by -m ai_scientist.apps.project."""
 
 from __future__ import annotations
 

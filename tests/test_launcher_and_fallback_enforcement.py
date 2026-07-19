@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import launch_scientist_bfts
-import launch_scientist_zhipu
+from ai_scientist.apps import bfts as launch_scientist_bfts
+from ai_scientist.apps import zhipu as launch_scientist_zhipu
 from ai_scientist.utils.launcher_workflow import run_review_phase, run_writeup_phase
-from continuous_paper_generator import (
+from ai_scientist.apps.batch import (
     StrictFallbackViolation,
     _run_optional_quality_pass,
 )
@@ -313,8 +313,8 @@ class LauncherWorkflowRegressionTests(unittest.TestCase):
 
 
 class StrictFallbackEnforcementRegressionTests(unittest.TestCase):
-    @mock.patch("continuous_paper_generator.record_quality_fallback_if_needed")
-    @mock.patch("continuous_paper_generator.execute_quality_workflow_with_followups")
+    @mock.patch("ai_scientist.apps.batch.record_quality_fallback_if_needed")
+    @mock.patch("ai_scientist.apps.batch.execute_quality_workflow_with_followups")
     def test_quality_override_should_record_fallback_without_raising(
         self,
         execute_quality_mock: mock.Mock,
@@ -344,8 +344,8 @@ class StrictFallbackEnforcementRegressionTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertFalse(record_fallback_mock.call_args.kwargs["strict"])
 
-    @mock.patch("continuous_paper_generator.record_quality_fallback_if_needed")
-    @mock.patch("continuous_paper_generator.execute_quality_workflow_with_followups")
+    @mock.patch("ai_scientist.apps.batch.record_quality_fallback_if_needed")
+    @mock.patch("ai_scientist.apps.batch.execute_quality_workflow_with_followups")
     def test_quality_strict_fallback_should_still_raise(
         self,
         execute_quality_mock: mock.Mock,

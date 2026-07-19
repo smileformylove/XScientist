@@ -53,7 +53,11 @@ def _should_ignore_python_path(path: Path) -> bool:
 
 def iter_python_files() -> list[Path]:
     if not is_source_checkout():
-        roots = [PROJECT_ROOT / "ai_scientist", PROJECT_ROOT / "xscientist"]
+        roots = [
+            PROJECT_ROOT / "ai_scientist",
+            PROJECT_ROOT / "xscientist",
+            PROJECT_ROOT / "compat",
+        ]
         files = [
             path
             for root in roots
@@ -61,19 +65,6 @@ def iter_python_files() -> list[Path]:
             for path in root.rglob("*.py")
             if not _should_ignore_python_path(path)
         ]
-        for module_name in (
-            "auth_cli.py",
-            "continuous_paper_generator.py",
-            "continuous_research_daemon.py",
-            "feedback_cli.py",
-            "research_manager.py",
-            "run_ara_fork.py",
-            "run_project.py",
-            "validate_repo.py",
-        ):
-            path = PROJECT_ROOT / module_name
-            if path.is_file():
-                files.append(path)
         return sorted(set(files))
     return sorted(
         path
@@ -241,8 +232,8 @@ def run_helper_smoke() -> None:
         bootstrap_todo_tasks_from_round_gate,
         evaluate_todo_progress_snapshot,
     )
-    from research_manager import ResearchManager
-    from continuous_research_daemon import (
+    from ai_scientist.apps.manager import ResearchManager
+    from ai_scientist.apps.daemon import (
         _apply_evidence_strategy_feedback,
         _apply_failure_guard,
         _apply_quality_strategy_feedback,
@@ -251,7 +242,7 @@ def run_helper_smoke() -> None:
         _derive_quality_governor,
         _derive_rewrite_followup_policy,
     )
-    from continuous_paper_generator import (
+    from ai_scientist.apps.batch import (
         _build_paper_experiment_todo_tasks,
         _build_batch_experiment_agenda,
         _build_batch_experiment_agenda_markdown,
@@ -532,7 +523,7 @@ def run_helper_smoke() -> None:
         assert launcher_captured.get("stage_target_venue") == "nature"
         launcher_workflow_smoke = "passed"
 
-        continuous_module = importlib.import_module("continuous_paper_generator")
+        continuous_module = importlib.import_module("ai_scientist.apps.batch")
         continuous_captured: dict[str, object] = {"quality_calls": []}
 
         def _fake_get_batch_dir(
@@ -1126,9 +1117,12 @@ def run_helper_smoke() -> None:
         assert resolved_paper_types == ["journal", "normal"]
         assert len(selection_log) >= 2
 
-        for script_name in ["run_project.py", "continuous_paper_generator.py"]:
+        for command in [
+            [sys.executable, "-m", "xscientist", "project", "--help"],
+            [sys.executable, "-m", "xscientist", "batch", "--help"],
+        ]:
             help_result = subprocess.run(
-                [sys.executable, str(PROJECT_ROOT / script_name), "--help"],
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1136,7 +1130,7 @@ def run_helper_smoke() -> None:
             )
             assert help_result.returncode == 0, help_result.stderr
             assert "usage:" in help_result.stdout.lower()
-        for module_name in ["run_project", "continuous_paper_generator"]:
+        for module_name in ["ai_scientist.apps.project", "ai_scientist.apps.batch"]:
             importlib.import_module(module_name)
             assert "ai_scientist.llm" not in sys.modules
         cli_help_smoke = "passed"
@@ -1421,7 +1415,7 @@ Results are preliminary.
             build_aggregator_prompt,
             load_quality_plot_guidance,
         )
-        from continuous_paper_generator import (
+        from ai_scientist.apps.batch import (
             _build_batch_experiment_agenda,
             _build_batch_experiment_agenda_markdown,
             _build_batch_experiment_ledger_rows,
@@ -2146,7 +2140,8 @@ Results are preliminary.
         daemon_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "continuous_research_daemon.py"),
+                "-m",
+                "ai_scientist.apps.daemon",
                 "--source-config",
                 str(source_config),
                 "--research-dir",
@@ -2273,7 +2268,7 @@ Results are preliminary.
         profile_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_profile.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
                 str(
                     PROJECT_ROOT / "configs" / "daemon" / "daemon_profile.example.json"
                 ),
@@ -2285,11 +2280,11 @@ Results are preliminary.
             text=True,
             check=True,
         )
-        assert "continuous_research_daemon.py" in profile_run.stdout
+        assert "ai_scientist.apps.daemon" in profile_run.stdout
         stable_profile_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_profile.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
                 str(
                     PROJECT_ROOT
                     / "configs"
@@ -2313,7 +2308,7 @@ Results are preliminary.
         stable_day_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_profile.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
                 str(
                     PROJECT_ROOT
                     / "configs"
@@ -2332,7 +2327,7 @@ Results are preliminary.
         stable_night_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_profile.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
                 str(
                     PROJECT_ROOT
                     / "configs"
@@ -2403,7 +2398,7 @@ Results are preliminary.
         portable_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_profile.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_profile.py"),
                 str(portable_profile),
                 "--dry-run",
                 "--print-command",
@@ -2437,7 +2432,7 @@ Results are preliminary.
         portable_rehearsal_run = subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "run_daemon_rehearsal.py"),
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_rehearsal.py"),
                 "--profile",
                 str(portable_rehearsal_profile),
             ],
@@ -2470,7 +2465,10 @@ Results are preliminary.
         assert "--sleep-minutes" in portable_command and "17" in portable_command
         assert "--dashboard-port" in portable_command and "8123" in portable_command
         rehearsal_run = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "run_daemon_rehearsal.py")],
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_rehearsal.py"),
+            ],
             cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,
@@ -2533,7 +2531,7 @@ Results are preliminary.
             text=True,
             check=True,
         )
-        assert "continuous_research_daemon.py" in wrapper_run.stdout
+        assert "ai_scientist.apps.daemon" in wrapper_run.stdout
         wrapper_overlay = portable_dir / "wrapper_overlay.json"
         wrapper_overlay.write_text(
             json.dumps({"sleep_minutes": 19}, ensure_ascii=False), encoding="utf-8"
@@ -3186,11 +3184,11 @@ def run_import_smoke() -> None:
         "ai_scientist.utils.pipeline_helpers",
         "ai_scientist.utils.review_execution",
         "ai_scientist.utils.launcher_workflow",
-        "run_project",
-        "continuous_paper_generator",
-        "continuous_research_daemon",
-        "launch_scientist_bfts",
-        "launch_scientist_zhipu",
+        "ai_scientist.apps.project",
+        "ai_scientist.apps.batch",
+        "ai_scientist.apps.daemon",
+        "ai_scientist.apps.bfts",
+        "ai_scientist.apps.zhipu",
     ]
     for module_name in modules:
         try:

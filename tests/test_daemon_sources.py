@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from continuous_research_daemon import (
+from ai_scientist.apps.daemon import (
     _load_source_config,
     _normalize_source_entry,
     _validate_source_config,

@@ -11,7 +11,7 @@ from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
 )
 from ai_scientist.utils.review_jobs import begin_review_job, finalize_review_job
-from research_manager import ResearchManager
+from ai_scientist.apps.manager import ResearchManager
 
 
 def _write_json(path: Path, payload: dict) -> None:

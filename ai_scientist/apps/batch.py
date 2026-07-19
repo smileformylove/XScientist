@@ -3791,7 +3791,8 @@ def main(argv=None):
     if integrity_forensics_enabled:
         print("🔎 启用 integrity forensics：每篇最终稿将生成可追溯一致性检查报告。")
     runtime = initialize_runtime(
-        source_file=Path(PROJECT_ROOT) / "continuous_paper_generator.py",
+        source_file=__file__,
+        project_root=PROJECT_ROOT,
         output_root=args.research_dir,
         ensure_dirs=True,
         apply_cache=True,

@@ -159,6 +159,5 @@ def require_login(operation: str = "当前操作") -> Dict[str, Any]:
     print(f"   操作: {operation}")
     print(f"   原因: {reason}")
     print(f"   会话文件: {auth_file}")
-    print("   登录命令: python3 auth_cli.py login --user <你的用户名>")
+    print("   登录命令: python3 -m xscientist auth login --user <你的用户名>")
     raise SystemExit(1)
-

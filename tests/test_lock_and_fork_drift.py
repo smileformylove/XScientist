@@ -31,7 +31,7 @@ from ai_scientist.utils.ara_minimal import export_minimal_ara
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FORK_SCRIPT = REPO_ROOT / "run_ara_fork.py"
+FORK_COMMAND = [sys.executable, "-m", "ai_scientist.apps.ara"]
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
@@ -83,7 +83,7 @@ def _seed_project(
 
 def _fork(ara_root: Path, node_id: str, dest: Path) -> None:
     subprocess.run(
-        [sys.executable, str(FORK_SCRIPT), "fork",
+        [*FORK_COMMAND, "fork",
          "--ara", str(ara_root), "--node-id", node_id, "--dest", str(dest)],
         capture_output=True, text=True, check=True,
     )

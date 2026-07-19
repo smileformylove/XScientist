@@ -5942,7 +5942,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
-  python continuous_research_daemon.py \
+  python -m xscientist daemon \
     --topic examples/example_topic.md \
     --duration-hours 24 \
     --sleep-minutes 10 \

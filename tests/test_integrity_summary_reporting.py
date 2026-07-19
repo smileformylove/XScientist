@@ -10,8 +10,8 @@ from ai_scientist.utils.integrity_workflow import (
     integrity_forensics_result_fields,
     run_integrity_forensics_for_manuscript,
 )
-from continuous_paper_generator import ContinuousPaperGenerator
-from run_project import save_project_summary
+from ai_scientist.apps.batch import ContinuousPaperGenerator
+from ai_scientist.apps.project import save_project_summary
 
 
 class IntegritySummaryReportingTests(unittest.TestCase):
@@ -231,7 +231,7 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                 }
 
             with mock.patch(
-                "continuous_paper_generator._process_single_paper",
+                "ai_scientist.apps.batch._process_single_paper",
                 side_effect=fake_process,
             ), mock.patch("builtins.print"):
                 results = generator.generate_paper_batch(
@@ -279,7 +279,7 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                 }
 
             with mock.patch(
-                "continuous_paper_generator._process_single_paper",
+                "ai_scientist.apps.batch._process_single_paper",
                 side_effect=fake_process,
             ), mock.patch("builtins.print"):
                 generator.generate_paper_batch(

@@ -9,7 +9,7 @@ runs the full pipeline). What we CAN prove cheaply is:
 
 This is a defense-in-depth test: the individual pieces are covered by
 test_activate_llm_tracing / test_llm_trace / test_llm_interceptor_wiring.
-Here we make sure they compose the way run_project.py expects.
+Here we make sure they compose the way -m ai_scientist.apps.project expects.
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ from ai_scientist.resources import idea_resource_path
 
 class PackagedEntrypointDefaultsTests(unittest.TestCase):
     def test_launcher_defaults_use_packaged_idea_resources(self) -> None:
-        import launch_scientist_bfts
-        import launch_scientist_zhipu
+        from ai_scientist.apps import bfts as launch_scientist_bfts
+        from ai_scientist.apps import zhipu as launch_scientist_zhipu
 
         with mock.patch("sys.argv", ["launch_scientist_bfts.py"]):
             bfts_args = launch_scientist_bfts.parse_arguments()

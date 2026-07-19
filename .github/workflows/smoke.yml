@@ -70,7 +70,7 @@ jobs:
       - name: Run syntax checks
         run: |
           set -o pipefail
-          python -m compileall -q ai_scientist xscientist *.py tests 2>&1 | tee .ci-output/logs/syntax.log
+          python -m compileall -q ai_scientist xscientist compat scripts tools tests 2>&1 | tee .ci-output/logs/syntax.log
           bash -n run_stable_daemon.sh 2>&1 | tee .ci-output/logs/run_stable_daemon_syntax.log
           bash -n start_research.sh 2>&1 | tee .ci-output/logs/start_research_syntax.log
 
@@ -129,7 +129,7 @@ jobs:
       - name: Run repository validator
         run: |
           set -o pipefail
-          python validate_repo.py --full-import-smoke 2>&1 | tee .ci-output/logs/validate_repo.log
+          python -m xscientist validate --full-import-smoke 2>&1 | tee .ci-output/logs/validate_repo.log
 
       - name: Build distribution artifacts
         run: |
@@ -139,7 +139,7 @@ jobs:
       - name: Run preflight
         run: |
           set -o pipefail
-          python preflight_check.py --strict 2>&1 | tee .ci-output/logs/preflight.log
+          python -m xscientist preflight --strict 2>&1 | tee .ci-output/logs/preflight.log
 
       - name: Upload smoke artifacts
         if: always()
