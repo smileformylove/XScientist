@@ -63,6 +63,10 @@ class DistributionBuildTests(unittest.TestCase):
             wheel = next(out_dir.glob("xscientist-*.whl"))
             with zipfile.ZipFile(wheel) as archive:
                 names = set(archive.namelist())
+                metadata_name = next(
+                    name for name in names if name.endswith(".dist-info/METADATA")
+                )
+                metadata = archive.read(metadata_name).decode("utf-8")
 
             required = {
                 "xscientist/__init__.py",
@@ -82,6 +86,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "continuous_research_daemon.py",
                 "ai_scientist/apps/daemon.py",
                 "ai_scientist/apps/daemon_control.py",
+                "ai_scientist/apps/daemon_sources.py",
                 "ai_scientist/apps/daemon_dashboard.py",
                 "ai_scientist/apps/daemon_reports.py",
                 "auth_cli.py",
@@ -105,6 +110,10 @@ class DistributionBuildTests(unittest.TestCase):
             }
             self.assertFalse(
                 required - names, f"missing wheel files: {required - names}"
+            )
+            self.assertIn(
+                'Requires-Dist: tomli>=2.0; python_version < "3.11"',
+                metadata,
             )
             self.assertFalse(
                 any(name.startswith("tests/") for name in names),

@@ -31,6 +31,7 @@ classifiers = [
 dependencies = [
   "jsonschema>=4.18",
   "PyYAML>=6.0",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

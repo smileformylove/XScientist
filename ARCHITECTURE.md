@@ -11,7 +11,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
 | Batch experiment artifacts | `ai_scientist/apps/batch_experiment_artifacts.py` | Internal | Build experiment TODOs, ledgers, agendas, and per-paper follow-up artifacts |
-| Daemon adapters | `ai_scientist/apps/daemon_control.py`, `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Persistent operator controls plus pure dashboard and report rendering |
+| Daemon adapters | `ai_scientist/apps/daemon_control.py`, `ai_scientist/apps/daemon_sources.py`, `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Persistent controls, source configuration, and pure dashboard/report rendering |
 | Manager read models | `ai_scientist/apps/manager_ranking.py`, `ai_scientist/apps/manager_reports.py` | Internal | Pure submission ranking/filtering plus Markdown rendering for manager boards |
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
@@ -39,8 +39,9 @@ so historical monkeypatch and legacy-module behavior remain intact.
 
 The daemon state machine remains in `ai_scientist/apps/daemon.py`. Persistent
 operator-control defaults, validation, expiry, atomic storage, and event history
-live in `ai_scientist/apps/daemon_control.py`; dashboard and report renderers
-remain side-effect-free presentation adapters.
+live in `ai_scientist/apps/daemon_control.py`. JSON/TOML source queue loading,
+validation, and normalization live in `ai_scientist/apps/daemon_sources.py`;
+dashboard and report renderers remain side-effect-free presentation adapters.
 
 The FastAPI adapter in `xscientist/service.py` owns request validation,
 filesystem confinement, authentication, and routes. Background job execution
