@@ -105,6 +105,46 @@ class OpenSourceHygieneTests(unittest.TestCase):
                 msg=f"README should avoid local absolute paths: found {prefix}",
             )
 
+    def test_readmes_describe_current_installation_status(self) -> None:
+        for source in (self.readme_path, self.chinese_readme_path):
+            text = source.read_text(encoding="utf-8")
+            self.assertIn(
+                "git+https://github.com/smileformylove/XScientist.git@main",
+                text,
+            )
+            self.assertIn("PyPI", text)
+        self.assertIn(
+            "has not been published to PyPI yet", self.readme_path.read_text()
+        )
+        self.assertIn("尚未发布到 PyPI", self.chinese_readme_path.read_text())
+
+    def test_readmes_use_public_workflow_commands(self) -> None:
+        forbidden = (
+            "run_ara_fork.py",
+            "run_project.py",
+            "continuous_paper_generator.py",
+            "continuous_research_daemon.py",
+            "research_manager.py",
+        )
+        for source in (self.readme_path, self.chinese_readme_path):
+            text = source.read_text(encoding="utf-8")
+            for legacy_name in forbidden:
+                self.assertNotIn(
+                    legacy_name,
+                    text,
+                    msg=f"{source.name} should recommend public xscientist commands",
+                )
+
+    def test_chinese_readme_toc_tracks_quick_start_sections(self) -> None:
+        text = self.chinese_readme_path.read_text(encoding="utf-8")
+        self.assertIn("[1) 安装](#1-安装)", text)
+        self.assertNotIn("#1-安装推荐-conda", text)
+        self.assertIn(
+            "[5) 隔离 AI 生成的实验代码](#5-隔离-ai-生成的实验代码)",
+            text,
+        )
+        self.assertIn("### 5) 隔离 AI 生成的实验代码", text)
+
     def test_readme_local_markdown_links_exist(self) -> None:
         for source in (self.readme_path, self.chinese_readme_path):
             text = source.read_text(encoding="utf-8")

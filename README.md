@@ -1,6 +1,9 @@
 # XScientist
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Smoke Checks](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+![PyPI](https://img.shields.io/badge/PyPI-not%20published-orange.svg)
 
 Chinese README: [docs/README.zh.md](docs/README.zh.md)
 
@@ -16,6 +19,7 @@ System report:
 
 Important notes:
 
+- Release status: version `0.2.0` is installable from GitHub or a source checkout, but **has not been published to PyPI yet**. `pip install xscientist` will not work until the first release is published.
 - Cost: running the system calls LLMs / retrieval services and may incur API fees and long runtimes.
 - Reliability: model outputs may contain errors or hallucinations; verify key claims, data, and citations yourself.
 - Output isolation: by default, run outputs are written outside this git repo (to avoid polluting an open-source repository).
@@ -27,6 +31,8 @@ Important notes:
 - [Vision: a git-like protocol for research](#vision-a-git-like-protocol-for-research)
 - [Overview](#overview)
 - [Key Features](#key-features)
+- [Public Interfaces](#public-interfaces)
+- [Repository Layout](#repository-layout)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -52,7 +58,7 @@ We don't just want a better "fully automated researcher" — we want a **git-lik
 
 - **Protocol before system.** `ai_scientist/protocol/` (ARA v1) pins down what a research run looks like on disk: six JSON Schemas and a `content_hash` normalisation rule. Any third-party producer or consumer can implement the same protocol without depending on the rest of XScientist — the same way git is not the only tool that reads a git object database.
 - **Every run is a commit.** An ARA archives the exploration graph, per-node `code / term_out / metrics / plots`, failed branches, the repair trajectory, the Pareto pool, and an environment fingerprint. Every manuscript claim is pinned back to its evidence node via `\claimref{node_id}`.
-- **Fork-continue, not cold-start.** Any node can be `run_ara_fork.py fork`-ed into a directory that is itself a conformant ARA. The next run seeds from it, and provenance lands automatically in the child ARA — across systems, teams, or long time gaps.
+- **Fork-continue, not cold-start.** Any node can be forked with `xscientist ara fork` into a directory that is itself a conformant ARA. The next run seeds from it, and provenance lands automatically in the child ARA — across systems, teams, or long time gaps.
 - **An automation tech tree with maths and physics at the root.** We believe the parts of science that are automatable form a *tree*: **mathematics and physics are the root nodes**, where "protocol / evidence / verification" signals are strongest and machines can safely go furthest; the further out you go toward engineering, human factors, or social science, the more indispensable human judgment becomes. XScientist starts near the root — automate what is verifiable, reproducible, and forkable, and surface the rest to human reviewers explicitly.
 
 In one line: **make research a protocol; make the system one implementation of that protocol.**<br/>
@@ -93,23 +99,44 @@ flowchart LR
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
-Public interfaces:
+## Public Interfaces
 
-- `xscientist`: unified CLI installed from PyPI
+- `xscientist`: unified CLI available after a GitHub or source installation
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
 
-Source-checkout commands:
+| Use case | Recommended interface |
+|---|---|
+| Run one project | `xscientist project` |
+| Batch paper generation | `xscientist batch` |
+| Long-running research | `xscientist daemon` |
+| Inspect outputs and boards | `xscientist manager` |
+| Inspect/fork ARA artifacts | `xscientist ara` |
+| Embed in Python | `XScientist` + `ProjectRequest` |
+| Expose an HTTP service | `xscientist serve` / `create_app()` |
 
-- `python -m xscientist project`: single-project end-to-end run
-- `python -m xscientist batch`: continuous/batch generation
-- `python -m xscientist daemon`: long-running autonomous scheduling
-- `python -m xscientist manager`: index + boards
-- `python -m xscientist ara`: inspect / re-execute / fork ARA nodes
+Source checkouts can also use `python -m xscientist ...`. The implementations
+live in `ai_scientist/apps/`. Built wheels retain the former top-level module
+names as compatibility aliases, but new integrations should use the public
+CLI, SDK, or HTTP API.
 
-The implementations live in `ai_scientist/apps/`. PyPI wheels still publish
-the former top-level module names as compatibility aliases, but the source
-checkout intentionally keeps Python modules out of the repository root.
+## Repository Layout
+
+```text
+xscientist/             Public SDK, CLI, models, and optional HTTP API
+ai_scientist/           Internal research workflow implementation
+configs/                BFTS, daemon, source, and environment examples
+scripts/                Source-checkout operational helpers
+docs/                   Architecture, guides, and Chinese README
+requirements/           CI-specific dependency sets and constraints
+tests/                   Unit, distribution, compatibility, and smoke tests
+tools/                   Repository-only validation helpers
+```
+
+The repository root intentionally keeps only standard project-discovery files
+(`pyproject.toml`, `MANIFEST.in`, `.gitignore`), the primary README/license,
+the main dependency file, Make targets, and two backward-compatible shell
+operations entrypoints.
 
 ---
 
@@ -118,6 +145,7 @@ checkout intentionally keeps Python modules out of the repository root.
 ### 0) Prerequisites
 
 - Python: 3.10+ (3.11 recommended)
+- Git: required for direct installation from the GitHub repository
 - System deps (recommended):
   - LaTeX toolchain (to compile paper PDFs, e.g., TeX Live / MacTeX)
   - `poppler` (PDF processing/extraction)
@@ -127,16 +155,25 @@ checkout intentionally keeps Python modules out of the repository root.
 
 ### 1) Install
 
-From PyPI (recommended for users):
+PyPI status: the package is not published yet. Install the current `main`
+branch directly from GitHub:
 
 ```bash
-pip install "xscientist[full]"
-pip install "xscientist[full,service]"  # include the HTTP API
+# Lightweight SDK and protocol surface
+pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+
+# Complete research runtime (recommended for running projects)
+pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
+
+# Complete runtime plus the FastAPI/Uvicorn service
+pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
-For repository development:
+For a local clone or repository development:
 
 ```bash
+git clone https://github.com/smileformylove/XScientist.git
+cd XScientist
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
@@ -152,8 +189,17 @@ pip install -r requirements.txt -c requirements/constraints-ci.txt
 Verify the installation:
 
 ```bash
+xscientist --version
 xscientist info
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
+```
+
+After the first PyPI release, the shorter commands will be:
+
+```bash
+pip install xscientist
+pip install "xscientist[full]"
+pip install "xscientist[full,service]"
 ```
 
 ### 2) Configure API keys (as needed)
@@ -161,6 +207,7 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 Set the env vars for your provider(s) (you do not need all of them):
 
 ```bash
+# Source checkout only; installed users can set the variables directly.
 cp configs/environment/example.env .env
 # Edit .env, then export/source the values for your shell or process manager.
 
@@ -294,10 +341,14 @@ HTTP API:
 
 ```bash
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
+curl http://127.0.0.1:8000/health
 curl -X POST http://127.0.0.1:8000/v1/projects \
   -H 'content-type: application/json' \
   -d '{"project":"demo","topic":"topic.md"}'
 ```
+
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`;
+the OpenAPI document is exposed at `/openapi.json`.
 
 Set `XSCIENTIST_API_KEY` and send it as `X-API-Key` when exposing the service
 beyond localhost.
@@ -454,7 +505,7 @@ flowchart TD
   candidate2 --> fork1
 ```
 
-This tree shares provenance with the git-like record, CLI logs, and node diffs: `exploration_graph.json` is the source of truth, while `exploration_graph.html`, `exploration_graph.summary.json`, `run_ara_fork.py log`, `run_ara_fork.py diff --only-node`, and `run_ara_fork.py fork` are different views over the same graph. If the ARA directory is committed to git, git captures the file-level snapshot of that graph; XScientist's log/diff/fork commands expose the node-level history. So if a paper claim comes from `candidate2`, you can trace back through its parent experiment, failed repair path, ablation evidence, and the node that can seed the next fork.
+This tree shares provenance with the git-like record, CLI logs, and node diffs: `exploration_graph.json` is the source of truth, while `exploration_graph.html`, `exploration_graph.summary.json`, `xscientist ara log`, `xscientist ara diff --only-node`, and `xscientist ara fork` are different views over the same graph. If the ARA directory is committed to git, git captures the file-level snapshot of that graph; XScientist's log/diff/fork commands expose the node-level history. So if a paper claim comes from `candidate2`, you can trace back through its parent experiment, failed repair path, ablation evidence, and the node that can seed the next fork.
 
 The `xscientist ara` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
 
@@ -493,7 +544,7 @@ xscientist ara verify \
   --limit 3
 ```
 
-`exploration_graph.json` is the exploration DAG behind each paper: nodes are concrete experiments, repairs, or failed branches, and edges are parent -> child evolution links. `validate` checks that the graph is directed and acyclic; `graph --json` reports roots, leaves, topological order, and structural issues; `exploration_graph.html` is the human-facing visualization. `run_ara_fork.py log --node <id>`, `diff --only-node <id>`, and the browser view all read the same graph data.
+`exploration_graph.json` is the exploration DAG behind each paper: nodes are concrete experiments, repairs, or failed branches, and edges are parent -> child evolution links. `validate` checks that the graph is directed and acyclic; `graph --json` reports roots, leaves, topological order, and structural issues; `exploration_graph.html` is the human-facing visualization. `xscientist ara log --node <id>`, `xscientist ara diff --only-node <id>`, and the browser view all read the same graph data.
 
 During writing, the LLM is prompted to append `\claimref{<node_id>}` after each quantitative claim. The macro renders as nothing in the PDF, but `ai_scientist/utils/claim_registry.py` scans the LaTeX source and drops each claim into `ara/.../claims/<claim_id>.json` — giving downstream agents a two-way link between paper assertions and the tree-search nodes that produced them. `ai_scientist/utils/claim_coverage.py` aggregates those markers into a `coverage_score` and a severity band (`ok` / `sparse` / `unresolved` / `insufficient` / `none`), persisted at `ara/.../claims/coverage.json` for quality gating, ranking, and dossier scoring.
 
@@ -538,13 +589,13 @@ python -m ai_scientist.experiments.ara_ab.harness stub \
     --seed-manifest <project>/.ara_seed/ara_seed.json \
     --out-dir /tmp/ab_out
 
-# Full run: shells out to run_project.py twice (baseline vs seeded). Needs API keys.
+# Full run: invokes `xscientist project` twice (baseline vs seeded). Needs API keys.
 python -m ai_scientist.experiments.ara_ab.harness real \
     --project-dir-baseline /tmp/ab_baseline \
     --project-dir-seeded   /tmp/ab_seeded \
     --seed-from-ara /path/to/fork \
     --out-dir /tmp/ab_out \
-    -- --topic mytopic.md   # everything after `--` is forwarded to run_project.py
+    -- --topic mytopic.md   # everything after `--` is forwarded to xscientist project
 ```
 
 The resulting `ab_report.json` (schema `ara.ab_report.v1`) records wall-clock, LLM call counts, node counts, and content-hash overlap for both arms, plus a verdict (`seed_saved_llm_calls` / `seed_wall_clock_faster` / `seed_did_not_short_circuit` / `seed_inconclusive`).
@@ -564,16 +615,16 @@ Currently organized example files:
 
 ## Docs
 
-- `docs/guides/PROJECT_USAGE.md`: project workflow usage and flags
-- `docs/guides/SDK_AND_API.md`: PyPI installation, Python SDK, CLI, and HTTP API
-- `docs/guides/FEEDBACK_QUICKSTART.md`: Feedback system quick start guide
-- `docs/CONFIG_REFERENCE.md`: detailed configuration and parameters
-- `docs/SOURCE_ORCHESTRATION.md`: source queue orchestration and recommended run postures
-- `docs/LONG_RUNNING_GUIDE.md`: Long-running operations guide
-- `docs/LOGIN_GUARDRAIL.md`: login guard and session management
-- `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
-- `docs/ARCHITECTURE.md`: System architecture documentation
-- `docs/guides/OPTIMIZATION_SUMMARY.md`: Optimization summary
+- [Project usage](docs/guides/PROJECT_USAGE.md): project workflow usage and flags
+- [SDK and API](docs/guides/SDK_AND_API.md): installation, Python SDK, CLI, and HTTP API
+- [Feedback quick start](docs/guides/FEEDBACK_QUICKSTART.md): feedback system operations
+- [Configuration reference](docs/CONFIG_REFERENCE.md): detailed configuration and parameters
+- [Source orchestration](docs/SOURCE_ORCHESTRATION.md): source queues and recommended run postures
+- [Long-running guide](docs/LONG_RUNNING_GUIDE.md): daemon operations and maintenance
+- [Login guardrail](docs/LOGIN_GUARDRAIL.md): login and session management
+- [Output directories](docs/guides/OUTPUT_DIRECTORIES.md): output policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
+- [Architecture](docs/ARCHITECTURE.md): system boundaries and components
+- [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---
 

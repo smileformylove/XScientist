@@ -1,6 +1,9 @@
 # XScientist
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
+[![Smoke Checks](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+![PyPI](https://img.shields.io/badge/PyPI-not%20published-orange.svg)
 
 English README: [README.md](../README.md)
 
@@ -16,6 +19,7 @@ English README: [README.md](../README.md)
 
 重要提示（建议先读）：
 
+- 发布状态：当前版本 `0.2.0` 已支持从 GitHub 或源码安装，但**尚未发布到 PyPI**；首次正式发布前，`pip install xscientist` 会失败。
 - 成本：运行会调用大模型/检索服务，可能产生 API 费用与较长运行时间。
 - 可靠性：生成内容可能存在错误或幻觉；请务必自行复核关键结论、数据与引用。
 - 输出目录：默认**不会**把运行产物写入仓库目录（避免污染开源仓库）。
@@ -30,12 +34,15 @@ English README: [README.md](../README.md)
   - [愿景：可 git 的科研协议](#愿景可-git-的科研协议)
   - [项目概览](#项目概览)
   - [核心能力](#核心能力)
+  - [公共接口](#公共接口)
+  - [仓库结构](#仓库结构)
   - [快速开始](#快速开始)
     - [0) 依赖说明](#0-依赖说明)
-    - [1) 安装（推荐 conda）](#1-安装推荐-conda)
+    - [1) 安装](#1-安装)
     - [2) 配置 API Key（按需）](#2-配置-api-key按需)
     - [3) 登录（必需）](#3-登录必需)
     - [4) 预检（推荐）](#4-预检推荐)
+    - [5) 隔离 AI 生成的实验代码](#5-隔离-ai-生成的实验代码)
   - [配置](#配置)
     - [输出目录（默认不写入仓库）](#输出目录默认不写入仓库)
     - [严格兜底策略（调试提示）](#严格兜底策略调试提示)
@@ -66,7 +73,7 @@ XScientist 想做的不只是「一个更好的全自动科研系统」，更是
 
 - **协议先于系统**：`ai_scientist/protocol/`（ARA v1）用 6 份 JSON Schema + 一个 `content_hash` 归一化算法，把一次研究运行沉淀成机读工件。第三方 producer / consumer 无需依赖 XScientist 本身也能实现同一协议——就像 git 之于代码。
 - **每次运行都是一个 commit**：ARA 把 exploration graph、每个节点的 `code / term_out / metrics / plots`、失败分支、修复轨迹、Pareto 池和环境指纹一起归档；每一份 manuscript 断言用 `\claimref{node_id}` 反向锚回其证据节点。
-- **fork-continue 而非冷启动**：任一节点都可被 `run_ara_fork.py fork` 出一份「本身也是合规 ARA」的种子，下一次运行直接接力（provenance 自动落进 child ARA），跨系统 / 跨团队都可以延续。
+- **fork-continue 而非冷启动**：任一节点都可通过 `xscientist ara fork` 导出一份「本身也是合规 ARA」的种子，下一次运行直接接力（provenance 自动落进 child ARA），跨系统 / 跨团队都可以延续。
 - **自动化的科技树，数学与物理是根节点**：我们相信科研的可自动化程度沿着一棵树展开——**数学和物理是根节点**，越靠近根的问题「协议 / 证据 / 复核」信号越强、更适合被机器扩展；越靠近叶子（工程、经验、社会科学）越依赖人类判断。XScientist 的重心先落在根附近：把「可验证、可复现、可 fork」的部分自动化，把「值得人类花时间的」部分显式暴露给评审者。
 
 一句话：**把科研做成协议，把系统做成协议的一个实现**。<br/>
@@ -109,22 +116,42 @@ flowchart LR
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
 - **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `xscientist ara` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
-公共入口：
+## 公共接口
 
-- `xscientist`：通过 PyPI 安装后的统一 CLI
+- `xscientist`：通过 GitHub 或源码安装后的统一 CLI
 - `from xscientist import XScientist, ProjectRequest`：稳定 Python SDK
 - `from xscientist import create_app`：可选 FastAPI 应用工厂
 
-源码仓库命令：
+| 使用场景 | 推荐接口 |
+|---|---|
+| 单项目端到端运行 | `xscientist project` |
+| 批量生成论文 | `xscientist batch` |
+| 长期自治运行 | `xscientist daemon` |
+| 查看产物和看板 | `xscientist manager` |
+| 检查/接力 ARA | `xscientist ara` |
+| 嵌入 Python 应用 | `XScientist` + `ProjectRequest` |
+| 提供 HTTP 服务 | `xscientist serve` / `create_app()` |
 
-- `python -m xscientist project`：单项目端到端
-- `python -m xscientist batch`：批量/连续运行
-- `python -m xscientist daemon`：长期自治调度
-- `python -m xscientist manager`：索引与看板
-- `python -m xscientist ara`：从 ARA 工件 inspect / re-exec / fork 节点
+源码 checkout 也可以统一使用 `python -m xscientist ...`。实际实现位于
+`ai_scientist/apps/`。构建出的 wheel 会继续提供历史顶层模块名作为
+兼容别名，但新集成应使用公共 CLI、SDK 或 HTTP API。
 
-实际实现位于 `ai_scientist/apps/`。PyPI wheel 仍发布原顶层模块名作为
-兼容别名，但源码仓库根目录不再放置 Python 模块。
+## 仓库结构
+
+```text
+xscientist/             公共 SDK、CLI、数据模型和可选 HTTP API
+ai_scientist/           内部科研工作流实现
+configs/                BFTS、daemon、source 和环境变量示例
+scripts/                源码 checkout 运维辅助脚本
+docs/                   架构、指南和中文 README
+requirements/           CI 专用依赖集合与约束
+tests/                   单测、分发、兼容与 smoke 测试
+tools/                   仅供仓库使用的验证工具
+```
+
+根目录刻意只保留标准工具必须发现的协议文件（`pyproject.toml`、
+`MANIFEST.in`、`.gitignore`）、主 README/许可证、主依赖文件、Make 入口，
+以及两个向后兼容的 shell 运维入口。
 
 ---
 
@@ -133,6 +160,7 @@ flowchart LR
 ### 0) 依赖说明
 
 - Python: 3.10+（推荐 3.11）
+- Git：从 GitHub 仓库直接安装时需要
 - 系统依赖（建议安装）：
   - LaTeX 工具链（用于编译论文 PDF，例如 TeX Live / MacTeX）
   - `poppler`（用于 PDF 处理/抽取）
@@ -142,16 +170,24 @@ flowchart LR
 
 ### 1) 安装
 
-普通用户建议直接从 PyPI 安装：
+PyPI 状态：当前尚未发布。请直接从 GitHub 的 `main` 分支安装：
 
 ```bash
-pip install "xscientist[full]"
-pip install "xscientist[full,service]"  # 包含 HTTP API
+# 轻量 SDK 与协议接口
+pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+
+# 完整科研运行环境（运行项目时推荐）
+pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
+
+# 完整运行环境与 FastAPI/Uvicorn 服务
+pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
-仓库开发环境：
+本地 clone 或仓库开发环境：
 
 ```bash
+git clone https://github.com/smileformylove/XScientist.git
+cd XScientist
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
@@ -167,8 +203,17 @@ pip install -r requirements.txt -c requirements/constraints-ci.txt
 验证安装：
 
 ```bash
+xscientist --version
 xscientist info
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
+```
+
+首次 PyPI 发布后，可以改用较短的命令：
+
+```bash
+pip install xscientist
+pip install "xscientist[full]"
+pip install "xscientist[full,service]"
 ```
 
 ### 2) 配置 API Key（按需）
@@ -176,6 +221,7 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 按你使用的提供商设置环境变量（不需要全部设置）：
 
 ```bash
+# 仅源码 checkout 可复制模板；通过 pip 安装时可直接设置下面的环境变量。
 cp configs/environment/example.env .env
 # 编辑 .env，再通过 shell 或进程管理器加载其中的变量。
 
@@ -202,6 +248,22 @@ xscientist validate
 ```
 
 在源码 checkout 中，贡献者还可以运行 `make smoke`。
+
+### 5) 隔离 AI 生成的实验代码
+
+BFTS 执行器在 `bfts_config*.yaml` 的 `exec:` 配置中支持 `process`、
+`docker` 和 `auto` 后端。`auto` 会优先使用 Docker，并在回退到未隔离的
+进程执行时把记录写入节点和 ARA。投稿级运行建议设置
+`require_isolation: true`，让 Docker 不可用时直接失败，而不是静默降级。
+
+默认 Docker 策略会移除 capabilities、关闭网络、使用只读根文件系统，并
+限制 CPU、内存和 PID；只有运行工作区可写。需要下载数据或模型时可以临时
+启用 `allow_experiment_network: true`，缓存完成后应重新关闭。严格隔离模式
+不允许联网执行，因此需提前把必要输入放入运行工作区。构建默认执行镜像：
+
+```bash
+make executor-image
+```
 
 ---
 
@@ -282,7 +344,14 @@ HTTP API：
 
 ```bash
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/v1/projects \
+  -H 'content-type: application/json' \
+  -d '{"project":"demo","topic":"topic.md"}'
 ```
+
+交互式 API 文档位于 `http://127.0.0.1:8000/docs`，OpenAPI 文档位于
+`/openapi.json`。
 
 服务不只监听本机时，建议设置 `XSCIENTIST_API_KEY`，客户端通过
 `X-API-Key` 请求头传入。
@@ -436,7 +505,7 @@ flowchart TD
   candidate2 --> fork1
 ```
 
-这棵树和 git-like 记录、CLI log、节点 diff 使用的是同一份 provenance：`exploration_graph.json` 是源数据，`exploration_graph.html`、`exploration_graph.summary.json`、`run_ara_fork.py log`、`run_ara_fork.py diff --only-node` 和 `run_ara_fork.py fork` 都是它的不同视图。如果把 ARA 目录提交进 git，git 记录的是这份图数据的文件级快照；XScientist 的 log/diff/fork 则给出节点级历史。因此某篇小论文的结论如果来自 `candidate2`，就能继续追到它的父实验、失败修复、消融对照，以及可以从哪个节点 fork 出下一轮研究。
+这棵树和 git-like 记录、CLI log、节点 diff 使用的是同一份 provenance：`exploration_graph.json` 是源数据，`exploration_graph.html`、`exploration_graph.summary.json`、`xscientist ara log`、`xscientist ara diff --only-node` 和 `xscientist ara fork` 都是它的不同视图。如果把 ARA 目录提交进 git，git 记录的是这份图数据的文件级快照；XScientist 的 log/diff/fork 则给出节点级历史。因此某篇小论文的结论如果来自 `candidate2`，就能继续追到它的父实验、失败修复、消融对照，以及可以从哪个节点 fork 出下一轮研究。
 
 配套 CLI：`xscientist ara` 提供 `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` 等子命令：
 
@@ -474,7 +543,7 @@ xscientist ara verify \
   --limit 3
 ```
 
-`exploration_graph.json` 是每篇小论文对应的科技探索 DAG：节点是一次具体实验、修复或失败分支，边是 parent -> child 的演化关系。`validate` 会校验它是有向无环图；`graph --json` 给出 root、leaf、拓扑序和问题列表；`exploration_graph.html` 则是给人看的可视化入口。这样 `run_ara_fork.py log --node <id>` 的祖先链、`diff --only-node <id>` 的节点差异和浏览器里的探索树使用同一份图数据。
+`exploration_graph.json` 是每篇小论文对应的科技探索 DAG：节点是一次具体实验、修复或失败分支，边是 parent -> child 的演化关系。`validate` 会校验它是有向无环图；`graph --json` 给出 root、leaf、拓扑序和问题列表；`exploration_graph.html` 则是给人看的可视化入口。这样 `xscientist ara log --node <id>` 的祖先链、`xscientist ara diff --only-node <id>` 的节点差异和浏览器里的探索树使用同一份图数据。
 
 写作阶段的 prompt 会引导模型在关键定量结论后附加 `\claimref{<node_id>}`。该宏在 PDF 里不可见，但会被 `ai_scientist/utils/claim_registry.py` 扫描，把每一条 claim 落到 `ara/.../claims/<claim_id>.json`——完成「论文 assertion ↔ 探索节点」的双向锚定。`ai_scientist/utils/claim_coverage.py` 会把这些标记聚合成 `coverage_score` 与 severity（`ok` / `sparse` / `unresolved` / `insufficient` / `none`），存入 `ara/.../claims/coverage.json`，供质量门禁 / 排行 / dossier 打分使用。
 
@@ -519,13 +588,13 @@ python -m ai_scientist.experiments.ara_ab.harness stub \
     --seed-manifest <project>/.ara_seed/ara_seed.json \
     --out-dir /tmp/ab_out
 
-# 真跑：两次 run_project.py（baseline vs seeded），需 API key
+# 真跑：两次调用 `xscientist project`（baseline vs seeded），需 API key
 python -m ai_scientist.experiments.ara_ab.harness real \
     --project-dir-baseline /tmp/ab_baseline \
     --project-dir-seeded   /tmp/ab_seeded \
     --seed-from-ara /path/to/fork \
     --out-dir /tmp/ab_out \
-    -- --topic mytopic.md   # 后接的参数直传 run_project.py
+    -- --topic mytopic.md   # 后接的参数直传 xscientist project
 ```
 
 产物 `ab_report.json`（schema `ara.ab_report.v1`）会同时给出两侧的 wall-clock、LLM 调用数、node 数、content_hash 重叠度，以及最终 verdict（`seed_saved_llm_calls` / `seed_wall_clock_faster` / `seed_did_not_short_circuit` / `seed_inconclusive`）。
@@ -545,15 +614,16 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 ## 文档索引
 
-- `docs/guides/PROJECT_USAGE.md`：项目流用法与参数说明
-- `docs/guides/FEEDBACK_QUICKSTART.md`：反馈系统快速入门指南
-- `docs/CONFIG_REFERENCE.md`：更细的配置/参数参考
-- `docs/SOURCE_ORCHESTRATION.md`：source queue 编排与运行姿态建议
-- `docs/LONG_RUNNING_GUIDE.md`：长时运行操作指南
-- `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
-- `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
-- `docs/ARCHITECTURE.md`：系统架构文档
-- `docs/guides/OPTIMIZATION_SUMMARY.md`：优化总结
+- [项目使用指南](guides/PROJECT_USAGE.md)：项目流用法与参数说明
+- [SDK 与 API](guides/SDK_AND_API.md)：安装、Python SDK、CLI 与 HTTP API
+- [反馈系统快速入门](guides/FEEDBACK_QUICKSTART.md)：反馈系统运维方式
+- [配置参考](CONFIG_REFERENCE.md)：更细的配置与参数说明
+- [Source 编排](SOURCE_ORCHESTRATION.md)：source queue 编排与运行姿态建议
+- [长时运行指南](LONG_RUNNING_GUIDE.md)：daemon 运维与维护
+- [登录守卫](LOGIN_GUARDRAIL.md)：登录与会话管理
+- [输出目录](guides/OUTPUT_DIRECTORIES.md)：输出策略（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
+- [系统架构](ARCHITECTURE.md)：系统边界与核心组件
+- [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---
 

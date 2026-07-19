@@ -16,6 +16,11 @@ class DistributionBuildTests(unittest.TestCase):
         if shutil.which(sys.executable) is None:
             self.skipTest("python executable unavailable")
         repo_root = Path(__file__).resolve().parents[1]
+        self.addCleanup(
+            shutil.rmtree,
+            repo_root / "compat" / "xscientist.egg-info",
+            ignore_errors=True,
+        )
         with tempfile.TemporaryDirectory() as td:
             out_dir = Path(td)
             completed = subprocess.run(

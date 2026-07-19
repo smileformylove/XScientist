@@ -2,17 +2,26 @@
 
 XScientist exposes one public package, `xscientist`. The historical
 `ai_scientist` package contains the workflow implementation, while
-repository-root scripts remain compatibility adapters. Application consumers
+wheel-level modules preserve legacy compatibility. Application consumers
 should depend on `xscientist`; contributors may work in `ai_scientist`.
 
 ## Installation profiles
 
+The package has not been published to PyPI yet. Install the current version
+from GitHub or a local clone:
+
 ```bash
-pip install xscientist                    # lightweight SDK/protocol surface
-pip install "xscientist[full]"            # complete research runtime
-pip install "xscientist[full,service]"    # runtime plus FastAPI/Uvicorn
-pip install -e ".[full,service,dev]"      # contributor environment
+pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+
+# From a local clone:
+pip install -e ".[full,service,dev]"
 ```
+
+After the first PyPI release, the equivalent commands will be
+`pip install xscientist`, `pip install "xscientist[full]"`, and
+`pip install "xscientist[full,service]"`.
 
 ## Package boundary
 
@@ -31,7 +40,7 @@ ai_scientist/               Internal workflow implementation
 ├── treesearch/             Experiment search engine
 └── utils/                  Internal workflow components
 
-run_project.py and peers    Thin legacy aliases to ai_scientist.apps
+wheel root modules          Thin legacy aliases to ai_scientist.apps
 ```
 
 Public compatibility follows semantic versioning for symbols exported by
@@ -123,6 +132,9 @@ Direct compatibility commands (`xscientist-project`, `xscientist-batch`,
 ```bash
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 ```
+
+FastAPI exposes interactive documentation at `/docs` and the OpenAPI schema at
+`/openapi.json`.
 
 For shared environments, enable the built-in API-key check:
 
@@ -228,7 +240,7 @@ The wheel includes runtime assets previously available only from a Git clone:
 For a small internal deployment:
 
 ```bash
-pip install "xscientist[full,service]"
+pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 export XSCIENTIST_API_KEY="replace-with-a-secret"
 xscientist serve --host 0.0.0.0 --port 8000 --output-root /srv/xscientist
 ```
