@@ -116,6 +116,27 @@ class DistributionBuildTests(unittest.TestCase):
                 missing_source_ops,
                 f"sdist is missing source-only ops: {missing_source_ops}",
             )
+            self.assertFalse(
+                any(
+                    name.startswith(("tools/", "docs/", "examples/")) for name in names
+                ),
+                "wheel should not include source-only maintenance assets",
+            )
+            self.assertIn(
+                f"{sdist_root}/tools/repository_validation.py",
+                sdist_names,
+                "sdist should retain repository-only validation",
+            )
+            for source_asset in (
+                "docs/CONFIG_REFERENCE.md",
+                "docs/OPERATIONS_CHECKLIST.md",
+                "examples/example_topic.md",
+            ):
+                self.assertIn(
+                    f"{sdist_root}/{source_asset}",
+                    sdist_names,
+                    f"sdist should retain source operation asset: {source_asset}",
+                )
 
 
 if __name__ == "__main__":

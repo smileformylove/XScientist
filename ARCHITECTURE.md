@@ -14,6 +14,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
 | Source operations | `run_daemon_profile.py`, `run_daemon_rehearsal.py`, shell wrappers | Checkout-only | Profile overlays, rehearsals, and operator workflows tied to repository configs |
+| Repository maintenance | `tools/` | Source/sdist-only | Full repository validation and maintainer workflows that do not belong in the portable wheel runtime |
 
 New application code should import from `xscientist`. The root workflow scripts
 contain no business logic; they keep existing automation working while the
@@ -22,6 +23,13 @@ installed CLI dispatches directly to `ai_scientist.apps`.
 Source-operation helpers are included in Git and the source distribution, but
 not in the wheel. Installed users run `xscientist daemon`; repository operators
 may additionally use the profile, rehearsal, and shell workflows.
+
+`xscientist validate` follows the same boundary. In a source checkout or an
+unpacked sdist it delegates to `tools/repository_validation.py` for the full
+repository and operations smoke suite. In a wheel installation it validates
+only installed modules, packaged resources, schemas, versions, and optional
+application imports, without depending on repository-only files or writing to
+the installation directory.
 
 ## System Architecture
 

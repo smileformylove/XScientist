@@ -77,6 +77,8 @@ mv experiments/* "$RESEARCH_OUTPUT_DIR/experiments/" 2>/dev/null || true
 xscientist validate
 ```
 
-`xscientist validate` checks the source repository when run from a checkout and
-checks installed package modules/resources when run from a wheel. Full workflow
-runs still require login, model credentials, and required system dependencies.
+`xscientist validate` runs the full repository smoke suite from a source
+checkout or unpacked sdist, and checks installed modules/resources from a
+wheel. The installed check writes bytecode only to a temporary directory, so it
+also works with read-only package installations. Full workflow runs still
+require login, model credentials, and required system dependencies.
