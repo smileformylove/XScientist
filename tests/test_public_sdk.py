@@ -256,6 +256,121 @@ class PublicSdkTests(unittest.TestCase):
                 self.assertEqual(status["status"], "succeeded")
                 self.assertEqual(status["result"]["stdout"], "done")
 
+    def test_http_service_confines_requests_to_service_directories(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        completed = xscientist.CommandResult(
+            command=("python", "-m", "ai_scientist.apps.project"),
+            returncode=0,
+            stdout="done",
+            stderr="",
+            started_at="start",
+            finished_at="finish",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            work_dir = root / "work"
+            output_root = root / "output"
+            work_dir.mkdir()
+            (work_dir / "topic.md").write_text("topic", encoding="utf-8")
+            app = xscientist.create_app(
+                ServiceSettings(
+                    work_dir=work_dir,
+                    output_root=output_root,
+                    max_workers=1,
+                )
+            )
+            with (
+                mock.patch.object(
+                    XScientist, "run_project", return_value=completed
+                ) as run_project,
+                TestClient(app) as client,
+            ):
+                response = client.post(
+                    "/v1/projects",
+                    json={"project": "demo", "topic": "topic.md"},
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                for _ in range(50):
+                    job = client.get(f"/v1/jobs/{response.json()['id']}").json()
+                    if job["status"] not in {"queued", "running"}:
+                        break
+                    time.sleep(0.01)
+
+            request = run_project.call_args.args[0]
+            self.assertEqual(request.project, "demo")
+            self.assertEqual(Path(request.topic), (work_dir / "topic.md").resolve())
+            self.assertEqual(Path(request.output_root), output_root.resolve())
+
+    def test_http_service_rejects_path_and_argument_overrides(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            work_dir = root / "work"
+            output_root = root / "output"
+            work_dir.mkdir()
+            projects_root = output_root / "projects"
+            projects_root.mkdir(parents=True)
+            outside_project = root / "outside-project"
+            outside_project.mkdir()
+            (projects_root / "linked").symlink_to(
+                outside_project, target_is_directory=True
+            )
+            app = xscientist.create_app(
+                ServiceSettings(work_dir=work_dir, output_root=output_root)
+            )
+            payloads = [
+                {"project": "../escape", "topic": "topic.md"},
+                {"project": "nested/demo", "topic": "topic.md"},
+                {"project": "~", "topic": "topic.md"},
+                {"project": "--output-root", "topic": "topic.md"},
+                {"project": " demo ", "topic": "topic.md"},
+                {"project": "demo\n", "topic": "topic.md"},
+                {"project": "linked", "topic": "topic.md"},
+                {"project": "demo", "topic": str(root / "outside.md")},
+                {
+                    "project": "demo",
+                    "topic": "topic.md",
+                    "output_root": str(root / "other-output"),
+                },
+                {
+                    "project": "demo",
+                    "topic": "topic.md",
+                    "extra_args": ["--output-root", str(root / "other-output")],
+                },
+                {
+                    "project": "demo",
+                    "topic": "topic.md",
+                    "extra_args": ["--topic=../outside.md"],
+                },
+                {
+                    "project": "demo",
+                    "topic": "topic.md",
+                    "extra_args": ["--seed-from-ara", str(root / "outside-ara")],
+                },
+                {
+                    "project": "demo",
+                    "topic": "topic.md",
+                    "bfts_config": str(root / "outside.yaml"),
+                },
+            ]
+            with TestClient(app) as client:
+                responses = [
+                    client.post("/v1/projects", json=payload) for payload in payloads
+                ]
+
+        self.assertTrue(
+            all(response.status_code == 422 for response in responses),
+            [(response.status_code, response.text) for response in responses],
+        )
+
     def test_http_jobs_survive_service_restart(self) -> None:
         try:
             from fastapi.testclient import TestClient

@@ -32,6 +32,116 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_RESERVED_PROJECT_ARGS = {
+    "--output-root",
+    "--topic",
+    "--ideas",
+    "--bfts-config",
+    "--seed-from-ara",
+}
+_PACKAGED_CONFIG_ALIASES = {
+    "default",
+    "deep",
+    "bfts_config.yaml",
+    "bfts_config_deep.yaml",
+}
+
+
+def _resolve_service_input(
+    value: str | None,
+    *,
+    work_dir: Path,
+    label: str,
+) -> str | None:
+    if value is None:
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = work_dir / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(work_dir)
+    except ValueError as exc:
+        raise ValueError(f"{label} must stay within the service work_dir") from exc
+    return str(resolved)
+
+
+def _validate_project_name(project: str, *, output_root: Path) -> str:
+    raw_name = str(project or "")
+    name = raw_name.strip()
+    if (
+        not name
+        or name != raw_name
+        or name in {".", ".."}
+        or name.startswith(("-", "~"))
+        or Path(name).is_absolute()
+        or "/" in name
+        or "\\" in name
+        or any(ord(char) < 32 for char in raw_name)
+    ):
+        raise ValueError("project must be a single directory name")
+    projects_root = (output_root / "projects").resolve()
+    candidate = (projects_root / name).resolve()
+    try:
+        candidate.relative_to(projects_root)
+    except ValueError as exc:
+        raise ValueError("project must stay within the service output_root") from exc
+    return name
+
+
+def _validate_extra_args(extra_args: list[str]) -> tuple[str, ...]:
+    normalized = tuple(str(arg) for arg in extra_args)
+    for arg in normalized:
+        if any(
+            arg == reserved or arg.startswith(f"{reserved}=")
+            for reserved in _RESERVED_PROJECT_ARGS
+        ):
+            raise ValueError(
+                f"extra_args cannot override service-controlled option {arg!r}"
+            )
+    return normalized
+
+
+def _service_request(
+    payload: "ProjectPayload",
+    *,
+    work_dir: Path,
+    output_root: Path,
+) -> ProjectRequest:
+    requested_output = payload.output_root
+    if requested_output is not None:
+        if Path(requested_output).expanduser().resolve() != output_root:
+            raise ValueError("output_root is controlled by the API service")
+
+    config = payload.bfts_config
+    if (
+        config is not None
+        and str(config).strip().lower() not in _PACKAGED_CONFIG_ALIASES
+    ):
+        config = _resolve_service_input(
+            config,
+            work_dir=work_dir,
+            label="bfts_config",
+        )
+
+    return ProjectRequest(
+        project=_validate_project_name(payload.project, output_root=output_root),
+        topic=_resolve_service_input(payload.topic, work_dir=work_dir, label="topic"),
+        ideas=_resolve_service_input(payload.ideas, work_dir=work_dir, label="ideas"),
+        output_root=output_root,
+        num_ideas=payload.num_ideas,
+        parallel=payload.parallel,
+        num_workers=payload.num_workers,
+        workflow_mode=payload.workflow_mode,
+        target_venue=payload.target_venue,
+        submission_mode=payload.submission_mode,
+        breakthrough_mode=payload.breakthrough_mode,
+        high_quality_mode=payload.high_quality_mode,
+        bfts_config=config,
+        extra_args=_validate_extra_args(payload.extra_args),
+    )
+
+
 def _require_fastapi():
     try:
         from fastapi import FastAPI, HTTPException, Request
@@ -227,6 +337,11 @@ def create_app(settings: ServiceSettings | None = None):
         if resolved.output_root is not None
         else resolve_output_path().resolve()
     )
+    work_dir = (
+        Path(resolved.work_dir).expanduser().resolve()
+        if resolved.work_dir is not None
+        else Path.cwd().resolve()
+    )
     state_dir = resolved.state_dir or output_root / ".xscientist" / "api" / "jobs"
     store = _JobStore(
         client,
@@ -271,7 +386,11 @@ def create_app(settings: ServiceSettings | None = None):
     @app.post("/v1/projects", status_code=202)
     def submit_project(payload: ProjectPayload) -> dict[str, Any]:
         try:
-            request = payload.to_request()
+            request = _service_request(
+                payload,
+                work_dir=work_dir,
+                output_root=output_root,
+            )
             request.to_argv()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

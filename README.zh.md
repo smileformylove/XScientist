@@ -197,8 +197,9 @@ xscientist auth status
 ```bash
 xscientist preflight --strict
 xscientist validate
-make smoke
 ```
+
+在源码 checkout 中，贡献者还可以运行 `make smoke`。
 
 ---
 
@@ -226,12 +227,15 @@ export RESEARCH_OUTPUT_DIR="/path/to/my_xscientist_outputs"
 
 ## 使用方法
 
+先在当前目录准备一个 `topic.md` 主题文件，再执行下面的安装版示例。
+源码仓库中也可以使用 `examples/example_topic.md`。
+
 ### A) 从 Topic 跑一个项目（最常用）
 
 ```bash
 xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md
+  --topic topic.md
 ```
 
 更多用法：`docs/guides/PROJECT_USAGE.md`
@@ -241,7 +245,7 @@ xscientist project my_project \
 ```bash
 xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --paper-types icbinb
 ```
 
@@ -249,7 +253,7 @@ xscientist batch \
 
 ```bash
 xscientist daemon \
-  --source-config configs/sources/stable_source_priority.example.json \
+  --topic topic.md \
   --duration-hours 24 \
   --enable-rewrite-followup \
   --auto-source-quality-feedback \
@@ -289,19 +293,21 @@ xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 # 强制启用最终稿完整性取证
 xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --integrity-forensics
 
 # 在高质量调试中临时关闭
 xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --paper-types icbinb \
   --high-quality-mode \
   --no-integrity-forensics
 ```
 
 常用运维命令：
+
+下面的 shell 运维命令只在源码 checkout 或 sdist 中提供，wheel 安装不包含它们。
 
 ```bash
 bash run_stable_daemon.sh status
@@ -482,16 +488,15 @@ export AI_SCIENTIST_ARA_REEXEC=1
 
 ```bash
 # 用 fork 目录作为种子（推荐）
-python3 run_project.py \
-  --project-dir <B_project> \
+xscientist project <B_project> \
   --seed-from-ara /path/to/fork_seed \
-  --topic ...   # 其他常规参数
+  --topic topic.md
 
 # 或直接从上一次 ARA 的某个节点起接力（等价于 fork + seed 一步到位）
-python3 run_project.py \
-  --project-dir <B_project> \
+xscientist project <B_project> \
   --seed-from-ara <A_project>/ara/<timestamp>_<idea> \
-  --seed-node-id <node_id>
+  --seed-node-id <node_id> \
+  --topic topic.md
 ```
 
 底层通过环境变量 `AI_SCIENTIST_ARA_SEED_PATH` 传递种子清单——同一机制会自动跨越 subprocess 边界（并行 worker 也能生效）。协议细节见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) §7。

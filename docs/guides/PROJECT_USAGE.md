@@ -1,6 +1,6 @@
 # XScientist Project Runner
 
-`run_project.py` runs a single research project end to end: ideation, experiment execution, writeup, review, repair, and artifact packaging.
+`xscientist project` runs a single research project end to end: ideation, experiment execution, writeup, review, repair, and artifact packaging. `run_project.py` remains a compatibility alias for source checkouts and older automation.
 
 Use it when you want a focused project directory rather than a long-running daemon or a batch of independent papers.
 
@@ -9,22 +9,22 @@ Use it when you want a focused project directory rather than a long-running daem
 Login is required for guarded entrypoints:
 
 ```bash
-python3 auth_cli.py login --user <your_name>
-python3 auth_cli.py status
+xscientist auth login --user <your_name>
+xscientist auth status
 ```
 
 Run one project from a topic file:
 
 ```bash
-python3 run_project.py my_research \
-  --topic examples/example_topic.md
+xscientist project my_research \
+  --topic topic.md
 ```
 
 Run several ideas in parallel:
 
 ```bash
-python3 run_project.py my_research \
-  --topic examples/example_topic.md \
+xscientist project my_research \
+  --topic topic.md \
   --num-ideas 3 \
   --parallel \
   --num-workers 2 \
@@ -34,7 +34,7 @@ python3 run_project.py my_research \
 Process existing ideas:
 
 ```bash
-python3 run_project.py my_research \
+xscientist project my_research \
   --ideas existing_ideas.json \
   --idea-indices 0,2,4 \
   --parallel
@@ -57,9 +57,9 @@ RESEARCH_OUTPUT_DIR > AI_SCIENTIST_OUTPUT_DIR > sibling <repo-name>_outputs
 Use `--output-root` when you want an explicit path for one invocation:
 
 ```bash
-python3 run_project.py my_research \
+xscientist project my_research \
   --output-root /path/to/my_xscientist_outputs \
-  --topic examples/example_topic.md
+  --topic topic.md
 ```
 
 ## Project Layout
@@ -110,16 +110,16 @@ my_research/
 Fast single-paper run:
 
 ```bash
-python3 run_project.py quick_paper \
-  --topic examples/example_topic.md \
+xscientist project quick_paper \
+  --topic topic.md \
   --improvement-rounds 1
 ```
 
 Higher-quality run:
 
 ```bash
-python3 run_project.py high_quality \
-  --topic examples/example_topic.md \
+xscientist project high_quality \
+  --topic topic.md \
   --num-ideas 1 \
   --high-quality-mode \
   --quality-preset publishable \
@@ -131,7 +131,7 @@ python3 run_project.py high_quality \
 Resume after interruption by skipping ideation and selecting remaining ideas:
 
 ```bash
-python3 run_project.py my_research \
+xscientist project my_research \
   --skip-ideation \
   --idea-indices 2,3,4 \
   --parallel
@@ -145,11 +145,11 @@ Progress is written to:
 <project_dir>/04_logs/progress.json
 ```
 
-Use `research_manager.py` for repository-wide boards:
+Use `xscientist manager` for repository-wide boards:
 
 ```bash
-python3 research_manager.py rebuild-index
-python3 research_manager.py submission-board --top 5 --require-gate
-python3 research_manager.py rewrite-board --top 10
-python3 research_manager.py repair-board --top 20
+xscientist manager rebuild-index
+xscientist manager submission-board --top 5 --require-gate
+xscientist manager rewrite-board --top 10
+xscientist manager repair-board --top 20
 ```

@@ -1,6 +1,6 @@
 # XScientist Continuous Paper Generator
 
-`continuous_paper_generator.py` creates batches of papers from a topic or an existing ideas file. It supports multiple paper types, parallel workers, review/repair rounds, high-quality gates, and batch-level progress reports.
+`xscientist batch` creates batches of papers from a topic or an existing ideas file. It supports multiple paper types, parallel workers, review/repair rounds, high-quality gates, and batch-level progress reports. `continuous_paper_generator.py` remains a compatibility alias.
 
 Use it when you want more throughput than `run_project.py` but do not need a persistent daemon loop.
 
@@ -53,8 +53,8 @@ RESEARCH_OUTPUT_DIR > AI_SCIENTIST_OUTPUT_DIR > sibling <repo-name>_outputs
 Login is required:
 
 ```bash
-python3 auth_cli.py login --user <your_name>
-python3 auth_cli.py status
+xscientist auth login --user <your_name>
+xscientist auth status
 ```
 
 Set the model credentials you need. The default models use Zhipu credentials:
@@ -66,8 +66,8 @@ export ZHIPU_API_KEY="your_api_key_here"
 Generate workshop papers from a topic:
 
 ```bash
-python3 continuous_paper_generator.py \
-  --topic examples/example_topic.md \
+xscientist batch \
+  --topic topic.md \
   --num-ideas 5 \
   --paper-types icbinb
 ```
@@ -75,8 +75,8 @@ python3 continuous_paper_generator.py \
 Generate all supported paper types:
 
 ```bash
-python3 continuous_paper_generator.py \
-  --topic examples/example_topic.md \
+xscientist batch \
+  --topic topic.md \
   --num-ideas 3 \
   --all-types
 ```
@@ -84,7 +84,7 @@ python3 continuous_paper_generator.py \
 Generate from existing ideas:
 
 ```bash
-python3 continuous_paper_generator.py \
+xscientist batch \
   --ideas existing_ideas.json \
   --paper-types normal journal
 ```
@@ -92,8 +92,8 @@ python3 continuous_paper_generator.py \
 Use parallel workers:
 
 ```bash
-python3 continuous_paper_generator.py \
-  --topic examples/example_topic.md \
+xscientist batch \
+  --topic topic.md \
   --all-types \
   --num-workers 2
 ```
@@ -101,7 +101,7 @@ python3 continuous_paper_generator.py \
 Process selected idea indices:
 
 ```bash
-python3 continuous_paper_generator.py \
+xscientist batch \
   --ideas my_ideas.json \
   --all-types \
   --idea-indices 0,1,2
@@ -110,8 +110,8 @@ python3 continuous_paper_generator.py \
 ## Quality-Oriented Runs
 
 ```bash
-python3 continuous_paper_generator.py \
-  --topic examples/example_topic.md \
+xscientist batch \
+  --topic topic.md \
   --paper-types normal \
   --target-venue neurips \
   --auto-adjust-paper-type \
@@ -129,34 +129,34 @@ python3 continuous_paper_generator.py \
 List batches:
 
 ```bash
-python3 research_manager.py list-batches
+xscientist manager list-batches
 ```
 
 Inspect a batch:
 
 ```bash
-python3 research_manager.py batch-summary 20240101_120000
+xscientist manager batch-summary 20240101_120000
 ```
 
 List papers:
 
 ```bash
-python3 research_manager.py list-papers
-python3 research_manager.py list-papers --type normal
-python3 research_manager.py list-papers --detailed
+xscientist manager list-papers
+xscientist manager list-papers --type normal
+xscientist manager list-papers --detailed
 ```
 
 Search generated papers:
 
 ```bash
-python3 research_manager.py search-papers "transformer"
+xscientist manager search-papers "transformer"
 ```
 
 Clean old artifacts:
 
 ```bash
-python3 research_manager.py cleanup --days 30 --dry-run
-python3 research_manager.py cleanup --days 30
+xscientist manager cleanup --days 30 --dry-run
+xscientist manager cleanup --days 30
 ```
 
 ## Useful Options
@@ -186,20 +186,20 @@ PDF generation fails:
 
 ```bash
 which pdflatex
-python3 continuous_paper_generator.py --topic examples/example_topic.md --writeup-retries 5
+xscientist batch --topic topic.md --writeup-retries 5
 ```
 
 Memory pressure is high:
 
 ```bash
-python3 continuous_paper_generator.py --topic examples/example_topic.md --num-workers 1
+xscientist batch --topic topic.md --num-workers 1
 ```
 
 Provider rate limits are tight:
 
 ```bash
-python3 continuous_paper_generator.py \
-  --topic examples/example_topic.md \
+xscientist batch \
+  --topic topic.md \
   --model-writeup glm-4-air \
   --model-citation glm-4-flash
 ```

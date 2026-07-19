@@ -144,6 +144,16 @@ Example request:
 }
 ```
 
+The service owns its filesystem boundary:
+
+- `project` must be a single directory name;
+- `topic`, `ideas`, and custom BFTS configs must resolve inside `work_dir`;
+- the request cannot override the configured `output_root` through fields or
+  `extra_args`.
+
+These restrictions apply to the HTTP adapter only. Trusted local Python SDK and
+CLI callers retain their normal path flexibility.
+
 The bundled service is intended for local/team integration. It includes API-key
 authentication and persistent job metadata. Internet-facing deployments should
 also add rate limits, durable external queues/workers, TLS, and centralized

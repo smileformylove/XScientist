@@ -181,8 +181,9 @@ Login guard doc: `docs/LOGIN_GUARDRAIL.md`
 ```bash
 xscientist preflight --strict
 xscientist validate
-make smoke
 ```
+
+From a source checkout, contributors can additionally run `make smoke`.
 
 ### 5) Isolate AI-generated experiment code
 
@@ -235,12 +236,15 @@ Most scripts support stricter quality gates. During local debugging you may choo
 
 ## Usage
 
+Create a local topic file such as `topic.md` before running the examples below.
+Repository checkouts may also use `examples/example_topic.md`.
+
 ### A) Run a single project from a topic
 
 ```bash
 xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md
+  --topic topic.md
 ```
 
 More usage: `docs/guides/PROJECT_USAGE.md`
@@ -250,7 +254,7 @@ More usage: `docs/guides/PROJECT_USAGE.md`
 ```bash
 xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --paper-types icbinb
 ```
 
@@ -258,7 +262,7 @@ xscientist batch \
 
 ```bash
 xscientist daemon \
-  --source-config configs/sources/stable_source_priority.example.json \
+  --topic topic.md \
   --duration-hours 24 \
   --enable-rewrite-followup \
   --auto-source-quality-feedback \
@@ -278,7 +282,7 @@ from xscientist import ProjectRequest, XScientist
 
 client = XScientist(output_root="./research-output")
 result = client.run_project(
-    ProjectRequest(project="my_project", topic="examples/example_topic.md")
+    ProjectRequest(project="my_project", topic="topic.md")
 )
 print(result.returncode, result.stdout)
 ```
@@ -289,7 +293,7 @@ HTTP API:
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 curl -X POST http://127.0.0.1:8000/v1/projects \
   -H 'content-type: application/json' \
-  -d '{"project":"demo","topic":"examples/example_topic.md"}'
+  -d '{"project":"demo","topic":"topic.md"}'
 ```
 
 Set `XSCIENTIST_API_KEY` and send it as `X-API-Key` when exposing the service
@@ -304,19 +308,22 @@ Submission-grade and high-quality runs enable deterministic integrity forensics 
 # Force integrity forensics for the final manuscript.
 xscientist project my_project \
   --output-root "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --integrity-forensics
 
 # Temporarily disable it during high-quality debugging.
 xscientist batch \
   --research-dir "$RESEARCH_OUTPUT_DIR" \
-  --topic examples/example_topic.md \
+  --topic topic.md \
   --paper-types icbinb \
   --high-quality-mode \
   --no-integrity-forensics
 ```
 
 Common ops commands:
+
+The shell operations below are available from a source checkout or sdist, not
+from the wheel-only installation.
 
 ```bash
 bash run_stable_daemon.sh status
@@ -498,16 +505,15 @@ Any ARA produced by an XScientist run can seed the next run — the very first B
 
 ```bash
 # Seed from a fork directory (recommended workflow).
-python3 run_project.py \
-  --project-dir <B_project> \
+xscientist project <B_project> \
   --seed-from-ara /path/to/fork_seed \
-  --topic ...   # other normal flags
+  --topic topic.md
 
 # Or seed directly from a node inside an existing ARA (fork + seed in one step).
-python3 run_project.py \
-  --project-dir <B_project> \
+xscientist project <B_project> \
   --seed-from-ara <A_project>/ara/<timestamp>_<idea> \
-  --seed-node-id <node_id>
+  --seed-node-id <node_id> \
+  --topic topic.md
 ```
 
 Under the hood the seed manifest is passed through the `AI_SCIENTIST_ARA_SEED_PATH` env var, so the short-circuit also applies inside parallel workers. Protocol details in [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) §7.
