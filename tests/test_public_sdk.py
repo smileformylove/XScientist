@@ -9,12 +9,14 @@ from unittest import mock
 import xscientist
 from ai_scientist.resources import (
     bfts_config_path,
+    idea_resource_path,
     latex_template_dir,
     resolve_bfts_config_path,
 )
 from xscientist import ProjectRequest, ServiceSettings, XScientist
 from xscientist.cli import main as cli_main
 from xscientist.entrypoints import project_main
+from xscientist.service import run_server
 
 
 class PublicSdkTests(unittest.TestCase):
@@ -26,6 +28,10 @@ class PublicSdkTests(unittest.TestCase):
     def test_packaged_runtime_resources_exist(self) -> None:
         self.assertTrue(bfts_config_path("default").is_file())
         self.assertTrue(bfts_config_path("deep").is_file())
+        self.assertTrue(idea_resource_path().is_file())
+        self.assertTrue(
+            idea_resource_path("i_cant_believe_its_not_better.md").is_file()
+        )
         self.assertTrue((latex_template_dir("icbinb") / "template.tex").is_file())
         self.assertTrue((latex_template_dir("icml") / "template.tex").is_file())
 
@@ -35,6 +41,36 @@ class PublicSdkTests(unittest.TestCase):
             resolve_bfts_config_path(missing_root_config),
             bfts_config_path("default"),
         )
+
+    def test_relative_custom_config_resolves_from_current_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "custom.yaml"
+            config.write_text("goal: demo\n", encoding="utf-8")
+            with mock.patch("pathlib.Path.cwd", return_value=root):
+                resolved = resolve_bfts_config_path("custom.yaml")
+
+            self.assertEqual(resolved, config.resolve())
+
+    def test_client_resolves_custom_config_from_work_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "custom.yaml"
+            config.write_text("goal: demo\n", encoding="utf-8")
+            client = XScientist(work_dir=root)
+
+            command = client.project_command(
+                ProjectRequest(
+                    project="demo",
+                    topic="topic.md",
+                    bfts_config="custom.yaml",
+                )
+            )
+
+            self.assertEqual(
+                Path(command[command.index("--bfts-config") + 1]),
+                config.resolve(),
+            )
 
     def test_project_request_builds_predictable_cli_arguments(self) -> None:
         request = ProjectRequest(
@@ -145,6 +181,29 @@ class PublicSdkTests(unittest.TestCase):
 
         self.assertEqual(payload["result"]["stdout"], "6789")
         self.assertEqual(payload["result"]["stderr"], "ghij")
+
+    def test_http_service_supports_optional_api_key(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        app = xscientist.create_app(ServiceSettings(max_workers=1, api_key="secret"))
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/health").status_code, 401)
+            response = client.get("/health", headers={"X-API-Key": "secret"})
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_reload_server_does_not_create_a_second_app(self) -> None:
+        with (
+            mock.patch("uvicorn.run") as uvicorn_run,
+            mock.patch("xscientist.service.create_app") as create_app_mock,
+        ):
+            run_server(reload=True)
+
+        uvicorn_run.assert_called_once()
+        create_app_mock.assert_not_called()
 
     def test_http_service_submits_and_reports_jobs(self) -> None:
         try:

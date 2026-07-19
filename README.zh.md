@@ -274,6 +274,9 @@ HTTP API：
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 ```
 
+服务不只监听本机时，建议设置 `XSCIENTIST_API_KEY`，客户端通过
+`X-API-Key` 请求头传入。
+
 完整说明见 [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md)。
 
 投稿级/高质量运行会默认启用 deterministic integrity forensics。你也可以显式控制：

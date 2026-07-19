@@ -22,9 +22,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import traceback
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-# 添加项目根目录到路径
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
-sys.path.insert(0, PROJECT_ROOT)
 
 from ai_scientist.utils.guardrail_artifacts import (
     load_guardrail_artifacts,
@@ -3612,8 +3610,6 @@ def _process_single_paper(args):
         exp_dir = str(paper_structure["root"])
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
-        if not osp.isabs(config_path):
-            config_path = osp.join(PROJECT_ROOT, config_path)
         idea_config_path = edit_bfts_config_file(
             config_path, exp_dir, str(idea_path_json)
         )
@@ -4177,7 +4173,7 @@ def _process_single_paper(args):
                     exp_dir=str(paper_dir),
                     idea=idea,
                     timestamp=None,
-                    bfts_config_path=bfts_config_path,
+                    bfts_config_path=config_path,
                     model_spec={
                         "writeup": model_writeup,
                         "writeup_small": model_writeup_small,

@@ -288,6 +288,9 @@ curl -X POST http://127.0.0.1:8000/v1/projects \
   -d '{"project":"demo","topic":"examples/example_topic.md"}'
 ```
 
+Set `XSCIENTIST_API_KEY` and send it as `X-API-Key` when exposing the service
+beyond localhost.
+
 See [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md) for the public
 package structure, SDK contract, API endpoints, and deployment guidance.
 

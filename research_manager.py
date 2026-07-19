@@ -17,9 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# 添加项目根目录到路径
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
-sys.path.insert(0, PROJECT_ROOT)
 
 from ai_scientist.config.paths import resolve_output_path
 from ai_scientist.utils.run_index import (

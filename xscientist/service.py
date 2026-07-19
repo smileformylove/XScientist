@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from contextlib import asynccontextmanager
+import hmac
+import os
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -27,13 +29,14 @@ def _now_iso() -> str:
 
 def _require_fastapi():
     try:
-        from fastapi import FastAPI, HTTPException
+        from fastapi import FastAPI, HTTPException, Request
+        from fastapi.responses import JSONResponse
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "HTTP service dependencies are not installed. "
             "Install them with `pip install xscientist[service]`."
         ) from exc
-    return FastAPI, HTTPException
+    return FastAPI, HTTPException, Request, JSONResponse
 
 
 if ConfigDict is not None and Field is not None:
@@ -158,12 +161,12 @@ class _JobStore:
 
 
 def create_app(settings: ServiceSettings | None = None):
-    FastAPI, HTTPException = _require_fastapi()
+    FastAPI, HTTPException, Request, JSONResponse = _require_fastapi()
     if ProjectPayload is None:
         raise ModuleNotFoundError(
             "Pydantic is not installed. Install `xscientist[service]`."
         )
-    resolved = settings or ServiceSettings()
+    resolved = settings or ServiceSettings(api_key=os.environ.get("XSCIENTIST_API_KEY"))
     client = XScientist(
         work_dir=resolved.work_dir,
         output_root=resolved.output_root,
@@ -187,6 +190,18 @@ def create_app(settings: ServiceSettings | None = None):
         lifespan=lifespan,
     )
     app.state.job_store = store
+
+    if resolved.api_key:
+
+        @app.middleware("http")
+        async def require_api_key(request: Request, call_next):
+            supplied = request.headers.get("x-api-key", "")
+            if not hmac.compare_digest(supplied, resolved.api_key or ""):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "missing or invalid X-API-Key"},
+                )
+            return await call_next(request)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -223,6 +238,7 @@ def run_server(
     output_root: str | None = None,
     max_workers: int = 2,
     max_output_chars: int = 200_000,
+    api_key: str | None = None,
     reload: bool = False,
 ) -> None:
     try:
@@ -248,6 +264,7 @@ def run_server(
             output_root=output_root,
             max_workers=max_workers,
             max_output_chars=max_output_chars,
+            api_key=api_key or os.environ.get("XSCIENTIST_API_KEY"),
         )
     )
     uvicorn.run(app, host=host, port=port)

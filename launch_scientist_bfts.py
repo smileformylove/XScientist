@@ -12,6 +12,7 @@ from ai_scientist.utils.launcher_workflow import (
     run_review_phase,
     run_writeup_phase,
 )
+from ai_scientist.resources import idea_resource_path
 from ai_scientist.utils.launcher_cli import normalize_common_launcher_args
 from ai_scientist.utils.pipeline_helpers import (
     cleanup_child_processes,
@@ -46,12 +47,14 @@ from ai_scientist.config.paths import (
     get_experiment_dir,
 )
 
+
 def experiment_budget_exit_code(experiment_result) -> int | None:
     """Backward-compatible helper for budget-specific callers."""
 
-    if isinstance(experiment_result, dict) and experiment_result.get(
-        "status"
-    ) == "budget_exhausted":
+    if (
+        isinstance(experiment_result, dict)
+        and experiment_result.get("status") == "budget_exhausted"
+    ):
         return LLM_BUDGET_EXIT_CODE
     return None
 
@@ -76,7 +79,7 @@ def parse_arguments():
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.json",
+        default=str(idea_resource_path("i_cant_believe_its_not_better.json")),
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -90,12 +93,37 @@ def parse_arguments():
         default=0,
         help="Index of the idea to run",
     )
-    parser.add_argument("--auto-best-idea", action="store_true", help="Rank loaded ideas and run the highest-scoring one")
-    parser.add_argument("--idea-rank-model", type=str, default=None, help="Model used to rank loaded ideas")
-    parser.add_argument("--fallback-ranked-ideas", action="store_true", help="If the best idea fails the quality gate, try the next ranked idea")
-    parser.add_argument("--auto-adjust-paper-type", action="store_true", help="Automatically switch to a better paper type for the target venue")
-    parser.add_argument("--submission-mode", action="store_true", help="Enable a full submission-grade preset")
-    parser.add_argument("--breakthrough-mode", action="store_true", help="Bias the system toward major-problem, high-impact submissions")
+    parser.add_argument(
+        "--auto-best-idea",
+        action="store_true",
+        help="Rank loaded ideas and run the highest-scoring one",
+    )
+    parser.add_argument(
+        "--idea-rank-model",
+        type=str,
+        default=None,
+        help="Model used to rank loaded ideas",
+    )
+    parser.add_argument(
+        "--fallback-ranked-ideas",
+        action="store_true",
+        help="If the best idea fails the quality gate, try the next ranked idea",
+    )
+    parser.add_argument(
+        "--auto-adjust-paper-type",
+        action="store_true",
+        help="Automatically switch to a better paper type for the target venue",
+    )
+    parser.add_argument(
+        "--submission-mode",
+        action="store_true",
+        help="Enable a full submission-grade preset",
+    )
+    parser.add_argument(
+        "--breakthrough-mode",
+        action="store_true",
+        help="Bias the system toward major-problem, high-impact submissions",
+    )
     parser.add_argument(
         "--workflow-mode",
         type=str,
@@ -103,7 +131,12 @@ def parse_arguments():
         default="adaptive",
         help="Research orchestration mode.",
     )
-    parser.add_argument("--max-ranked-candidates", type=int, default=None, help="Maximum ranked ideas to try when fallback is enabled")
+    parser.add_argument(
+        "--max-ranked-candidates",
+        type=int,
+        default=None,
+        help="Maximum ranked ideas to try when fallback is enabled",
+    )
     parser.add_argument(
         "--add_dataset_ref",
         action="store_true",
@@ -189,14 +222,51 @@ def parse_arguments():
         default="balanced",
         help="Preset for high-quality paper generation",
     )
-    parser.add_argument("--quality-model", type=str, default=None, help="Model used for quality evaluation")
-    parser.add_argument("--target-venue", type=str, choices=["neurips", "iclr", "cvpr", "journal", "nature"], default=None)
-    parser.add_argument("--quality-threshold", type=float, default=None, help="Minimum target quality score")
-    parser.add_argument("--rigor-threshold", type=float, default=None, help="Minimum target rigor score")
-    parser.add_argument("--quality-rewrite-rounds", type=int, default=None, help="Maximum targeted rewrite rounds")
-    parser.add_argument("--autonomous-quality-followup-rounds", type=int, default=0, help="Maximum autonomous quality follow-up rounds when submission bar is not met")
-    parser.add_argument("--min-submission-priority", type=float, default=None, help="Minimum submission priority score to accept a draft")
-    parser.add_argument("--max-submission-blockers", type=int, default=None, help="Maximum blocker count allowed for an accepted draft")
+    parser.add_argument(
+        "--quality-model",
+        type=str,
+        default=None,
+        help="Model used for quality evaluation",
+    )
+    parser.add_argument(
+        "--target-venue",
+        type=str,
+        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        default=None,
+    )
+    parser.add_argument(
+        "--quality-threshold",
+        type=float,
+        default=None,
+        help="Minimum target quality score",
+    )
+    parser.add_argument(
+        "--rigor-threshold", type=float, default=None, help="Minimum target rigor score"
+    )
+    parser.add_argument(
+        "--quality-rewrite-rounds",
+        type=int,
+        default=None,
+        help="Maximum targeted rewrite rounds",
+    )
+    parser.add_argument(
+        "--autonomous-quality-followup-rounds",
+        type=int,
+        default=0,
+        help="Maximum autonomous quality follow-up rounds when submission bar is not met",
+    )
+    parser.add_argument(
+        "--min-submission-priority",
+        type=float,
+        default=None,
+        help="Minimum submission priority score to accept a draft",
+    )
+    parser.add_argument(
+        "--max-submission-blockers",
+        type=int,
+        default=None,
+        help="Maximum blocker count allowed for an accepted draft",
+    )
     parser.add_argument(
         "--require-quality-gate",
         action="store_true",
@@ -215,13 +285,39 @@ def parse_arguments():
         action="store_false",
         help="Disable deterministic integrity forensics for the final manuscript.",
     )
-    parser.add_argument("--review-reflections", type=int, default=1, help="Reflection rounds for textual review")
-    parser.add_argument("--review-ensemble", type=int, default=1, help="How many review samples to ensemble")
-    parser.add_argument("--review-fewshot", type=int, default=1, help="Few-shot review exemplars")
-    parser.add_argument("--review-temperature", type=float, default=0.75, help="Temperature for review generation")
+    parser.add_argument(
+        "--review-reflections",
+        type=int,
+        default=1,
+        help="Reflection rounds for textual review",
+    )
+    parser.add_argument(
+        "--review-ensemble",
+        type=int,
+        default=1,
+        help="How many review samples to ensemble",
+    )
+    parser.add_argument(
+        "--review-fewshot", type=int, default=1, help="Few-shot review exemplars"
+    )
+    parser.add_argument(
+        "--review-temperature",
+        type=float,
+        default=0.75,
+        help="Temperature for review generation",
+    )
     parser.add_argument(
         "--review-strategy",
-        choices=["standard", "fast", "depth", "neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=[
+            "standard",
+            "fast",
+            "depth",
+            "neurips",
+            "iclr",
+            "cvpr",
+            "journal",
+            "nature",
+        ],
         default=None,
         help="Review strategy preset",
     )
@@ -359,7 +455,9 @@ if __name__ == "__main__":
     )
     if rankings and candidate_indices:
         args.idea_idx = candidate_indices[0]
-        print(f"Auto-selected best idea index: {args.idea_idx} ({rankings[0].get('idea_name')}); ranking_score={rankings[0].get('ranking_score')}")
+        print(
+            f"Auto-selected best idea index: {args.idea_idx} ({rankings[0].get('idea_name')}); ranking_score={rankings[0].get('ranking_score')}"
+        )
 
     args.writeup_type = resolve_paper_type_for_venue(
         args.writeup_type,
@@ -373,7 +471,7 @@ if __name__ == "__main__":
     for candidate_idx in candidate_indices:
         idea = ideas[candidate_idx]
 
-        idea_dir = str(get_experiment_dir(idea['Name'], args.attempt_id))
+        idea_dir = str(get_experiment_dir(idea["Name"], args.attempt_id))
         print(f"Results will be saved in {idea_dir}")
         print(
             "(Relative to project root: "

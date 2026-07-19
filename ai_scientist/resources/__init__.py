@@ -35,7 +35,9 @@ def bfts_config_path(profile: str = "default") -> Path:
     return path
 
 
-def resolve_bfts_config_path(value: str | Path | None = None) -> Path:
+def resolve_bfts_config_path(
+    value: str | Path | None = None, *, base_dir: str | Path | None = None
+) -> Path:
     """Resolve an explicit path or a packaged ``default``/``deep`` profile."""
 
     if value is None:
@@ -51,9 +53,9 @@ def resolve_bfts_config_path(value: str | Path | None = None) -> Path:
     if candidate.is_file():
         return candidate.resolve()
     if not candidate.is_absolute():
-        cwd_candidate = Path.cwd() / candidate
-        if cwd_candidate.is_file():
-            return cwd_candidate.resolve()
+        relative_candidate = Path(base_dir or Path.cwd()).expanduser() / candidate
+        if relative_candidate.is_file():
+            return relative_candidate.resolve()
     profile = profile_aliases.get(text.lower()) or profile_aliases.get(
         candidate.name.lower()
     )
@@ -85,8 +87,19 @@ def latex_template_dir(template: str) -> Path:
     return path
 
 
+def idea_resource_path(filename: str = "i_cant_believe_its_not_better.json") -> Path:
+    """Return a packaged example idea or workshop-description file."""
+
+    name = Path(filename).name
+    path = package_root() / "ideas" / name
+    if not path.is_file():
+        raise FileNotFoundError(f"Packaged idea resource is missing: {name}")
+    return path
+
+
 __all__ = [
     "bfts_config_path",
+    "idea_resource_path",
     "latex_template_dir",
     "package_root",
     "resolve_bfts_config_path",

@@ -1,13 +1,13 @@
 import argparse
 import json
 import os.path as osp
-import re,os
+import re, os
 import traceback
 from typing import Any, Dict, List
 
-import sys
 
-sys.path.append(osp.join(osp.dirname(__file__), ".."))
+from ai_scientist.resources import idea_resource_path
+from ai_scientist.config.paths import get_idea_path
 from ai_scientist.llm import (
     AVAILABLE_LLMS,
     create_client,
@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workshop-file",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.md",
+        default=str(idea_resource_path("i_cant_believe_its_not_better.md")),
         help="Path to the workshop description file.",
     )
     parser.add_argument(
@@ -297,6 +297,12 @@ if __name__ == "__main__":
         type=int,
         default=5,
         help="Number of reflection rounds per proposal.",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output JSON path. Defaults to the configured research ideas directory.",
     )
     args = parser.parse_args()
 
@@ -308,8 +314,8 @@ if __name__ == "__main__":
     print(f"Using workshop description from {args.workshop_file} for idea generation.")
     print(f"Workshop description:\n{workshop_description}")
 
-    # Create output filename by replacing .md extension with .json
-    idea_fname = args.workshop_file.replace(".md", ".json")
+    workshop_stem = osp.splitext(osp.basename(args.workshop_file))[0]
+    idea_fname = args.output or str(get_idea_path(workshop_stem))
     print("Starting idea generation for", idea_fname)
     ideas = generate_temp_free_idea(
         idea_fname=idea_fname,

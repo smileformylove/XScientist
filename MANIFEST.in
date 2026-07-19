@@ -1,2 +1,2 @@
-exclude tests/*
+prune tests
 global-exclude __pycache__ *.py[cod] .DS_Store

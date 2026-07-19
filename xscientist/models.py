@@ -102,6 +102,7 @@ class ServiceSettings:
     env: Mapping[str, str] = field(default_factory=dict)
     max_workers: int = 2
     max_output_chars: int = 200_000
+    api_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:

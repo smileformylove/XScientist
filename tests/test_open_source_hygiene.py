@@ -13,6 +13,9 @@ class OpenSourceHygieneTests(unittest.TestCase):
         cls.pyproject_path = cls.repo_root / "pyproject.toml"
         cls.gitignore_path = cls.repo_root / ".gitignore"
         cls.workflow_path = cls.repo_root / ".github" / "workflows" / "smoke.yml"
+        cls.release_workflow_path = (
+            cls.repo_root / ".github" / "workflows" / "release.yml"
+        )
         cls.constraints_path = cls.repo_root / "constraints-ci.txt"
         cls.smoke_requirements_path = cls.repo_root / "requirements-smoke.txt"
         portable_sources = [
@@ -118,6 +121,12 @@ class OpenSourceHygieneTests(unittest.TestCase):
         self.assertIn('xscientist = "xscientist.cli:main"', text)
         self.assertIn("[project.optional-dependencies]", text)
         self.assertIn("service = [", text)
+
+    def test_release_workflow_should_use_pypi_trusted_publishing(self) -> None:
+        text = self.release_workflow_path.read_text(encoding="utf-8")
+        self.assertIn("pypa/gh-action-pypi-publish@release/v1", text)
+        self.assertIn("id-token: write", text)
+        self.assertIn("python -m build --sdist --wheel", text)
 
     def test_pyproject_should_define_python_floor_and_black_config(self) -> None:
         text = self.pyproject_path.read_text(encoding="utf-8")

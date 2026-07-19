@@ -1,11 +1,8 @@
 import json
 import os
-import sys
 
 from .journal import Node, Journal
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-sys.path.insert(0, parent_dir)
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
 from ai_scientist.treesearch.backend import get_ai_client
 from ai_scientist.utils.llm_budget import is_llm_budget_exception

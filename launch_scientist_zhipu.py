@@ -3,6 +3,7 @@
 AI Scientist-v2 启动脚本 - 智谱API优化版
 使用智谱AI模型运行完整的科研流程
 """
+
 import json
 import argparse
 import os
@@ -15,6 +16,7 @@ from ai_scientist.utils.launcher_workflow import (
     run_review_phase,
     run_writeup_phase,
 )
+from ai_scientist.resources import idea_resource_path
 from ai_scientist.utils.launcher_cli import normalize_common_launcher_args
 from ai_scientist.utils.pipeline_helpers import (
     cleanup_child_processes,
@@ -81,7 +83,7 @@ def parse_arguments():
     --load_ideas "ai_scientist/ideas/my_research_topic.json" \\
     --skip_writeup \\
     --skip_review
-        """
+        """,
     )
 
     # 基本参数
@@ -95,7 +97,7 @@ def parse_arguments():
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ai_scientist/ideas/i_cant_believe_its_not_better.json",
+        default=str(idea_resource_path("i_cant_believe_its_not_better.json")),
         help="预生成的想法JSON文件路径",
     )
     parser.add_argument(
@@ -109,12 +111,30 @@ def parse_arguments():
         default=0,
         help="要运行的想法索引 (默认: 0)",
     )
-    parser.add_argument("--auto-best-idea", action="store_true", help="对加载的 ideas 排序并自动选择最高分")
-    parser.add_argument("--idea-rank-model", type=str, default=None, help="用于 idea 排序的模型")
-    parser.add_argument("--fallback-ranked-ideas", action="store_true", help="若最佳 idea 未通过质量门槛，则尝试下一个高分 idea")
-    parser.add_argument("--auto-adjust-paper-type", action="store_true", help="自动切换到更适合目标 venue 的 paper type")
-    parser.add_argument("--submission-mode", action="store_true", help="启用完整的投稿级 preset")
-    parser.add_argument("--breakthrough-mode", action="store_true", help="偏向重大问题和高影响力投稿")
+    parser.add_argument(
+        "--auto-best-idea",
+        action="store_true",
+        help="对加载的 ideas 排序并自动选择最高分",
+    )
+    parser.add_argument(
+        "--idea-rank-model", type=str, default=None, help="用于 idea 排序的模型"
+    )
+    parser.add_argument(
+        "--fallback-ranked-ideas",
+        action="store_true",
+        help="若最佳 idea 未通过质量门槛，则尝试下一个高分 idea",
+    )
+    parser.add_argument(
+        "--auto-adjust-paper-type",
+        action="store_true",
+        help="自动切换到更适合目标 venue 的 paper type",
+    )
+    parser.add_argument(
+        "--submission-mode", action="store_true", help="启用完整的投稿级 preset"
+    )
+    parser.add_argument(
+        "--breakthrough-mode", action="store_true", help="偏向重大问题和高影响力投稿"
+    )
     parser.add_argument(
         "--workflow-mode",
         type=str,
@@ -122,7 +142,12 @@ def parse_arguments():
         default="adaptive",
         help="研究编排模式",
     )
-    parser.add_argument("--max-ranked-candidates", type=int, default=None, help="fallback 模式下最多尝试多少个高分 idea")
+    parser.add_argument(
+        "--max-ranked-candidates",
+        type=int,
+        default=None,
+        help="fallback 模式下最多尝试多少个高分 idea",
+    )
     parser.add_argument(
         "--add_dataset_ref",
         action="store_true",
@@ -214,14 +239,42 @@ def parse_arguments():
         default="balanced",
         help="高质量论文生成预设",
     )
-    parser.add_argument("--quality-model", type=str, default=None, help="质量评估使用的模型")
-    parser.add_argument("--target-venue", type=str, choices=["neurips", "iclr", "cvpr", "journal", "nature"], default=None)
-    parser.add_argument("--quality-threshold", type=float, default=None, help="目标最低质量分")
-    parser.add_argument("--rigor-threshold", type=float, default=None, help="目标最低严谨性分")
-    parser.add_argument("--quality-rewrite-rounds", type=int, default=None, help="定向重写最大轮数")
-    parser.add_argument("--autonomous-quality-followup-rounds", type=int, default=0, help="投稿标准未达标时自动补跑更强质量 follow-up 的最大轮数")
-    parser.add_argument("--min-submission-priority", type=float, default=None, help="接受稿件所需的最低投稿优先级")
-    parser.add_argument("--max-submission-blockers", type=int, default=None, help="接受稿件所允许的最大 blocker 数")
+    parser.add_argument(
+        "--quality-model", type=str, default=None, help="质量评估使用的模型"
+    )
+    parser.add_argument(
+        "--target-venue",
+        type=str,
+        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        default=None,
+    )
+    parser.add_argument(
+        "--quality-threshold", type=float, default=None, help="目标最低质量分"
+    )
+    parser.add_argument(
+        "--rigor-threshold", type=float, default=None, help="目标最低严谨性分"
+    )
+    parser.add_argument(
+        "--quality-rewrite-rounds", type=int, default=None, help="定向重写最大轮数"
+    )
+    parser.add_argument(
+        "--autonomous-quality-followup-rounds",
+        type=int,
+        default=0,
+        help="投稿标准未达标时自动补跑更强质量 follow-up 的最大轮数",
+    )
+    parser.add_argument(
+        "--min-submission-priority",
+        type=float,
+        default=None,
+        help="接受稿件所需的最低投稿优先级",
+    )
+    parser.add_argument(
+        "--max-submission-blockers",
+        type=int,
+        default=None,
+        help="接受稿件所允许的最大 blocker 数",
+    )
     parser.add_argument(
         "--require-quality-gate",
         action="store_true",
@@ -240,13 +293,30 @@ def parse_arguments():
         action="store_false",
         help="禁用最终稿 deterministic integrity forensics 检查。",
     )
-    parser.add_argument("--review-reflections", type=int, default=1, help="文本审稿反思轮数")
-    parser.add_argument("--review-ensemble", type=int, default=1, help="审稿 ensemble 数量")
-    parser.add_argument("--review-fewshot", type=int, default=1, help="审稿 few-shot 示例数")
-    parser.add_argument("--review-temperature", type=float, default=0.75, help="审稿温度")
+    parser.add_argument(
+        "--review-reflections", type=int, default=1, help="文本审稿反思轮数"
+    )
+    parser.add_argument(
+        "--review-ensemble", type=int, default=1, help="审稿 ensemble 数量"
+    )
+    parser.add_argument(
+        "--review-fewshot", type=int, default=1, help="审稿 few-shot 示例数"
+    )
+    parser.add_argument(
+        "--review-temperature", type=float, default=0.75, help="审稿温度"
+    )
     parser.add_argument(
         "--review-strategy",
-        choices=["standard", "fast", "depth", "neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=[
+            "standard",
+            "fast",
+            "depth",
+            "neurips",
+            "iclr",
+            "cvpr",
+            "journal",
+            "nature",
+        ],
         default=None,
         help="审稿策略预设",
     )
@@ -360,7 +430,9 @@ if __name__ == "__main__":
         print("⚠️  override-strict-fallbacks 已启用：继续记录 fallback，但本次不阻断。")
         strict_fallbacks = False
     elif strict_fallbacks:
-        print("🛡️  严格兜底策略已启用：idea ranking 或质量 fallback 会直接终止本次运行。")
+        print(
+            "🛡️  严格兜底策略已启用：idea ranking 或质量 fallback 会直接终止本次运行。"
+        )
     integrity_forensics_enabled = (
         bool(args.integrity_forensics)
         if args.integrity_forensics is not None
@@ -399,7 +471,9 @@ if __name__ == "__main__":
     )
     if rankings and candidate_indices:
         args.idea_idx = candidate_indices[0]
-        print(f"🏅 自动选择最佳 idea: index={args.idea_idx}, name={rankings[0].get('idea_name')}, ranking_score={rankings[0].get('ranking_score')}")
+        print(
+            f"🏅 自动选择最佳 idea: index={args.idea_idx}, name={rankings[0].get('idea_name')}, ranking_score={rankings[0].get('ranking_score')}"
+        )
 
     args.writeup_type = resolve_paper_type_for_venue(
         args.writeup_type,
@@ -417,7 +491,7 @@ if __name__ == "__main__":
         idea = ideas[candidate_idx]
         print(f"选择想法 #{candidate_idx}: {idea.get('Name', 'Unknown')}")
 
-        idea_dir = str(get_experiment_dir(idea['Name'], args.attempt_id))
+        idea_dir = str(get_experiment_dir(idea["Name"], args.attempt_id))
         print(f"结果将保存在 {idea_dir}")
         print(
             "(相对于项目根目录: "

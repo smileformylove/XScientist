@@ -19,9 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 import traceback
 
-# 添加项目根目录到路径
 PROJECT_ROOT = osp.dirname(osp.abspath(__file__))
-sys.path.insert(0, PROJECT_ROOT)
 
 from ai_scientist.utils.deferred_imports import load_module_attr
 from ai_scientist.utils.high_quality_pipeline import run_high_quality_pass
@@ -969,8 +967,6 @@ def process_single_idea(args):
         idea_to_markdown(idea, idea_path_md, None)
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
-        if not osp.isabs(config_path):
-            config_path = osp.join(PROJECT_ROOT, config_path)
         idea_config_path = edit_bfts_config_file(config_path, exp_dir, idea_path_json)
 
         experiment_result = perform_experiments_bfts(idea_config_path)
@@ -1630,7 +1626,7 @@ def process_single_idea(args):
             exp_dir=exp_dir,
             idea=idea,
             timestamp=timestamp,
-            bfts_config_path=bfts_config_path,
+            bfts_config_path=config_path,
             model_spec={
                 "writeup": model_writeup,
                 "writeup_small": model_writeup_small,

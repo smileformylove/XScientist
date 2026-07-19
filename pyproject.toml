@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xscientist"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Autonomous research pipeline with structured review, repair, and self-evolution loops."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -92,6 +92,10 @@ xscientist-project = "xscientist.entrypoints:project_main"
 xscientist-batch = "xscientist.entrypoints:batch_main"
 xscientist-daemon = "xscientist.entrypoints:daemon_main"
 xscientist-ara = "xscientist.entrypoints:ara_main"
+xscientist-manager = "xscientist.entrypoints:manager_main"
+xscientist-auth = "xscientist.entrypoints:auth_main"
+xscientist-feedback = "xscientist.entrypoints:feedback_main"
+xscientist-validate = "xscientist.entrypoints:validate_main"
 
 [tool.setuptools]
 include-package-data = true
@@ -129,6 +133,9 @@ ai_scientist = [
   "treesearch/utils/viz_templates/*.html",
   "treesearch/utils/viz_templates/*.js",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "xscientist._version.__version__" }
 
 [tool.black]
 line-length = 88

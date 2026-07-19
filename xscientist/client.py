@@ -52,7 +52,12 @@ class XScientist:
                 ["--bfts-config", str(resolve_bfts_config_path(request.bfts_config))]
             )
         else:
-            argv[config_index] = str(resolve_bfts_config_path(argv[config_index]))
+            argv[config_index] = str(
+                resolve_bfts_config_path(
+                    argv[config_index],
+                    base_dir=self.work_dir,
+                )
+            )
         return [self.python_executable, "-m", "run_project", *argv]
 
     def run_project(

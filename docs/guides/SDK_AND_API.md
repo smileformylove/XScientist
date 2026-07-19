@@ -81,6 +81,14 @@ Direct compatibility commands (`xscientist-project`, `xscientist-batch`,
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 ```
 
+For shared environments, enable the built-in API-key check:
+
+```bash
+export XSCIENTIST_API_KEY="replace-with-a-secret"
+xscientist serve --host 0.0.0.0 --port 8000
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" http://127.0.0.1:8000/health
+```
+
 Or embed it:
 
 ```python
