@@ -33,6 +33,36 @@ class AppCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
 
+    def test_continuous_generator_aliases_internal_batch_application(self) -> None:
+        legacy = importlib.import_module("continuous_paper_generator")
+        internal = importlib.import_module("ai_scientist.apps.batch")
+
+        self.assertIs(legacy, internal)
+        self.assertIs(
+            legacy.ContinuousPaperGenerator, internal.ContinuousPaperGenerator
+        )
+
+    def test_legacy_batch_mock_patch_targets_internal_globals(self) -> None:
+        internal = importlib.import_module("ai_scientist.apps.batch")
+
+        with mock.patch(
+            "continuous_paper_generator.record_quality_fallback_if_needed"
+        ) as patched:
+            self.assertIs(internal.record_quality_fallback_if_needed, patched)
+
+    def test_batch_help_does_not_require_a_login_session(self) -> None:
+        internal = importlib.import_module("ai_scientist.apps.batch")
+
+        with (
+            mock.patch.object(sys, "argv", ["xscientist batch", "--help"]),
+            mock.patch.object(internal, "require_login") as require_login,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            internal.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        require_login.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

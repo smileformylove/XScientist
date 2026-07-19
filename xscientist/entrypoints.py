@@ -34,7 +34,7 @@ def project_main(argv: Sequence[str] | None = None) -> int:
 
 
 def batch_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("continuous_paper_generator", argv)
+    return _call_main("ai_scientist.apps.batch", argv)
 
 
 def daemon_main(argv: Sequence[str] | None = None) -> int:
