@@ -68,6 +68,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/__init__.py",
                 "xscientist/cli.py",
                 "xscientist/service.py",
+                "xscientist/service_jobs.py",
                 "run_project.py",
                 "ai_scientist/apps/project.py",
                 "continuous_paper_generator.py",

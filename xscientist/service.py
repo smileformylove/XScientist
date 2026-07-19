@@ -3,13 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import asynccontextmanager
 import hmac
-import json
 import os
-import threading
-import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +12,9 @@ from ai_scientist.config.paths import resolve_output_path
 
 from ._version import __version__
 from .client import XScientist
-from .models import CommandResult, ProjectRequest, ServiceSettings
+from .models import ProjectRequest, ServiceSettings
+from .service_jobs import Job as _Job
+from .service_jobs import JobStore as _JobStore
 
 try:
     from pydantic import BaseModel, ConfigDict, Field
@@ -26,10 +22,6 @@ except ModuleNotFoundError:
     BaseModel = object  # type: ignore[assignment,misc]
     ConfigDict = None  # type: ignore[assignment]
     Field = None  # type: ignore[assignment]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 _RESERVED_PROJECT_ARGS = {
@@ -202,145 +194,6 @@ else:
     ProjectPayload = None  # type: ignore[assignment,misc]
 
 
-@dataclass
-class _Job:
-    id: str
-    request: ProjectRequest
-    status: str = "queued"
-    created_at: str = field(default_factory=_now_iso)
-    started_at: str | None = None
-    finished_at: str | None = None
-    result: CommandResult | None = None
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "status": self.status,
-            "created_at": self.created_at,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "error": self.error,
-            "request": self.request.to_dict(),
-            "result": self.result.to_dict() if self.result is not None else None,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "_Job":
-        result_payload = payload.get("result")
-        return cls(
-            id=str(payload["id"]),
-            request=ProjectRequest.from_dict(payload["request"]),
-            status=str(payload.get("status") or "failed"),
-            created_at=str(payload.get("created_at") or _now_iso()),
-            started_at=payload.get("started_at"),
-            finished_at=payload.get("finished_at"),
-            result=(
-                CommandResult.from_dict(result_payload)
-                if isinstance(result_payload, dict)
-                else None
-            ),
-            error=payload.get("error"),
-        )
-
-
-class _JobStore:
-    def __init__(
-        self,
-        client: XScientist,
-        *,
-        max_workers: int,
-        max_output_chars: int,
-        state_dir: str | Path,
-    ) -> None:
-        self.client = client
-        self.max_output_chars = max_output_chars
-        self.executor = ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="xscientist-api"
-        )
-        self.jobs: dict[str, _Job] = {}
-        self.futures: dict[str, Future[None]] = {}
-        self.lock = threading.Lock()
-        self.state_dir = Path(state_dir).expanduser().resolve()
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._restore()
-
-    def _job_path(self, job_id: str) -> Path:
-        return self.state_dir / f"{job_id}.json"
-
-    def _persist_locked(self, job: _Job) -> None:
-        atomic_write_json(self._job_path(job.id), job.to_dict())
-
-    def _restore(self) -> None:
-        for path in sorted(self.state_dir.glob("*.json")):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(payload, dict):
-                    continue
-                job = _Job.from_dict(payload)
-            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
-                continue
-            if job.status in {"queued", "running"}:
-                job.status = "interrupted"
-                job.finished_at = _now_iso()
-                job.error = "Service restarted before the job completed"
-                atomic_write_json(path, job.to_dict())
-            self.jobs[job.id] = job
-
-    def submit(self, request: ProjectRequest) -> _Job:
-        job = _Job(id=uuid.uuid4().hex, request=request)
-        with self.lock:
-            self._persist_locked(job)
-            self.jobs[job.id] = job
-            self.futures[job.id] = self.executor.submit(self._run, job.id)
-        return job
-
-    def _run(self, job_id: str) -> None:
-        job = self.jobs[job_id]
-        try:
-            with self.lock:
-                job.status = "running"
-                job.started_at = _now_iso()
-                self._persist_locked(job)
-            result = self.client.run_project(job.request)
-            result = CommandResult(
-                command=result.command,
-                returncode=result.returncode,
-                stdout=result.stdout[-self.max_output_chars :],
-                stderr=result.stderr[-self.max_output_chars :],
-                started_at=result.started_at,
-                finished_at=result.finished_at,
-            )
-            with self.lock:
-                job.result = result
-                job.status = "succeeded" if result.ok else "failed"
-        except BaseException as exc:
-            with self.lock:
-                job.error = f"{type(exc).__name__}: {exc}"
-                job.status = "failed"
-        finally:
-            with self.lock:
-                job.finished_at = _now_iso()
-                try:
-                    self._persist_locked(job)
-                except OSError as exc:
-                    job.status = "failed"
-                    job.error = f"StatePersistenceError: {exc}"
-
-    def get(self, job_id: str) -> _Job | None:
-        with self.lock:
-            return self.jobs.get(job_id)
-
-    def list(self) -> list[_Job]:
-        with self.lock:
-            return sorted(
-                self.jobs.values(), key=lambda job: job.created_at, reverse=True
-            )
-
-    def shutdown(self) -> None:
-        self.executor.shutdown(wait=False, cancel_futures=False)
-
-
 def create_app(settings: ServiceSettings | None = None):
     FastAPI, HTTPException, Request, JSONResponse = _require_fastapi()
     if ProjectPayload is None:
@@ -369,6 +222,7 @@ def create_app(settings: ServiceSettings | None = None):
         max_workers=resolved.max_workers,
         max_output_chars=resolved.max_output_chars,
         state_dir=state_dir,
+        write_json=lambda path, payload: atomic_write_json(path, payload),
     )
 
     @asynccontextmanager
