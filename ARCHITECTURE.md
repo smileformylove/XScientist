@@ -13,6 +13,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Batch experiment artifacts | `ai_scientist/apps/batch_experiment_artifacts.py` | Internal | Build experiment TODOs, ledgers, agendas, and per-paper follow-up artifacts |
 | Daemon presentation | `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Pure dashboard transformation plus HTML and Markdown rendering |
 | Manager read models | `ai_scientist/apps/manager_ranking.py`, `ai_scientist/apps/manager_reports.py` | Internal | Pure submission ranking/filtering plus Markdown rendering for manager boards |
+| Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
@@ -30,6 +31,11 @@ read-only integrations reuse ranking logic without constructing a manager or
 touching the filesystem. Board and shortlist Markdown rendering is similarly
 available from `ai_scientist/apps/manager_reports.py`; the manager export
 methods remain responsible for path creation and file writes.
+
+`ai_scientist/apps/manager.py` owns the manager domain class and keeps a thin
+compatibility `main()` wrapper. Argument parsing and terminal presentation live
+in `ai_scientist/apps/manager_cli.py`, with dependencies injected at call time
+so historical monkeypatch and legacy-module behavior remain intact.
 
 The FastAPI adapter in `xscientist/service.py` owns request validation,
 filesystem confinement, authentication, and routes. Background job execution
