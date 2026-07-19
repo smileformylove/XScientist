@@ -44,4 +44,4 @@ python -m xscientist validate --full-import-smoke
 ## Reporting issues
 
 - Use GitHub Issues for bugs/feature requests.
-- For security issues, please follow `SECURITY.md`.
+- For security issues, please follow `.github/SECURITY.md`.

@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Chinese README: [README.zh.md](README.zh.md)
+Chinese README: [docs/README.zh.md](docs/README.zh.md)
 
 > A sustainable, self-improving autonomous research system: idea generation, experiment execution, paper writing, self-review loops, strategy scheduling, and long-running daemon ops.
 > Going a step further — we're not just building "better autonomous research"; we're building a **git-like protocol for research**, expanding outward along an automation tech tree whose root nodes are mathematics and physics.
@@ -569,7 +569,7 @@ Currently organized example files:
 - `docs/LONG_RUNNING_GUIDE.md`: Long-running operations guide
 - `docs/LOGIN_GUARDRAIL.md`: login guard and session management
 - `docs/guides/OUTPUT_DIRECTORIES.md`: output directory policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
-- `ARCHITECTURE.md`: System architecture documentation
+- `docs/ARCHITECTURE.md`: System architecture documentation
 - `docs/guides/OPTIMIZATION_SUMMARY.md`: Optimization summary
 
 ---
@@ -585,7 +585,7 @@ Currently organized example files:
 
 ## Roadmap
 
-XScientist aims to move autonomous research from "one-shot paper generation" toward long-running, reproducible, reviewable, submission-ready infrastructure. Issues and PRs welcome (see `CONTRIBUTING.md`).
+XScientist aims to move autonomous research from "one-shot paper generation" toward long-running, reproducible, reviewable, submission-ready infrastructure. Issues and PRs welcome (see `.github/CONTRIBUTING.md`).
 
 - **Near term**: ship a reproducible submission-ready example; harden preflight and delivery checklists; wire TODO closure into quality gates.
 - **Mid term**: bidirectional evidence↔figure/table/metric binding; dossier consistency/regression checks; multi-reviewer aggregation.
@@ -595,7 +595,7 @@ XScientist aims to move autonomous research from "one-shot paper generation" tow
 
 ## System Architecture
 
-For detailed architecture documentation, see: [ARCHITECTURE.md](ARCHITECTURE.md)
+For detailed architecture documentation, see: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 Core components:
 - **Ideation Engine**: Idea generation and ranking
@@ -608,10 +608,10 @@ Core components:
 
 ## Contributing & Community
 
-- Contributing guide: `CONTRIBUTING.md`
-- Code of conduct: `CODE_OF_CONDUCT.md`
-- Security policy: `SECURITY.md`
-- Architecture docs: `ARCHITECTURE.md`
+- Contributing guide: `.github/CONTRIBUTING.md`
+- Code of conduct: `.github/CODE_OF_CONDUCT.md`
+- Security policy: `.github/SECURITY.md`
+- Architecture docs: `docs/ARCHITECTURE.md`
 
 ---
 

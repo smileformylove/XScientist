@@ -508,7 +508,7 @@ See `configs/sources/` for source configuration templates.
 
 ### Metric Definitions
 
-See `ARCHITECTURE.md` for detailed metric definitions.
+See `docs/ARCHITECTURE.md` for detailed metric definitions.
 
 ### API Reference
 

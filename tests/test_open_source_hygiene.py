@@ -6,6 +6,25 @@ from pathlib import Path
 
 
 class OpenSourceHygieneTests(unittest.TestCase):
+    def test_repository_root_visible_files_are_intentional(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        expected = {
+            "LICENSE",
+            "MANIFEST.in",
+            "Makefile",
+            "README.md",
+            "pyproject.toml",
+            "requirements.txt",
+            "run_stable_daemon.sh",
+            "start_research.sh",
+        }
+        actual = {
+            path.name
+            for path in repo_root.iterdir()
+            if path.is_file() and not path.name.startswith(".")
+        }
+        self.assertEqual(actual, expected)
+
     def test_repository_root_has_no_python_modules(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         root_modules = sorted(path.name for path in repo_root.glob("*.py"))
@@ -39,6 +58,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.repo_root = Path(__file__).resolve().parents[1]
         cls.readme_path = cls.repo_root / "README.md"
+        cls.chinese_readme_path = cls.repo_root / "docs" / "README.zh.md"
         cls.pyproject_path = cls.repo_root / "pyproject.toml"
         cls.gitignore_path = cls.repo_root / ".gitignore"
         cls.workflow_path = cls.repo_root / ".github" / "workflows" / "smoke.yml"
@@ -49,6 +69,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
         cls.smoke_requirements_path = cls.repo_root / "requirements" / "smoke.txt"
         portable_sources = [
             cls.readme_path,
+            *sorted((cls.repo_root / ".github").glob("*.md")),
             *sorted((cls.repo_root / "docs").glob("**/*.md")),
             *sorted((cls.repo_root / "configs").glob("**/*.example.json")),
             *sorted((cls.repo_root / "configs").glob("**/*.example.yaml")),
@@ -70,13 +91,36 @@ class OpenSourceHygieneTests(unittest.TestCase):
             )
 
     def test_readme_local_markdown_links_exist(self) -> None:
-        text = self.readme_path.read_text(encoding="utf-8")
-        links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
-        for link in links:
-            if not link or link.startswith(("http://", "https://", "#")):
-                continue
-            target = (self.readme_path.parent / link).resolve()
-            self.assertTrue(target.exists(), msg=f"Broken local README link: {link}")
+        for source in (self.readme_path, self.chinese_readme_path):
+            text = source.read_text(encoding="utf-8")
+            links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
+            for link in links:
+                if not link or link.startswith(("http://", "https://", "#")):
+                    continue
+                target = (source.parent / link).resolve()
+                self.assertTrue(
+                    target.exists(),
+                    msg=f"Broken local link in {source.relative_to(self.repo_root)}: {link}",
+                )
+
+    def test_community_documents_use_standard_locations(self) -> None:
+        expected = {
+            self.repo_root / ".github" / "CONTRIBUTING.md",
+            self.repo_root / ".github" / "CODE_OF_CONDUCT.md",
+            self.repo_root / ".github" / "SECURITY.md",
+            self.repo_root / "docs" / "ARCHITECTURE.md",
+            self.repo_root / "docs" / "README.zh.md",
+        }
+        self.assertTrue(all(path.is_file() for path in expected))
+        for old_name in (
+            "ARCHITECTURE.md",
+            "CODE_OF_CONDUCT.md",
+            "CONTRIBUTING.md",
+            "README.en.md",
+            "README.zh.md",
+            "SECURITY.md",
+        ):
+            self.assertFalse((self.repo_root / old_name).exists())
 
     def test_smoke_workflow_seeds_ci_auth_session(self) -> None:
         text = self.workflow_path.read_text(encoding="utf-8")

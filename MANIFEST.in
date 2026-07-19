@@ -5,6 +5,9 @@ include start_research.sh
 graft configs
 graft requirements
 graft docs
+include .github/CONTRIBUTING.md
+include .github/CODE_OF_CONDUCT.md
+include .github/SECURITY.md
 graft examples
 graft tools
 global-exclude __pycache__ *.py[cod] .DS_Store

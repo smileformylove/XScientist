@@ -1,8 +1,8 @@
 # XScientist
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 
-English README: [README.md](README.md)
+English README: [README.md](../README.md)
 
 > 面向"可持续自我迭代"的 AI 科研系统：从想法生成、实验执行、论文写作，到自评审闭环、策略调度与长期运行（daemon）。
 > 更进一步——我们想做的不只是「更好的全自动科研」，而是**可 git 的科研协议**，沿着自动化的科技树，从数学与物理这类可验证的根节点向外扩展。
@@ -12,7 +12,7 @@ English README: [README.md](README.md)
 系统报告：
 
 - arXiv: [2607.12301](https://arxiv.org/abs/2607.12301) — *XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery*
-- 源码目录：[`paper/xscientist_arxiv/`](paper/xscientist_arxiv/)
+- 源码目录：[`paper/xscientist_arxiv/`](../paper/xscientist_arxiv/)
 
 重要提示（建议先读）：
 
@@ -70,7 +70,7 @@ XScientist 想做的不只是「一个更好的全自动科研系统」，更是
 - **自动化的科技树，数学与物理是根节点**：我们相信科研的可自动化程度沿着一棵树展开——**数学和物理是根节点**，越靠近根的问题「协议 / 证据 / 复核」信号越强、更适合被机器扩展；越靠近叶子（工程、经验、社会科学）越依赖人类判断。XScientist 的重心先落在根附近：把「可验证、可复现、可 fork」的部分自动化，把「值得人类花时间的」部分显式暴露给评审者。
 
 一句话：**把科研做成协议，把系统做成协议的一个实现**。<br/>
-配套细节见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) 与下文的 [ARA 工件](#ara-工件面向下游智能体) / [从 ARA 接力](#从-ara-接力fork-continue) 章节。
+配套细节见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md) 与下文的 [ARA 工件](#ara-工件面向下游智能体) / [从 ARA 接力](#从-ara-接力fork-continue) 章节。
 
 ---
 
@@ -284,7 +284,7 @@ xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 服务不只监听本机时，建议设置 `XSCIENTIST_API_KEY`，客户端通过
 `X-API-Key` 请求头传入。
 
-完整说明见 [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md)。
+完整说明见 [`docs/guides/SDK_AND_API.md`](guides/SDK_AND_API.md)。
 
 投稿级/高质量运行会默认启用 deterministic integrity forensics。你也可以显式控制：
 
@@ -500,11 +500,11 @@ xscientist project <B_project> \
   --topic topic.md
 ```
 
-底层通过环境变量 `AI_SCIENTIST_ARA_SEED_PATH` 传递种子清单——同一机制会自动跨越 subprocess 边界（并行 worker 也能生效）。协议细节见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md) §7。
+底层通过环境变量 `AI_SCIENTIST_ARA_SEED_PATH` 传递种子清单——同一机制会自动跨越 subprocess 边界（并行 worker 也能生效）。协议细节见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md) §7。
 
 ### 协议规范
 
-`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含 6 份 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。规范正文见 [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md)。
+`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含 6 份 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。规范正文见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md)。
 
 ### A/B 加速证据实验
 
@@ -535,8 +535,8 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 当前已整理的示例文件：
 
-- [example/XScientist_Board.pdf](example/XScientist_Board.pdf)：XScientist Board 论文/报告 PDF。
-- [example/icml_submitted_gravitation_paper.pdf](example/icml_submitted_gravitation_paper.pdf)：ICML 投稿中的 gravitation 论文稿件 PDF。
+- [example/XScientist_Board.pdf](../example/XScientist_Board.pdf)：XScientist Board 论文/报告 PDF。
+- [example/icml_submitted_gravitation_paper.pdf](../example/icml_submitted_gravitation_paper.pdf)：ICML 投稿中的 gravitation 论文稿件 PDF。
 
 ---
 
@@ -549,7 +549,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - `docs/LONG_RUNNING_GUIDE.md`：长时运行操作指南
 - `docs/LOGIN_GUARDRAIL.md`：登录守卫与会话管理
 - `docs/guides/OUTPUT_DIRECTORIES.md`：输出目录策略说明（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
-- `ARCHITECTURE.md`：系统架构文档
+- `docs/ARCHITECTURE.md`：系统架构文档
 - `docs/guides/OPTIMIZATION_SUMMARY.md`：优化总结
 
 ---
@@ -565,7 +565,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 ## 路线图
 
-XScientist 的目标是把自动科研从「单次生成一篇论文」推进为「长期可运行、可复现、可评审、可交付」的科研基础设施。欢迎 issue / PR 协作（见 `CONTRIBUTING.md`）。
+XScientist 的目标是把自动科研从「单次生成一篇论文」推进为「长期可运行、可复现、可评审、可交付」的科研基础设施。欢迎 issue / PR 协作（见 `.github/CONTRIBUTING.md`）。
 
 - **近期**：交付可复现的 submission-ready 样例；补齐 preflight/交付清单；把 TODO closure 并入质量门禁。
 - **中期**：evidence 与 figure/table/metric 双向绑定；dossier 一致性/回归检查；多评审视角聚合。
@@ -590,16 +590,16 @@ XScientist 的目标是把自动科研从「单次生成一篇论文」推进为
 
 ## 贡献与社区
 
-- 贡献指南：`CONTRIBUTING.md`
-- 行为准则：`CODE_OF_CONDUCT.md`
-- 安全策略：`SECURITY.md`
-- 架构文档：`ARCHITECTURE.md`
+- 贡献指南：`.github/CONTRIBUTING.md`
+- 行为准则：`.github/CODE_OF_CONDUCT.md`
+- 安全策略：`.github/SECURITY.md`
+- 架构文档：`docs/ARCHITECTURE.md`
 
 ---
 
 ## License
 
-Apache-2.0，详见 `LICENSE`。
+Apache-2.0，详见根目录 `LICENSE`。
 
 ---
 

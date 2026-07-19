@@ -153,11 +153,16 @@ class DistributionBuildTests(unittest.TestCase):
                 "sdist should retain repository-only validation",
             )
             for source_asset in (
+                ".github/CODE_OF_CONDUCT.md",
+                ".github/CONTRIBUTING.md",
+                ".github/SECURITY.md",
                 "configs/bfts/bfts_config.yaml",
                 "configs/bfts/bfts_config_deep.yaml",
                 "configs/bfts/bfts_config_enhanced.yaml",
                 "docs/CONFIG_REFERENCE.md",
+                "docs/ARCHITECTURE.md",
                 "docs/OPERATIONS_CHECKLIST.md",
+                "docs/README.zh.md",
                 "examples/example_topic.md",
                 "requirements/constraints-ci.txt",
                 "requirements/smoke.txt",
