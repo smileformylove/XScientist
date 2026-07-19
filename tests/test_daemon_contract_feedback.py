@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +17,8 @@ from continuous_research_daemon import (
     _hydrate_source_next_batch_advisory,
     _build_source_runtime_rows,
     _start_dashboard_server,
+    _build_generator_command,
+    _manager_command_preview,
 )
 
 
@@ -23,6 +27,30 @@ class DaemonContractFeedbackTests(unittest.TestCase):
         return SimpleNamespace(
             research_dir="/tmp/research",
             guardrail_default_num_ideas=4,
+        )
+
+    def test_child_commands_use_installed_module_entrypoints(self) -> None:
+        parsed = SimpleNamespace(
+            python=sys.executable,
+            research_dir="/tmp/research",
+            default_submission_mode=False,
+        )
+        source = {"type": "topic", "value": "topic.md"}
+        with mock.patch(
+            "continuous_research_daemon._select_source", return_value=source
+        ), mock.patch(
+            "continuous_research_daemon._effective_generator_args",
+            return_value=["--num-ideas", "2"],
+        ):
+            command = _build_generator_command(parsed, "batch", {})
+
+        self.assertEqual(command[:3], [sys.executable, "-m", "ai_scientist.apps.batch"])
+        manager_command = shlex.split(
+            _manager_command_preview(parsed, "submission-board")
+        )
+        self.assertEqual(
+            manager_command[:3],
+            [sys.executable, "-m", "ai_scientist.apps.manager"],
         )
 
     def test_pipeline_contract_feedback_should_stay_neutral_when_summary_is_healthy(

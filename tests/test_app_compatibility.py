@@ -83,6 +83,32 @@ class AppCompatibilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
 
+    def test_research_daemon_aliases_internal_daemon_application(self) -> None:
+        legacy = importlib.import_module("continuous_research_daemon")
+        internal = importlib.import_module("ai_scientist.apps.daemon")
+
+        self.assertIs(legacy, internal)
+        self.assertIs(legacy.build_parser, internal.build_parser)
+
+    def test_legacy_daemon_mock_patch_targets_internal_globals(self) -> None:
+        internal = importlib.import_module("ai_scientist.apps.daemon")
+
+        with mock.patch("continuous_research_daemon.ResearchManager") as patched:
+            self.assertIs(internal.ResearchManager, patched)
+
+    def test_daemon_help_does_not_require_a_login_session(self) -> None:
+        internal = importlib.import_module("ai_scientist.apps.daemon")
+
+        with (
+            mock.patch.object(sys, "argv", ["xscientist daemon", "--help"]),
+            mock.patch.object(internal, "require_login") as require_login,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            internal.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        require_login.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

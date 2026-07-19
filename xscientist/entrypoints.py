@@ -38,7 +38,7 @@ def batch_main(argv: Sequence[str] | None = None) -> int:
 
 
 def daemon_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("continuous_research_daemon", argv)
+    return _call_main("ai_scientist.apps.daemon", argv)
 
 
 def manager_main(argv: Sequence[str] | None = None) -> int:
