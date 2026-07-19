@@ -10,6 +10,7 @@ XScientist is designed as a **research operating system** that can run continuou
 |---|---|---|---|
 | Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
+| Batch experiment artifacts | `ai_scientist/apps/batch_experiment_artifacts.py` | Internal | Build experiment TODOs, ledgers, agendas, and per-paper follow-up artifacts |
 | Daemon presentation | `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Pure dashboard transformation plus HTML and Markdown rendering |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
@@ -99,6 +100,12 @@ Executes experiments using:
 - Resource management
 - Experiment TODO tracking
 - Evidence collection
+
+Batch-level experiment follow-up artifacts are assembled in
+`ai_scientist/apps/batch_experiment_artifacts.py`. The batch entrypoint keeps
+workflow orchestration and file placement, while the extracted module owns the
+self-review-to-TODO mapping, keep/discard/crash ledger, and next experiment
+agenda. Compatibility exports remain available from `ai_scientist.apps.batch`.
 
 ### 3. Writeup Engine
 **Location**: `ai_scientist/perform_writeup.py`, `ai_scientist/perform_icbinb_writeup.py`
