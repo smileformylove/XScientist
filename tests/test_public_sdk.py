@@ -114,6 +114,48 @@ class PublicSdkTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.stdout.strip(), "ready")
 
+    def test_client_exposes_read_only_research_views(self) -> None:
+        manager = mock.Mock()
+        manager.list_papers.return_value = [{"name": "paper-a"}, {"name": "paper-b"}]
+        manager.shortlist_papers.return_value = [{"name": "paper-a"}]
+        manager.submission_board.return_value = {"iclr": [{"name": "paper-a"}]}
+        manager.rewrite_board.return_value = [{"name": "paper-b"}]
+        client = XScientist(output_root="/tmp/xscientist-output")
+
+        with mock.patch.object(client, "_research_manager", return_value=manager):
+            self.assertEqual(client.list_papers(limit=1), [{"name": "paper-a"}])
+            self.assertEqual(client.shortlist_papers(top_n=2), [{"name": "paper-a"}])
+            self.assertEqual(
+                client.submission_board(top_n_per_venue=2),
+                {"iclr": [{"name": "paper-a"}]},
+            )
+            self.assertEqual(client.rewrite_board(top_n=2), [{"name": "paper-b"}])
+
+        manager.list_papers.assert_called_once_with(
+            paper_type=None,
+            sort_by="modified",
+        )
+        manager.shortlist_papers.assert_called_once()
+        manager.submission_board.assert_called_once()
+        manager.rewrite_board.assert_called_once()
+
+    def test_client_read_only_views_validate_limits(self) -> None:
+        client = XScientist()
+        with mock.patch.object(client, "_research_manager") as manager:
+            for kwargs in ({"limit": 0}, {"limit": 1001}):
+                with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                    client.list_papers(**kwargs)
+            with self.assertRaisesRegex(ValueError, "sort_by"):
+                client.list_papers(sort_by="unknown")
+            with self.assertRaises(ValueError):
+                client.shortlist_papers(top_n=0)
+            with self.assertRaises(ValueError):
+                client.submission_board(top_n_per_venue=0)
+            with self.assertRaises(ValueError):
+                client.rewrite_board(top_n=0)
+
+        manager.assert_not_called()
+
     def test_cli_info_has_machine_readable_output(self) -> None:
         with mock.patch("builtins.print") as printer:
             exit_code = cli_main(["info", "--json"])
@@ -255,6 +297,76 @@ class PublicSdkTests(unittest.TestCase):
                         break
                 self.assertEqual(status["status"], "succeeded")
                 self.assertEqual(status["result"]["stdout"], "done")
+
+    def test_http_service_exposes_confined_read_only_research_views(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            output_root = Path(td) / "output"
+            output_root.mkdir()
+            inside = output_root / "papers" / "demo"
+            outside = Path(td) / "private.txt"
+            views = {
+                "papers": [
+                    {"name": "demo", "path": str(inside), "private": str(outside)}
+                ],
+                "shortlist": [{"name": "demo", "path": str(inside)}],
+                "submission": {"iclr": [{"name": "demo", "path": str(inside)}]},
+                "rewrite": [{"name": "demo", "path": str(inside)}],
+            }
+            with (
+                mock.patch.object(
+                    XScientist, "list_papers", return_value=views["papers"]
+                ),
+                mock.patch.object(
+                    XScientist, "shortlist_papers", return_value=views["shortlist"]
+                ),
+                mock.patch.object(
+                    XScientist, "submission_board", return_value=views["submission"]
+                ),
+                mock.patch.object(
+                    XScientist, "rewrite_board", return_value=views["rewrite"]
+                ),
+            ):
+                app = xscientist.create_app(
+                    ServiceSettings(output_root=output_root, max_workers=1)
+                )
+                with TestClient(app) as client:
+                    papers = client.get("/v1/papers?limit=10").json()
+                    shortlist = client.get("/v1/shortlist?top_n=2").json()
+                    submission = client.get(
+                        "/v1/boards/submission?top_n_per_venue=2"
+                    ).json()
+                    rewrite = client.get("/v1/boards/rewrite?top_n=2").json()
+
+            self.assertEqual(papers["items"][0]["path"], "papers/demo")
+            self.assertIsNone(papers["items"][0]["private"])
+            self.assertEqual(shortlist["count"], 1)
+            self.assertEqual(submission["count"], 1)
+            self.assertEqual(rewrite["count"], 1)
+
+    def test_http_read_only_views_reject_invalid_limits(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        app = xscientist.create_app(ServiceSettings(max_workers=1))
+        with TestClient(app) as client:
+            responses = [
+                client.get("/v1/papers?limit=0"),
+                client.get("/v1/shortlist?top_n=1001"),
+                client.get("/v1/boards/submission?top_n_per_venue=0"),
+                client.get("/v1/boards/rewrite?top_n=0"),
+            ]
+
+        self.assertTrue(
+            all(response.status_code == 422 for response in responses),
+            [(response.status_code, response.text) for response in responses],
+        )
 
     def test_http_service_confines_requests_to_service_directories(self) -> None:
         try:

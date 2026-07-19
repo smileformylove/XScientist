@@ -38,6 +38,116 @@ class XScientist:
         self.env = {str(key): str(value) for key, value in (env or {}).items()}
         self.python_executable = str(python_executable or sys.executable)
 
+    def _research_manager(self):
+        from ai_scientist.apps.manager import ResearchManager
+
+        return ResearchManager(
+            str(self.output_root) if self.output_root is not None else None
+        )
+
+    @staticmethod
+    def _validate_limit(value: int, *, label: str) -> int:
+        limit = int(value)
+        if limit < 1:
+            raise ValueError(f"{label} must be at least 1")
+        if limit > 1000:
+            raise ValueError(f"{label} must not exceed 1000")
+        return limit
+
+    def list_papers(
+        self,
+        *,
+        paper_type: str | None = None,
+        sort_by: str = "modified",
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        """List generated papers from the configured output root."""
+
+        if sort_by not in {"modified", "quality"}:
+            raise ValueError("sort_by must be 'modified' or 'quality'")
+        validated_limit = self._validate_limit(limit, label="limit")
+        items = self._research_manager().list_papers(
+            paper_type=paper_type,
+            sort_by=sort_by,
+        )
+        return items[:validated_limit]
+
+    def shortlist_papers(
+        self,
+        *,
+        paper_type: str | None = None,
+        target_venue: str | None = None,
+        require_gate: bool = False,
+        require_ready: bool = False,
+        min_breakthrough: float | None = None,
+        min_priority: float | None = None,
+        max_blockers: int | None = None,
+        min_rewrite_gain: float | None = None,
+        top_n: int = 5,
+    ) -> list[dict[str, object]]:
+        """Return the strongest submission candidates without mutating outputs."""
+
+        validated_top_n = self._validate_limit(top_n, label="top_n")
+        return self._research_manager().shortlist_papers(
+            paper_type=paper_type,
+            target_venue=target_venue,
+            require_gate=require_gate,
+            require_ready=require_ready,
+            min_breakthrough=min_breakthrough,
+            min_priority=min_priority,
+            max_blockers=max_blockers,
+            min_rewrite_gain=min_rewrite_gain,
+            top_n=validated_top_n,
+        )
+
+    def submission_board(
+        self,
+        *,
+        top_n_per_venue: int = 3,
+        require_gate: bool = False,
+        min_breakthrough: float | None = None,
+        min_priority: float | None = None,
+        max_blockers: int | None = None,
+        min_rewrite_gain: float | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        """Group submission candidates by target venue."""
+
+        validated_top_n = self._validate_limit(top_n_per_venue, label="top_n_per_venue")
+        return self._research_manager().submission_board(
+            top_n_per_venue=validated_top_n,
+            require_gate=require_gate,
+            min_breakthrough=min_breakthrough,
+            min_priority=min_priority,
+            max_blockers=max_blockers,
+            min_rewrite_gain=min_rewrite_gain,
+        )
+
+    def rewrite_board(
+        self,
+        *,
+        top_n: int = 10,
+        paper_type: str | None = None,
+        target_venue: str | None = None,
+        min_priority: float | None = None,
+        min_rewrite_gain: float | None = None,
+        max_blockers: int | None = None,
+        require_gate: bool = False,
+        include_ready: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return papers ranked by the value of another focused rewrite."""
+
+        validated_top_n = self._validate_limit(top_n, label="top_n")
+        return self._research_manager().rewrite_board(
+            top_n=validated_top_n,
+            paper_type=paper_type,
+            target_venue=target_venue,
+            min_priority=min_priority,
+            min_rewrite_gain=min_rewrite_gain,
+            max_blockers=max_blockers,
+            require_gate=require_gate,
+            include_ready=include_ready,
+        )
+
     def project_command(self, request: ProjectRequest) -> list[str]:
         argv = request.to_argv()
         if request.output_root is None and self.output_root is not None:

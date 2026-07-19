@@ -18,7 +18,7 @@ pip install -e ".[full,service,dev]"      # contributor environment
 
 ```text
 xscientist/                 Public, versioned integration surface
-├── client.py               Python SDK and subprocess isolation
+├── client.py               Python SDK, subprocess isolation, read-only views
 ├── models.py               Stable request/result data models
 ├── cli.py                  Unified `xscientist` command
 ├── service.py              Optional FastAPI service
@@ -82,6 +82,26 @@ if not result.ok:
 Workflows run in a child process. Large research modules, provider SDK state,
 and environment mutations therefore do not leak into an embedding web app.
 
+The same client exposes read-only views over its configured `output_root`:
+
+```python
+papers = client.list_papers(sort_by="quality", limit=20)
+shortlist = client.shortlist_papers(
+    target_venue="iclr",
+    require_gate=True,
+    top_n=5,
+)
+submission_board = client.submission_board(
+    require_gate=True,
+    top_n_per_venue=3,
+)
+rewrite_board = client.rewrite_board(top_n=10)
+```
+
+These methods do not launch models or modify research artifacts. They reuse the
+same manager read models as the CLI and are suitable for dashboards, notebooks,
+and embedding applications.
+
 ## Unified CLI
 
 ```bash
@@ -131,6 +151,10 @@ Endpoints:
 - `POST /v1/projects`
 - `GET /v1/jobs`
 - `GET /v1/jobs/{job_id}`
+- `GET /v1/papers`
+- `GET /v1/shortlist`
+- `GET /v1/boards/submission`
+- `GET /v1/boards/rewrite`
 
 Example request:
 
@@ -153,6 +177,24 @@ The service owns its filesystem boundary:
 
 These restrictions apply to the HTTP adapter only. Trusted local Python SDK and
 CLI callers retain their normal path flexibility.
+
+Read-only query examples:
+
+```bash
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
+  "http://127.0.0.1:8000/v1/papers?sort_by=quality&limit=20"
+
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
+  "http://127.0.0.1:8000/v1/shortlist?target_venue=iclr&require_gate=true&top_n=5"
+
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
+  "http://127.0.0.1:8000/v1/boards/submission?require_gate=true"
+```
+
+The service always reads these views from its configured `output_root`;
+requests cannot select another research directory. Absolute artifact paths
+inside that root are returned as relative paths, and absolute paths outside the
+root are redacted.
 
 The bundled service is intended for local/team integration. It includes API-key
 authentication and persistent job metadata. Internet-facing deployments should

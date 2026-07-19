@@ -102,6 +102,27 @@ def _validate_extra_args(extra_args: list[str]) -> tuple[str, ...]:
     return normalized
 
 
+def _service_output_view(value: Any, *, output_root: Path) -> Any:
+    """Make manager results JSON-safe without exposing host absolute paths."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _service_output_view(item, output_root=output_root)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_service_output_view(item, output_root=output_root) for item in value]
+    if isinstance(value, Path) or (
+        isinstance(value, str) and Path(value).is_absolute()
+    ):
+        resolved = Path(value).expanduser().resolve()
+        try:
+            return resolved.relative_to(output_root).as_posix()
+        except ValueError:
+            return None
+    return value
+
+
 def _service_request(
     payload: "ProjectPayload",
     *,
@@ -327,11 +348,6 @@ def create_app(settings: ServiceSettings | None = None):
             "Pydantic is not installed. Install `xscientist[service]`."
         )
     resolved = settings or ServiceSettings(api_key=os.environ.get("XSCIENTIST_API_KEY"))
-    client = XScientist(
-        work_dir=resolved.work_dir,
-        output_root=resolved.output_root,
-        env=resolved.env,
-    )
     output_root = (
         Path(resolved.output_root).expanduser().resolve()
         if resolved.output_root is not None
@@ -341,6 +357,11 @@ def create_app(settings: ServiceSettings | None = None):
         Path(resolved.work_dir).expanduser().resolve()
         if resolved.work_dir is not None
         else Path.cwd().resolve()
+    )
+    client = XScientist(
+        work_dir=work_dir,
+        output_root=output_root,
+        env=resolved.env,
     )
     state_dir = resolved.state_dir or output_root / ".xscientist" / "api" / "jobs"
     store = _JobStore(
@@ -358,7 +379,10 @@ def create_app(settings: ServiceSettings | None = None):
     app = FastAPI(
         title="XScientist API",
         version=__version__,
-        description="Submit and inspect isolated autonomous research jobs.",
+        description=(
+            "Submit and inspect isolated autonomous research jobs, papers, "
+            "shortlists, and research boards."
+        ),
         lifespan=lifespan,
     )
     app.state.job_store = store
@@ -382,6 +406,110 @@ def create_app(settings: ServiceSettings | None = None):
     @app.get("/v1/jobs")
     def list_jobs() -> dict[str, Any]:
         return {"items": [job.to_dict() for job in store.list()]}
+
+    @app.get("/v1/papers")
+    def list_papers(
+        paper_type: str | None = None,
+        sort_by: str = "modified",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            items = client.list_papers(
+                paper_type=paper_type,
+                sort_by=sort_by,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "items": _service_output_view(items, output_root=output_root),
+            "count": len(items),
+        }
+
+    @app.get("/v1/shortlist")
+    def shortlist_papers(
+        paper_type: str | None = None,
+        target_venue: str | None = None,
+        require_gate: bool = False,
+        require_ready: bool = False,
+        min_breakthrough: float | None = None,
+        min_priority: float | None = None,
+        max_blockers: int | None = None,
+        min_rewrite_gain: float | None = None,
+        top_n: int = 5,
+    ) -> dict[str, Any]:
+        try:
+            items = client.shortlist_papers(
+                paper_type=paper_type,
+                target_venue=target_venue,
+                require_gate=require_gate,
+                require_ready=require_ready,
+                min_breakthrough=min_breakthrough,
+                min_priority=min_priority,
+                max_blockers=max_blockers,
+                min_rewrite_gain=min_rewrite_gain,
+                top_n=top_n,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "items": _service_output_view(items, output_root=output_root),
+            "count": len(items),
+        }
+
+    @app.get("/v1/boards/submission")
+    def submission_board(
+        top_n_per_venue: int = 3,
+        require_gate: bool = False,
+        min_breakthrough: float | None = None,
+        min_priority: float | None = None,
+        max_blockers: int | None = None,
+        min_rewrite_gain: float | None = None,
+    ) -> dict[str, Any]:
+        try:
+            venues = client.submission_board(
+                top_n_per_venue=top_n_per_venue,
+                require_gate=require_gate,
+                min_breakthrough=min_breakthrough,
+                min_priority=min_priority,
+                max_blockers=max_blockers,
+                min_rewrite_gain=min_rewrite_gain,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "venues": _service_output_view(venues, output_root=output_root),
+            "count": sum(len(items) for items in venues.values()),
+        }
+
+    @app.get("/v1/boards/rewrite")
+    def rewrite_board(
+        top_n: int = 10,
+        paper_type: str | None = None,
+        target_venue: str | None = None,
+        min_priority: float | None = None,
+        min_rewrite_gain: float | None = None,
+        max_blockers: int | None = None,
+        require_gate: bool = False,
+        include_ready: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            items = client.rewrite_board(
+                top_n=top_n,
+                paper_type=paper_type,
+                target_venue=target_venue,
+                min_priority=min_priority,
+                min_rewrite_gain=min_rewrite_gain,
+                max_blockers=max_blockers,
+                require_gate=require_gate,
+                include_ready=include_ready,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "items": _service_output_view(items, output_root=output_root),
+            "count": len(items),
+        }
 
     @app.post("/v1/projects", status_code=202)
     def submit_project(payload: ProjectPayload) -> dict[str, Any]:

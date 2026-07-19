@@ -302,6 +302,9 @@ beyond localhost.
 See [`docs/guides/SDK_AND_API.md`](docs/guides/SDK_AND_API.md) for the public
 package structure, SDK contract, API endpoints, and deployment guidance.
 
+The public SDK and HTTP service also expose read-only paper, shortlist,
+submission-board, and rewrite-board views bound to the configured output root.
+
 Submission-grade and high-quality runs enable deterministic integrity forensics by default. You can also control it explicitly:
 
 ```bash
