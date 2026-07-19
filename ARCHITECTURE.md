@@ -11,6 +11,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
 | Batch experiment artifacts | `ai_scientist/apps/batch_experiment_artifacts.py` | Internal | Build experiment TODOs, ledgers, agendas, and per-paper follow-up artifacts |
+| Batch CLI | `ai_scientist/apps/batch_cli.py` | Internal adapter | Reusable argument contract for continuous paper generation |
 | Daemon adapters | `ai_scientist/apps/daemon_control.py`, `ai_scientist/apps/daemon_sources.py`, `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Persistent controls, source configuration, and pure dashboard/report rendering |
 | Manager read models | `ai_scientist/apps/manager_ranking.py`, `ai_scientist/apps/manager_reports.py` | Internal | Pure submission ranking/filtering plus Markdown rendering for manager boards |
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
@@ -36,6 +37,10 @@ methods remain responsible for path creation and file writes.
 compatibility `main()` wrapper. Argument parsing and terminal presentation live
 in `ai_scientist/apps/manager_cli.py`, with dependencies injected at call time
 so historical monkeypatch and legacy-module behavior remain intact.
+
+`ai_scientist/apps/batch.py` owns batch generation and execution. Its reusable
+argument contract lives in `ai_scientist/apps/batch_cli.py`, while `main()`
+injects environment-derived defaults and keeps legacy module behavior intact.
 
 The daemon state machine remains in `ai_scientist/apps/daemon.py`. Persistent
 operator-control defaults, validation, expiry, atomic storage, and event history
