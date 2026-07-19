@@ -10,7 +10,7 @@ XScientist is designed as a **research operating system** that can run continuou
 |---|---|---|---|
 | Public integration | `xscientist/` | Semver-managed | Python SDK, request/result models, unified CLI, FastAPI service |
 | Application entrypoints | `ai_scientist/apps/` | Internal | Project, batch, daemon, and manager implementations |
-| Daemon presentation | `ai_scientist/apps/daemon_dashboard.py` | Internal | Pure trend transformation and HTML rendering for daemon dashboards |
+| Daemon presentation | `ai_scientist/apps/daemon_dashboard.py`, `ai_scientist/apps/daemon_reports.py` | Internal | Pure dashboard transformation plus HTML and Markdown rendering |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
@@ -193,8 +193,9 @@ Long-running orchestration:
 - Graceful degradation
 
 The daemon entrypoint owns scheduling, state, control files, and artifact I/O.
-Dashboard trend transformation and HTML rendering live separately in
-`ai_scientist/apps/daemon_dashboard.py`, keeping presentation code independent
+Dashboard trend transformation and HTML rendering live in
+`ai_scientist/apps/daemon_dashboard.py`; operational Markdown formatters live in
+`ai_scientist/apps/daemon_reports.py`. This keeps presentation code independent
 from the long-running orchestration loop while preserving compatibility exports
 from `ai_scientist.apps.daemon`.
 
