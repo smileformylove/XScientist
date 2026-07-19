@@ -161,6 +161,9 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 Set the env vars for your provider(s) (you do not need all of them):
 
 ```bash
+cp configs/environment/example.env .env
+# Edit .env, then export/source the values for your shell or process manager.
+
 export OPENAI_API_KEY="..."
 export ZHIPU_API_KEY="..."
 export GEMINI_API_KEY="..."

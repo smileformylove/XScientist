@@ -47,6 +47,21 @@ class OpenSourceHygieneTests(unittest.TestCase):
             f"runtime YAML configs should live under configs/: {root_configs}",
         )
 
+    def test_environment_template_lives_under_configs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        self.assertFalse((repo_root / ".env.example").exists())
+        self.assertTrue(
+            (repo_root / "configs" / "environment" / "example.env").is_file()
+        )
+
+    def test_root_protocol_files_stay_discoverable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for name in (".gitignore", "MANIFEST.in", "pyproject.toml"):
+            self.assertTrue(
+                (repo_root / name).is_file(),
+                msg=f"{name} must remain at repository root for tool discovery",
+            )
+
     def test_ci_dependency_files_live_under_requirements(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         self.assertFalse((repo_root / "constraints-ci.txt").exists())

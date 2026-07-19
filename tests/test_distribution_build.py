@@ -159,6 +159,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "configs/bfts/bfts_config.yaml",
                 "configs/bfts/bfts_config_deep.yaml",
                 "configs/bfts/bfts_config_enhanced.yaml",
+                "configs/environment/example.env",
                 "docs/CONFIG_REFERENCE.md",
                 "docs/ARCHITECTURE.md",
                 "docs/OPERATIONS_CHECKLIST.md",

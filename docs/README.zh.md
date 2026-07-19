@@ -176,6 +176,9 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 按你使用的提供商设置环境变量（不需要全部设置）：
 
 ```bash
+cp configs/environment/example.env .env
+# 编辑 .env，再通过 shell 或进程管理器加载其中的变量。
+
 export OPENAI_API_KEY="..."
 export ZHIPU_API_KEY="..."
 export GEMINI_API_KEY="..."
