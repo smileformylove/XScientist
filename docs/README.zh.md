@@ -625,6 +625,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [系统架构](ARCHITECTURE.md)：系统边界与核心组件
 - [科研可信协议](RESEARCH_INTEGRITY.md)：预注册、盲测复现与结论晋升门禁
 - [开放式科研发现](RESEARCH_DISCOVERY.md)：假设谱系、文献证据、Pareto 多样性与多评审共识
+- [基准约束的自我进化](EVOLUTION_GATE.md)：影子评测、灰度晋升、独立批准与回滚
 - [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---

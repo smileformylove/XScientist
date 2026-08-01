@@ -18,7 +18,6 @@ from ai_scientist.utils.pipeline_contracts import (
 )
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
 
-
 LANE_DEFAULTS = {
     "figure_repair": {
         "stage": "figure",
@@ -122,7 +121,9 @@ def _finalize_self_check(criteria: list[dict[str, Any]]) -> dict[str, Any]:
     total = max(len(criteria), 1)
     passed = sum(1 for item in criteria if item.get("passed"))
     required_failures = [
-        item["id"] for item in criteria if item.get("required") and not item.get("passed")
+        item["id"]
+        for item in criteria
+        if item.get("required") and not item.get("passed")
     ]
     score = round((passed / total) * 100.0, 1)
     if required_failures:
@@ -212,9 +213,8 @@ def _build_lane_lessons(
                 "signal": f"{count} repair tasks routed to {lane}",
                 "recommended_action": defaults["action"],
                 "agentic_default_update": defaults["action"],
-                "ready_rate": float(lane_row.get("ready_count") or 0) / max(
-                    int(lane_row.get("task_count") or count), 1
-                ),
+                "ready_rate": float(lane_row.get("ready_count") or 0)
+                / max(int(lane_row.get("task_count") or count), 1),
             }
         )
     return lessons
@@ -325,11 +325,7 @@ def _build_next_cycle_defaults(lessons: list[dict[str, Any]]) -> dict[str, list[
             continue
         grouped.setdefault(stage, [])
         grouped[stage].append(action)
-    return {
-        stage: _dedupe(actions)
-        for stage, actions in grouped.items()
-        if actions
-    }
+    return {stage: _dedupe(actions) for stage, actions in grouped.items() if actions}
 
 
 def build_self_evolution(
@@ -391,7 +387,9 @@ def build_self_evolution(
         if str(item.get("role") or "").strip()
     )
     lane_rows = [
-        item for item in (repair_plan_payload.get("lanes") or []) if isinstance(item, dict)
+        item
+        for item in (repair_plan_payload.get("lanes") or [])
+        if isinstance(item, dict)
     ]
     lane_counts = Counter(
         str(item.get("lane") or "").strip()
@@ -527,13 +525,27 @@ def build_self_evolution(
         "lessons": lessons,
         "stage_risks": _coerce_list(standards_summary.get("top_risks")),
         "blocked_stages": _coerce_list(standards_summary.get("blocked_stages")),
+        "promotion_policy": {
+            "automatic_production_mutation_allowed": False,
+            "requires_hidden_benchmark": True,
+            "requires_evolution_gate": True,
+            "requires_canary": True,
+            "requires_independent_approval": True,
+            "rollback_required": True,
+        },
     }
 
 
 def _snapshot_for_history(evolution_payload: dict[str, Any]) -> dict[str, Any]:
-    summary = evolution_payload.get("summary") if isinstance(evolution_payload.get("summary"), dict) else {}
+    summary = (
+        evolution_payload.get("summary")
+        if isinstance(evolution_payload.get("summary"), dict)
+        else {}
+    )
     lessons = [
-        item for item in (evolution_payload.get("lessons") or []) if isinstance(item, dict)
+        item
+        for item in (evolution_payload.get("lessons") or [])
+        if isinstance(item, dict)
     ]
     return {
         "generated_at": evolution_payload.get("generated_at"),
@@ -614,8 +626,7 @@ def build_self_evolution_playbook(entries: list[dict[str, Any]]) -> dict[str, An
         "role_counts": dict(role_counts),
         "stage_focus_counts": dict(stage_focus_counts),
         "top_recurring_risks": [
-            {"risk": name, "count": count}
-            for name, count in risk_counts.most_common(8)
+            {"risk": name, "count": count} for name, count in risk_counts.most_common(8)
         ],
         "top_agentic_defaults": [
             {"stage": stage, "action": action, "count": count}
@@ -631,7 +642,10 @@ def build_self_evolution_playbook(entries: list[dict[str, Any]]) -> dict[str, An
             }
             for item in sorted(
                 latest_entries,
-                key=lambda row: (str(row.get("generated_at") or ""), str(row.get("project_root") or "")),
+                key=lambda row: (
+                    str(row.get("generated_at") or ""),
+                    str(row.get("project_root") or ""),
+                ),
                 reverse=True,
             )[:10]
         ],
@@ -671,4 +685,7 @@ def save_self_evolution(
 
 def load_self_evolution_playbook(project_root: str | Path) -> dict[str, Any]:
     knowledge_dir = _resolve_knowledge_dir(project_root)
-    return load_json_artifact(knowledge_dir / "self_evolution_playbook.json", default={}) or {}
+    return (
+        load_json_artifact(knowledge_dir / "self_evolution_playbook.json", default={})
+        or {}
+    )

@@ -626,6 +626,7 @@ Currently organized example files:
 - [Architecture](docs/ARCHITECTURE.md): system boundaries and components
 - [Research integrity protocol](docs/RESEARCH_INTEGRITY.md): preregistration, blind verification, and claim-promotion gates
 - [Open-ended research discovery](docs/RESEARCH_DISCOVERY.md): hypothesis lineage, literature grounding, Pareto diversity, and judge consensus
+- [Benchmark-gated self-evolution](docs/EVOLUTION_GATE.md): shadow evaluation, canary promotion, independent approval, and rollback
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---

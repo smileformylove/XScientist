@@ -17,7 +17,9 @@ from ai_scientist.utils.self_evolution import (
 
 
 class SelfEvolutionTests(unittest.TestCase):
-    def test_save_self_evolution_should_persist_project_artifact_and_playbook(self) -> None:
+    def test_save_self_evolution_should_persist_project_artifact_and_playbook(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
             project_root = research_root / "projects" / "demo_project"
@@ -86,19 +88,27 @@ class SelfEvolutionTests(unittest.TestCase):
                 producer="test_self_evolution",
             )
 
-            output_path = save_self_evolution(project_root, producer="test_self_evolution")
+            output_path = save_self_evolution(
+                project_root, producer="test_self_evolution"
+            )
 
             self.assertTrue(Path(output_path).exists())
             payload = json.loads(Path(output_path).read_text(encoding="utf-8"))
             self.assertEqual(payload["summary"]["dominant_lane"], "evidence_followup")
             self.assertGreaterEqual(payload["summary"]["lesson_count"], 1)
+            self.assertFalse(
+                payload["promotion_policy"]["automatic_production_mutation_allowed"]
+            )
+            self.assertTrue(payload["promotion_policy"]["requires_evolution_gate"])
 
             playbook = load_self_evolution_playbook(project_root)
             self.assertEqual(playbook["project_count"], 1)
             self.assertTrue(playbook["top_agentic_defaults"])
             self.assertTrue(playbook["top_recurring_risks"])
 
-    def test_build_self_evolution_should_surface_stage_blockers_as_lessons(self) -> None:
+    def test_build_self_evolution_should_surface_stage_blockers_as_lessons(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "blocked_project"
             project_root.mkdir(parents=True, exist_ok=True)

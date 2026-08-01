@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from ._version import __version__
 from .entrypoints import (
@@ -74,7 +75,68 @@ def _build_parser() -> argparse.ArgumentParser:
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
+    evolution_parser = subparsers.add_parser(
+        "evolution-gate",
+        help="Evaluate a shadow self-evolution candidate against hidden benchmarks.",
+    )
+    evolution_parser.add_argument("--project-root", required=True)
+    evolution_parser.add_argument("--candidate", required=True)
+    evolution_parser.add_argument("--benchmark", required=True)
+    evolution_parser.add_argument("--policy", default=None)
+    evolution_parser.add_argument("--canary", default=None)
+    evolution_parser.add_argument("--approver", default=None)
     return parser
+
+
+def _load_json_file(path: str) -> object:
+    with open(Path(path).expanduser().resolve(), "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _run_evolution_gate(parsed: argparse.Namespace) -> int:
+    from ai_scientist.utils.evolution_gate import (
+        approve_production_promotion,
+        build_evolution_candidate,
+        build_evolution_gate,
+        save_evolution_gate,
+    )
+
+    candidate_payload = _load_json_file(parsed.candidate)
+    if not isinstance(candidate_payload, dict):
+        raise ValueError("candidate JSON must be an object")
+    candidate = (
+        candidate_payload
+        if candidate_payload.get("candidate_hash")
+        else build_evolution_candidate(**candidate_payload)
+    )
+    benchmark_payload = _load_json_file(parsed.benchmark)
+    samples = (
+        benchmark_payload.get("samples")
+        if isinstance(benchmark_payload, dict)
+        else benchmark_payload
+    )
+    if not isinstance(samples, list):
+        raise ValueError("benchmark JSON must be a list or an object with samples")
+    policy = _load_json_file(parsed.policy) if parsed.policy else None
+    if policy is not None and not isinstance(policy, dict):
+        raise ValueError("policy JSON must be an object")
+    report = build_evolution_gate(candidate, samples, policy=policy)
+    if parsed.canary:
+        canary = _load_json_file(parsed.canary)
+        if not isinstance(canary, dict):
+            raise ValueError("canary JSON must be an object")
+        report = approve_production_promotion(
+            report,
+            canary,
+            approver_id=str(parsed.approver or ""),
+        )
+    save_evolution_gate(
+        parsed.project_root,
+        report,
+        producer="xscientist.evolution_gate",
+    )
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0 if report.get("decision") in {"promote_to_canary", "approved"} else 3
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -111,6 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for key, value in payload.items():
                 print(f"{key}: {value}")
         return 0
+    if parsed.command == "evolution-gate":
+        return _run_evolution_gate(parsed)
     parser.error(f"Unsupported command: {parsed.command}")
     return 2
 
