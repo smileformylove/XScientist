@@ -5,6 +5,11 @@ resource allocation, failure recovery, or agent scaffolds. They are guidance
 only. XScientist does not allow an autonomous process to mutate production
 behavior directly.
 
+The upstream organization of lessons into L0/L1/L2 adaptation levels,
+fixed-utility epochs, and quality-diverse atomic intents is specified in
+[`SELF_EVOLUTION_ARCHITECTURE.md`](SELF_EVOLUTION_ARCHITECTURE.md). This document
+covers the downstream admission gate for one candidate.
+
 Every candidate is bound to the project's intact science constitution. The
 autonomous mutation whitelist is explicit; the constitution, epistemic
 history, raw evidence, sealed benchmarks, evaluation/verification policy,

@@ -103,6 +103,7 @@ class PipelineContractsTests(unittest.TestCase):
             self.assertIn("evaluation_charter", reloaded["artifacts"])
             self.assertIn("evaluation_benchmarks", reloaded["artifacts"])
             self.assertIn("evaluation_report", reloaded["artifacts"])
+            self.assertIn("evolution_program", reloaded["artifacts"])
             self.assertEqual(
                 reloaded["artifacts"]["repair_plan"]["status"],
                 "missing",

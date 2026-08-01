@@ -9,6 +9,7 @@ from typing import Any
 
 from ai_scientist.utils.pipeline_contracts import (
     append_jsonl_artifact,
+    artifact_path,
     load_contract_artifact,
     load_json_artifact,
     load_jsonl_artifact,
@@ -17,6 +18,11 @@ from ai_scientist.utils.pipeline_contracts import (
     save_json_artifact,
 )
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
+from ai_scientist.utils.science_constitution import (
+    build_science_constitution,
+    save_science_constitution,
+    validate_science_constitution,
+)
 
 LANE_DEFAULTS = {
     "figure_repair": {
@@ -485,6 +491,10 @@ def build_self_evolution(
             str(item.get("lesson_id") or ""),
         )
     )
+    for lesson in lessons:
+        lesson["evolution_level"] = "playbook"
+        lesson["automatic_system_mutation_allowed"] = False
+        lesson["requires_portfolio_intent"] = True
     next_cycle_defaults = _build_next_cycle_defaults(lessons)
     dominant_lane = lane_counts.most_common(1)[0][0] if lane_counts else None
     dominant_role = role_counts.most_common(1)[0][0] if role_counts else None
@@ -512,7 +522,7 @@ def build_self_evolution(
         "lesson_count": len(lessons),
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": _now_iso(),
         "project_root": str(resolved_root),
         "workflow_mode": manifest.get("workflow_mode"),
@@ -525,9 +535,17 @@ def build_self_evolution(
         "lessons": lessons,
         "stage_risks": _coerce_list(standards_summary.get("top_risks")),
         "blocked_stages": _coerce_list(standards_summary.get("blocked_stages")),
+        "adaptation_model": {
+            "episodic": "Current-run reflection; never a persistent system update.",
+            "playbook": "Cross-project advisory memory; outcomes must accumulate before use.",
+            "system": "Atomic scaffold change organized by evolution_program and governed by evolution_gate.",
+        },
         "promotion_policy": {
             "automatic_production_mutation_allowed": False,
             "requires_hidden_benchmark": True,
+            "requires_prospective_benchmark": True,
+            "requires_ablation_attribution": True,
+            "requires_evolution_program": True,
             "requires_evolution_gate": True,
             "requires_canary": True,
             "requires_independent_approval": True,
@@ -660,6 +678,21 @@ def save_self_evolution(
     stage_standards: dict[str, Any] | None = None,
     producer: str = "self_evolution",
 ) -> str:
+    constitution_path = artifact_path(project_root, "science_constitution")
+    constitution = load_contract_artifact(
+        project_root, "science_constitution", default={}
+    )
+    if constitution_path.exists():
+        constitution_check = validate_science_constitution(constitution)
+        if not constitution_check.get("passed"):
+            raise ValueError(
+                "existing science constitution is invalid; refusing self-evolution"
+            )
+    else:
+        constitution = build_science_constitution(
+            project_name=Path(project_root).expanduser().resolve().name
+        )
+        save_science_constitution(project_root, constitution, producer=producer)
     payload = build_self_evolution(
         project_root,
         review_state=review_state,
@@ -680,6 +713,13 @@ def save_self_evolution(
     history_entries = load_jsonl_artifact(history_path)
     playbook = build_self_evolution_playbook(history_entries)
     save_json_artifact(knowledge_dir / "self_evolution_playbook.json", playbook)
+    from ai_scientist.utils.evolution_program import build_and_save_evolution_program
+
+    build_and_save_evolution_program(
+        project_root,
+        self_evolution=payload,
+        producer=producer,
+    )
     return output_path
 
 

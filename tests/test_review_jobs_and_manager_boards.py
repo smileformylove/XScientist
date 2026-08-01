@@ -660,6 +660,30 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 },
                 producer="test_manager",
             )
+            save_contract_artifact(
+                project_root,
+                "evolution_program",
+                {
+                    "program_id": "evolution-program:test",
+                    "epoch": {
+                        "epoch_id": "epoch:0001:test",
+                        "epoch_index": 1,
+                        "status": "planning",
+                    },
+                    "intents": [
+                        {
+                            "intent_id": "intent:test",
+                            "failure_class": "figure_traceability_gap",
+                            "component_type": "tool",
+                            "search_mode": "explore",
+                        }
+                    ],
+                    "evaluation_challenges": [
+                        {"challenge_id": "eval-challenge:test"}
+                    ],
+                },
+                producer="test_manager",
+            )
 
             manager = ResearchManager(str(research_root))
             manager.rebuild_index()
@@ -717,6 +741,10 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             self.assertEqual(evolution_rows[0]["project"], "demo_project")
             self.assertIn(evolution_rows[0]["status"], {"ready", "needs_attention"})
             self.assertGreaterEqual(evolution_rows[0]["lesson_count"], 1)
+            self.assertEqual(evolution_rows[0]["epoch_index"], 1)
+            self.assertEqual(evolution_rows[0]["active_intent_count"], 1)
+            self.assertEqual(evolution_rows[0]["intent_component_counts"], {"tool": 1})
+            self.assertEqual(evolution_rows[0]["evaluator_challenge_count"], 1)
             self.assertTrue(process_rows)
             review_process_rows = [
                 row for row in process_rows if row.get("process") == "review"

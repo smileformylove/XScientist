@@ -4,6 +4,7 @@
 使AI Scientist能够自主进化，并接受外部agent的指导
 """
 
+import hashlib
 import json
 import os
 from typing import Dict, List, Optional, Callable
@@ -18,10 +19,12 @@ from ai_scientist.config.paths import OUTPUT_PATH
 from ai_scientist.llm import create_client, get_response_from_llm
 from ai_scientist.self_learning_knowledge_base import SelfLearningKnowledgeBase
 from ai_scientist.adaptive_learning_engine import AdaptiveLearningEngine
+from ai_scientist.utils.pipeline_contracts import append_jsonl_artifact
 
 
 class FeedbackSource(Enum):
     """反馈来源"""
+
     SELF = "self"  # 自我反思
     EXTERNAL_AGENT = "external_agent"  # 外部agent
     HUMAN = "human"  # 人工反馈
@@ -31,6 +34,7 @@ class FeedbackSource(Enum):
 
 class EvolutionAction(Enum):
     """进化动作"""
+
     IMPROVE_WRITING = "improve_writing"
     ADJUST_STRATEGY = "adjust_strategy"
     LEARN_PATTERN = "learn_pattern"
@@ -124,6 +128,10 @@ class AutonomousEvolutionEngine:
             "timestamp": datetime.now().isoformat(),
             "paper_id": paper_data.get("paper_id", "unknown"),
             "current_state": current_state,
+            "adaptation_level": "episodic",
+            "execution_scope": "current_paper_sandbox",
+            "production_mutation_allowed": False,
+            "global_knowledge_commit_allowed": False,
         }
 
         # 1. 自我反思
@@ -167,14 +175,18 @@ class AutonomousEvolutionEngine:
             current_state,
             evolution_result,
         )
+        validation["validation_authority"] = "self_model_advisory"
+        validation["eligible_for_global_learning"] = False
+        validation["requires_external_outcome_confirmation"] = True
         evolution_record["validation"] = validation
 
         # 6. 更新知识库
         print("\n📚 步骤 6: 更新知识库")
-        await self._update_knowledge_from_evolution(
+        knowledge_update = await self._update_knowledge_from_evolution(
             evolution_record,
             validation,
         )
+        evolution_record["knowledge_update"] = knowledge_update
 
         # 保存历史
         self.evolution_history.append(evolution_record)
@@ -243,7 +255,8 @@ class AutonomousEvolutionEngine:
         # 解析响应
         try:
             import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group(1))
             else:
@@ -266,16 +279,16 @@ class AutonomousEvolutionEngine:
         }
 
         # 收集所有反馈
-        all_feedback = [
-            {"source": FeedbackSource.SELF, "feedback": self_reflection}
-        ]
+        all_feedback = [{"source": FeedbackSource.SELF, "feedback": self_reflection}]
 
         for ext_feedback in external_feedback:
             source = ext_feedback.get("source", "unknown")
-            all_feedback.append({
-                "source": source,
-                "feedback": ext_feedback,
-            })
+            all_feedback.append(
+                {
+                    "source": source,
+                    "feedback": ext_feedback,
+                }
+            )
 
         integrated["sources"] = all_feedback
 
@@ -305,12 +318,12 @@ class AutonomousEvolutionEngine:
         if integrated["common_issues"]:
             priority_actions.extend(
                 [
-                issue["issue"]
-                for issue in sorted(
-                    integrated["common_issues"],
-                    key=lambda x: x["frequency"],
-                    reverse=True
-                )
+                    issue["issue"]
+                    for issue in sorted(
+                        integrated["common_issues"],
+                        key=lambda x: x["frequency"],
+                        reverse=True,
+                    )
                 ]
             )
         priority_actions.extend(integrated["conflict_actions"])
@@ -333,7 +346,14 @@ class AutonomousEvolutionEngine:
 
     def _collect_feedback_markers(self, feedback: Dict) -> Dict:
         positive_keys = {"strengths", "positives", "pros", "highlights"}
-        negative_keys = {"issues", "concerns", "weaknesses", "cons", "risks", "problems"}
+        negative_keys = {
+            "issues",
+            "concerns",
+            "weaknesses",
+            "cons",
+            "risks",
+            "problems",
+        }
         positive_points: set[str] = set()
         negative_points: set[str] = set()
         score_map: Dict[str, float] = {}
@@ -552,7 +572,8 @@ class AutonomousEvolutionEngine:
 
         try:
             import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group(1))
             else:
@@ -588,15 +609,15 @@ class AutonomousEvolutionEngine:
             )
 
             results["actions_taken"].append(action_result)
-            results["improvements"].extend(
-                action_result.get("improvements", [])
-            )
+            results["improvements"].extend(action_result.get("improvements", []))
 
             # 记录中间状态
-            results["intermediate_states"].append({
-                "action": action.get("name"),
-                "state": action_result.get("new_state"),
-            })
+            results["intermediate_states"].append(
+                {
+                    "action": action.get("name"),
+                    "state": action_result.get("new_state"),
+                }
+            )
 
         return results
 
@@ -650,17 +671,25 @@ class AutonomousEvolutionEngine:
         improvements = []
 
         if target_section == "all":
-            sections = ["abstract", "introduction", "method", "experiments", "conclusion"]
+            sections = [
+                "abstract",
+                "introduction",
+                "method",
+                "experiments",
+                "conclusion",
+            ]
         else:
             sections = [target_section]
 
         for section in sections:
             # 这里可以调用专业写作系统进行改进
-            improvements.append({
-                "section": section,
-                "improvement": f"Enhanced {section} based on evolutionary strategy",
-                "estimated_gain": 0.5,
-            })
+            improvements.append(
+                {
+                    "section": section,
+                    "improvement": f"Enhanced {section} based on evolutionary strategy",
+                    "estimated_gain": 0.5,
+                }
+            )
 
         return {
             "improvements": improvements,
@@ -675,16 +704,19 @@ class AutonomousEvolutionEngine:
         """调整策略动作"""
         new_strategy = action.get("new_strategy", {})
 
-        # 更新知识库中的策略
-        self.knowledge_base.improvement_strategies.update(new_strategy)
-
         return {
-            "improvements": [{
-                "type": "strategy_adjustment",
-                "description": "Updated strategy based on evolutionary insights",
-                "estimated_gain": 0.3,
-            }],
-            "new_state": {"strategy": "adjusted"},
+            "improvements": [
+                {
+                    "type": "strategy_adjustment",
+                    "description": "Updated strategy based on evolutionary insights",
+                    "estimated_gain": 0.3,
+                }
+            ],
+            "new_state": {
+                "strategy": "proposed_for_current_run",
+                "proposed_strategy": new_strategy,
+                "global_knowledge_commit_allowed": False,
+            },
         }
 
     async def _action_optimize_prompt(
@@ -701,11 +733,13 @@ class AutonomousEvolutionEngine:
         optimized_prompt = f"Optimized for {optimization_goal}"
 
         return {
-            "improvements": [{
-                "type": "prompt_optimization",
-                "description": f"Optimized prompt for {optimization_goal}",
-                "estimated_gain": 0.4,
-            }],
+            "improvements": [
+                {
+                    "type": "prompt_optimization",
+                    "description": f"Optimized prompt for {optimization_goal}",
+                    "estimated_gain": 0.4,
+                }
+            ],
             "new_state": {"prompt": optimized_prompt},
         }
 
@@ -718,19 +752,20 @@ class AutonomousEvolutionEngine:
         pattern = action.get("pattern", {})
         pattern_type = action.get("pattern_type", "writing")
 
-        # 提取并存储新模式
-        if pattern_type == "writing":
-            self.knowledge_base.writing_insights[pattern.get("name", "unnamed")] = pattern
-        elif pattern_type == "review":
-            self.knowledge_base.review_insights[pattern.get("name", "unnamed")] = pattern
-
         return {
-            "improvements": [{
-                "type": "pattern_learning",
-                "description": f"Learned new {pattern_type} pattern",
-                "estimated_gain": 0.6,
-            }],
-            "new_state": {"patterns_learned": 1},
+            "improvements": [
+                {
+                    "type": "pattern_learning",
+                    "description": f"Learned new {pattern_type} pattern",
+                    "estimated_gain": 0.6,
+                }
+            ],
+            "new_state": {
+                "patterns_proposed": 1,
+                "pattern_type": pattern_type,
+                "pattern": pattern,
+                "global_knowledge_commit_allowed": False,
+            },
         }
 
     async def _action_generic(
@@ -742,11 +777,13 @@ class AutonomousEvolutionEngine:
         description = action.get("description", "")
 
         return {
-            "improvements": [{
-                "type": "generic",
-                "description": description,
-                "estimated_gain": 0.2,
-            }],
+            "improvements": [
+                {
+                    "type": "generic",
+                    "description": description,
+                    "estimated_gain": 0.2,
+                }
+            ],
             "new_state": {},
         }
 
@@ -800,13 +837,16 @@ class AutonomousEvolutionEngine:
 
         try:
             import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if json_match:
                 validation = json.loads(json_match.group(1))
 
                 # 计算总体分数
                 if "scores" in validation:
-                    overall = sum(validation["scores"].values()) / len(validation["scores"])
+                    overall = sum(validation["scores"].values()) / len(
+                        validation["scores"]
+                    )
                     validation["overall_score"] = overall
 
                 return validation
@@ -819,33 +859,80 @@ class AutonomousEvolutionEngine:
         self,
         evolution_record: Dict,
         validation: Dict,
-    ) -> None:
-        """从进化中更新知识库"""
-        # 提取成功的模式
+    ) -> Dict:
+        """Quarantine self-scored lessons until independent outcomes confirm them."""
+        quarantined = []
         if validation.get("overall_score", 0) >= 4.0:
             successful_actions = []
 
-            for action_result in evolution_record.get("result", {}).get("actions_taken", []):
+            for action_result in evolution_record.get("result", {}).get(
+                "actions_taken", []
+            ):
                 if action_result.get("success"):
                     successful_actions.append(action_result)
 
-            # 存储成功模式
             for action in successful_actions:
-                pattern = {
+                proposal = {
                     "action": action.get("action"),
                     "type": action.get("type"),
-                    "timestamp": datetime.now().isoformat(),
-                    "effectiveness": validation.get("overall_score", 0),
+                    "claimed_effectiveness": validation.get("overall_score", 0),
                 }
-
-                self.knowledge_base.improvement_strategies[
-                    f"evolution_{action.get('action')}"
-                ] = pattern
+                quarantined.append(
+                    self._quarantine_learning_candidate(
+                        source="self_scored_evolution",
+                        proposal=proposal,
+                        validation=validation,
+                    )
+                )
 
         # 保存验证结果
-        validation_file = self.evolution_dir / f"validation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        validation_file = (
+            self.evolution_dir
+            / f"validation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
         with open(validation_file, "w") as f:
             json.dump(validation, f, indent=2, ensure_ascii=False)
+        return {
+            "status": "quarantined_pending_external_outcome",
+            "candidate_count": len(quarantined),
+            "candidate_ids": [item["candidate_id"] for item in quarantined],
+            "global_knowledge_base_updated": False,
+        }
+
+    def _quarantine_learning_candidate(
+        self,
+        *,
+        source: str,
+        proposal: Dict,
+        validation: Optional[Dict] = None,
+    ) -> Dict:
+        core = {
+            "source": str(source),
+            "proposal": proposal,
+            "validation": validation or {},
+            "validation_authority": "advisory_only",
+            "eligible_for_global_learning": False,
+            "requires_external_outcome_confirmation": True,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                core,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        candidate = {
+            **core,
+            "candidate_id": f"learning-candidate:{digest[:16]}",
+            "created_at": datetime.now().isoformat(),
+        }
+        append_jsonl_artifact(
+            self.evolution_dir / "quarantined_learning_candidates.jsonl",
+            candidate,
+        )
+        return candidate
 
     def _extract_actions_from_text(self, text: str) -> List[Dict]:
         """从文本中提取动作"""
@@ -864,11 +951,13 @@ class AutonomousEvolutionEngine:
         for line in lines:
             for keyword, action_type in action_keywords.items():
                 if keyword.lower() in line.lower():
-                    actions.append({
-                        "type": action_type,
-                        "name": line.strip()[:50],
-                        "description": line.strip(),
-                    })
+                    actions.append(
+                        {
+                            "type": action_type,
+                            "name": line.strip()[:50],
+                            "description": line.strip(),
+                        }
+                    )
                     break
 
         return actions[:5]  # 最多5个动作
@@ -921,7 +1010,8 @@ class AutonomousEvolutionEngine:
         # 确定要咨询的agents
         if agent_filter:
             agents_to_consult = {
-                k: v for k, v in self.external_agent_callbacks.items()
+                k: v
+                for k, v in self.external_agent_callbacks.items()
                 if k in agent_filter
             }
         else:
@@ -1031,13 +1121,13 @@ class AutonomousEvolutionEngine:
         # 提取洞察
         insights = self._extract_insights_from_feedback(integrated)
 
-        # 更新知识库
+        # Feedback-derived insights stay advisory until independently confirmed.
         if insights:
             for insight in insights:
-                if insight.get("type") == "writing":
-                    self.knowledge_base.writing_insights[insight.get("name", "unnamed")] = insight
-                elif insight.get("type") == "strategy":
-                    self.knowledge_base.improvement_strategies[insight.get("name", "unnamed")] = insight
+                self._quarantine_learning_candidate(
+                    source="feedback_buffer",
+                    proposal=insight,
+                )
 
         # 清空缓冲区
         self.feedback_buffer = []
@@ -1053,23 +1143,27 @@ class AutonomousEvolutionEngine:
 
         # 从共同问题中提取洞察
         for issue_obj in integrated_feedback.get("common_issues", []):
-            insights.append({
-                "name": f"common_issue_{issue_obj['issue']}",
-                "type": "strategy",
-                "description": f"Common issue: {issue_obj['issue']}",
-                "frequency": issue_obj.get("frequency", 1),
-                "timestamp": datetime.now().isoformat(),
-            })
+            insights.append(
+                {
+                    "name": f"common_issue_{issue_obj['issue']}",
+                    "type": "strategy",
+                    "description": f"Common issue: {issue_obj['issue']}",
+                    "frequency": issue_obj.get("frequency", 1),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
         # 从优先级行动中提取
         for i, action in enumerate(integrated_feedback.get("priority_actions", [])[:3]):
-            insights.append({
-                "name": f"priority_action_{i}",
-                "type": "strategy",
-                "description": f"Priority action: {action}",
-                "priority": i + 1,
-                "timestamp": datetime.now().isoformat(),
-            })
+            insights.append(
+                {
+                    "name": f"priority_action_{i}",
+                    "type": "strategy",
+                    "description": f"Priority action: {action}",
+                    "priority": i + 1,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
         return insights
 
@@ -1081,7 +1175,11 @@ class AutonomousEvolutionEngine:
         """获取进化报告"""
         summary = {
             "total_evolutions": len(self.evolution_history),
-            "recent_evolutions": self.evolution_history[-10:] if len(self.evolution_history) >= 10 else self.evolution_history,
+            "recent_evolutions": (
+                self.evolution_history[-10:]
+                if len(self.evolution_history) >= 10
+                else self.evolution_history
+            ),
             "knowledge_base_summary": self.knowledge_base.generate_learning_summary(),
             "registered_agents": list(self.external_agent_callbacks.keys()),
             "pending_feedback": len(self.feedback_buffer),
@@ -1094,15 +1192,22 @@ class AutonomousEvolutionEngine:
                 for e in self.evolution_history[-10:]
             ]
             if recent_scores:
-                summary["average_validation_score"] = sum(recent_scores) / len(recent_scores)
-                summary["trend"] = "improving" if recent_scores[-1] > recent_scores[0] else "stable"
+                summary["average_validation_score"] = sum(recent_scores) / len(
+                    recent_scores
+                )
+                summary["trend"] = (
+                    "improving" if recent_scores[-1] > recent_scores[0] else "stable"
+                )
 
         return summary
 
     def export_evolution_knowledge(self, export_path: str = None) -> str:
         """导出进化知识"""
         if export_path is None:
-            export_path = self.evolution_dir / f"evolution_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            export_path = (
+                self.evolution_dir
+                / f"evolution_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            )
 
         export_data = {
             "evolution_history": self.evolution_history,
@@ -1125,14 +1230,16 @@ class AutonomousEvolutionEngine:
 
 
 # ========================================
-    # 辅助函数
-    # ========================================
+# 辅助函数
+# ========================================
+
 
 async def get_response_from_llm(prompt, client, model, system_message, temperature):
     """异步获取LLM响应"""
     # 这里是同步调用的包装器
     # 实际实现中可以使用真正的异步LLM客户端
     from ai_scientist.llm import get_response_from_llm
+
     return get_response_from_llm(
         prompt=prompt,
         client=client,

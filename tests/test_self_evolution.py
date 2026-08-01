@@ -14,9 +14,42 @@ from ai_scientist.utils.self_evolution import (
     load_self_evolution_playbook,
     save_self_evolution,
 )
+from ai_scientist.utils.science_constitution import (
+    build_science_constitution,
+    save_science_constitution,
+)
 
 
 class SelfEvolutionTests(unittest.TestCase):
+    def test_existing_invalid_constitution_stops_evolution_without_overwrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "tampered_project"
+            project_root.mkdir(parents=True, exist_ok=True)
+            initialize_pipeline_contracts(project_root)
+            constitution = build_science_constitution(project_name="tampered")
+            save_science_constitution(project_root, constitution, producer="test")
+            constitution_path = project_root / "science_constitution.json"
+            tampered = json.loads(constitution_path.read_text(encoding="utf-8"))
+            tampered["core_policy"]["principles"][0][
+                "rule"
+            ] = "Optimize appearance only."
+            constitution_path.write_text(
+                json.dumps(tampered, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "refusing self-evolution"):
+                save_self_evolution(project_root, producer="test")
+
+            persisted = json.loads(constitution_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["core_policy"]["principles"][0]["rule"],
+                "Optimize appearance only.",
+            )
+            self.assertFalse((project_root / "self_evolution.json").exists())
+
     def test_save_self_evolution_should_persist_project_artifact_and_playbook(
         self,
     ) -> None:
@@ -100,6 +133,9 @@ class SelfEvolutionTests(unittest.TestCase):
                 payload["promotion_policy"]["automatic_production_mutation_allowed"]
             )
             self.assertTrue(payload["promotion_policy"]["requires_evolution_gate"])
+            self.assertTrue(payload["promotion_policy"]["requires_evolution_program"])
+            self.assertTrue((project_root / "evolution_program.json").exists())
+            self.assertTrue((project_root / "science_constitution.json").exists())
 
             playbook = load_self_evolution_playbook(project_root)
             self.assertEqual(playbook["project_count"], 1)

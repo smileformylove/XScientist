@@ -1035,6 +1035,20 @@ class ResearchManager:
             rel_path = self._relative_output_path(project_root)
             index_entry = index_entries.get(rel_path, {})
             evolution = self._load_self_evolution(project_root)
+            program = load_contract_artifact(
+                project_root,
+                "evolution_program",
+                default={},
+            )
+            program = program if isinstance(program, dict) else {}
+            epoch = (
+                program.get("epoch") if isinstance(program.get("epoch"), dict) else {}
+            )
+            intents = [
+                item
+                for item in (program.get("intents") or [])
+                if isinstance(item, dict)
+            ]
             summary = (
                 evolution.get("summary")
                 if isinstance(evolution.get("summary"), dict)
@@ -1071,6 +1085,27 @@ class ResearchManager:
                     "stage_risks": list(evolution.get("stage_risks") or []),
                     "next_cycle_defaults": evolution.get("next_cycle_defaults") or {},
                     "top_lessons": lessons[:3],
+                    "evolution_program_id": program.get("program_id"),
+                    "epoch_id": epoch.get("epoch_id"),
+                    "epoch_index": epoch.get("epoch_index"),
+                    "epoch_status": epoch.get("status"),
+                    "active_intent_count": len(intents),
+                    "intent_component_counts": dict(
+                        Counter(
+                            str(item.get("component_type") or "unknown")
+                            for item in intents
+                        )
+                    ),
+                    "intent_search_mode_counts": dict(
+                        Counter(
+                            str(item.get("search_mode") or "unknown")
+                            for item in intents
+                        )
+                    ),
+                    "evaluator_challenge_count": len(
+                        program.get("evaluation_challenges") or []
+                    ),
+                    "top_intents": intents[:3],
                 }
             )
         status_rank = {

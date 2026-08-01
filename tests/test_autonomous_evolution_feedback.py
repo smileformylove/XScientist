@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
+import json
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
+
 
 def _load_autonomous_evolution_engine():
     module_name = "ai_scientist.autonomous_evolution"
@@ -74,7 +79,9 @@ class AutonomousEvolutionFeedbackTests(unittest.TestCase):
         )
         conflicts = result.get("conflicting_points") or []
         self.assertTrue(conflicts)
-        polarity = [item for item in conflicts if item.get("type") == "polarity_conflict"]
+        polarity = [
+            item for item in conflicts if item.get("type") == "polarity_conflict"
+        ]
         self.assertTrue(polarity)
         self.assertTrue(
             any("need stronger ablation" == item.get("point") for item in polarity)
@@ -96,7 +103,9 @@ class AutonomousEvolutionFeedbackTests(unittest.TestCase):
             ],
         )
         conflicts = result.get("conflicting_points") or []
-        score_conflicts = [item for item in conflicts if item.get("type") == "score_conflict"]
+        score_conflicts = [
+            item for item in conflicts if item.get("type") == "score_conflict"
+        ]
         self.assertTrue(score_conflicts)
         clarity_conflict = next(
             item for item in score_conflicts if item.get("dimension") == "clarity"
@@ -124,11 +133,77 @@ class AutonomousEvolutionFeedbackTests(unittest.TestCase):
         priority_actions = result.get("priority_actions") or []
         self.assertTrue(priority_actions)
         self.assertTrue(
-            any("resolve scoring disagreement on novelty" in action.lower() for action in priority_actions)
+            any(
+                "resolve scoring disagreement on novelty" in action.lower()
+                for action in priority_actions
+            )
         )
         self.assertTrue(
-            any("run focused verification" in action.lower() for action in priority_actions)
+            any(
+                "run focused verification" in action.lower()
+                for action in priority_actions
+            )
         )
+
+    def test_self_scored_learning_is_quarantined_not_committed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine_without_init()
+            engine.evolution_dir = Path(td)
+            engine.knowledge_base = types.SimpleNamespace(
+                improvement_strategies={"existing": {"trusted": True}},
+                writing_insights={},
+                review_insights={},
+            )
+            before = dict(engine.knowledge_base.improvement_strategies)
+            result = asyncio.run(
+                engine._update_knowledge_from_evolution(
+                    {
+                        "result": {
+                            "actions_taken": [
+                                {
+                                    "action": "tighten ablation",
+                                    "type": "adjust_strategy",
+                                    "success": True,
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "overall_score": 4.8,
+                        "validation_authority": "self_model_advisory",
+                    },
+                )
+            )
+
+            self.assertEqual(engine.knowledge_base.improvement_strategies, before)
+            self.assertFalse(result["global_knowledge_base_updated"])
+            self.assertEqual(result["candidate_count"], 1)
+            rows = [
+                json.loads(line)
+                for line in (
+                    engine.evolution_dir / "quarantined_learning_candidates.jsonl"
+                )
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertFalse(rows[0]["eligible_for_global_learning"])
+            self.assertTrue(rows[0]["requires_external_outcome_confirmation"])
+
+    def test_strategy_action_is_current_run_only(self) -> None:
+        engine = self._engine_without_init()
+        engine.knowledge_base = types.SimpleNamespace(
+            improvement_strategies={"existing": {"trusted": True}}
+        )
+        before = dict(engine.knowledge_base.improvement_strategies)
+        result = asyncio.run(
+            engine._action_adjust_strategy(
+                {},
+                {"new_strategy": {"unsafe_direct_update": {"score": 5}}},
+            )
+        )
+        self.assertEqual(engine.knowledge_base.improvement_strategies, before)
+        self.assertFalse(result["new_state"]["global_knowledge_commit_allowed"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Research integrity | `ai_scientist/utils/research_integrity.py` | Artifact-compatible | Immutable preregistration, blind verification, independent reproduction, claim promotion |
 | Discovery archive | `ai_scientist/utils/hypothesis_archive.py` | Artifact-compatible | Hypothesis lineage, proximity niches, Pareto fronts, quality-diverse selection, tournaments |
+| Evolution program | `ai_scientist/utils/evolution_program.py` | Constitution-bound | L0/L1/L2 separation, fixed-utility epochs, quality-diverse atomic intent portfolios, outcome feedback |
 | Evolution gate | `ai_scientist/utils/evolution_gate.py` | Constitution-bound | Mutation whitelist/blacklist, ablation, sealed and prospective tests, real-work canary, verified rollback |
 | Science constitution | `ai_scientist/utils/science_constitution.py` | Immutable core | Code-anchored scientific principles, protected assets, amendment proposals |
 | Epistemic graph | `ai_scientist/utils/epistemic_graph.py` | Append-only | Questions, theories, claims, evidence relations, and hash-chained status transitions |
@@ -181,19 +182,27 @@ Multi-round review system:
 - Regression detection
 
 ### 5. Autonomous Evolution Engine
-**Location**: `ai_scientist/autonomous_evolution.py`
+**Location**: `ai_scientist/utils/self_evolution.py`,
+`ai_scientist/utils/evolution_program.py`,
+`ai_scientist/utils/evolution_gate.py`
 
 Self-improvement system that:
-- Collects feedback from multiple sources
-- Identifies patterns in successes/failures
-- Evolves strategies over time
-- Integrates external agent guidance
+- Separates current-run reflection, advisory playbooks, and system mutation
+- Organizes system changes into bounded, fixed-utility epochs
+- Selects quality-diverse, single-mechanism candidate intents
+- Feeds both successful and failed gate outcomes into later epochs
 
 **Key Features**:
-- Multi-source feedback (self, external agents, metrics, peer review)
-- Evolution actions (improve writing, adjust strategy, learn patterns)
-- Evolution history tracking
-- External agent callbacks
+- No automatic production or evaluator mutation
+- Exploration/exploitation and per-component budgets
+- Append-only negative-result and epoch archives
+- Ablation, independent benchmark, canary, rollback, and approval gates
+
+`ai_scientist/autonomous_evolution.py` remains a compatibility path for
+paper-level episodic actions. Its self-scored learning proposals are quarantined
+and cannot update trusted cross-project knowledge directly. See
+[`SELF_EVOLUTION_ARCHITECTURE.md`](SELF_EVOLUTION_ARCHITECTURE.md) for the full
+control model.
 
 ### 6. Adaptive Learning Engine
 **Location**: `ai_scientist/adaptive_learning_engine.py`

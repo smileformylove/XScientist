@@ -1432,16 +1432,28 @@ def save_evolution_gate(
     history_path = artifact_path(project_root, "evolution_gate").with_name(
         "evolution_gate_history.jsonl"
     )
+    gate_report = payload.get("gate_report") or payload
+    candidate = gate_report.get("candidate") or {}
+    ablation_report = gate_report.get("ablation_report") or {}
     append_jsonl_artifact(
         history_path,
         {
             "generated_at": payload.get("generated_at"),
-            "candidate_id": (payload.get("candidate") or {}).get("candidate_id"),
-            "candidate_hash": (payload.get("candidate") or {}).get("candidate_hash"),
+            "candidate_id": candidate.get("candidate_id"),
+            "candidate_hash": candidate.get("candidate_hash"),
+            "component_type": candidate.get("component_type"),
+            "change_scope": list(candidate.get("change_scope") or []),
+            "failure_taxonomy_refs": list(candidate.get("failure_taxonomy_refs") or []),
+            "risk_tier": candidate.get("risk_tier"),
             "constitution_hash": payload.get("constitution_hash"),
             "decision": payload.get("decision"),
             "production_promotion_allowed": bool(
                 payload.get("production_promotion_allowed")
+            ),
+            "ablation_passed": bool(ablation_report.get("passed")),
+            "benchmark_task_count": gate_report.get("benchmark_task_count"),
+            "benchmark_layer_counts": dict(
+                gate_report.get("benchmark_layer_counts") or {}
             ),
             "gate_hash": payload.get("gate_hash"),
             "promotion_hash": payload.get("promotion_hash"),
