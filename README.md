@@ -626,7 +626,7 @@ Currently organized example files:
 - [Architecture](docs/ARCHITECTURE.md): system boundaries and components
 - [Research integrity protocol](docs/RESEARCH_INTEGRITY.md): preregistration, blind verification, and claim-promotion gates
 - [Open-ended research discovery](docs/RESEARCH_DISCOVERY.md): hypothesis lineage, literature grounding, Pareto diversity, and judge consensus
-- [Benchmark-gated self-evolution](docs/EVOLUTION_GATE.md): shadow evaluation, canary promotion, independent approval, and rollback
+- [Constitution-bound self-evolution](docs/EVOLUTION_GATE.md): mutation boundaries, ablation, prospective tests, real-work canaries, and verified rollback
 - [Science constitution](docs/SCIENCE_CONSTITUTION.md): immutable research principles, protected assets, and amendment governance
 - [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md): cumulative questions, claims, refutations, and evidence-state transitions
 - [Independent evaluation governance](docs/EVALUATION_GOVERNANCE.md): disjoint authorities, sealed/prospective/external tests, and high-confidence promotion gates
