@@ -42,6 +42,8 @@ ARTIFACT_FILENAMES = {
     "verification_report": "verification_report.json",
     "hypothesis_archive": "hypothesis_archive.json",
     "evolution_gate": "evolution_gate.json",
+    "science_constitution": "science_constitution.json",
+    "epistemic_graph": "epistemic_graph.json",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -70,6 +72,8 @@ ARTIFACT_DEFAULT_STATUS = {
     "verification_report": "missing",
     "hypothesis_archive": "missing",
     "evolution_gate": "missing",
+    "science_constitution": "missing",
+    "epistemic_graph": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {

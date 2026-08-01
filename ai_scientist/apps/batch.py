@@ -106,6 +106,7 @@ from ai_scientist.utils.hypothesis_archive import (
     build_hypothesis_archive,
     save_hypothesis_archive,
 )
+from ai_scientist.utils.epistemic_graph import seed_scientific_foundation
 from ai_scientist.writing_prompt_profiles import (
     DEFAULT_WRITING_PROFILE,
     list_writing_profiles,
@@ -452,6 +453,11 @@ def _save_batch_pipeline_seed_artifacts(
         build_hypothesis_archive(idea_cards),
         producer="continuous_paper_generator.batch_seed",
     )
+    seed_scientific_foundation(
+        batch_root,
+        idea_cards,
+        producer="continuous_paper_generator.batch_seed",
+    )
     lead_idea = idea_cards[0] if idea_cards else {}
     lead_plan = (
         build_research_plan(
@@ -547,6 +553,11 @@ def _save_paper_pipeline_seed_artifacts(
     save_hypothesis_archive(
         paper_root_path,
         build_hypothesis_archive([idea_card]),
+        producer="continuous_paper_generator.paper_seed",
+    )
+    seed_scientific_foundation(
+        paper_root_path,
+        [idea_card],
         producer="continuous_paper_generator.paper_seed",
     )
     research_plan = build_research_plan(

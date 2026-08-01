@@ -99,6 +99,7 @@ from ai_scientist.utils.hypothesis_archive import (
     build_hypothesis_archive,
     save_hypothesis_archive,
 )
+from ai_scientist.utils.epistemic_graph import seed_scientific_foundation
 from ai_scientist.utils.self_review_optimizer import (
     apply_issue_driven_rewrite,
     assess_self_review_gate,
@@ -395,6 +396,11 @@ def _write_project_pipeline_seed_artifacts(
         build_hypothesis_archive(idea_cards),
         producer="run_project.project_seed",
     )
+    seed_scientific_foundation(
+        project_root,
+        idea_cards,
+        producer="run_project.project_seed",
+    )
     lead_idea = idea_cards[0] if idea_cards else {}
     lead_plan = (
         build_research_plan(
@@ -490,6 +496,11 @@ def _write_experiment_pipeline_seed_artifacts(
     save_hypothesis_archive(
         exp_root,
         build_hypothesis_archive([idea_card]),
+        producer="run_project.idea_seed",
+    )
+    seed_scientific_foundation(
+        exp_root,
+        [idea_card],
         producer="run_project.idea_seed",
     )
     research_plan = build_research_plan(

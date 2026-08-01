@@ -626,6 +626,8 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [科研可信协议](RESEARCH_INTEGRITY.md)：预注册、盲测复现与结论晋升门禁
 - [开放式科研发现](RESEARCH_DISCOVERY.md)：假设谱系、文献证据、Pareto 多样性与多评审共识
 - [基准约束的自我进化](EVOLUTION_GATE.md)：影子评测、灰度晋升、独立批准与回滚
+- [科研宪法](SCIENCE_CONSTITUTION.md)：不可静默弱化的科研原则、受保护资产与修订治理
+- [认知科技树](EPISTEMIC_GRAPH_SPEC.md)：问题、主张、反例及证据状态的追加式积累
 - [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---

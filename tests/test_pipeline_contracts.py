@@ -98,6 +98,8 @@ class PipelineContractsTests(unittest.TestCase):
             self.assertIn("verification_report", reloaded["artifacts"])
             self.assertIn("hypothesis_archive", reloaded["artifacts"])
             self.assertIn("evolution_gate", reloaded["artifacts"])
+            self.assertIn("science_constitution", reloaded["artifacts"])
+            self.assertIn("epistemic_graph", reloaded["artifacts"])
             self.assertEqual(
                 reloaded["artifacts"]["repair_plan"]["status"],
                 "missing",

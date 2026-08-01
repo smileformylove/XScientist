@@ -627,6 +627,8 @@ Currently organized example files:
 - [Research integrity protocol](docs/RESEARCH_INTEGRITY.md): preregistration, blind verification, and claim-promotion gates
 - [Open-ended research discovery](docs/RESEARCH_DISCOVERY.md): hypothesis lineage, literature grounding, Pareto diversity, and judge consensus
 - [Benchmark-gated self-evolution](docs/EVOLUTION_GATE.md): shadow evaluation, canary promotion, independent approval, and rollback
+- [Science constitution](docs/SCIENCE_CONSTITUTION.md): immutable research principles, protected assets, and amendment governance
+- [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md): cumulative questions, claims, refutations, and evidence-state transitions
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---

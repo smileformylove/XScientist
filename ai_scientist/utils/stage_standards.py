@@ -15,6 +15,8 @@ from ai_scientist.utils.pipeline_contracts import (
 )
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
 from ai_scientist.utils.research_integrity import validate_preregistration
+from ai_scientist.utils.science_constitution import validate_science_constitution
+from ai_scientist.utils.epistemic_graph import validate_epistemic_graph
 
 STAGE_ORDER = (
     "ideation",
@@ -93,7 +95,10 @@ def _finalize_stage(
 
 
 def _evaluate_ideation(
-    idea_cards: Any, hypothesis_archive: Any = None
+    idea_cards: Any,
+    hypothesis_archive: Any = None,
+    science_constitution: Any = None,
+    epistemic_graph: Any = None,
 ) -> dict[str, Any]:
     cards = idea_cards if isinstance(idea_cards, list) else []
     if not cards:
@@ -112,6 +117,13 @@ def _evaluate_ideation(
         archive.get("summary") if isinstance(archive.get("summary"), dict) else {}
     )
     cluster_count = int(archive_summary.get("cluster_count") or 0)
+    constitution = (
+        science_constitution if isinstance(science_constitution, dict) else {}
+    )
+    knowledge_graph = epistemic_graph if isinstance(epistemic_graph, dict) else {}
+    constitution_check = validate_science_constitution(constitution)
+    graph_check = validate_epistemic_graph(knowledge_graph)
+    foundation_required = bool(archive)
     criteria = [
         _criterion(
             "idea_count",
@@ -194,6 +206,42 @@ def _evaluate_ideation(
             required=bool(archive) and len(archive_nodes) > 1,
             detail=f"clusters={cluster_count}, hypotheses={len(archive_nodes)}",
         ),
+        _criterion(
+            "science_constitution",
+            "Research inherits an intact, locked science constitution",
+            passed=(
+                not foundation_required
+                or (bool(constitution) and bool(constitution_check.get("passed")))
+            ),
+            required=foundation_required,
+            detail=", ".join(constitution_check.get("errors") or [])
+            or "core policy intact",
+        ),
+        _criterion(
+            "epistemic_graph",
+            "Questions and hypotheses are represented in a valid epistemic graph",
+            passed=(
+                not foundation_required
+                or (bool(knowledge_graph) and bool(graph_check.get("passed")))
+            ),
+            required=foundation_required,
+            detail=", ".join(graph_check.get("errors") or [])
+            or f"nodes={len(knowledge_graph.get('nodes') or [])}",
+        ),
+        _criterion(
+            "constitution_graph_binding",
+            "Epistemic graph is bound to the locked project constitution",
+            passed=(
+                not foundation_required
+                or (
+                    bool(constitution)
+                    and bool(knowledge_graph)
+                    and knowledge_graph.get("constitution_hash")
+                    == constitution.get("constitution_hash")
+                )
+            ),
+            required=foundation_required,
+        ),
     ]
     return _finalize_stage(
         "ideation",
@@ -206,6 +254,9 @@ def _evaluate_ideation(
             "hypothesis_count": len(archive_nodes),
             "hypothesis_cluster_count": cluster_count,
             "pareto_count": len(archive.get("pareto_front") or []),
+            "constitution_status": constitution.get("status"),
+            "epistemic_node_count": len(knowledge_graph.get("nodes") or []),
+            "epistemic_transition_count": len(knowledge_graph.get("transitions") or []),
         },
     )
 
@@ -944,6 +995,12 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     hypothesis_archive = load_contract_artifact(
         resolved_root, "hypothesis_archive", default={}
     )
+    science_constitution = load_contract_artifact(
+        resolved_root, "science_constitution", default={}
+    )
+    epistemic_graph = load_contract_artifact(
+        resolved_root, "epistemic_graph", default={}
+    )
     research_plan = load_contract_artifact(resolved_root, "research_plan", default={})
     claim_graph = load_contract_artifact(
         resolved_root, "claim_evidence_graph", default={}
@@ -963,7 +1020,12 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     )
 
     stage_results = [
-        _evaluate_ideation(idea_cards, hypothesis_archive),
+        _evaluate_ideation(
+            idea_cards,
+            hypothesis_archive,
+            science_constitution,
+            epistemic_graph,
+        ),
         _evaluate_planning(research_plan, claim_graph, preregistration),
         _evaluate_experiment(resolved_root, preregistration, verification_report),
         _evaluate_figure(figure_spec, claim_graph, research_plan),
@@ -1018,6 +1080,8 @@ def save_stage_standards(project_root: str | Path) -> str:
         depends_on=[
             "idea_cards",
             "hypothesis_archive",
+            "science_constitution",
+            "epistemic_graph",
             "research_plan",
             "claim_evidence_graph",
             "experiment_registry",
