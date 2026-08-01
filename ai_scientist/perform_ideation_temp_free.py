@@ -17,6 +17,7 @@ from ai_scientist.llm import (
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 from ai_scientist.tools.base_tool import BaseTool
 from ai_scientist.utils.auth_session import require_login
+from ai_scientist.utils.atomic_io import atomic_write_json
 
 # Create tool instances
 semantic_scholar_tool = SemanticScholarSearchTool()
@@ -61,6 +62,8 @@ tool_names_str = ", ".join(tool_names)
 
 system_prompt = f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions. Clearly clarify how the proposal distinguishes from the existing literature.
 
+Use an explicit discovery operator: analogy, combination, contradiction, boundary_condition, simplification, failure_driven, mechanism, or out_of_distribution. Prefer hypotheses with a measurable mechanism, clear falsifiers, and high expected information gain. A literature search is a hard requirement, not a suggestion.
+
 Ensure that the proposal does not require resources beyond what an academic lab could afford. These proposals should lead to papers that are publishable at top ML conferences.
 
 You have access to the following tools:
@@ -84,6 +87,9 @@ IDEA JSON:
     "Name": "...",
     "Title": "...",
     "Short Hypothesis": "...",
+    "Mechanism": "...",
+    "Generation Operator": "analogy|combination|contradiction|boundary_condition|simplification|failure_driven|mechanism|out_of_distribution",
+    "Falsifiers": ["..."],
     "Related Work": "...",
     "Abstract": "...",
     "Experiments": "...",
@@ -94,7 +100,7 @@ IDEA JSON:
 
 Ensure the JSON is properly formatted for automatic parsing.
 
-Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
+Note: FinalizeIdea will be rejected until at least one literature search returns evidence."""
 
 # Define the initial idea generation prompt
 idea_generation_prompt = """{workshop_description}
@@ -116,7 +122,7 @@ Include any other factors that you think are important in evaluating the proposa
 Ensure the proposal is clear and concise, and the JSON is in the correct format.
 Do not make things overly complicated.
 In the next attempt, try to refine and improve your proposal.
-Stick to the spirit of the original idea unless there are glaring issues.
+Preserve promising parents, but switch discovery operator or branch into a distinct mechanism when criticism shows the current direction is locally exhausted.
 
 If you have new information from tools, such as literature search results, incorporate them into your reflection and refine your proposal accordingly.
 
@@ -135,10 +141,14 @@ def generate_temp_free_idea(
     num_reflections: int = 5,
     reload_ideas: bool = True,
 ) -> List[Dict]:
+    if num_reflections < 2:
+        raise ValueError(
+            "num_reflections must be at least 2 so literature can be searched before finalization"
+        )
     idea_str_archive = []
     # load ideas from file
     if reload_ideas and osp.exists(idea_fname):
-        with open(idea_fname, "r") as f:
+        with open(idea_fname, "r", encoding="utf-8") as f:
             idea_str_content = json.load(f)
             for idea in idea_str_content:
                 idea_str_archive.append(json.dumps(idea))
@@ -155,6 +165,9 @@ def generate_temp_free_idea(
             last_tool_results = ""
             idea_finalized = False
             msg_history = []
+            successful_literature_searches = 0
+            literature_queries: list[str] = []
+            literature_evidence: list[dict[str, str]] = []
 
             for reflection_round in range(num_reflections):
                 if reflection_round == 0:
@@ -221,15 +234,45 @@ def generate_temp_free_idea(
                             # Assuming the arguments match the parameters of the tool
                             result = tool.use_tool(**arguments_json)
                             last_tool_results = result
+                            if action == "SearchSemanticScholar":
+                                query = str(arguments_json.get("query") or "").strip()
+                                result_text = str(result or "").strip()
+                                failed = (
+                                    not result_text
+                                    or result_text.lower().startswith("error")
+                                    or result_text.lower().startswith("no papers")
+                                )
+                                if query and not failed:
+                                    successful_literature_searches += 1
+                                    if query not in literature_queries:
+                                        literature_queries.append(query)
+                                    literature_evidence.append(
+                                        {
+                                            "query": query,
+                                            "result": result_text[:8000],
+                                        }
+                                    )
                         except Exception as e:
                             last_tool_results = f"Error using tool {action}: {str(e)}"
                     elif action == "FinalizeIdea":
+                        if successful_literature_searches < 1:
+                            last_tool_results = (
+                                "FinalizeIdea rejected: perform a successful "
+                                "SearchSemanticScholar action first."
+                            )
+                            continue
                         # Parse arguments
                         try:
                             arguments_json = json.loads(arguments_text)
                             idea = arguments_json.get("idea")
                             if not idea:
                                 raise ValueError("Missing 'idea' in arguments.")
+
+                            idea["Literature Search"] = {
+                                "queries": list(literature_queries),
+                                "successful_search_count": successful_literature_searches,
+                                "evidence": list(literature_evidence),
+                            }
 
                             # Append the idea to the archive
                             idea_str_archive.append(json.dumps(idea))
@@ -261,8 +304,7 @@ def generate_temp_free_idea(
     # Save ideas
     ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
 
-    with open(idea_fname, "w") as f:
-        json.dump(ideas, f, indent=4)
+    atomic_write_json(idea_fname, ideas, indent=4, ensure_ascii=False)
     print(f"Stored {len(ideas)} ideas in {idea_fname}")
     return ideas
 

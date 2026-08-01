@@ -3,13 +3,15 @@
 创新性评估和突破性想法生成系统
 提升研究的创新性和突破性
 """
+
 import json
-import os
+import logging
 from typing import Dict, List, Optional
-from datetime import datetime
 
 from ai_scientist.llm import create_client, get_response_from_llm
 from ai_scientist.tools.semantic_scholar import search_for_papers
+
+logger = logging.getLogger(__name__)
 
 
 class InnovationEvaluator:
@@ -82,16 +84,14 @@ class InnovationEvaluator:
 
         # 搜索论文
         papers = []
-        for keyword in keywords[:3]:  # 只搜索前3个关键词
+        queries = [title.strip()] if title.strip() else []
+        queries.extend(keywords[:4])
+        for query in queries:
             try:
-                results = search_for_papers(
-                    query=keyword,
-                    limit=5,
-                    year_range="2020-2024"
-                )
-                papers.extend(results)
-            except:
-                pass
+                results = search_for_papers(query=query, result_limit=8)
+                papers.extend(results or [])
+            except Exception as exc:
+                logger.warning("Related-paper search failed for %r: %s", query, exc)
 
         # 去重
         seen = set()
@@ -110,8 +110,25 @@ class InnovationEvaluator:
         # 简单的关键词提取（可以改进为使用NLP）
         words = text.lower().split()
         stopwords = {
-            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
-            "for", "of", "with", "by", "from", "as", "is", "was", "are"
+            "the",
+            "a",
+            "an",
+            "and",
+            "or",
+            "but",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "of",
+            "with",
+            "by",
+            "from",
+            "as",
+            "is",
+            "was",
+            "are",
         }
 
         keywords = []
@@ -121,10 +138,13 @@ class InnovationEvaluator:
 
         # 返回最常见的词
         from collections import Counter
+
         counter = Counter(keywords)
         return [kw for kw, _ in counter.most_common(10)]
 
-    def _build_novelty_evaluation_prompt(self, idea: Dict, related_papers: List[Dict]) -> str:
+    def _build_novelty_evaluation_prompt(
+        self, idea: Dict, related_papers: List[Dict]
+    ) -> str:
         """构建新颖性评估提示"""
         # 构建相关论文摘要
         papers_summary = ""
@@ -184,22 +204,27 @@ class InnovationEvaluator:
         import re
 
         # 尝试提取JSON
-        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        fenced = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
+        plain = None if fenced else re.search(r"\{.*\}", response, re.DOTALL)
 
-        if json_match:
+        if fenced or plain:
             try:
-                return json.loads(json_match.group(1))
-            except:
-                pass
+                parsed = json.loads(fenced.group(1) if fenced else plain.group(0))
+                if isinstance(parsed, dict):
+                    parsed["ranking_eligible"] = True
+                    parsed["trust_tier"] = "llm_judged"
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Novelty evaluator returned invalid JSON")
 
         # 如果无法解析，返回结构化响应
         return {
             "raw_response": response,
-            "novelty_score": 3,  # 默认评分
-            "feasibility_score": 3,
-            "impact_score": 3,
+            "novelty_score": None,
+            "feasibility_score": None,
+            "impact_score": None,
+            "ranking_eligible": False,
+            "trust_tier": "untrusted_fallback",
         }
 
 
@@ -291,7 +316,6 @@ class BreakthroughIdeaGenerator:
 
 以JSON格式返回。
 """,
-
             f"""
 请为"{research_area}"领域提出一个**解决根本性问题**的研究想法。
 
@@ -310,7 +334,6 @@ class BreakthroughIdeaGenerator:
 
 以JSON格式返回。
 """,
-
             f"""
 请为"{research_area}"领域提出一个**反直觉但可验证**的研究想法。
 
@@ -329,7 +352,6 @@ class BreakthroughIdeaGenerator:
 
 以JSON格式返回。
 """,
-
             f"""
 请为"{research_area}"领域提出一个**方法论创新**的研究想法。
 
@@ -352,8 +374,7 @@ class BreakthroughIdeaGenerator:
 
     def _get_standard_prompts(self, research_area: str) -> List[str]:
         """获取标准提示模板"""
-        return [
-            f"""
+        return [f"""
 请为"{research_area}"领域提出一个创新的研究想法。
 
 要求:
@@ -370,17 +391,16 @@ class BreakthroughIdeaGenerator:
 - 预期结果
 
 以JSON格式返回。
-"""
-        ] * 3
+"""] * 3
 
     def _parse_idea(self, response: str, index: int) -> Dict:
         """解析想法响应"""
         import re
 
         # 尝试提取JSON
-        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
         if not json_match:
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            json_match = re.search(r"\{.*\}", response, re.DOTALL)
 
         if json_match:
             try:
@@ -490,9 +510,10 @@ class DepthEnhancer:
 
             # 解析响应
             import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if not json_match:
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
 
             if json_match:
                 enhancement = json.loads(json_match.group(1))
@@ -574,9 +595,10 @@ class DepthEnhancer:
 
             # 解析响应
             import re
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if not json_match:
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
 
             if json_match:
                 studies = json.loads(json_match.group(1))

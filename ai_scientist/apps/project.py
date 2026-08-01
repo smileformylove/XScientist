@@ -95,6 +95,10 @@ from ai_scientist.utils.research_integrity import (
     build_preregistration,
     save_preregistration,
 )
+from ai_scientist.utils.hypothesis_archive import (
+    build_hypothesis_archive,
+    save_hypothesis_archive,
+)
 from ai_scientist.utils.self_review_optimizer import (
     apply_issue_driven_rewrite,
     assess_self_review_gate,
@@ -334,11 +338,11 @@ def _collect_requested_models(args: argparse.Namespace) -> list[str]:
     models: list[str] = []
     seen: set[str] = set()
     for value in candidates:
-        model = str(value or "").strip()
-        if not model or model in seen:
-            continue
-        models.append(model)
-        seen.add(model)
+        for model in [item.strip() for item in str(value or "").split(",")]:
+            if not model or model in seen:
+                continue
+            models.append(model)
+            seen.add(model)
     return models
 
 
@@ -384,6 +388,11 @@ def _write_project_pipeline_seed_artifacts(
         project_root,
         "idea_cards",
         idea_cards,
+        producer="run_project.project_seed",
+    )
+    save_hypothesis_archive(
+        project_root,
+        build_hypothesis_archive(idea_cards),
         producer="run_project.project_seed",
     )
     lead_idea = idea_cards[0] if idea_cards else {}
@@ -476,6 +485,11 @@ def _write_experiment_pipeline_seed_artifacts(
         exp_root,
         "idea_cards",
         [idea_card],
+        producer="run_project.idea_seed",
+    )
+    save_hypothesis_archive(
+        exp_root,
+        build_hypothesis_archive([idea_card]),
         producer="run_project.idea_seed",
     )
     research_plan = build_research_plan(

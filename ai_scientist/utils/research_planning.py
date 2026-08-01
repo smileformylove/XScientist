@@ -313,6 +313,9 @@ def _infer_candidate_baselines(idea: dict[str, Any]) -> list[str]:
 
 
 def _infer_failure_criteria(idea: dict[str, Any], metrics: list[str]) -> list[str]:
+    falsifiers = _coerce_list(idea.get("Falsifiers"))
+    if falsifiers:
+        return falsifiers[:6]
     risks = _coerce_list(idea.get("Risk Factors and Limitations"))
     if risks:
         return [f"Risk-triggered failure: {risk}" for risk in risks[:4]]
@@ -410,11 +413,35 @@ def build_idea_cards(
         metrics = _infer_candidate_metrics(idea)
         datasets = _infer_candidate_datasets(idea)
         baselines = _infer_candidate_baselines(idea)
+        literature_search = (
+            idea.get("Literature Search")
+            if isinstance(idea.get("Literature Search"), dict)
+            else {}
+        )
+        literature_queries = [
+            str(item).strip()
+            for item in literature_search.get("queries") or []
+            if str(item).strip()
+        ]
+        if not literature_queries:
+            literature_queries = [
+                str(item).strip()
+                for item in [
+                    idea.get("Title"),
+                    idea.get("Name"),
+                    idea.get("Short Hypothesis"),
+                ]
+                if str(item or "").strip()
+            ][:3]
         card = {
             "idea_id": f"idea_{idx}",
             "name": idea.get("Name") or f"idea_{idx}",
             "title": idea.get("Title") or idea.get("Name") or f"Idea {idx}",
             "core_hypothesis": str(idea.get("Short Hypothesis") or "").strip(),
+            "mechanism": str(idea.get("Mechanism") or "").strip(),
+            "generation_operator": str(
+                idea.get("Generation Operator") or "initial"
+            ).strip(),
             "novelty_claim": str(idea.get("Related Work") or "").strip(),
             "related_work_notes": str(idea.get("Related Work") or "").strip(),
             "minimum_viable_experiment": (
@@ -428,16 +455,12 @@ def build_idea_cards(
             "compute_risk": "moderate" if len(experiments) > 3 else "low",
             "failure_criteria": _infer_failure_criteria(idea, metrics),
             "negative_result_value": "Clarifies when the hypothesis fails and which evidence is still missing.",
-            "literature_queries": [
-                item
-                for item in [
-                    idea.get("Title"),
-                    idea.get("Name"),
-                    idea.get("Short Hypothesis"),
-                ]
-                if str(item or "").strip()
-            ][:3],
-            "supporting_papers": [],
+            "literature_queries": literature_queries,
+            "literature_search_verified": int(
+                literature_search.get("successful_search_count") or 0
+            )
+            > 0,
+            "supporting_papers": list(literature_search.get("evidence") or []),
             "target_venue": target_venue,
             "template_profile": template_profile,
             "workflow_mode": workflow_mode,

@@ -71,7 +71,10 @@ def build_parser(
         "--top-k-ideas", type=int, default=None, help="只处理评分最高的前 K 个 idea"
     )
     parser.add_argument(
-        "--idea-rank-model", type=str, default=None, help="用于 idea 排序的模型"
+        "--idea-rank-model",
+        type=str,
+        default=None,
+        help="用于 idea 排序的模型；可用逗号分隔多个独立评审模型",
     )
     parser.add_argument("--submission-mode", action="store_true")
     parser.add_argument("--fallback-ranked-ideas", action="store_true")

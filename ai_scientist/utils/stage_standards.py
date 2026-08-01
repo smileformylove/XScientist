@@ -92,7 +92,9 @@ def _finalize_stage(
     }
 
 
-def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
+def _evaluate_ideation(
+    idea_cards: Any, hypothesis_archive: Any = None
+) -> dict[str, Any]:
     cards = idea_cards if isinstance(idea_cards, list) else []
     if not cards:
         return _finalize_stage(
@@ -102,6 +104,14 @@ def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
             missing_reason="idea_cards artifact missing or empty",
         )
     lead = cards[0] if isinstance(cards[0], dict) else {}
+    archive = hypothesis_archive if isinstance(hypothesis_archive, dict) else {}
+    archive_nodes = [
+        item for item in archive.get("nodes") or [] if isinstance(item, dict)
+    ]
+    archive_summary = (
+        archive.get("summary") if isinstance(archive.get("summary"), dict) else {}
+    )
+    cluster_count = int(archive_summary.get("cluster_count") or 0)
     criteria = [
         _criterion(
             "idea_count",
@@ -145,6 +155,45 @@ def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
             passed=bool(lead.get("literature_queries")),
             required=False,
         ),
+        _criterion(
+            "literature_search_execution",
+            "Archived ideas finalize only after successful literature retrieval",
+            passed=(
+                not archive
+                or all(bool(card.get("literature_search_verified")) for card in cards)
+            ),
+            required=bool(archive),
+        ),
+        _criterion(
+            "append_only_hypothesis_archive",
+            "Hypotheses are preserved in an append-only lineage archive",
+            passed=(
+                not archive
+                or (
+                    archive.get("append_only") is True
+                    and len(archive_nodes) >= len(cards)
+                )
+            ),
+            required=bool(archive),
+        ),
+        _criterion(
+            "falsifiable_hypotheses",
+            "Archived hypotheses expose explicit falsifiers",
+            passed=not archive
+            or all(bool(item.get("falsifiers")) for item in archive_nodes),
+            required=bool(archive),
+        ),
+        _criterion(
+            "quality_diversity",
+            "Multi-idea archives preserve more than one discovery niche",
+            passed=(
+                not archive
+                or len(archive_nodes) <= 1
+                or cluster_count >= min(2, len(archive_nodes))
+            ),
+            required=bool(archive) and len(archive_nodes) > 1,
+            detail=f"clusters={cluster_count}, hypotheses={len(archive_nodes)}",
+        ),
     ]
     return _finalize_stage(
         "ideation",
@@ -154,6 +203,9 @@ def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
             "idea_count": len(cards),
             "lead_idea_id": lead.get("idea_id"),
             "target_venue": lead.get("target_venue"),
+            "hypothesis_count": len(archive_nodes),
+            "hypothesis_cluster_count": cluster_count,
+            "pareto_count": len(archive.get("pareto_front") or []),
         },
     )
 
@@ -889,6 +941,9 @@ def _evaluate_review(
 def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     resolved_root = Path(project_root).expanduser().resolve()
     idea_cards = load_contract_artifact(resolved_root, "idea_cards", default=[])
+    hypothesis_archive = load_contract_artifact(
+        resolved_root, "hypothesis_archive", default={}
+    )
     research_plan = load_contract_artifact(resolved_root, "research_plan", default={})
     claim_graph = load_contract_artifact(
         resolved_root, "claim_evidence_graph", default={}
@@ -908,7 +963,7 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     )
 
     stage_results = [
-        _evaluate_ideation(idea_cards),
+        _evaluate_ideation(idea_cards, hypothesis_archive),
         _evaluate_planning(research_plan, claim_graph, preregistration),
         _evaluate_experiment(resolved_root, preregistration, verification_report),
         _evaluate_figure(figure_spec, claim_graph, research_plan),
@@ -962,6 +1017,7 @@ def save_stage_standards(project_root: str | Path) -> str:
         producer="stage_standards",
         depends_on=[
             "idea_cards",
+            "hypothesis_archive",
             "research_plan",
             "claim_evidence_graph",
             "experiment_registry",

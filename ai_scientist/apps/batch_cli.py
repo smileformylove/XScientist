@@ -101,7 +101,7 @@ def build_parser(
         "--idea-rank-model",
         type=str,
         default=None,
-        help="用于想法排序的模型，默认复用写作模型",
+        help="用于想法排序的模型；可用逗号分隔多个独立评审模型",
     )
 
     parser.add_argument("--num-workers", type=int, default=1, help="并行worker数量")

@@ -625,6 +625,7 @@ Currently organized example files:
 - [Output directories](docs/guides/OUTPUT_DIRECTORIES.md): output policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
 - [Architecture](docs/ARCHITECTURE.md): system boundaries and components
 - [Research integrity protocol](docs/RESEARCH_INTEGRITY.md): preregistration, blind verification, and claim-promotion gates
+- [Open-ended research discovery](docs/RESEARCH_DISCOVERY.md): hypothesis lineage, literature grounding, Pareto diversity, and judge consensus
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---

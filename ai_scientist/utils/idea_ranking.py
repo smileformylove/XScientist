@@ -3,26 +3,81 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from statistics import median
 from typing import Callable, Optional
 
 from ai_scientist.config.paths import resolve_output_path
+from ai_scientist.utils.atomic_io import atomic_write_json
+
+IDEA_SCORE_DIMENSIONS = (
+    "novelty",
+    "feasibility",
+    "rigor_potential",
+    "falsifiability",
+    "information_gain",
+    "evidence_grounding",
+    "impact",
+    "writing_potential",
+    "breakthrough_potential",
+)
 
 STOPWORDS = {
-    "about", "above", "after", "again", "against", "among", "approach", "baseline",
-    "between", "challenge", "compare", "comparison", "dataset", "during", "efficient",
-    "experiment", "experiments", "figure", "framework", "general", "improve", "improves",
-    "improving", "introduction", "large", "method", "methods", "model", "models", "novel",
-    "paper", "problem", "results", "section", "show", "shows", "study", "system",
-    "table", "their", "these", "this", "using", "with", "work", "works",
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "among",
+    "approach",
+    "baseline",
+    "between",
+    "challenge",
+    "compare",
+    "comparison",
+    "dataset",
+    "during",
+    "efficient",
+    "experiment",
+    "experiments",
+    "figure",
+    "framework",
+    "general",
+    "improve",
+    "improves",
+    "improving",
+    "introduction",
+    "large",
+    "method",
+    "methods",
+    "model",
+    "models",
+    "novel",
+    "paper",
+    "problem",
+    "results",
+    "section",
+    "show",
+    "shows",
+    "study",
+    "system",
+    "table",
+    "their",
+    "these",
+    "this",
+    "using",
+    "with",
+    "work",
+    "works",
 }
 
 
 def _extract_json(text: str) -> dict:
-    match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL) or re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+    fenced = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    plain = None if fenced else re.search(r"\{.*\}", text, re.DOTALL)
+    if not fenced and not plain:
         return {}
     try:
-        return json.loads(match.group(1))
+        return json.loads(fenced.group(1) if fenced else plain.group(0))
     except json.JSONDecodeError:
         return {}
 
@@ -102,7 +157,9 @@ def _iter_historical_quality_paths(research_root: str | Path) -> list[Path]:
                 quality_paths.append(quality_path)
                 seen.add(quality_path)
 
-    quality_paths.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    quality_paths.sort(
+        key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True
+    )
     return quality_paths[:400]
 
 
@@ -158,7 +215,15 @@ def _apply_historical_acceptance_prior(
     history: list[dict],
     target_venue: str | None,
 ) -> dict:
-    base_total = score.get("total_score", 3.0)
+    base_total = float(score.get("total_score") or 0.0)
+    if not score.get("ranking_eligible"):
+        score["historical_acceptance_adjustment"] = 0.0
+        score["ranking_score"] = 0.0
+        score["historical_rationale"] = (
+            "historical prior withheld because the primary score is untrusted"
+        )
+        score["historical_matches"] = []
+        return score
     if not history:
         score["historical_acceptance_adjustment"] = 0.0
         score["ranking_score"] = round(base_total, 3)
@@ -172,7 +237,9 @@ def _apply_historical_acceptance_prior(
         similarity = _similarity_score(current_tokens, item.get("tokens", set()))
         if similarity < 0.08:
             continue
-        venue_weight = 1.15 if target_venue and item.get("target_venue") == target_venue else 1.0
+        venue_weight = (
+            1.15 if target_venue and item.get("target_venue") == target_venue else 1.0
+        )
         weighted_similarity = similarity * venue_weight
         matches.append(
             {
@@ -193,24 +260,36 @@ def _apply_historical_acceptance_prior(
     rejected_matches = [item for item in matches if not item.get("accepted")][:3]
 
     positive_signal = sum(
-        item.get("weighted_similarity", 0) * (0.6 + min(0.4, (item.get("priority") or 0) / 100.0))
+        item.get("weighted_similarity", 0)
+        * (0.6 + min(0.4, (item.get("priority") or 0) / 100.0))
         for item in accepted_matches
     )
     negative_signal = sum(
-        item.get("weighted_similarity", 0) * (0.8 + min(0.2, ((100 - (item.get("priority") or 0)) / 100.0)))
+        item.get("weighted_similarity", 0)
+        * (0.8 + min(0.2, ((100 - (item.get("priority") or 0)) / 100.0)))
         for item in rejected_matches
     )
-    adjustment = round(max(-0.5, min(0.6, (positive_signal - negative_signal) * 1.8)), 3)
+    adjustment = round(
+        max(-0.5, min(0.6, (positive_signal - negative_signal) * 1.8)), 3
+    )
     ranking_score = round(max(1.0, min(5.0, base_total + adjustment)), 3)
 
     rationales = []
     if accepted_matches:
         rationales.append(
-            "similar accepted ideas: " + ", ".join(item.get("name") or item.get("title") or "unknown" for item in accepted_matches)
+            "similar accepted ideas: "
+            + ", ".join(
+                item.get("name") or item.get("title") or "unknown"
+                for item in accepted_matches
+            )
         )
     if rejected_matches:
         rationales.append(
-            "similar weak outcomes: " + ", ".join(item.get("name") or item.get("title") or "unknown" for item in rejected_matches)
+            "similar weak outcomes: "
+            + ", ".join(
+                item.get("name") or item.get("title") or "unknown"
+                for item in rejected_matches
+            )
         )
     if not rationales:
         rationales.append("no strong historical matches found")
@@ -223,42 +302,43 @@ def _apply_historical_acceptance_prior(
 
 
 def _heuristic_score_idea(idea: dict, target_venue: str | None) -> dict:
-    title = idea.get("Title", "")
-    hypothesis = idea.get("Short Hypothesis", "") or idea.get("Hypothesis", "")
-    related = idea.get("Related Work", "")
-    experiments = json.dumps(idea, ensure_ascii=False)
-
-    novelty = 2.5 + min(1.5, 0.3 * sum(keyword in experiments.lower() for keyword in ["novel", "new", "first", "dynamic", "adaptive", "real-world"]))
-    feasibility = 2.5 + min(1.5, 0.0015 * len(hypothesis))
-    rigor = 2.0 + min(2.0, 0.001 * len(related) + 0.2 * sum(keyword in experiments.lower() for keyword in ["baseline", "experiment", "compare", "analysis", "dataset"]))
-    impact = 2.5 + min(1.5, 0.001 * len(title) + 0.3 * sum(keyword in experiments.lower() for keyword in ["significant", "real-world", "generalization", "impact", "efficient"]))
-    writing = 2.5 + min(1.5, 0.001 * (len(title) + len(hypothesis)))
-
-    breakthrough = 2.0 + min(2.5, 0.4 * sum(keyword in experiments.lower() for keyword in [
-        "fundamental", "grand challenge", "broad impact", "real-world", "scientific discovery",
-        "cross-domain", "major challenge", "medical", "biology", "climate",
-    ]))
-
-    if target_venue == "nature":
-        impact += 0.3
-        rigor += 0.2
-        breakthrough += 0.5
-    elif target_venue in {"neurips", "iclr", "cvpr"}:
-        novelty += 0.2
-        rigor += 0.2
-
-    scores = [max(1.0, min(5.0, value)) for value in [novelty, feasibility, rigor, impact, writing, breakthrough]]
-    total = sum(scores) / len(scores)
+    del idea, target_venue
     return {
-        "novelty": scores[0],
-        "feasibility": scores[1],
-        "rigor_potential": scores[2],
-        "impact": scores[3],
-        "writing_potential": scores[4],
-        "breakthrough_potential": scores[5],
-        "total_score": total,
-        "rationale": "heuristic fallback ranking",
+        **{name: 0.0 for name in IDEA_SCORE_DIMENSIONS},
+        "total_score": 0.0,
+        "ranking_eligible": False,
+        "trust_tier": "untrusted_fallback",
+        "rationale": (
+            "untrusted fallback: no semantic score is assigned when model "
+            "judging is unavailable"
+        ),
     }
+
+
+def _validate_judge_score(payload: dict) -> tuple[dict, list[str]]:
+    errors: list[str] = []
+    normalized: dict = {}
+    for name in IDEA_SCORE_DIMENSIONS:
+        value = payload.get(name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"{name}_missing_or_non_numeric")
+            continue
+        score = float(value)
+        if not 1.0 <= score <= 5.0:
+            errors.append(f"{name}_out_of_range")
+            continue
+        normalized[name] = round(score, 4)
+    if errors:
+        return {}, errors
+    normalized["total_score"] = round(
+        sum(float(normalized[name]) for name in IDEA_SCORE_DIMENSIONS)
+        / len(IDEA_SCORE_DIMENSIONS),
+        4,
+    )
+    normalized["rationale"] = str(payload.get("rationale") or "").strip()
+    normalized["ranking_eligible"] = True
+    normalized["trust_tier"] = "llm_judged"
+    return normalized, []
 
 
 def _mark_ranking_fallback(
@@ -276,7 +356,9 @@ def _mark_ranking_fallback(
     return payload
 
 
-def score_idea(idea: dict, *, model: str, logger: Callable[[str], None] = print) -> dict:
+def score_idea(
+    idea: dict, *, model: str, logger: Callable[[str], None] = print
+) -> dict:
     return score_idea_for_venue(idea, model=model, target_venue=None, logger=logger)
 
 
@@ -321,9 +403,12 @@ def score_idea_for_venue(
 1. novelty: 创新性
 2. feasibility: 可实现性
 3. rigor_potential: 形成严谨实验与 baseline 的潜力
-4. impact: 潜在影响力
-5. writing_potential: 形成强论文叙事的潜力
-6. breakthrough_potential: 是否在解决重大问题并具备突破性影响潜力
+4. falsifiability: 是否有明确、可执行且可能推翻假设的实验
+5. information_gain: 即使结果为负，是否仍能显著减少科学不确定性
+6. evidence_grounding: 文献依据、prior-art 检索和实验定义是否具体
+7. impact: 潜在影响力
+8. writing_potential: 形成强论文叙事的潜力
+9. breakthrough_potential: 是否在解决重大问题并具备突破性影响潜力
 
 目标 venue:
 {target_venue or 'generic_high_quality'}
@@ -338,6 +423,9 @@ venue 约束:
   "novelty": 4.2,
   "feasibility": 3.8,
   "rigor_potential": 4.1,
+  "falsifiability": 4.3,
+  "information_gain": 4.2,
+  "evidence_grounding": 4.0,
   "impact": 3.9,
   "writing_potential": 4.0,
   "breakthrough_potential": 4.4,
@@ -352,17 +440,90 @@ venue 约束:
         system_message="你是资深科研选题评审专家，负责挑选最适合产出高质量论文的研究想法。",
         temperature=0.2,
     )
-    result = _extract_json(response)
+    parsed = _extract_json(response)
+    result, validation_errors = _validate_judge_score(parsed)
     if not result:
         result = _heuristic_score_idea(idea, target_venue)
-        result["rationale"] = "heuristic fallback ranking due to parse failure"
         result = _mark_ranking_fallback(
             result,
-            stage="response_parsing",
-            reason="response_parse_failed",
+            stage="response_validation",
+            reason="response_invalid",
+            detail=", ".join(validation_errors) or "response_parse_failed",
         )
     else:
         result["fallback_used"] = False
+    result["idea_name"] = idea.get("Name")
+    result["title"] = idea.get("Title")
+    result["target_venue"] = target_venue
+    return result
+
+
+def score_idea_with_judges(
+    idea: dict,
+    *,
+    models: list[str],
+    target_venue: str | None,
+    minimum_valid_judges: int | None = None,
+    logger: Callable[[str], None] = print,
+) -> dict:
+    """Aggregate independent model judgments and expose disagreement."""
+
+    resolved_models = [str(item).strip() for item in models if str(item).strip()]
+    if not resolved_models:
+        raise ValueError("at least one judge model is required")
+    required = (
+        max(int(minimum_valid_judges), 1)
+        if minimum_valid_judges is not None
+        else (2 if len(resolved_models) > 1 else 1)
+    )
+    judge_scores = [
+        score_idea_for_venue(
+            idea,
+            model=judge_model,
+            target_venue=target_venue,
+            logger=logger,
+        )
+        for judge_model in resolved_models
+    ]
+    valid = [item for item in judge_scores if item.get("ranking_eligible")]
+    if len(valid) < required:
+        result = _heuristic_score_idea(idea, target_venue)
+        result = _mark_ranking_fallback(
+            result,
+            stage="judge_consensus",
+            reason="insufficient_valid_judges",
+            detail=f"valid={len(valid)}, required={required}",
+        )
+    else:
+        result = {
+            name: round(median(float(item[name]) for item in valid), 4)
+            for name in IDEA_SCORE_DIMENSIONS
+        }
+        result["total_score"] = round(
+            sum(float(result[name]) for name in IDEA_SCORE_DIMENSIONS)
+            / len(IDEA_SCORE_DIMENSIONS),
+            4,
+        )
+        totals = [float(item["total_score"]) for item in valid]
+        result.update(
+            {
+                "ranking_eligible": True,
+                "trust_tier": (
+                    "multi_judge_consensus" if len(valid) > 1 else "llm_judged"
+                ),
+                "fallback_used": False,
+                "judge_disagreement": round(max(totals) - min(totals), 4),
+                "rationale": " | ".join(
+                    str(item.get("rationale") or "").strip()
+                    for item in valid
+                    if str(item.get("rationale") or "").strip()
+                ),
+            }
+        )
+    result["judge_models"] = resolved_models
+    result["valid_judge_count"] = len(valid)
+    result["required_judge_count"] = required
+    result["judge_scores"] = judge_scores
     result["idea_name"] = idea.get("Name")
     result["title"] = idea.get("Title")
     result["target_venue"] = target_venue
@@ -373,6 +534,7 @@ def rank_ideas(
     ideas: list[dict],
     *,
     model: str,
+    judge_models: list[str] | None = None,
     target_venue: str | None = None,
     prioritize_breakthrough: bool = False,
     research_root: str | Path | None = None,
@@ -391,9 +553,17 @@ def rank_ideas(
         logger(f"Loaded {len(historical_profile)} historical idea outcomes for ranking")
 
     rankings = []
+    resolved_judges = judge_models or [
+        item.strip() for item in str(model).split(",") if item.strip()
+    ]
     for idx, idea in enumerate(ideas):
         logger(f"Ranking idea {idx}: {idea.get('Name', f'idea_{idx}')}")
-        score = score_idea_for_venue(idea, model=model, target_venue=target_venue, logger=logger)
+        score = score_idea_with_judges(
+            idea,
+            models=resolved_judges,
+            target_venue=target_venue,
+            logger=logger,
+        )
         score = _apply_historical_acceptance_prior(
             score,
             idea,
@@ -406,6 +576,7 @@ def rank_ideas(
     if prioritize_breakthrough:
         rankings.sort(
             key=lambda item: (
+                bool(item.get("ranking_eligible")),
                 item.get("breakthrough_potential", 0),
                 item.get("ranking_score", item.get("total_score", 0)),
                 item.get("impact", 0),
@@ -417,6 +588,7 @@ def rank_ideas(
     else:
         rankings.sort(
             key=lambda item: (
+                bool(item.get("ranking_eligible")),
                 item.get("ranking_score", item.get("total_score", 0)),
                 item.get("total_score", 0),
                 item.get("rigor_potential", 0),
@@ -427,6 +599,5 @@ def rank_ideas(
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(rankings, f, indent=2, ensure_ascii=False)
+        atomic_write_json(output_path, rankings, indent=2, ensure_ascii=False)
     return rankings

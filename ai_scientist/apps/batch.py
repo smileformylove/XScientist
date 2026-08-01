@@ -102,6 +102,10 @@ from ai_scientist.utils.research_integrity import (
     build_preregistration,
     save_preregistration,
 )
+from ai_scientist.utils.hypothesis_archive import (
+    build_hypothesis_archive,
+    save_hypothesis_archive,
+)
 from ai_scientist.writing_prompt_profiles import (
     DEFAULT_WRITING_PROFILE,
     list_writing_profiles,
@@ -391,11 +395,11 @@ def _collect_requested_models(args: argparse.Namespace) -> list[str]:
     models: list[str] = []
     seen: set[str] = set()
     for value in candidates:
-        model = str(value or "").strip()
-        if not model or model in seen:
-            continue
-        models.append(model)
-        seen.add(model)
+        for model in [item.strip() for item in str(value or "").split(",")]:
+            if not model or model in seen:
+                continue
+            models.append(model)
+            seen.add(model)
     return models
 
 
@@ -441,6 +445,11 @@ def _save_batch_pipeline_seed_artifacts(
         batch_root,
         "idea_cards",
         idea_cards,
+        producer="continuous_paper_generator.batch_seed",
+    )
+    save_hypothesis_archive(
+        batch_root,
+        build_hypothesis_archive(idea_cards),
         producer="continuous_paper_generator.batch_seed",
     )
     lead_idea = idea_cards[0] if idea_cards else {}
@@ -533,6 +542,11 @@ def _save_paper_pipeline_seed_artifacts(
         paper_root_path,
         "idea_cards",
         [idea_card],
+        producer="continuous_paper_generator.paper_seed",
+    )
+    save_hypothesis_archive(
+        paper_root_path,
+        build_hypothesis_archive([idea_card]),
         producer="continuous_paper_generator.paper_seed",
     )
     research_plan = build_research_plan(
