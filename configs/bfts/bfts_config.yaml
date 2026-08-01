@@ -21,10 +21,10 @@ exec:
   timeout: 3600
   agent_file_name: runfile.py
   format_tb_ipython: False
-  # auto uses Docker when available and otherwise reports a non-isolated fallback.
-  # Set require_isolation: true for runs that must fail closed.
+  # Autonomous experiment code must fail closed when Docker is unavailable.
+  # Opting into the process backend requires an explicit local-only override.
   backend: auto
-  require_isolation: false
+  require_isolation: true
   docker_image: xscientist-exec:latest
   network: none
   # Experiment code may download declared datasets/models; metric parsing and

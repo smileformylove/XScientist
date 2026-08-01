@@ -18,6 +18,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
+| Research integrity | `ai_scientist/utils/research_integrity.py` | Artifact-compatible | Immutable preregistration, blind verification, independent reproduction, claim promotion |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
 | Source operations | `run_daemon_profile.py`, `run_daemon_rehearsal.py`, shell wrappers | Checkout-only | Profile overlays, rehearsals, and operator workflows tied to repository configs |

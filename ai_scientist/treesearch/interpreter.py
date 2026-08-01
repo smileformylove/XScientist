@@ -55,7 +55,7 @@ class SandboxPolicy:
     """Execution policy for AI-generated experiment code."""
 
     backend: Literal["auto", "process", "docker"] = "auto"
-    require_isolation: bool = False
+    require_isolation: bool = True
     docker_image: str = "xscientist-exec:latest"
     network: Literal["none", "bridge"] = "none"
     memory: str = "4g"
@@ -83,7 +83,7 @@ def sandbox_policy_from_config(exec_config: Any | None) -> SandboxPolicy:
 
     return SandboxPolicy(
         backend=str(getattr(exec_config, "backend", "auto") or "auto").lower(),
-        require_isolation=bool(getattr(exec_config, "require_isolation", False)),
+        require_isolation=bool(getattr(exec_config, "require_isolation", True)),
         docker_image=str(
             getattr(exec_config, "docker_image", "xscientist-exec:latest")
             or "xscientist-exec:latest"
@@ -220,7 +220,11 @@ class Interpreter:
             for key, value in (env_vars or {}).items()
             if value is not None
         }
-        self.sandbox_policy = sandbox_policy or SandboxPolicy(backend="process")
+        # Direct Interpreter use is an explicit local API choice. Autonomous
+        # workflows pass a config-derived policy, whose default is fail-closed.
+        self.sandbox_policy = sandbox_policy or SandboxPolicy(
+            backend="process", require_isolation=False
+        )
         self.execution_backend, self.isolation_reason = self._resolve_backend()
 
     def _resolve_backend(self) -> tuple[str, str | None]:
@@ -443,7 +447,9 @@ class Interpreter:
         for raw_mount in policy.read_only_mounts:
             mount_path = Path(raw_mount).expanduser().resolve()
             if not mount_path.exists():
-                logger.warning("Skipping missing read-only sandbox mount: %s", mount_path)
+                logger.warning(
+                    "Skipping missing read-only sandbox mount: %s", mount_path
+                )
                 continue
             source = str(mount_path)
             if source in mounted_sources:
@@ -492,7 +498,9 @@ class Interpreter:
                 timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
-            logger.warning("Failed to remove timed-out Docker container %s", container_name)
+            logger.warning(
+                "Failed to remove timed-out Docker container %s", container_name
+            )
 
     def _run_docker(self, code: str) -> ExecutionResult:
         for directory in (

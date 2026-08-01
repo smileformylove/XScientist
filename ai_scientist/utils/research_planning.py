@@ -15,7 +15,6 @@ from ai_scientist.utils.workflow_execution_policy import (
     policy_snapshot,
 )
 
-
 DEFAULT_EXPERIMENT_BUDGET = {
     "max_steps": 12,
     "max_wallclock_minutes": 90,
@@ -252,12 +251,16 @@ def _coerce_list(value: Any) -> list[str]:
     if not text:
         return []
     split_items = re.split(r"[\n;]+", text)
-    return [item.strip("-* ").strip() for item in split_items if item.strip("-* ").strip()]
+    return [
+        item.strip("-* ").strip() for item in split_items if item.strip("-* ").strip()
+    ]
 
 
 def _extract_keywords(text: str, *, prefix: str, limit: int = 4) -> list[str]:
     lowered = str(text or "")
-    matches = re.findall(rf"{prefix}\s*[:=]?\s*([A-Za-z0-9_\-./ ]+)", lowered, flags=re.IGNORECASE)
+    matches = re.findall(
+        rf"{prefix}\s*[:=]?\s*([A-Za-z0-9_\-./ ]+)", lowered, flags=re.IGNORECASE
+    )
     cleaned: list[str] = []
     for match in matches:
         item = str(match).strip().strip(".,")
@@ -284,7 +287,9 @@ def _infer_candidate_datasets(idea: dict[str, Any]) -> list[str]:
 
 
 def _infer_candidate_metrics(idea: dict[str, Any]) -> list[str]:
-    text = "\n".join([str(idea.get("Experiments") or ""), str(idea.get("Abstract") or "")])
+    text = "\n".join(
+        [str(idea.get("Experiments") or ""), str(idea.get("Abstract") or "")]
+    )
     metrics = _extract_keywords(text, prefix="metric", limit=6)
     if metrics:
         return metrics
@@ -300,7 +305,9 @@ def _infer_candidate_metrics(idea: dict[str, Any]) -> list[str]:
 
 
 def _infer_candidate_baselines(idea: dict[str, Any]) -> list[str]:
-    text = "\n".join([str(idea.get("Experiments") or ""), str(idea.get("Related Work") or "")])
+    text = "\n".join(
+        [str(idea.get("Experiments") or ""), str(idea.get("Related Work") or "")]
+    )
     baselines = _extract_keywords(text, prefix="baseline", limit=6)
     return baselines or ["strong_existing_baseline"]
 
@@ -350,7 +357,9 @@ def _build_agent_plan(
     execution_policy: dict[str, Any],
     failure_criteria: list[str],
 ) -> dict[str, Any]:
-    lanes = list(DEFAULT_AGENT_LANES.get(workflow_mode, DEFAULT_AGENT_LANES["classic_pipeline"]))
+    lanes = list(
+        DEFAULT_AGENT_LANES.get(workflow_mode, DEFAULT_AGENT_LANES["classic_pipeline"])
+    )
     review_bundle = WORKFLOW_REVIEW_BUNDLES.get(
         workflow_mode,
         WORKFLOW_REVIEW_BUNDLES["classic_pipeline"],
@@ -408,7 +417,11 @@ def build_idea_cards(
             "core_hypothesis": str(idea.get("Short Hypothesis") or "").strip(),
             "novelty_claim": str(idea.get("Related Work") or "").strip(),
             "related_work_notes": str(idea.get("Related Work") or "").strip(),
-            "minimum_viable_experiment": experiments[0] if experiments else "Run a first-pass experiment for the main claim.",
+            "minimum_viable_experiment": (
+                experiments[0]
+                if experiments
+                else "Run a first-pass experiment for the main claim."
+            ),
             "candidate_datasets": datasets,
             "candidate_metrics": metrics,
             "candidate_baselines": baselines,
@@ -416,7 +429,13 @@ def build_idea_cards(
             "failure_criteria": _infer_failure_criteria(idea, metrics),
             "negative_result_value": "Clarifies when the hypothesis fails and which evidence is still missing.",
             "literature_queries": [
-                item for item in [idea.get("Title"), idea.get("Name"), idea.get("Short Hypothesis")] if str(item or "").strip()
+                item
+                for item in [
+                    idea.get("Title"),
+                    idea.get("Name"),
+                    idea.get("Short Hypothesis"),
+                ]
+                if str(item or "").strip()
             ][:3],
             "supporting_papers": [],
             "target_venue": target_venue,
@@ -450,14 +469,17 @@ def build_research_plan(
     budget_payload.update(execution_policy.budget)
     budget_payload.update(budget or {})
     task_descriptions = _coerce_list(
-        idea_card.get("source_idea", {}).get("Experiments") or idea_card.get("minimum_viable_experiment")
+        idea_card.get("source_idea", {}).get("Experiments")
+        or idea_card.get("minimum_viable_experiment")
     )
     if not task_descriptions:
         task_descriptions = ["Run the minimum viable experiment for the main claim."]
 
     datasets = list(idea_card.get("candidate_datasets") or ["dataset_to_be_selected"])
     metrics = list(idea_card.get("candidate_metrics") or ["primary_task_metric"])
-    baselines = list(idea_card.get("candidate_baselines") or ["strong_existing_baseline"])
+    baselines = list(
+        idea_card.get("candidate_baselines") or ["strong_existing_baseline"]
+    )
 
     tasks: list[dict[str, Any]] = []
     failure_criteria = list(idea_card.get("failure_criteria") or [])
@@ -497,7 +519,9 @@ def build_research_plan(
                 f"Keep only if the run is baseline-comparable and materially strengthens {claim_id}."
             ),
             "kill_criteria": failure_criteria[:2]
-            or ["Stop the branch if the evidence does not materially support the target claim."],
+            or [
+                "Stop the branch if the evidence does not materially support the target claim."
+            ],
             "evidence_requirements": [
                 "baseline-comparable metric delta",
                 "claim-linked experiment record",
@@ -521,14 +545,18 @@ def build_research_plan(
                 f"figure_candidate:{claim_id}",
                 f"claim_note:{claim_id}",
             ],
-            "artifact_intent": [
-                "claim_survival",
-                "figure_packaging",
-                "reviewer_rebuttal",
-            ]
-            if workflow_mode == "multi_agent_board"
-            else ["claim_survival", "figure_packaging"],
-            "verifier": "quality_gate" if workflow_mode == "multi_agent_board" else "reviewer",
+            "artifact_intent": (
+                [
+                    "claim_survival",
+                    "figure_packaging",
+                    "reviewer_rebuttal",
+                ]
+                if workflow_mode == "multi_agent_board"
+                else ["claim_survival", "figure_packaging"]
+            ),
+            "verifier": (
+                "quality_gate" if workflow_mode == "multi_agent_board" else "reviewer"
+            ),
             "close_condition": (
                 "The task is only done when the evidence either survives storyline selection "
                 "or is explicitly discarded with a recorded reason."
@@ -545,6 +573,8 @@ def build_research_plan(
             "acceptance_checks": list(execution_policy.acceptance_rules[:2]),
             "execution_style": execution_policy.execution_style,
             "status": "planned",
+            "study_phase": "exploratory",
+            "claim_promotion_gate": "independent_verification_required",
         }
         tasks.append(task)
 
@@ -563,6 +593,14 @@ def build_research_plan(
         "budget": budget_payload,
         "execution_policy": policy_snapshot(execution_policy),
         "agent_plan": agent_plan,
+        "integrity_policy": {
+            "exploratory_runs_allowed": True,
+            "preregistration_required_for_confirmatory": True,
+            "blind_holdout_required": True,
+            "deterministic_metric_verification_required": True,
+            "independent_reproduction_required": True,
+            "claim_promotion_requires_verified_report": True,
+        },
         "tasks": tasks,
     }
     truth_contract = build_truth_contract(idea_card, plan_payload)

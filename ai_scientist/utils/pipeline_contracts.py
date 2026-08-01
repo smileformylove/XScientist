@@ -14,7 +14,6 @@ from ai_scientist.utils.atomic_io import (
     durable_append_text,
 )
 
-
 PIPELINE_SCHEMA_VERSION = 1
 
 ARTIFACT_FILENAMES = {
@@ -39,6 +38,10 @@ ARTIFACT_FILENAMES = {
     "hallucination_review": "hallucination_review.json",
     "sample_gate": "sample_gate.json",
     "decision_log": "decision_log.jsonl",
+    "preregistration": "preregistration.json",
+    "verification_report": "verification_report.json",
+    "hypothesis_archive": "hypothesis_archive.json",
+    "evolution_gate": "evolution_gate.json",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -63,6 +66,10 @@ ARTIFACT_DEFAULT_STATUS = {
     "hallucination_review": "missing",
     "sample_gate": "missing",
     "decision_log": "missing",
+    "preregistration": "missing",
+    "verification_report": "missing",
+    "hypothesis_archive": "missing",
+    "evolution_gate": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {
@@ -108,7 +115,9 @@ def iter_project_roots(research_root: str | Path) -> list[Path]:
     return sorted(project_roots, key=lambda path: str(path))
 
 
-def _default_artifact_entry(project_root: str | Path, artifact_name: str) -> dict[str, Any]:
+def _default_artifact_entry(
+    project_root: str | Path, artifact_name: str
+) -> dict[str, Any]:
     path = artifact_path(project_root, artifact_name)
     return {
         "name": artifact_name,
@@ -165,7 +174,9 @@ def build_pipeline_manifest(
             for artifact_name in ARTIFACT_FILENAMES
         },
     }
-    manifest["artifacts"]["pipeline_manifest"]["generated_at"] = manifest["generated_at"]
+    manifest["artifacts"]["pipeline_manifest"]["generated_at"] = manifest[
+        "generated_at"
+    ]
     manifest["artifacts"]["pipeline_manifest"]["producer"] = "pipeline_contracts"
     return manifest
 
@@ -282,7 +293,9 @@ def save_pipeline_manifest(project_root: str | Path, manifest: dict[str, Any]) -
         manifest.get("fallback_events") or []
     )
     manifest["generated_at"] = _now_iso()
-    return save_json_artifact(artifact_path(project_root, "pipeline_manifest"), manifest)
+    return save_json_artifact(
+        artifact_path(project_root, "pipeline_manifest"), manifest
+    )
 
 
 def initialize_pipeline_contracts(
@@ -301,22 +314,30 @@ def initialize_pipeline_contracts(
     manifest = load_pipeline_manifest(project_root)
     manifest["schema_version"] = PIPELINE_SCHEMA_VERSION
     manifest["project_root"] = str(Path(project_root).expanduser().resolve())
-    manifest["project_name"] = project_name or manifest.get("project_name") or Path(project_root).name
+    manifest["project_name"] = (
+        project_name or manifest.get("project_name") or Path(project_root).name
+    )
     manifest["pipeline_goal"] = pipeline_goal or manifest.get("pipeline_goal")
     manifest["template_profile"] = template_profile or manifest.get("template_profile")
-    manifest["template_capability"] = template_capability or manifest.get("template_capability")
-    manifest["workflow_mode"] = workflow_mode or manifest.get("workflow_mode") or "classic_pipeline"
-    manifest["workflow_label"] = workflow_label or manifest.get("workflow_label") or str(manifest["workflow_mode"]).replace("_", " ").title()
-    manifest["workflow_summary"] = workflow_summary or manifest.get("workflow_summary") or ""
+    manifest["template_capability"] = template_capability or manifest.get(
+        "template_capability"
+    )
+    manifest["workflow_mode"] = (
+        workflow_mode or manifest.get("workflow_mode") or "classic_pipeline"
+    )
+    manifest["workflow_label"] = (
+        workflow_label
+        or manifest.get("workflow_label")
+        or str(manifest["workflow_mode"]).replace("_", " ").title()
+    )
+    manifest["workflow_summary"] = (
+        workflow_summary or manifest.get("workflow_summary") or ""
+    )
     manifest["workflow_inspirations"] = list(
-        workflow_inspirations
-        or manifest.get("workflow_inspirations")
-        or []
+        workflow_inspirations or manifest.get("workflow_inspirations") or []
     )
     manifest["workflow_sequence"] = list(
-        workflow_sequence
-        or manifest.get("workflow_sequence")
-        or []
+        workflow_sequence or manifest.get("workflow_sequence") or []
     )
     artifacts = manifest.setdefault("artifacts", {})
     for artifact_name in ARTIFACT_FILENAMES:
@@ -324,8 +345,12 @@ def initialize_pipeline_contracts(
             artifact_name,
             _default_artifact_entry(project_root, artifact_name),
         )
-        artifacts[artifact_name].setdefault("path", str(artifact_path(project_root, artifact_name)))
-        artifacts[artifact_name]["filename"] = artifact_path(project_root, artifact_name).name
+        artifacts[artifact_name].setdefault(
+            "path", str(artifact_path(project_root, artifact_name))
+        )
+        artifacts[artifact_name]["filename"] = artifact_path(
+            project_root, artifact_name
+        ).name
         artifacts[artifact_name]["schema_version"] = PIPELINE_SCHEMA_VERSION
     manifest.setdefault("fallback_events", [])
     manifest["fallback_summary"] = _summarize_fallback_events(
@@ -355,7 +380,9 @@ def update_pipeline_artifact(
     artifact_entry["status"] = status
     artifact_entry["producer"] = producer
     artifact_entry["generated_at"] = _now_iso()
-    artifact_entry["depends_on"] = list(depends_on or artifact_entry.get("depends_on") or [])
+    artifact_entry["depends_on"] = list(
+        depends_on or artifact_entry.get("depends_on") or []
+    )
     artifact_entry["warnings"] = list(warnings or [])
     artifact_entry["recovery_hint"] = recovery_hint
     artifact_entry["notes"] = notes
@@ -432,7 +459,9 @@ def save_contract_artifact(
         output_path = save_json_artifact(path, payload)
     elif path.suffix == ".jsonl":
         if not isinstance(payload, list):
-            raise TypeError(f"{artifact_name} expects a list payload for jsonl serialization")
+            raise TypeError(
+                f"{artifact_name} expects a list payload for jsonl serialization"
+            )
         output_path = save_jsonl_artifact(path, payload)
     else:
         output_path = save_text_artifact(path, str(payload))
@@ -449,7 +478,9 @@ def save_contract_artifact(
     return output_path
 
 
-def load_contract_artifact(project_root: str | Path, artifact_name: str, *, default: Any = None) -> Any:
+def load_contract_artifact(
+    project_root: str | Path, artifact_name: str, *, default: Any = None
+) -> Any:
     path = artifact_path(project_root, artifact_name)
     if path.suffix == ".json":
         return load_json_artifact(path, default=default)
@@ -497,7 +528,8 @@ def render_research_program_markdown(
         f"- Lead idea: {idea_name}",
         "",
         "## Workflow Strategy",
-        workflow_summary or "Use the current workflow mode to adapt execution order and evidence pressure.",
+        workflow_summary
+        or "Use the current workflow mode to adapt execution order and evidence pressure.",
         "",
     ]
     if workflow_inspirations:
@@ -545,7 +577,9 @@ def render_research_program_markdown(
             "## Success Criteria",
         ]
     )
-    for item in success_criteria or ["Demonstrate a measurable gain or a credible negative result with clear evidence."]:
+    for item in success_criteria or [
+        "Demonstrate a measurable gain or a credible negative result with clear evidence."
+    ]:
         lines.append(f"- {item}")
     lines.extend(["", "## Failure Handling"])
     for item in failure_handling_rules or [

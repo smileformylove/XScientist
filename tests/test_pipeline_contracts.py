@@ -17,7 +17,9 @@ from ai_scientist.utils.pipeline_contracts import (
 
 
 class PipelineContractsTests(unittest.TestCase):
-    def test_initialize_and_save_contract_artifacts_should_persist_manifest(self) -> None:
+    def test_initialize_and_save_contract_artifacts_should_persist_manifest(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo_project"
             project_root.mkdir(parents=True, exist_ok=True)
@@ -56,7 +58,11 @@ class PipelineContractsTests(unittest.TestCase):
                     workflow_summary="Program-first orchestration.",
                     workflow_inspirations=["karpathy/autoresearch"],
                     workflow_sequence=["program", "experiment", "review"],
-                    budget={"max_steps": 4, "max_wallclock_minutes": 30, "max_retry_per_task": 1},
+                    budget={
+                        "max_steps": 4,
+                        "max_wallclock_minutes": 30,
+                        "max_retry_per_task": 1,
+                    },
                     execution_policy={
                         "execution_style": "budgeted_program_execution",
                         "evidence_pressure": "disciplined",
@@ -88,6 +94,10 @@ class PipelineContractsTests(unittest.TestCase):
             self.assertIn("hallucination_review", reloaded["artifacts"])
             self.assertIn("sample_gate", reloaded["artifacts"])
             self.assertIn("decision_log", reloaded["artifacts"])
+            self.assertIn("preregistration", reloaded["artifacts"])
+            self.assertIn("verification_report", reloaded["artifacts"])
+            self.assertIn("hypothesis_archive", reloaded["artifacts"])
+            self.assertIn("evolution_gate", reloaded["artifacts"])
             self.assertEqual(
                 reloaded["artifacts"]["repair_plan"]["status"],
                 "missing",
@@ -105,19 +115,25 @@ class PipelineContractsTests(unittest.TestCase):
                 "missing",
             )
             self.assertEqual(
-                load_contract_artifact(project_root, "idea_cards", default=[])[0]["idea_id"],
+                load_contract_artifact(project_root, "idea_cards", default=[])[0][
+                    "idea_id"
+                ],
                 "idea_0",
             )
             self.assertTrue(artifact_path(project_root, "research_program").exists())
-            research_program = artifact_path(project_root, "research_program").read_text(
-                encoding="utf-8"
-            )
+            research_program = artifact_path(
+                project_root, "research_program"
+            ).read_text(encoding="utf-8")
             self.assertIn("## Operating Policy", research_program)
             self.assertIn("### Registry Discipline", research_program)
             self.assertIn("Quality fallback policy: disallowed", research_program)
-            self.assertIn("Reject submission after quality fallback: yes", research_program)
+            self.assertIn(
+                "Reject submission after quality fallback: yes", research_program
+            )
 
-    def test_iter_project_roots_should_only_return_manifest_backed_projects(self) -> None:
+    def test_iter_project_roots_should_only_return_manifest_backed_projects(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
             valid_project = research_root / "projects" / "valid_project"

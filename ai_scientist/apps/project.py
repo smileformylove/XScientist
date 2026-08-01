@@ -91,6 +91,10 @@ from ai_scientist.utils.research_planning import (
     build_idea_cards,
     build_research_plan,
 )
+from ai_scientist.utils.research_integrity import (
+    build_preregistration,
+    save_preregistration,
+)
 from ai_scientist.utils.self_review_optimizer import (
     apply_issue_driven_rewrite,
     assess_self_review_gate,
@@ -487,6 +491,11 @@ def _write_experiment_pipeline_seed_artifacts(
         research_plan,
         producer="run_project.planning",
         depends_on=["idea_cards"],
+    )
+    save_preregistration(
+        exp_root,
+        build_preregistration(idea_card, research_plan),
+        producer="run_project.planning",
     )
     save_truth_contract_bundle(
         exp_root,

@@ -98,6 +98,10 @@ from ai_scientist.utils.research_planning import (
     build_idea_cards,
     build_research_plan,
 )
+from ai_scientist.utils.research_integrity import (
+    build_preregistration,
+    save_preregistration,
+)
 from ai_scientist.writing_prompt_profiles import (
     DEFAULT_WRITING_PROFILE,
     list_writing_profiles,
@@ -544,6 +548,11 @@ def _save_paper_pipeline_seed_artifacts(
         research_plan,
         producer="continuous_paper_generator.planning",
         depends_on=["idea_cards"],
+    )
+    save_preregistration(
+        paper_root_path,
+        build_preregistration(idea_card, research_plan),
+        producer="continuous_paper_generator.planning",
     )
     save_truth_contract_bundle(
         paper_root_path,

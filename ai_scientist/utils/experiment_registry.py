@@ -40,6 +40,18 @@ def build_experiment_record(
     acceptance_results: list[dict[str, Any]] | None = None,
     budget_audit: dict[str, Any] | None = None,
     budget_status: str | None = None,
+    study_phase: str = "exploratory",
+    preregistration_id: str | None = None,
+    dataset_split_hash: str | None = None,
+    metric_provenance: str | None = None,
+    evaluator_input_hash: str | None = None,
+    evaluator_result_hash: str | None = None,
+    holdout_access: str | None = None,
+    producer_id: str | None = None,
+    independent_reproduction: bool = False,
+    replicates_record_id: str | None = None,
+    verifier_id: str | None = None,
+    clean_room: bool = False,
 ) -> dict[str, Any]:
     error_tokens = " ".join(
         [
@@ -77,6 +89,18 @@ def build_experiment_record(
         "budget_audit": dict(budget_audit or {}),
         "started_at": _now_iso(),
         "finished_at": None if status in {"planned", "running"} else _now_iso(),
+        "study_phase": str(study_phase or "exploratory").strip().lower(),
+        "preregistration_id": preregistration_id,
+        "dataset_split_hash": dataset_split_hash,
+        "metric_provenance": metric_provenance,
+        "evaluator_input_hash": evaluator_input_hash,
+        "evaluator_result_hash": evaluator_result_hash,
+        "holdout_access": holdout_access,
+        "producer_id": producer_id,
+        "independent_reproduction": bool(independent_reproduction),
+        "replicates_record_id": replicates_record_id,
+        "verifier_id": verifier_id,
+        "clean_room": bool(clean_room),
     }
 
 
@@ -128,7 +152,9 @@ def summarize_experiment_registry(project_root: str | Path) -> dict[str, Any]:
     return summary
 
 
-def save_experiment_registry(project_root: str | Path, rows: list[dict[str, Any]]) -> str:
+def save_experiment_registry(
+    project_root: str | Path, rows: list[dict[str, Any]]
+) -> str:
     output_path = Path(artifact_path(project_root, "experiment_registry"))
     save_jsonl_artifact(output_path, rows)
     update_pipeline_artifact(

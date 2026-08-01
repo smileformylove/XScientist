@@ -623,6 +623,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [登录守卫](LOGIN_GUARDRAIL.md)：登录与会话管理
 - [输出目录](guides/OUTPUT_DIRECTORIES.md)：输出策略（如与代码不一致，请以 `ai_scientist/config/paths.py` 为准）
 - [系统架构](ARCHITECTURE.md)：系统边界与核心组件
+- [科研可信协议](RESEARCH_INTEGRITY.md)：预注册、盲测复现与结论晋升门禁
 - [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---

@@ -624,6 +624,7 @@ Currently organized example files:
 - [Login guardrail](docs/LOGIN_GUARDRAIL.md): login and session management
 - [Output directories](docs/guides/OUTPUT_DIRECTORIES.md): output policy (if it diverges from code, follow `ai_scientist/config/paths.py`)
 - [Architecture](docs/ARCHITECTURE.md): system boundaries and components
+- [Research integrity protocol](docs/RESEARCH_INTEGRITY.md): preregistration, blind verification, and claim-promotion gates
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---

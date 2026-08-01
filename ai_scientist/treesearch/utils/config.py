@@ -84,7 +84,7 @@ class ExecConfig:
     agent_file_name: str
     format_tb_ipython: bool
     backend: str = "auto"
-    require_isolation: bool = False
+    require_isolation: bool = True
     docker_image: str = "xscientist-exec:latest"
     network: str = "none"
     allow_experiment_network: bool = False

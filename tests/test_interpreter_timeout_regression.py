@@ -44,7 +44,9 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
             interpreter = module.Interpreter(
                 working_dir=td,
                 timeout=3,
-                sandbox_policy=module.SandboxPolicy(backend="process"),
+                sandbox_policy=module.SandboxPolicy(
+                    backend="process", require_isolation=False
+                ),
             )
             try:
                 result = interpreter.run(
@@ -67,7 +69,9 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
         ):
             interpreter = module.Interpreter(
                 working_dir=td,
-                sandbox_policy=module.SandboxPolicy(backend="auto"),
+                sandbox_policy=module.SandboxPolicy(
+                    backend="auto", require_isolation=False
+                ),
             )
 
         self.assertEqual(interpreter.execution_backend, "process")
@@ -169,7 +173,9 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
         ):
             interpreter = module.Interpreter(
                 working_dir=td,
-                sandbox_policy=module.SandboxPolicy(backend="auto"),
+                sandbox_policy=module.SandboxPolicy(
+                    backend="auto", require_isolation=False
+                ),
             )
 
         self.assertEqual(interpreter.execution_backend, "process")
@@ -195,13 +201,16 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
             read_only_root = True
             read_only_mounts = ()
 
-        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
-            "os.environ",
-            {
-                "CUDA_VISIBLE_DEVICES": "0",
-                "OPENAI_API_KEY": "must-not-pass",
-            },
-            clear=False,
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "CUDA_VISIBLE_DEVICES": "0",
+                    "OPENAI_API_KEY": "must-not-pass",
+                },
+                clear=False,
+            ),
         ):
             cfg = type(
                 "Cfg",

@@ -14,6 +14,7 @@ from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
 )
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
+from ai_scientist.utils.research_integrity import validate_preregistration
 
 STAGE_ORDER = (
     "ideation",
@@ -68,7 +69,9 @@ def _finalize_stage(
     total = max(len(criteria), 1)
     passed = sum(1 for item in criteria if item.get("passed"))
     required_failures = [
-        item["id"] for item in criteria if item.get("required") and not item.get("passed")
+        item["id"]
+        for item in criteria
+        if item.get("required") and not item.get("passed")
     ]
     score = round((passed / total) * 100.0, 1)
     if required_failures:
@@ -100,7 +103,12 @@ def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
         )
     lead = cards[0] if isinstance(cards[0], dict) else {}
     criteria = [
-        _criterion("idea_count", "At least one idea card exists", passed=len(cards) > 0, detail=f"count={len(cards)}"),
+        _criterion(
+            "idea_count",
+            "At least one idea card exists",
+            passed=len(cards) > 0,
+            detail=f"count={len(cards)}",
+        ),
         _criterion(
             "core_hypothesis",
             "Lead idea defines a core hypothesis",
@@ -150,7 +158,11 @@ def _evaluate_ideation(idea_cards: Any) -> dict[str, Any]:
     )
 
 
-def _evaluate_planning(research_plan: Any, claim_graph: Any) -> dict[str, Any]:
+def _evaluate_planning(
+    research_plan: Any,
+    claim_graph: Any,
+    preregistration: Any = None,
+) -> dict[str, Any]:
     plan = research_plan if isinstance(research_plan, dict) else {}
     graph = claim_graph if isinstance(claim_graph, dict) else {}
     tasks = [item for item in (plan.get("tasks") or []) if isinstance(item, dict)]
@@ -166,10 +178,31 @@ def _evaluate_planning(research_plan: Any, claim_graph: Any) -> dict[str, Any]:
         )
     budget = plan.get("budget") if isinstance(plan.get("budget"), dict) else {}
     workflow_mode = str(plan.get("workflow_mode") or "").strip().lower()
-    agent_plan = plan.get("agent_plan") if isinstance(plan.get("agent_plan"), dict) else {}
-    agent_lanes = [item for item in (agent_plan.get("lanes") or []) if isinstance(item, dict)]
+    agent_plan = (
+        plan.get("agent_plan") if isinstance(plan.get("agent_plan"), dict) else {}
+    )
+    agent_lanes = [
+        item for item in (agent_plan.get("lanes") or []) if isinstance(item, dict)
+    ]
+    integrity_policy = (
+        plan.get("integrity_policy")
+        if isinstance(plan.get("integrity_policy"), dict)
+        else {}
+    )
+    prereg_payload = preregistration if isinstance(preregistration, dict) else {}
+    prereg_check = (
+        validate_preregistration(prereg_payload)
+        if prereg_payload
+        else {"ok": False, "errors": ["preregistration_missing"], "warnings": []}
+    )
+    integrity_required = bool(integrity_policy)
     criteria = [
-        _criterion("task_count", "Research plan contains at least one task", passed=len(tasks) > 0, detail=f"count={len(tasks)}"),
+        _criterion(
+            "task_count",
+            "Research plan contains at least one task",
+            passed=len(tasks) > 0,
+            detail=f"count={len(tasks)}",
+        ),
         _criterion(
             "budget_fields",
             "Research plan sets max steps, wallclock, and retry budget",
@@ -219,6 +252,25 @@ def _evaluate_planning(research_plan: Any, claim_graph: Any) -> dict[str, Any]:
             ),
             required=workflow_mode == "multi_agent_board",
         ),
+        _criterion(
+            "preregistration_protocol",
+            "Confirmatory research is mapped to a complete preregistration",
+            passed=bool(prereg_payload) and bool(prereg_check.get("ok")),
+            required=integrity_required,
+            detail=", ".join(prereg_check.get("errors") or [])
+            or "protocol fields complete",
+        ),
+        _criterion(
+            "claim_promotion_policy",
+            "Research plan blocks claim promotion until independent verification",
+            passed=(
+                not integrity_required
+                or bool(
+                    integrity_policy.get("claim_promotion_requires_verified_report")
+                )
+            ),
+            required=integrity_required,
+        ),
     ]
     return _finalize_stage(
         "planning",
@@ -231,11 +283,17 @@ def _evaluate_planning(research_plan: Any, claim_graph: Any) -> dict[str, Any]:
             "workflow_mode": plan.get("workflow_mode"),
             "policy_name": (plan.get("execution_policy") or {}).get("policy_name"),
             "agent_lane_count": len(agent_lanes),
+            "integrity_required": integrity_required,
+            "preregistration_status": prereg_payload.get("status"),
         },
     )
 
 
-def _evaluate_experiment(project_root: str | Path) -> dict[str, Any]:
+def _evaluate_experiment(
+    project_root: str | Path,
+    preregistration: Any = None,
+    verification_report: Any = None,
+) -> dict[str, Any]:
     records = load_jsonl_artifact(artifact_path(project_root, "experiment_registry"))
     if not records:
         return _finalize_stage(
@@ -249,6 +307,17 @@ def _evaluate_experiment(project_root: str | Path) -> dict[str, Any]:
         for item in records
         if str(item.get("status") or "").lower() in {"completed", "failed"}
     ]
+    prereg_payload = preregistration if isinstance(preregistration, dict) else {}
+    verification_payload = (
+        verification_report if isinstance(verification_report, dict) else {}
+    )
+    integrity_required = bool(prereg_payload)
+    promotion_requested = any(
+        bool(item.get("entered_storyline"))
+        or str(item.get("study_phase") or "").lower() == "confirmatory"
+        for item in records
+    )
+    preregistration_id = str(prereg_payload.get("preregistration_id") or "")
     criteria = [
         _criterion(
             "record_count",
@@ -270,7 +339,9 @@ def _evaluate_experiment(project_root: str | Path) -> dict[str, Any]:
         _criterion(
             "budget_status",
             "Every record reports a budget status",
-            passed=all(str(item.get("budget_status") or "").strip() for item in records),
+            passed=all(
+                str(item.get("budget_status") or "").strip() for item in records
+            ),
         ),
         _criterion(
             "acceptance_checks",
@@ -290,7 +361,44 @@ def _evaluate_experiment(project_root: str | Path) -> dict[str, Any]:
             "storyline_or_completion",
             "Registry contains at least one storyline-ready or completed run",
             passed=any(item.get("entered_storyline") for item in records)
-            or any(str(item.get("status") or "").lower() == "completed" for item in records),
+            or any(
+                str(item.get("status") or "").lower() == "completed" for item in records
+            ),
+        ),
+        _criterion(
+            "confirmatory_preregistration_linkage",
+            "Confirmatory and storyline records link to the locked preregistration",
+            passed=(
+                not integrity_required
+                or not promotion_requested
+                or (
+                    prereg_payload.get("status") == "locked"
+                    and all(
+                        str(item.get("preregistration_id") or "") == preregistration_id
+                        for item in records
+                        if bool(item.get("entered_storyline"))
+                        or str(item.get("study_phase") or "").lower() == "confirmatory"
+                    )
+                )
+            ),
+            required=integrity_required and promotion_requested,
+        ),
+        _criterion(
+            "independent_verification_gate",
+            "Storyline evidence passed blind, deterministic, clean-room verification",
+            passed=(
+                not integrity_required
+                or not promotion_requested
+                or (
+                    verification_payload.get("status") == "verified"
+                    and bool(verification_payload.get("claim_promotion_allowed"))
+                )
+            ),
+            required=integrity_required and promotion_requested,
+            detail=(
+                ", ".join(verification_payload.get("required_failures") or [])
+                or str(verification_payload.get("status") or "not_requested")
+            ),
         ),
     ]
     return _finalize_stage(
@@ -302,11 +410,16 @@ def _evaluate_experiment(project_root: str | Path) -> dict[str, Any]:
             "completed_count": sum(
                 str(item.get("status") or "").lower() == "completed" for item in records
             ),
-            "storyline_count": sum(bool(item.get("entered_storyline")) for item in records),
+            "storyline_count": sum(
+                bool(item.get("entered_storyline")) for item in records
+            ),
             "budget_exhausted_count": sum(
                 str(item.get("budget_status") or "").lower() == "budget_exhausted"
                 for item in records
             ),
+            "integrity_required": integrity_required,
+            "promotion_requested": promotion_requested,
+            "verification_status": verification_payload.get("status"),
         },
     )
 
@@ -338,7 +451,9 @@ def _evaluate_figure(
         if isinstance(node, dict) and node.get("type") == "claim"
     }
     ready_claim_ids = {
-        str(item.get("claim_id") or "").strip() for item in ready_figures if item.get("claim_id")
+        str(item.get("claim_id") or "").strip()
+        for item in ready_figures
+        if item.get("claim_id")
     }
     workflow_mode = str(plan.get("workflow_mode") or "").strip().lower()
     strict_visual_lane = workflow_mode in {
@@ -347,9 +462,13 @@ def _evaluate_figure(
         "review_board",
         "multi_agent_board",
     }
-    expected_main_ready = min(max(len(claim_ids), 1), 4) if claim_ids else min(
-        max(len(ready_figures), 1),
-        4,
+    expected_main_ready = (
+        min(max(len(claim_ids), 1), 4)
+        if claim_ids
+        else min(
+            max(len(ready_figures), 1),
+            4,
+        )
     )
     criteria = [
         _criterion(
@@ -423,7 +542,9 @@ def _evaluate_figure(
         signals={
             "figure_count": len(figures),
             "ready_figure_count": len(ready_figures),
-            "blocked_figure_count": sum(item.get("status") == "blocked" for item in figures),
+            "blocked_figure_count": sum(
+                item.get("status") == "blocked" for item in figures
+            ),
             "claim_coverage_ratio": figure_summary.get("claim_coverage_ratio"),
             "main_ready_count": figure_summary.get("main_ready_count"),
             "main_blocked_count": figure_summary.get("main_blocked_count"),
@@ -493,7 +614,9 @@ def _evaluate_manuscript(manuscript_state: Any) -> dict[str, Any]:
     )
 
 
-def _evaluate_review(review_state: Any, repair_plan: Any, self_evolution: Any) -> dict[str, Any]:
+def _evaluate_review(
+    review_state: Any, repair_plan: Any, self_evolution: Any
+) -> dict[str, Any]:
     state = review_state if isinstance(review_state, dict) else {}
     repair_plan_payload = repair_plan if isinstance(repair_plan, dict) else {}
     self_evolution_payload = self_evolution if isinstance(self_evolution, dict) else {}
@@ -517,8 +640,12 @@ def _evaluate_review(review_state: Any, repair_plan: Any, self_evolution: Any) -
     bound_issue_count = int(repair_metrics.get("bound_issue_count") or 0)
     unbound_issue_count = int(repair_metrics.get("unbound_issue_count") or 0)
     bound_active_issue_count = int(repair_metrics.get("bound_active_issue_count") or 0)
-    target_binding_coverage = float(repair_metrics.get("target_binding_coverage") or 0.0)
-    active_binding_coverage = float(repair_metrics.get("active_binding_coverage") or 0.0)
+    target_binding_coverage = float(
+        repair_metrics.get("target_binding_coverage") or 0.0
+    )
+    active_binding_coverage = float(
+        repair_metrics.get("active_binding_coverage") or 0.0
+    )
     repair_queue_count = int(repair_metrics.get("repair_queue_count") or 0)
     repair_ready_count = int(repair_metrics.get("repair_ready_count") or 0)
     repair_verification_ready_count = int(
@@ -660,7 +787,9 @@ def _evaluate_review(review_state: Any, repair_plan: Any, self_evolution: Any) -
         _criterion(
             "verification_checks",
             "Review state exposes verification checks or issue-resolution tracking",
-            passed=verification_count > 0 or resolved_issue_count > 0 or persistent_issue_count > 0,
+            passed=verification_count > 0
+            or resolved_issue_count > 0
+            or persistent_issue_count > 0,
             required=False,
         ),
         _criterion(
@@ -676,10 +805,12 @@ def _evaluate_review(review_state: Any, repair_plan: Any, self_evolution: Any) -
             passed=not hostile_summary or hostile_active_issue_count == 0,
             required=False,
             detail=(
-                f"active={hostile_active_issue_count} blocking={hostile_blocking_issue_count}"
-            )
-            if hostile_summary
-            else None,
+                (
+                    f"active={hostile_active_issue_count} blocking={hostile_blocking_issue_count}"
+                )
+                if hostile_summary
+                else None
+            ),
         ),
         _criterion(
             "persistent_issue_budget",
@@ -768,14 +899,18 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     )
     review_state = load_contract_artifact(resolved_root, "review_state", default={})
     repair_plan = load_contract_artifact(resolved_root, "repair_plan", default={})
-    self_evolution = load_contract_artifact(
-        resolved_root, "self_evolution", default={}
+    self_evolution = load_contract_artifact(resolved_root, "self_evolution", default={})
+    preregistration = load_contract_artifact(
+        resolved_root, "preregistration", default={}
+    )
+    verification_report = load_contract_artifact(
+        resolved_root, "verification_report", default={}
     )
 
     stage_results = [
         _evaluate_ideation(idea_cards),
-        _evaluate_planning(research_plan, claim_graph),
-        _evaluate_experiment(resolved_root),
+        _evaluate_planning(research_plan, claim_graph, preregistration),
+        _evaluate_experiment(resolved_root, preregistration, verification_report),
         _evaluate_figure(figure_spec, claim_graph, research_plan),
         _evaluate_manuscript(manuscript_state),
         _evaluate_review(review_state, repair_plan, self_evolution),
@@ -833,6 +968,8 @@ def save_stage_standards(project_root: str | Path) -> str:
             "figure_spec",
             "manuscript_state",
             "review_state",
+            "preregistration",
+            "verification_report",
         ],
     )
     # Keep the cross-reference process audit fresh whenever stage standards change.
