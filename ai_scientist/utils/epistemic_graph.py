@@ -441,6 +441,7 @@ def advance_epistemic_node(
     actor_id: str,
     reason: str,
     evidence_refs: Iterable[str],
+    evaluation_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Append a hash-chained state transition without mutating the node."""
 
@@ -459,6 +460,12 @@ def advance_epistemic_node(
         raise EpistemicGraphError(
             f"transition to {destination} requires at least {minimum} evidence refs"
         )
+    if destination in {"robust", "canonical"}:
+        from ai_scientist.utils.evaluation_governance import (
+            assert_scientific_promotion_allowed,
+        )
+
+        assert_scientific_promotion_allowed(evaluation_report, node_id=node_id)
     updated = deepcopy(graph)
     previous_hash = (
         updated["transitions"][-1]["event_hash"] if updated["transitions"] else None

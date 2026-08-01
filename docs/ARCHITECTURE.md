@@ -23,6 +23,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Evolution gate | `ai_scientist/utils/evolution_gate.py` | Artifact-compatible | Hidden paired benchmarks, regression confidence checks, canary approval, rollback audit |
 | Science constitution | `ai_scientist/utils/science_constitution.py` | Immutable core | Code-anchored scientific principles, protected assets, amendment proposals |
 | Epistemic graph | `ai_scientist/utils/epistemic_graph.py` | Append-only | Questions, theories, claims, evidence relations, and hash-chained status transitions |
+| Evaluation governance | `ai_scientist/utils/evaluation_governance.py` | Immutable decisions | Disjoint authorities, opaque benchmarks, prospective/external tests, claim-promotion approval |
 | Protocol and resources | `ai_scientist/protocol/`, `ai_scientist/resources/` | Artifact-compatible | ARA schemas, packaged configs, templates, resource lookup |
 | Legacy adapters | Repository-root workflow scripts | Compatibility-only | Preserve historical commands and imports by aliasing internal apps |
 | Source operations | `run_daemon_profile.py`, `run_daemon_rehearsal.py`, shell wrappers | Checkout-only | Profile overlays, rehearsals, and operator workflows tied to repository configs |

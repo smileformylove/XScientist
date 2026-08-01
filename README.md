@@ -629,6 +629,7 @@ Currently organized example files:
 - [Benchmark-gated self-evolution](docs/EVOLUTION_GATE.md): shadow evaluation, canary promotion, independent approval, and rollback
 - [Science constitution](docs/SCIENCE_CONSTITUTION.md): immutable research principles, protected assets, and amendment governance
 - [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md): cumulative questions, claims, refutations, and evidence-state transitions
+- [Independent evaluation governance](docs/EVALUATION_GOVERNANCE.md): disjoint authorities, sealed/prospective/external tests, and high-confidence promotion gates
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---

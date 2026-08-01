@@ -6,6 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.epistemic_graph import validate_epistemic_graph
+from ai_scientist.utils.evaluation_governance import (
+    validate_evaluation_charter,
+    validate_evaluation_decision,
+)
 from ai_scientist.utils.figure_spec import summarize_figure_spec
 from ai_scientist.utils.pipeline_contracts import (
     artifact_path,
@@ -16,7 +21,6 @@ from ai_scientist.utils.pipeline_contracts import (
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
 from ai_scientist.utils.research_integrity import validate_preregistration
 from ai_scientist.utils.science_constitution import validate_science_constitution
-from ai_scientist.utils.epistemic_graph import validate_epistemic_graph
 
 STAGE_ORDER = (
     "ideation",
@@ -99,6 +103,8 @@ def _evaluate_ideation(
     hypothesis_archive: Any = None,
     science_constitution: Any = None,
     epistemic_graph: Any = None,
+    evaluation_charter: Any = None,
+    evaluation_report: Any = None,
 ) -> dict[str, Any]:
     cards = idea_cards if isinstance(idea_cards, list) else []
     if not cards:
@@ -123,6 +129,20 @@ def _evaluate_ideation(
     knowledge_graph = epistemic_graph if isinstance(epistemic_graph, dict) else {}
     constitution_check = validate_science_constitution(constitution)
     graph_check = validate_epistemic_graph(knowledge_graph)
+    charter = evaluation_charter if isinstance(evaluation_charter, dict) else {}
+    report = evaluation_report if isinstance(evaluation_report, dict) else {}
+    charter_check = validate_evaluation_charter(charter, constitution=constitution)
+    report_check = validate_evaluation_decision(report)
+    current_statuses = graph_check.get("current_statuses") or {}
+    promotion_node_ids = sorted(
+        node_id
+        for node_id, status in current_statuses.items()
+        if status in {"robust", "canonical"}
+    )
+    promotion_required = bool(promotion_node_ids)
+    report_scope = {
+        str(node_id) for node_id in (report.get("scope_node_ids") or []) if node_id
+    }
     foundation_required = bool(archive)
     criteria = [
         _criterion(
@@ -242,6 +262,42 @@ def _evaluate_ideation(
             ),
             required=foundation_required,
         ),
+        _criterion(
+            "evaluation_charter",
+            "Robust claims use a locked, constitution-bound evaluation charter",
+            passed=(
+                not promotion_required
+                or (bool(charter) and bool(charter_check.get("passed")))
+            ),
+            required=promotion_required,
+            detail=", ".join(charter_check.get("errors") or [])
+            or "evaluation authorities are locked and disjoint",
+        ),
+        _criterion(
+            "independent_evaluation",
+            "Robust claims pass sealed, prospective, and external evaluation",
+            passed=(
+                not promotion_required
+                or (
+                    bool(report)
+                    and bool(report_check.get("passed"))
+                    and report.get("decision") == "approved"
+                    and report.get("charter_hash") == charter.get("charter_hash")
+                )
+            ),
+            required=promotion_required,
+            detail=", ".join(report_check.get("errors") or [])
+            or str(report.get("decision") or "not required"),
+        ),
+        _criterion(
+            "evaluation_scope",
+            "The approval explicitly covers every robust or canonical node",
+            passed=(
+                not promotion_required or set(promotion_node_ids).issubset(report_scope)
+            ),
+            required=promotion_required,
+            detail=f"promotion_nodes={len(promotion_node_ids)}",
+        ),
     ]
     return _finalize_stage(
         "ideation",
@@ -257,6 +313,8 @@ def _evaluate_ideation(
             "constitution_status": constitution.get("status"),
             "epistemic_node_count": len(knowledge_graph.get("nodes") or []),
             "epistemic_transition_count": len(knowledge_graph.get("transitions") or []),
+            "promotion_node_count": len(promotion_node_ids),
+            "evaluation_decision": report.get("decision"),
         },
     )
 
@@ -1001,6 +1059,12 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     epistemic_graph = load_contract_artifact(
         resolved_root, "epistemic_graph", default={}
     )
+    evaluation_charter = load_contract_artifact(
+        resolved_root, "evaluation_charter", default={}
+    )
+    evaluation_report = load_contract_artifact(
+        resolved_root, "evaluation_report", default={}
+    )
     research_plan = load_contract_artifact(resolved_root, "research_plan", default={})
     claim_graph = load_contract_artifact(
         resolved_root, "claim_evidence_graph", default={}
@@ -1025,6 +1089,8 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
             hypothesis_archive,
             science_constitution,
             epistemic_graph,
+            evaluation_charter,
+            evaluation_report,
         ),
         _evaluate_planning(research_plan, claim_graph, preregistration),
         _evaluate_experiment(resolved_root, preregistration, verification_report),
@@ -1082,6 +1148,9 @@ def save_stage_standards(project_root: str | Path) -> str:
             "hypothesis_archive",
             "science_constitution",
             "epistemic_graph",
+            "evaluation_charter",
+            "evaluation_benchmarks",
+            "evaluation_report",
             "research_plan",
             "claim_evidence_graph",
             "experiment_registry",

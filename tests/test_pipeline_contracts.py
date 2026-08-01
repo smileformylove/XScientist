@@ -100,6 +100,9 @@ class PipelineContractsTests(unittest.TestCase):
             self.assertIn("evolution_gate", reloaded["artifacts"])
             self.assertIn("science_constitution", reloaded["artifacts"])
             self.assertIn("epistemic_graph", reloaded["artifacts"])
+            self.assertIn("evaluation_charter", reloaded["artifacts"])
+            self.assertIn("evaluation_benchmarks", reloaded["artifacts"])
+            self.assertIn("evaluation_report", reloaded["artifacts"])
             self.assertEqual(
                 reloaded["artifacts"]["repair_plan"]["status"],
                 "missing",

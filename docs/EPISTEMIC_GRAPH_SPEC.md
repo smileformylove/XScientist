@@ -34,6 +34,9 @@ Nodes never change status in place. Every transition is an append-only event
 containing its actor, reason, evidence references, previous event hash, and
 event hash. Higher states require progressively stronger evidence references.
 The graph itself is bound to the project's locked science constitution.
+Promotion to `robust` or `canonical` additionally requires a valid independent
+evaluation decision scoped to that exact node; see
+[Independent Scientific Evaluation Governance](EVALUATION_GOVERNANCE.md).
 
 ## Project initialization
 

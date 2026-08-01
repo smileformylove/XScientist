@@ -44,6 +44,9 @@ ARTIFACT_FILENAMES = {
     "evolution_gate": "evolution_gate.json",
     "science_constitution": "science_constitution.json",
     "epistemic_graph": "epistemic_graph.json",
+    "evaluation_charter": "evaluation_charter.json",
+    "evaluation_benchmarks": "evaluation_benchmarks.jsonl",
+    "evaluation_report": "evaluation_report.json",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -74,6 +77,9 @@ ARTIFACT_DEFAULT_STATUS = {
     "evolution_gate": "missing",
     "science_constitution": "missing",
     "epistemic_graph": "missing",
+    "evaluation_charter": "missing",
+    "evaluation_benchmarks": "missing",
+    "evaluation_report": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {
