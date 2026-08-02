@@ -4,6 +4,11 @@ import re
 import unittest
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
+
 
 class OpenSourceHygieneTests(unittest.TestCase):
     def test_repository_root_visible_files_are_intentional(self) -> None:
@@ -68,6 +73,36 @@ class OpenSourceHygieneTests(unittest.TestCase):
         self.assertFalse((repo_root / "requirements-smoke.txt").exists())
         self.assertTrue((repo_root / "requirements" / "constraints-ci.txt").is_file())
         self.assertTrue((repo_root / "requirements" / "smoke.txt").is_file())
+
+    def test_dependency_manifests_avoid_unused_and_transitive_redundancies(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with (repo_root / "pyproject.toml").open("rb") as handle:
+            metadata = tomllib.load(handle)
+        full_dependencies = "\n".join(
+            metadata["project"]["optional-dependencies"]["full"]
+        ).lower()
+        root_requirements = (repo_root / "requirements.txt").read_text(encoding="utf-8")
+        smoke_requirements = (repo_root / "requirements" / "smoke.txt").read_text(
+            encoding="utf-8"
+        )
+
+        for package in ("funcy", "wandb"):
+            self.assertNotIn(package, full_dependencies)
+            self.assertNotRegex(
+                root_requirements,
+                rf"(?m)^\s*{re.escape(package)}\s*(?:#.*)?$",
+            )
+            self.assertNotRegex(
+                smoke_requirements,
+                rf"(?m)^\s*{re.escape(package)}\s*(?:#.*)?$",
+            )
+        self.assertNotRegex(
+            full_dependencies,
+            r"(?m)^\s*botocore(?:[<>=!~].*)?$",
+            msg="boto3 already installs botocore; keep only its CI constraint",
+        )
 
     @classmethod
     def setUpClass(cls) -> None:

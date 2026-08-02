@@ -19,12 +19,10 @@ scikit-learn
 transformers
 datasets
 tiktoken
-wandb
 tqdm
 rich
 humanize
 dataclasses-json
-funcy
 black
 genson
 shutup
@@ -32,6 +30,5 @@ python-igraph
 coolname
 jsonschema
 omegaconf
-botocore
 boto3
 huggingface-hub

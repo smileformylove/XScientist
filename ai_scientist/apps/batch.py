@@ -179,7 +179,6 @@ from ai_scientist.config.paths import (
 
 _RUNTIME_IMPORT_ATTRS = {
     "create_client": ("ai_scientist.llm", "create_client"),
-    "get_response_from_llm": ("ai_scientist.llm", "get_response_from_llm"),
     "generate_temp_free_idea": (
         "ai_scientist.perform_ideation_temp_free",
         "generate_temp_free_idea",
@@ -221,26 +220,9 @@ _RUNTIME_IMPORT_ATTRS = {
         "ai_scientist.professional_writing_system",
         "ProfessionalPaperEvaluator",
     ),
-    "PAPER_TEMPLATES": (
-        "ai_scientist.professional_writing_system",
-        "PAPER_TEMPLATES",
-    ),
-    "ACADEMIC_WRITING_STANDARDS": (
-        "ai_scientist.professional_writing_system",
-        "ACADEMIC_WRITING_STANDARDS",
-    ),
-    "recommend_template": (
-        "ai_scientist.professional_writing_system",
-        "recommend_template",
-    ),
-    "list_templates": ("ai_scientist.professional_writing_system", "list_templates"),
     "SelfLearningKnowledgeBase": (
         "ai_scientist.self_learning_knowledge_base",
         "SelfLearningKnowledgeBase",
-    ),
-    "PatternAnalyzer": (
-        "ai_scientist.self_learning_knowledge_base",
-        "PatternAnalyzer",
     ),
     "AdaptiveLearningEngine": (
         "ai_scientist.adaptive_learning_engine",
@@ -281,7 +263,6 @@ _RUNTIME_IMPORT_ATTRS = {
 
 _LEARNING_RUNTIME_ATTRS = {
     "SelfLearningKnowledgeBase",
-    "PatternAnalyzer",
     "AdaptiveLearningEngine",
     "AdaptiveWriter",
 }

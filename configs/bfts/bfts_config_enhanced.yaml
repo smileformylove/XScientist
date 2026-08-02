@@ -212,8 +212,8 @@ early_stopping:
 logging:
   # 实验跟踪
   experiment_tracking:
-    enabled: true
-    backend: "wandb"  # wandb, tensorboard, mlflow
+    enabled: false
+    backend: "local"  # 当前管线仅保证本地 artifact 跟踪
 
   # 详细日志级别
   verbosity: "debug"

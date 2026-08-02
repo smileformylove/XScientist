@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,15 @@ class BatchRuntimeImportTests(unittest.TestCase):
             | batch._GUIDANCE_RUNTIME_ATTRS,
             set(batch._RUNTIME_IMPORT_ATTRS),
         )
+
+    def test_every_deferred_runtime_attribute_is_consumed(self) -> None:
+        source = Path(batch.__file__).read_text(encoding="utf-8")
+        loaded_names = {
+            node.id
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        self.assertFalse(set(batch._RUNTIME_IMPORT_ATTRS) - loaded_names)
 
     def test_core_loader_does_not_resolve_learning_dependencies(self) -> None:
         batch._RUNTIME_IMPORTS_LOADED.clear()

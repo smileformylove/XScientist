@@ -33,7 +33,6 @@ tqdm
 rich
 humanize
 dataclasses-json
-funcy
 black
 genson
 shutup
