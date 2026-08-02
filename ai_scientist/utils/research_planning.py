@@ -21,6 +21,15 @@ DEFAULT_EXPERIMENT_BUDGET = {
     "max_retry_per_task": 2,
 }
 
+SOCRATIC_CHALLENGE_POLICY = {
+    "minimum_rival_hypotheses": 3,
+    "minimum_discriminating_tests": 3,
+    "require_null_explanation": True,
+    "require_measurement_artifact_explanation": True,
+    "require_scope_boundary_explanation": True,
+    "posterior_update_requires_evidence": True,
+}
+
 DEFAULT_AGENT_LANES = {
     "classic_pipeline": ("planner", "experiment", "writer", "reviewer"),
     "agentic_tree": (
@@ -83,7 +92,12 @@ AGENT_LANE_SPECS = {
     "results_analyst": {
         "responsibility": "Converts experiment artifacts into evidence-faithful result paragraphs, captions, and claim cards.",
         "inputs": ["experiment_registry", "figure_spec", "claim_evidence_graph"],
-        "outputs": ["claim_cards", "caption_briefs", "result_takeaways"],
+        "outputs": [
+            "claim_cards",
+            "caption_briefs",
+            "result_takeaways",
+            "rival_hypothesis_outcomes",
+        ],
         "handoff_gate": "Every surviving claim cites a metric delta and at least one figure/table candidate.",
     },
     "storyline_editor": {
@@ -142,7 +156,12 @@ AGENT_LANE_SPECS = {
     },
     "writer": {
         "responsibility": "Drafts the manuscript around evidence-backed claims only.",
-        "inputs": ["claim_cards", "figure_spec", "citation_pack"],
+        "inputs": [
+            "claim_cards",
+            "figure_spec",
+            "citation_pack",
+            "socratic_challenge",
+        ],
         "outputs": ["manuscript_draft", "section_claim_bindings"],
         "handoff_gate": "Every major claim is traceable to evidence and section placement.",
     },
@@ -326,6 +345,224 @@ def _infer_failure_criteria(idea: dict[str, Any], metrics: list[str]) -> list[st
     ]
 
 
+def _build_socratic_challenge(
+    idea_card: dict[str, Any],
+    *,
+    datasets: list[str],
+    metrics: list[str],
+    baselines: list[str],
+    failure_criteria: list[str],
+) -> dict[str, Any]:
+    """Turn one favored hypothesis into a pre-experiment adversarial contract."""
+
+    primary = str(
+        idea_card.get("core_hypothesis") or idea_card.get("title") or ""
+    ).strip()
+    mechanism = str(idea_card.get("mechanism") or "mechanism_not_yet_resolved").strip()
+    dataset = str((datasets or ["dataset_to_be_selected"])[0])
+    metric = str((metrics or ["primary_task_metric"])[0])
+    baseline = str((baselines or ["strong_existing_baseline"])[0])
+    source_idea = (
+        idea_card.get("source_idea")
+        if isinstance(idea_card.get("source_idea"), dict)
+        else {}
+    )
+    supplied_rivals = _coerce_list(
+        source_idea.get("Alternative Hypotheses") or source_idea.get("Rival Hypotheses")
+    )
+    default_rivals = [
+        {
+            "rival_id": "rival_null",
+            "class": "null_effect",
+            "statement": (
+                f"The proposed method has no reliable advantage over {baseline}; "
+                "the observed delta is compatible with run-to-run variation."
+            ),
+            "discriminating_prediction": (
+                f"A paired, repeated comparison on {dataset} does not show a stable "
+                f"improvement in {metric}."
+            ),
+        },
+        {
+            "rival_id": "rival_substitute_mechanism",
+            "class": "mechanism_substitution",
+            "statement": (
+                "Any gain comes from matched compute, tuning, preprocessing, or data "
+                f"exposure rather than the proposed mechanism ({mechanism})."
+            ),
+            "discriminating_prediction": (
+                "Removing only the proposed mechanism while holding budget and data "
+                "fixed preserves the gain."
+            ),
+        },
+        {
+            "rival_id": "rival_measurement_artifact",
+            "class": "measurement_artifact",
+            "statement": (
+                "The apparent result is produced by leakage, selection, metric choice, "
+                "or evaluator coupling rather than a scientific effect."
+            ),
+            "discriminating_prediction": (
+                "Leakage checks, a negative control, or an independent metric/evaluator "
+                "removes the apparent advantage."
+            ),
+        },
+        {
+            "rival_id": "rival_scope_boundary",
+            "class": "scope_boundary",
+            "statement": (
+                f"The result is specific to {dataset} or the tested regime and does not "
+                "support the broader claim."
+            ),
+            "discriminating_prediction": (
+                "The effect collapses under a declared distribution shift, perturbation, "
+                "or second dataset/regime."
+            ),
+        },
+    ]
+    rivals = [dict(item, source="protocol_default") for item in default_rivals]
+    for index, statement in enumerate(supplied_rivals):
+        rivals.append(
+            {
+                "rival_id": f"rival_user_{index}",
+                "class": "domain_rival",
+                "statement": statement,
+                "discriminating_prediction": (
+                    "Specify an observation that separates this rival from the primary "
+                    "hypothesis before confirmatory execution."
+                ),
+                "source": "researcher_supplied",
+            }
+        )
+    tests = [
+        {
+            "test_id": "socratic_paired_baseline",
+            "targets": ["rival_null"],
+            "design": (
+                f"Run paired repeated comparisons against {baseline} on {dataset} using "
+                f"the preregistered {metric} analysis."
+            ),
+            "required_controls": ["matched budget", "matched data", "seed sensitivity"],
+        },
+        {
+            "test_id": "socratic_mechanism_ablation",
+            "targets": ["rival_substitute_mechanism"],
+            "design": (
+                "Remove only the proposed causal mechanism and preserve all other "
+                "training, inference, and evaluation conditions."
+            ),
+            "required_controls": ["single-change attribution", "compute parity"],
+        },
+        {
+            "test_id": "socratic_negative_control",
+            "targets": ["rival_measurement_artifact"],
+            "design": (
+                "Run leakage and selection audits plus a negative control and an "
+                "independent metric or evaluator where feasible."
+            ),
+            "required_controls": ["negative control", "independent evaluation"],
+        },
+        {
+            "test_id": "socratic_boundary_probe",
+            "targets": ["rival_scope_boundary"],
+            "design": (
+                "Probe one declared distribution shift, perturbation, subgroup, or "
+                "second regime and record the claim boundary even when it fails."
+            ),
+            "required_controls": ["predeclared boundary", "negative-result retention"],
+        },
+    ]
+    for index, statement in enumerate(supplied_rivals):
+        tests.append(
+            {
+                "test_id": f"socratic_user_rival_{index}",
+                "targets": [f"rival_user_{index}"],
+                "design": (
+                    "Preregister an observation that would distinguish the primary "
+                    f"hypothesis from this researcher-supplied rival: {statement}"
+                ),
+                "required_controls": [
+                    "researcher-approved discriminator",
+                    "evidence-linked decision",
+                ],
+            }
+        )
+    return {
+        "policy": dict(SOCRATIC_CHALLENGE_POLICY),
+        "primary_hypothesis": primary,
+        "proposed_mechanism": mechanism,
+        "rival_hypotheses": rivals,
+        "discriminating_tests": tests,
+        "falsifiers": list(failure_criteria),
+        "uncertainty_contract": {
+            "prior_confidence": None,
+            "posterior_confidence": None,
+            "update_status": "awaiting_evidence",
+            "required_update": (
+                "Report which primary or rival hypothesis gained or lost support, with "
+                "evidence references and calibrated uncertainty."
+            ),
+            "self_score_is_evidence": False,
+        },
+        "status": "planned",
+    }
+
+
+def validate_socratic_challenge(payload: dict[str, Any] | None) -> dict[str, Any]:
+    challenge = payload if isinstance(payload, dict) else {}
+    errors: list[str] = []
+    if challenge.get("policy") != SOCRATIC_CHALLENGE_POLICY:
+        errors.append("policy_modified_or_missing")
+    if not str(challenge.get("primary_hypothesis") or "").strip():
+        errors.append("primary_hypothesis_missing")
+    rivals = [
+        item
+        for item in challenge.get("rival_hypotheses") or []
+        if isinstance(item, dict)
+    ]
+    tests = [
+        item
+        for item in challenge.get("discriminating_tests") or []
+        if isinstance(item, dict)
+    ]
+    if len(rivals) < int(SOCRATIC_CHALLENGE_POLICY["minimum_rival_hypotheses"]):
+        errors.append("rival_hypothesis_floor_not_met")
+    if len(tests) < int(SOCRATIC_CHALLENGE_POLICY["minimum_discriminating_tests"]):
+        errors.append("discriminating_test_floor_not_met")
+    rival_ids = [str(item.get("rival_id") or "").strip() for item in rivals]
+    if not all(rival_ids) or len(set(rival_ids)) != len(rival_ids):
+        errors.append("rival_ids_invalid")
+    required_classes = {"null_effect", "measurement_artifact", "scope_boundary"}
+    present_classes = {str(item.get("class") or "") for item in rivals}
+    if not required_classes.issubset(present_classes):
+        errors.append("required_rival_classes_missing")
+    covered_ids = {
+        str(target).strip()
+        for test in tests
+        for target in (test.get("targets") or [])
+        if str(target).strip()
+    }
+    if set(rival_ids) - covered_ids:
+        errors.append("rival_without_discriminating_test")
+    if any(
+        not str(test.get("test_id") or "").strip()
+        or not str(test.get("design") or "").strip()
+        or not test.get("required_controls")
+        for test in tests
+    ):
+        errors.append("discriminating_test_incomplete")
+    uncertainty = (
+        challenge.get("uncertainty_contract")
+        if isinstance(challenge.get("uncertainty_contract"), dict)
+        else {}
+    )
+    if uncertainty.get("self_score_is_evidence") is not False:
+        errors.append("self_score_may_not_be_evidence")
+    if not str(uncertainty.get("required_update") or "").strip():
+        errors.append("uncertainty_update_missing")
+    return {"passed": not errors, "errors": errors}
+
+
 def _task_owner_for_workflow(workflow_mode: str, *, task_kind: str) -> str:
     if workflow_mode == "multi_agent_board":
         if task_kind == "review_hardening":
@@ -506,6 +743,14 @@ def build_research_plan(
 
     tasks: list[dict[str, Any]] = []
     failure_criteria = list(idea_card.get("failure_criteria") or [])
+    socratic_challenge = _build_socratic_challenge(
+        idea_card,
+        datasets=datasets,
+        metrics=metrics,
+        baselines=baselines,
+        failure_criteria=failure_criteria,
+    )
+    discriminating_tests = socratic_challenge["discriminating_tests"]
     for idx, description in enumerate(task_descriptions):
         claim_id = f"claim_{idx}"
         if workflow_mode == "agentic_tree":
@@ -525,6 +770,7 @@ def build_research_plan(
             if workflow_mode == "multi_agent_board"
             else ("reviewer_board" if workflow_mode == "review_board" else "reviewer")
         )
+        discriminating_test = discriminating_tests[idx % len(discriminating_tests)]
         task = {
             "task_id": f"task_{idx}",
             "goal": description,
@@ -549,6 +795,7 @@ def build_research_plan(
                 "baseline-comparable metric delta",
                 "claim-linked experiment record",
                 "figure-or-table-ready artifact",
+                "rival-hypothesis outcome with calibrated uncertainty",
             ],
             "expected_outputs": [
                 "experiment logs",
@@ -567,6 +814,7 @@ def build_research_plan(
                 "run_summary_json",
                 f"figure_candidate:{claim_id}",
                 f"claim_note:{claim_id}",
+                f"rival_hypothesis_decision:{claim_id}",
             ],
             "artifact_intent": (
                 [
@@ -592,6 +840,18 @@ def build_research_plan(
             ],
             "escalation_lane": escalation_lane,
             "claim_targets": [claim_id],
+            "socratic_challenge_refs": sorted(
+                {
+                    str(target)
+                    for test in discriminating_tests
+                    for target in test["targets"]
+                }
+            ),
+            "discriminating_test": dict(discriminating_test),
+            "required_discriminating_tests": [
+                dict(test) for test in discriminating_tests
+            ],
+            "uncertainty_update_required": True,
             "budget": budget_payload,
             "acceptance_checks": list(execution_policy.acceptance_rules[:2]),
             "execution_style": execution_policy.execution_style,
@@ -624,6 +884,7 @@ def build_research_plan(
             "independent_reproduction_required": True,
             "claim_promotion_requires_verified_report": True,
         },
+        "socratic_challenge": socratic_challenge,
         "tasks": tasks,
     }
     truth_contract = build_truth_contract(idea_card, plan_payload)
@@ -675,6 +936,33 @@ def build_claim_evidence_graph(
     ]
     edges: list[dict[str, Any]] = []
 
+    socratic_challenge = (
+        research_plan.get("socratic_challenge")
+        if isinstance(research_plan.get("socratic_challenge"), dict)
+        else {}
+    )
+    rival_ids: list[str] = []
+    for rival in socratic_challenge.get("rival_hypotheses") or []:
+        if not isinstance(rival, dict):
+            continue
+        rival_id = str(rival.get("rival_id") or "").strip()
+        if not rival_id:
+            continue
+        rival_ids.append(rival_id)
+        nodes.append(
+            {
+                "id": rival_id,
+                "type": "hypothesis",
+                "label": rival.get("statement"),
+                "status": "proposed",
+                "hypothesis_role": "rival",
+                "discriminating_prediction": rival.get("discriminating_prediction"),
+            }
+        )
+        edges.append(
+            {"source": rival_id, "target": hypothesis_id, "type": "contradicts"}
+        )
+
     for task in research_plan.get("tasks", []):
         task_id = task["task_id"]
         claim_id = (task.get("claim_targets") or [f"{task_id}_claim"])[0]
@@ -725,6 +1013,11 @@ def build_claim_evidence_graph(
                 {"source": claim_id, "target": limitation_id, "type": "qualifies"},
             ]
         )
+        for rival_id in task.get("socratic_challenge_refs") or []:
+            if rival_id in rival_ids:
+                edges.append(
+                    {"source": rival_id, "target": task_id, "type": "tested_by"}
+                )
 
     return {
         "graph_id": f"{idea_card.get('idea_id')}_claim_graph",

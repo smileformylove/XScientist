@@ -114,6 +114,22 @@ class GatePreconditionTests(unittest.TestCase):
         self.assertIn("truth_contract_invalid", result["reasons"])
         self.assertIn("hallucination_checks_invalid", result["reasons"])
 
+    def test_blocks_incomplete_socratic_challenge_for_high_risk_workflow(self) -> None:
+        plan = self._plan()
+        plan["socratic_challenge"]["discriminating_tests"] = []
+
+        result = evaluate_gate_preconditions(
+            GatePreconditionContext(
+                research_plan=plan,
+                sample_gate={"full_generation_allowed": True},
+                improvement_rounds=1,
+                high_quality_mode=True,
+            )
+        )
+
+        self.assertFalse(result["satisfiable"])
+        self.assertIn("socratic_challenge_invalid", result["reasons"])
+
     @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
     def test_process_single_idea_should_fail_fast_before_bfts_on_static_gate_conflict(
         self,
@@ -182,13 +198,23 @@ class GatePreconditionTests(unittest.TestCase):
             [item["option"] for item in decisions[0]["options_considered"]],
             ["adaptive", "classic_pipeline"],
         )
-        self.assertEqual(decisions[0]["metadata"]["requested_workflow_mode"], "adaptive")
-        self.assertEqual(decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline")
+        self.assertEqual(
+            decisions[0]["metadata"]["requested_workflow_mode"], "adaptive"
+        )
+        self.assertEqual(
+            decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline"
+        )
 
     @mock.patch("ai_scientist.apps.project.gather_citations")
-    @mock.patch("ai_scientist.apps.project.write_experiment_report", side_effect=RuntimeError("no report"))
+    @mock.patch(
+        "ai_scientist.apps.project.write_experiment_report",
+        side_effect=RuntimeError("no report"),
+    )
     @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
-    @mock.patch("ai_scientist.apps.project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml")
+    @mock.patch(
+        "ai_scientist.apps.project.edit_bfts_config_file",
+        return_value="/tmp/demo_config.yaml",
+    )
     @mock.patch("ai_scientist.apps.project.idea_to_markdown")
     def test_process_single_idea_should_log_sample_gate_block_decision(
         self,
@@ -276,7 +302,8 @@ class GatePreconditionTests(unittest.TestCase):
     @mock.patch("ai_scientist.apps.project.write_experiment_report")
     @mock.patch("ai_scientist.apps.project.perform_experiments_bfts")
     @mock.patch(
-        "ai_scientist.apps.project.edit_bfts_config_file", return_value="/tmp/demo_config.yaml"
+        "ai_scientist.apps.project.edit_bfts_config_file",
+        return_value="/tmp/demo_config.yaml",
     )
     @mock.patch("ai_scientist.apps.project.idea_to_markdown")
     def test_process_single_idea_should_stop_when_experiment_is_locked(
@@ -302,14 +329,45 @@ class GatePreconditionTests(unittest.TestCase):
             project_dir.mkdir()
             result = process_single_idea(
                 (
-                    str(project_dir), str(project_dir), 1,
+                    str(project_dir),
+                    str(project_dir),
+                    1,
                     {"Name": "Locked", "Experiments": ["Run a baseline."]},
-                    None, "model-writeup", "model-citation", "model-review",
-                    "model-plots", "model-small", 1, 1, "normal", 1, 0, 1,
-                    0, 0.0, "depth", False, "publishable", "model-quality",
-                    "neurips", 8.0, 8.0, 0, 0, False, "P1", 0, "default",
-                    0, False, 0, "classic_pipeline", "open_ended", "adaptive",
-                    False, "adaptive",
+                    None,
+                    "model-writeup",
+                    "model-citation",
+                    "model-review",
+                    "model-plots",
+                    "model-small",
+                    1,
+                    1,
+                    "normal",
+                    1,
+                    0,
+                    1,
+                    0,
+                    0.0,
+                    "depth",
+                    False,
+                    "publishable",
+                    "model-quality",
+                    "neurips",
+                    8.0,
+                    8.0,
+                    0,
+                    0,
+                    False,
+                    "P1",
+                    0,
+                    "default",
+                    0,
+                    False,
+                    0,
+                    "classic_pipeline",
+                    "open_ended",
+                    "adaptive",
+                    False,
+                    "adaptive",
                 )
             )
 
@@ -388,13 +446,24 @@ class GatePreconditionTests(unittest.TestCase):
             [item["option"] for item in decisions[0]["options_considered"]],
             ["adaptive", "classic_pipeline"],
         )
-        self.assertEqual(decisions[0]["metadata"]["requested_workflow_mode"], "adaptive")
-        self.assertEqual(decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline")
+        self.assertEqual(
+            decisions[0]["metadata"]["requested_workflow_mode"], "adaptive"
+        )
+        self.assertEqual(
+            decisions[0]["metadata"]["resolved_workflow_mode"], "classic_pipeline"
+        )
 
     @mock.patch("ai_scientist.apps.batch.gather_citations", create=True)
-    @mock.patch("ai_scientist.apps.batch.write_experiment_report", side_effect=RuntimeError("no report"))
+    @mock.patch(
+        "ai_scientist.apps.batch.write_experiment_report",
+        side_effect=RuntimeError("no report"),
+    )
     @mock.patch("ai_scientist.apps.batch.perform_experiments_bfts", create=True)
-    @mock.patch("ai_scientist.apps.batch.edit_bfts_config_file", create=True, return_value="/tmp/demo_config.yaml")
+    @mock.patch(
+        "ai_scientist.apps.batch.edit_bfts_config_file",
+        create=True,
+        return_value="/tmp/demo_config.yaml",
+    )
     @mock.patch("ai_scientist.apps.batch.idea_to_markdown", create=True)
     def test_process_single_paper_should_log_sample_gate_block_decision(
         self,
@@ -513,13 +582,43 @@ class GatePreconditionTests(unittest.TestCase):
             research_dir.mkdir()
             result = _process_single_paper(
                 (
-                    str(batch_dir), str(research_dir), 1,
+                    str(batch_dir),
+                    str(research_dir),
+                    1,
                     {"Name": "Locked", "Experiments": ["Run a baseline."]},
-                    "normal", None, "model-writeup", "model-citation",
-                    "model-review", "model-plots", "model-small", 1, 1, 1,
-                    False, "publishable", "model-quality", "neurips", 8.0,
-                    8.0, 0, 0, False, "P1", 0, 0, 1, 0, 0.0, "depth",
-                    "default", 0, False, 0, "classic_pipeline", False, False,
+                    "normal",
+                    None,
+                    "model-writeup",
+                    "model-citation",
+                    "model-review",
+                    "model-plots",
+                    "model-small",
+                    1,
+                    1,
+                    1,
+                    False,
+                    "publishable",
+                    "model-quality",
+                    "neurips",
+                    8.0,
+                    8.0,
+                    0,
+                    0,
+                    False,
+                    "P1",
+                    0,
+                    0,
+                    1,
+                    0,
+                    0.0,
+                    "depth",
+                    "default",
+                    0,
+                    False,
+                    0,
+                    "classic_pipeline",
+                    False,
+                    False,
                     "adaptive",
                 )
             )

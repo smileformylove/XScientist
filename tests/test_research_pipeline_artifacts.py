@@ -10,6 +10,7 @@ from ai_scientist.utils.research_planning import (
     build_claim_evidence_graph,
     build_idea_cards,
     build_research_plan,
+    validate_socratic_challenge,
 )
 from ai_scientist.utils.truth_contracts import (
     TRUTH_CONTRACT_CATEGORIES,
@@ -19,7 +20,9 @@ from ai_scientist.utils.truth_contracts import (
 
 
 class ResearchPipelineArtifactsTests(unittest.TestCase):
-    def test_planning_and_figure_spec_should_produce_ready_manuscript_state(self) -> None:
+    def test_planning_and_figure_spec_should_produce_ready_manuscript_state(
+        self,
+    ) -> None:
         ideas = [
             {
                 "Name": "Idea Alpha",
@@ -93,7 +96,9 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
             ["figure_0"],
         )
 
-    def test_low_risk_plan_should_mark_truth_contract_not_applicable_per_task(self) -> None:
+    def test_low_risk_plan_should_mark_truth_contract_not_applicable_per_task(
+        self,
+    ) -> None:
         ideas = [
             {
                 "Name": "Idea Low Risk",
@@ -154,7 +159,9 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
                 "Experiments": ["Run one comparison study."],
             }
         ]
-        idea_card = build_idea_cards(ideas, target_venue="cvpr", workflow_mode="review_board")[0]
+        idea_card = build_idea_cards(
+            ideas, target_venue="cvpr", workflow_mode="review_board"
+        )[0]
         research_plan = build_research_plan(idea_card, target_venue="cvpr")
         claim_graph = build_claim_evidence_graph(idea_card, research_plan)
 
@@ -178,7 +185,9 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
         self.assertEqual(figure_spec["summary"]["ready_missing_data_file_count"], 0)
         self.assertEqual(figure_spec["summary"]["missing_data_file_count"], 1)
 
-    def test_multi_agent_board_plan_should_include_agent_ownership_and_kill_criteria(self) -> None:
+    def test_multi_agent_board_plan_should_include_agent_ownership_and_kill_criteria(
+        self,
+    ) -> None:
         ideas = [
             {
                 "Name": "Idea Delta",
@@ -214,7 +223,9 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
         self.assertEqual(research_plan["tasks"][0]["truth_contract_status"], "pending")
         self.assertTrue(research_plan["tasks"][0]["required_inputs"])
         self.assertTrue(research_plan["tasks"][0]["produced_artifacts"])
-        self.assertTrue(validate_truth_contract(research_plan["truth_contract"])["passed"])
+        self.assertTrue(
+            validate_truth_contract(research_plan["truth_contract"])["passed"]
+        )
         self.assertTrue(
             validate_hallucination_checks(
                 research_plan["hallucination_checks"],
@@ -231,11 +242,15 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
             1,
         )
         self.assertGreater(
-            len(research_plan["truth_contract"]["categories"]["product_geometry_rules"]),
+            len(
+                research_plan["truth_contract"]["categories"]["product_geometry_rules"]
+            ),
             1,
         )
         self.assertGreater(
-            len(research_plan["truth_contract"]["categories"]["motion_coherence_rules"]),
+            len(
+                research_plan["truth_contract"]["categories"]["motion_coherence_rules"]
+            ),
             1,
         )
         self.assertGreater(
@@ -253,10 +268,7 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
         )
         for task in research_plan["tasks"]:
             self.assertEqual(
-                {
-                    check["category"]
-                    for check in task["hallucination_checks"]
-                },
+                {check["category"] for check in task["hallucination_checks"]},
                 set(TRUTH_CONTRACT_CATEGORIES),
             )
         self.assertIn(
@@ -264,6 +276,71 @@ class ResearchPipelineArtifactsTests(unittest.TestCase):
             research_plan["agent_plan"]["review_bundles"]["final_roles"],
         )
         self.assertTrue(research_plan["agent_plan"]["phase_gates"])
+
+    def test_plan_should_challenge_primary_hypothesis_before_experimentation(
+        self,
+    ) -> None:
+        idea_card = build_idea_cards(
+            [
+                {
+                    "Name": "Socratic Discovery",
+                    "Short Hypothesis": "A causal routing mechanism improves robustness.",
+                    "Mechanism": "causal route selection",
+                    "Experiments": [
+                        "Compare against baseline: static-router on dataset: shift-bench with metric: robustness."
+                    ],
+                    "Alternative Hypotheses": [
+                        "The effect is caused by regularization rather than routing."
+                    ],
+                }
+            ],
+            workflow_mode="multi_agent_board",
+        )[0]
+
+        plan = build_research_plan(idea_card)
+        challenge = plan["socratic_challenge"]
+        graph = build_claim_evidence_graph(idea_card, plan)
+
+        self.assertGreaterEqual(
+            len(challenge["rival_hypotheses"]),
+            challenge["policy"]["minimum_rival_hypotheses"],
+        )
+        self.assertGreaterEqual(
+            len(challenge["discriminating_tests"]),
+            challenge["policy"]["minimum_discriminating_tests"],
+        )
+        self.assertTrue(
+            any(
+                rival["source"] == "researcher_supplied"
+                for rival in challenge["rival_hypotheses"]
+            )
+        )
+        self.assertFalse(challenge["uncertainty_contract"]["self_score_is_evidence"])
+        self.assertTrue(validate_socratic_challenge(challenge)["passed"])
+        rival_ids = {item["rival_id"] for item in challenge["rival_hypotheses"]}
+        tested_ids = {
+            target
+            for test in challenge["discriminating_tests"]
+            for target in test["targets"]
+        }
+        self.assertEqual(rival_ids, tested_ids)
+        self.assertTrue(plan["tasks"][0]["socratic_challenge_refs"])
+        self.assertEqual(
+            set(plan["tasks"][0]["socratic_challenge_refs"]),
+            rival_ids,
+        )
+        self.assertTrue(plan["tasks"][0]["uncertainty_update_required"])
+        self.assertTrue(
+            any(node.get("hypothesis_role") == "rival" for node in graph["nodes"])
+        )
+        self.assertTrue(any(edge["type"] == "contradicts" for edge in graph["edges"]))
+        self.assertTrue(any(edge["type"] == "tested_by" for edge in graph["edges"]))
+
+        challenge["uncertainty_contract"]["self_score_is_evidence"] = True
+        self.assertIn(
+            "self_score_may_not_be_evidence",
+            validate_socratic_challenge(challenge)["errors"],
+        )
 
 
 if __name__ == "__main__":

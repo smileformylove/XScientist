@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ai_scientist.utils.truth_contracts import validate_hallucination_checks, validate_truth_contract
+from ai_scientist.utils.research_planning import validate_socratic_challenge
+from ai_scientist.utils.truth_contracts import (
+    validate_hallucination_checks,
+    validate_truth_contract,
+)
 
 
 class UnsatisfiableGateError(RuntimeError):
@@ -44,7 +48,10 @@ def evaluate_gate_preconditions(context: GatePreconditionContext) -> dict[str, A
     high_risk_workflow = workflow_mode in {"review_board", "multi_agent_board"}
 
     sample_gate = context.sample_gate if isinstance(context.sample_gate, dict) else {}
-    if context.require_sample_gate and sample_gate.get("full_generation_allowed") is not True:
+    if (
+        context.require_sample_gate
+        and sample_gate.get("full_generation_allowed") is not True
+    ):
         reasons.append("sample_gate_blocked")
         checks.append(
             {
@@ -85,6 +92,23 @@ def evaluate_gate_preconditions(context: GatePreconditionContext) -> dict[str, A
         checks.append({"id": "improvement_round_budget", "passed": True})
 
     if high_risk_workflow:
+        challenge_validation = validate_socratic_challenge(
+            plan.get("socratic_challenge")
+            if isinstance(plan.get("socratic_challenge"), dict)
+            else None
+        )
+        if not challenge_validation.get("passed"):
+            reasons.append("socratic_challenge_invalid")
+            checks.append(
+                {
+                    "id": "socratic_challenge",
+                    "passed": False,
+                    "detail": challenge_validation.get("errors", []),
+                }
+            )
+        else:
+            checks.append({"id": "socratic_challenge", "passed": True})
+
         truth_contract = (
             context.truth_contract
             if isinstance(context.truth_contract, dict)
@@ -134,7 +158,9 @@ def evaluate_gate_preconditions(context: GatePreconditionContext) -> dict[str, A
     }
 
 
-def assert_gate_preconditions_satisfiable(context: GatePreconditionContext) -> dict[str, Any]:
+def assert_gate_preconditions_satisfiable(
+    context: GatePreconditionContext,
+) -> dict[str, Any]:
     result = evaluate_gate_preconditions(context)
     if result["satisfiable"]:
         return result

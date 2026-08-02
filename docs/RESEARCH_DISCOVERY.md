@@ -56,3 +56,25 @@ The ranker uses the median per dimension, reports judge disagreement, and
 requires at least two valid judgments when multiple models are configured.
 Historical acceptance priors are withheld if the primary judgment is
 untrusted.
+
+## Socratic challenge before execution
+
+`research_plan.json` does not let the favored hypothesis monopolize the
+experiment budget. Every plan now carries a `socratic_challenge` with:
+
+- null-effect, substitute-mechanism, measurement-artifact, and scope-boundary
+  rivals, plus any researcher-supplied alternative hypotheses;
+- paired baseline, single-mechanism ablation, negative-control, and boundary
+  probes that distinguish those rivals;
+- an uncertainty contract that forbids treating self-scores as evidence and
+  requires an evidence-linked posterior update;
+- explicit rival-hypothesis decisions in experiment outputs and the
+  claim-evidence graph.
+
+This moves adversarial reasoning before expensive execution and before the
+paper narrative hardens. The design is informed by the causal questioning and
+falsification loop in [Socratic agents for autonomous scientific
+discovery](https://arxiv.org/abs/2606.26722), while keeping the progressive
+experiment-manager search used by [AI Scientist
+v2](https://arxiv.org/abs/2504.08066). Negative and boundary results remain
+first-class outputs rather than failed attempts to hide.

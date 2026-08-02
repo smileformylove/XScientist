@@ -20,6 +20,7 @@ from ai_scientist.utils.pipeline_contracts import (
 )
 from ai_scientist.utils.review_jobs import compute_review_repair_metrics
 from ai_scientist.utils.research_integrity import validate_preregistration
+from ai_scientist.utils.research_planning import validate_socratic_challenge
 from ai_scientist.utils.science_constitution import validate_science_constitution
 
 STAGE_ORDER = (
@@ -357,6 +358,12 @@ def _evaluate_planning(
         else {"ok": False, "errors": ["preregistration_missing"], "warnings": []}
     )
     integrity_required = bool(integrity_policy)
+    challenge_present = isinstance(plan.get("socratic_challenge"), dict) and bool(
+        plan.get("socratic_challenge")
+    )
+    challenge_check = validate_socratic_challenge(
+        plan.get("socratic_challenge") if challenge_present else None
+    )
     criteria = [
         _criterion(
             "task_count",
@@ -390,6 +397,18 @@ def _evaluate_planning(
             "task_claim_targets",
             "Each task targets at least one claim",
             passed=all(bool(task.get("claim_targets")) for task in tasks),
+        ),
+        _criterion(
+            "socratic_hypothesis_challenge",
+            "Primary and rival hypotheses have complete discriminating tests",
+            passed=not challenge_present or bool(challenge_check.get("passed")),
+            required=challenge_present,
+            detail=", ".join(challenge_check.get("errors") or [])
+            or (
+                "rival hypotheses and tests complete"
+                if challenge_present
+                else "legacy plan without Socratic challenge"
+            ),
         ),
         _criterion(
             "claim_graph_nodes",
@@ -446,6 +465,9 @@ def _evaluate_planning(
             "agent_lane_count": len(agent_lanes),
             "integrity_required": integrity_required,
             "preregistration_status": prereg_payload.get("status"),
+            "socratic_rival_count": len(
+                (plan.get("socratic_challenge") or {}).get("rival_hypotheses") or []
+            ),
         },
     )
 
