@@ -120,6 +120,32 @@ class PerformanceRegressionTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_public_package_defers_sdk_imports_until_attribute_access(self) -> None:
+        code = """
+import sys
+import xscientist
+
+assert "xscientist.client" not in sys.modules
+assert "xscientist.models" not in sys.modules
+assert {"XScientist", "ProjectRequest", "CommandResult", "ServiceSettings"} <= set(dir(xscientist))
+
+from xscientist import CommandResult, ProjectRequest, ServiceSettings, XScientist
+
+assert xscientist.XScientist is XScientist
+assert xscientist.ProjectRequest is ProjectRequest
+assert xscientist.CommandResult is CommandResult
+assert xscientist.ServiceSettings is ServiceSettings
+assert "xscientist.client" in sys.modules
+assert "xscientist.models" in sys.modules
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
