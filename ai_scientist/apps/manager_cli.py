@@ -1326,13 +1326,19 @@ def main(
                 f"- {row.get('name')} | status={row.get('status')} | score={row.get('score')} | "
                 f"lane={row.get('dominant_lane')} | role={row.get('dominant_role')} | "
                 f"lessons={row.get('lesson_count')} | epoch={row.get('epoch_index')} | "
-                f"active_intents={row.get('active_intent_count')}"
+                f"active_intents={row.get('active_intent_count')} | "
+                f"execution={row.get('execution_status')} trials={row.get('trial_count')}"
             )
             if row.get("intent_component_counts"):
                 print(
                     f"  portfolio={row.get('intent_component_counts')} | "
                     f"search={row.get('intent_search_mode_counts')} | "
                     f"evaluator_challenges={row.get('evaluator_challenge_count')}"
+                )
+                print(
+                    f"  mechanism_diversity={row.get('mechanism_diversity')} | "
+                    f"discovery_efficiency={row.get('discovery_efficiency')} | "
+                    f"should_stop={row.get('should_stop')}"
                 )
             if row.get("top_intents"):
                 print(

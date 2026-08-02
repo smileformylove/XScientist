@@ -48,6 +48,7 @@ ARTIFACT_FILENAMES = {
     "evaluation_benchmarks": "evaluation_benchmarks.jsonl",
     "evaluation_report": "evaluation_report.json",
     "evolution_program": "evolution_program.json",
+    "evolution_control": "evolution_control.json",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -82,6 +83,7 @@ ARTIFACT_DEFAULT_STATUS = {
     "evaluation_benchmarks": "missing",
     "evaluation_report": "missing",
     "evolution_program": "missing",
+    "evolution_control": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {

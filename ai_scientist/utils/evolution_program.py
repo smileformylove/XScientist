@@ -53,6 +53,10 @@ CORE_PROGRAM_POLICY = {
     "maximum_active_intents": 6,
     "maximum_intents_per_component": 2,
     "maximum_scopes_per_intent": 1,
+    "maximum_trials_per_intent": 4,
+    "maximum_epoch_trials": 24,
+    "maximum_consecutive_non_improving_trials": 2,
+    "minimum_utility_improvement": 0.005,
     "minimum_exploration_fraction": 0.34,
     "fixed_utility_within_epoch": True,
     "evaluator_changes_at_epoch_boundary_only": True,
@@ -443,6 +447,19 @@ def _build_intent(signal: dict[str, Any], *, epoch_id: str) -> dict[str, Any]:
             "verified rollback receipt",
             "independent human approval",
         ],
+        "execution_contract": {
+            "protocol": "paired_shadow_ablation",
+            "maximum_trials": CORE_PROGRAM_POLICY["maximum_trials_per_intent"],
+            "futility_patience": CORE_PROGRAM_POLICY[
+                "maximum_consecutive_non_improving_trials"
+            ],
+            "minimum_utility_improvement": CORE_PROGRAM_POLICY[
+                "minimum_utility_improvement"
+            ],
+            "duplicate_mechanisms_count_as_progress": False,
+            "hard_gate_failure_stops_epoch": True,
+            "automatic_production_promotion_allowed": False,
+        },
         "automatic_application_allowed": False,
         "requires_evolution_gate": True,
     }
@@ -613,6 +630,27 @@ def validate_evolution_program(
             errors.append(f"intent_falsifier_missing:{index}")
         if not intent.get("target_metrics") or not intent.get("required_evidence"):
             errors.append(f"intent_evidence_contract_missing:{index}")
+        execution_contract = (
+            intent.get("execution_contract")
+            if isinstance(intent.get("execution_contract"), dict)
+            else {}
+        )
+        if execution_contract.get("protocol") != "paired_shadow_ablation":
+            errors.append(f"intent_execution_protocol_invalid:{index}")
+        if execution_contract.get("maximum_trials") != CORE_PROGRAM_POLICY.get(
+            "maximum_trials_per_intent"
+        ):
+            errors.append(f"intent_trial_budget_invalid:{index}")
+        if (
+            execution_contract.get("duplicate_mechanisms_count_as_progress")
+            is not False
+        ):
+            errors.append(f"intent_duplicate_mechanism_policy_invalid:{index}")
+        if (
+            execution_contract.get("automatic_production_promotion_allowed")
+            is not False
+        ):
+            errors.append(f"intent_production_promotion_policy_invalid:{index}")
         if len(_strings(intent.get("ablation_dimensions"))) != 1:
             errors.append(f"intent_causal_scope_invalid:{index}")
         if not str(intent.get("mechanism_constraint") or "").strip():
@@ -707,6 +745,15 @@ def save_evolution_program(
         "evolution_program_history.jsonl"
     )
     append_jsonl_artifact(history_path, _history_snapshot(payload))
+    from ai_scientist.utils.evolution_controller import (
+        evaluate_and_save_evolution_control,
+    )
+
+    evaluate_and_save_evolution_control(
+        project_root,
+        program=payload,
+        producer=producer,
+    )
     return output
 
 

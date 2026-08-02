@@ -148,14 +148,20 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 evidence_refs=["experiment_registry.jsonl"],
             )
 
-            review_state = json.loads((project_root / "review_state.json").read_text(encoding="utf-8"))
-            repair_plan = json.loads((project_root / "repair_plan.json").read_text(encoding="utf-8"))
+            review_state = json.loads(
+                (project_root / "review_state.json").read_text(encoding="utf-8")
+            )
+            repair_plan = json.loads(
+                (project_root / "repair_plan.json").read_text(encoding="utf-8")
+            )
             self_evolution = json.loads(
                 (project_root / "self_evolution.json").read_text(encoding="utf-8")
             )
             self.assertEqual(len(review_state["rounds"]), 1)
             self.assertIn("Need a stronger baseline.", review_state["active_issues"])
-            self.assertEqual(review_state["usage_accounting"][job["job_id"]]["tokens"], 128)
+            self.assertEqual(
+                review_state["usage_accounting"][job["job_id"]]["tokens"], 128
+            )
             self.assertEqual(review_state["repair_metrics"]["active_issue_count"], 3)
             self.assertEqual(review_state["repair_metrics"]["repair_action_count"], 1)
             self.assertEqual(review_state["repair_metrics"]["verification_count"], 1)
@@ -275,18 +281,27 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 job=job,
                 review_text={
                     "review": {
-                        "Weaknesses": ["The abstract overclaims generalization beyond the evaluated setting."],
-                        "Questions": ["Which figure actually supports the broad claim?"],
+                        "Weaknesses": [
+                            "The abstract overclaims generalization beyond the evaluated setting."
+                        ],
+                        "Questions": [
+                            "Which figure actually supports the broad claim?"
+                        ],
                         "Limitations": [],
                     }
                 },
                 review_img={"review": {}},
                 pdf_path=str(project_root / "paper.pdf"),
                 usage_summary={"tokens": 80},
-                evidence_refs=["claim_evidence_graph.json", "experiment_registry.jsonl"],
+                evidence_refs=[
+                    "claim_evidence_graph.json",
+                    "experiment_registry.jsonl",
+                ],
             )
 
-            review_state = json.loads((project_root / "review_state.json").read_text(encoding="utf-8"))
+            review_state = json.loads(
+                (project_root / "review_state.json").read_text(encoding="utf-8")
+            )
             critic_findings = json.loads(
                 (project_root / "critic_findings.json").read_text(encoding="utf-8")
             )
@@ -304,7 +319,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 "claim_cross_examiner",
             )
 
-    def test_review_job_should_bind_issue_targets_to_claim_figure_and_section(self) -> None:
+    def test_review_job_should_bind_issue_targets_to_claim_figure_and_section(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "binding_project"
             project_root.mkdir(parents=True, exist_ok=True)
@@ -314,7 +331,11 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 "claim_evidence_graph",
                 {
                     "nodes": [
-                        {"id": "claim_0", "type": "claim", "label": "Baseline robustness claim"},
+                        {
+                            "id": "claim_0",
+                            "type": "claim",
+                            "label": "Baseline robustness claim",
+                        },
                     ],
                     "edges": [],
                 },
@@ -375,7 +396,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                         "Weaknesses": [
                             "The baseline robustness figure in the results section is unclear."
                         ],
-                        "Limitations": ["Clarify the baseline robustness figure legend."],
+                        "Limitations": [
+                            "Clarify the baseline robustness figure legend."
+                        ],
                     }
                 },
                 review_img={"review": {}},
@@ -394,9 +417,15 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             self.assertEqual(issue_record["claim_ids"], ["claim_0"])
             self.assertEqual(issue_record["figure_ids"], ["figure_0"])
             self.assertIn("results", issue_record["section_ids"])
-            self.assertEqual(review_state["issue_to_claim"][issue_record["issue_id"]], ["claim_0"])
-            self.assertEqual(review_state["issue_to_figure"][issue_record["issue_id"]], ["figure_0"])
-            self.assertIn("results", review_state["issue_to_section"][issue_record["issue_id"]])
+            self.assertEqual(
+                review_state["issue_to_claim"][issue_record["issue_id"]], ["claim_0"]
+            )
+            self.assertEqual(
+                review_state["issue_to_figure"][issue_record["issue_id"]], ["figure_0"]
+            )
+            self.assertIn(
+                "results", review_state["issue_to_section"][issue_record["issue_id"]]
+            )
             self.assertEqual(
                 review_state["repair_metrics"]["target_binding_coverage"],
                 1.0,
@@ -485,7 +514,10 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                         "acceptance_checks": [
                             "Only storyline tasks with reproducibility-ready evidence can enter the final narrative."
                         ],
-                        "result_summary": {"metric_name": "accuracy", "metric_mean": 0.9},
+                        "result_summary": {
+                            "metric_name": "accuracy",
+                            "metric_mean": 0.9,
+                        },
                     },
                     ensure_ascii=False,
                 )
@@ -519,7 +551,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             manifest_path = project_root / "pipeline_manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["artifacts"]["experiment_registry"]["status"] = "ready"
-            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
             record_fallback_event(
                 project_root,
                 stage="idea_ranking",
@@ -556,7 +590,11 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 {"Name": "Paper Demo", "Title": "Paper Demo Title"},
             )
             _write_json(
-                research_root / "papers" / "paper_demo" / "quality" / "high_quality_result.json",
+                research_root
+                / "papers"
+                / "paper_demo"
+                / "quality"
+                / "high_quality_result.json",
                 {
                     "status": "success",
                     "target_venue": "nature",
@@ -590,7 +628,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "rounds": [{"job_id": "rigor_0", "role": "rigor"}],
-                    "active_issues": ["The main figure still needs a stronger baseline caption."],
+                    "active_issues": [
+                        "The main figure still needs a stronger baseline caption."
+                    ],
                     "active_issue_records": [
                         {
                             "issue_id": "RVW-demo2001",
@@ -604,8 +644,12 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                             "is_strongly_bound": True,
                         }
                     ],
-                    "repair_actions": ["Revise figure_0 caption with the stronger baseline comparison."],
-                    "verification_checks": ["Verify figure_0 now supports the main result claim."],
+                    "repair_actions": [
+                        "Revise figure_0 caption with the stronger baseline comparison."
+                    ],
+                    "verification_checks": [
+                        "Verify figure_0 now supports the main result claim."
+                    ],
                     "repair_queue": [
                         {
                             "repair_id": "RPR-demo2001",
@@ -678,9 +722,20 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                             "search_mode": "explore",
                         }
                     ],
-                    "evaluation_challenges": [
-                        {"challenge_id": "eval-challenge:test"}
-                    ],
+                    "evaluation_challenges": [{"challenge_id": "eval-challenge:test"}],
+                },
+                producer="test_manager",
+            )
+            save_contract_artifact(
+                project_root,
+                "evolution_control",
+                {
+                    "status": "continue",
+                    "should_stop": False,
+                    "trial_count": 2,
+                    "next_intent_ids": ["intent:test"],
+                    "mechanism_diversity": 1.0,
+                    "discovery_efficiency": 0.25,
                 },
                 producer="test_manager",
             )
@@ -745,6 +800,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             self.assertEqual(evolution_rows[0]["active_intent_count"], 1)
             self.assertEqual(evolution_rows[0]["intent_component_counts"], {"tool": 1})
             self.assertEqual(evolution_rows[0]["evaluator_challenge_count"], 1)
+            self.assertEqual(evolution_rows[0]["execution_status"], "continue")
+            self.assertEqual(evolution_rows[0]["trial_count"], 2)
+            self.assertEqual(evolution_rows[0]["mechanism_diversity"], 1.0)
             self.assertTrue(process_rows)
             review_process_rows = [
                 row for row in process_rows if row.get("process") == "review"
@@ -782,10 +840,14 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             self.assertEqual(trends["summary"]["ready_count"], 1)
             self.assertTrue(trends["timeline"])
 
-    def test_submission_board_should_exclude_strict_fallback_runs_by_default(self) -> None:
+    def test_submission_board_should_exclude_strict_fallback_runs_by_default(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
-            clean_root = research_root / "papers" / "paper_20260321_000001_clean_journal"
+            clean_root = (
+                research_root / "papers" / "paper_20260321_000001_clean_journal"
+            )
             clean_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(clean_root)
             _write_json(
@@ -823,7 +885,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 },
             )
 
-            fallback_root = research_root / "papers" / "paper_20260321_000002_fallback_journal"
+            fallback_root = (
+                research_root / "papers" / "paper_20260321_000002_fallback_journal"
+            )
             fallback_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(fallback_root)
             record_fallback_event(
@@ -892,7 +956,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
-            clean_root = research_root / "papers" / "paper_20260321_000003_clean_stage_journal"
+            clean_root = (
+                research_root / "papers" / "paper_20260321_000003_clean_stage_journal"
+            )
             clean_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(clean_root)
             _write_json(
@@ -950,7 +1016,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_submission_board",
             )
 
-            blocked_root = research_root / "papers" / "paper_20260321_000004_blocked_stage_journal"
+            blocked_root = (
+                research_root / "papers" / "paper_20260321_000004_blocked_stage_journal"
+            )
             blocked_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(blocked_root)
             _write_json(
@@ -1031,12 +1099,19 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
-            clean_root = research_root / "papers" / "paper_20260321_000005_clean_evolution_journal"
+            clean_root = (
+                research_root
+                / "papers"
+                / "paper_20260321_000005_clean_evolution_journal"
+            )
             clean_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(clean_root)
             _write_json(
                 clean_root / "idea.json",
-                {"Name": "Clean Evolution Nature", "Title": "Clean Evolution Nature Title"},
+                {
+                    "Name": "Clean Evolution Nature",
+                    "Title": "Clean Evolution Nature Title",
+                },
             )
             (clean_root / "paper.pdf").write_text("pdf", encoding="utf-8")
             _write_json(
@@ -1104,12 +1179,19 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_submission_board",
             )
 
-            blocked_root = research_root / "papers" / "paper_20260321_000006_blocked_evolution_journal"
+            blocked_root = (
+                research_root
+                / "papers"
+                / "paper_20260321_000006_blocked_evolution_journal"
+            )
             blocked_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(blocked_root)
             _write_json(
                 blocked_root / "idea.json",
-                {"Name": "Blocked Evolution Nature", "Title": "Blocked Evolution Nature Title"},
+                {
+                    "Name": "Blocked Evolution Nature",
+                    "Title": "Blocked Evolution Nature Title",
+                },
             )
             (blocked_root / "paper.pdf").write_text("pdf", encoding="utf-8")
             _write_json(
@@ -1184,9 +1266,13 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
             shortlist = manager.shortlist_papers(require_gate=True, top_n=5)
 
             by_name = {paper["name"]: paper for paper in papers}
-            self.assertEqual(by_name["Blocked Evolution Nature"]["self_evolution_status"], "blocked")
             self.assertEqual(
-                by_name["Blocked Evolution Nature"]["self_evolution_required_failure_count"],
+                by_name["Blocked Evolution Nature"]["self_evolution_status"], "blocked"
+            )
+            self.assertEqual(
+                by_name["Blocked Evolution Nature"][
+                    "self_evolution_required_failure_count"
+                ],
                 1,
             )
             self.assertEqual(
@@ -1203,7 +1289,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as td:
             research_root = Path(td)
-            clean_root = research_root / "papers" / "paper_20260321_000007_clean_process_journal"
+            clean_root = (
+                research_root / "papers" / "paper_20260321_000007_clean_process_journal"
+            )
             clean_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(clean_root)
             _write_json(clean_root / "idea.json", {"Name": "Clean Process Nature"})
@@ -1229,7 +1317,12 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                     "critical_revision_actions_count": 0,
                     "rewrite_trace": [{"round": 1}],
                     "rewrite_applied": True,
-                    "submission_readiness": {"status": "ready", "ready": True, "blockers": [], "categories": {}},
+                    "submission_readiness": {
+                        "status": "ready",
+                        "ready": True,
+                        "blockers": [],
+                        "categories": {},
+                    },
                 },
             )
             save_contract_artifact(
@@ -1249,7 +1342,11 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_submission_board",
             )
 
-            blocked_root = research_root / "papers" / "paper_20260321_000008_blocked_process_journal"
+            blocked_root = (
+                research_root
+                / "papers"
+                / "paper_20260321_000008_blocked_process_journal"
+            )
             blocked_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(blocked_root)
             _write_json(blocked_root / "idea.json", {"Name": "Blocked Process Nature"})
@@ -1275,7 +1372,12 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                     "critical_revision_actions_count": 0,
                     "rewrite_trace": [{"round": 1}],
                     "rewrite_applied": True,
-                    "submission_readiness": {"status": "ready", "ready": True, "blockers": [], "categories": {}},
+                    "submission_readiness": {
+                        "status": "ready",
+                        "ready": True,
+                        "blockers": [],
+                        "categories": {},
+                    },
                 },
             )
             save_contract_artifact(
@@ -1303,7 +1405,9 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
 
             by_name = {paper["name"]: paper for paper in papers}
             self.assertEqual(
-                by_name["Blocked Process Nature"]["process_alignment_blocked_process_count"],
+                by_name["Blocked Process Nature"][
+                    "process_alignment_blocked_process_count"
+                ],
                 1,
             )
             self.assertEqual(

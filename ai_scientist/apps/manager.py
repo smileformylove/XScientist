@@ -1041,6 +1041,12 @@ class ResearchManager:
                 default={},
             )
             program = program if isinstance(program, dict) else {}
+            control = load_contract_artifact(
+                project_root,
+                "evolution_control",
+                default={},
+            )
+            control = control if isinstance(control, dict) else {}
             epoch = (
                 program.get("epoch") if isinstance(program.get("epoch"), dict) else {}
             )
@@ -1089,6 +1095,14 @@ class ResearchManager:
                     "epoch_id": epoch.get("epoch_id"),
                     "epoch_index": epoch.get("epoch_index"),
                     "epoch_status": epoch.get("status"),
+                    "execution_status": control.get("status"),
+                    "should_stop": control.get("should_stop"),
+                    "trial_count": int(control.get("trial_count") or 0),
+                    "remaining_next_intent_ids": list(
+                        control.get("next_intent_ids") or []
+                    ),
+                    "mechanism_diversity": control.get("mechanism_diversity"),
+                    "discovery_efficiency": control.get("discovery_efficiency"),
                     "active_intent_count": len(intents),
                     "intent_component_counts": dict(
                         Counter(

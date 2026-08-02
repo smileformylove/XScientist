@@ -58,7 +58,9 @@ The implementation has five planes:
    the entire research budget.
 3. **Experiment plane** — each intent has one component, one logical scope, one
    causal mechanism, a hypothesis, a falsifier, target metrics, and required
-   evidence. Bundled multi-cause mutations are invalid.
+   evidence. Bundled multi-cause mutations are invalid. The epoch controller
+   caps trials globally and per intent, rejects duplicate mechanisms as search
+   progress, and stops branches after repeated non-improving trials.
 4. **Release plane** — candidates remain shadow-only until attributed ablation,
    sealed and prospective paired tests, independent evaluator stacks, a real
    canary, verified rollback, and human approval all pass.
@@ -107,6 +109,14 @@ A repeated failure is not evidence that the same mutation deserves more
 retries. Two prior gate holds for the same failure class switch the next intent
 to exploration, encouraging a different causal mechanism.
 
+Within an epoch, `evolution_control.json` reports trial cost, distinct-mechanism
+diversity, gate-eligible candidates per cost unit, remaining intent budgets,
+and the deterministic continue/complete/halt decision. Safety, integrity,
+constitution, raw-evidence, or evaluator-policy failures halt the epoch;
+neither a high self-score nor exhausted compute can promote a candidate. This
+adds the explicit stopping discipline highlighted by recent self-improving
+agent systems while preserving AlphaEvolve-style quality-diverse search.
+
 ## Evidence and authority rules
 
 - A producer's self-score is advisory and is never sufficient for persistent
@@ -129,6 +139,8 @@ to exploration, encouraging a different causal mechanism.
 | `knowledge_base/self_evolution_playbook.json` | Advisory recurring defaults |
 | `evolution_program.json` | Current fixed-utility epoch and active L2 intents |
 | `evolution_program_history.jsonl` | Append-only epoch archive |
+| `evolution_trials.jsonl` | Immutable candidate/mechanism attempts and outcomes |
+| `evolution_control.json` | Budget, diversity, efficiency, and stopping state |
 | `evolution_gate.json` | Latest shadow/canary/promotion decision |
 | `evolution_gate_history.jsonl` | Candidate outcomes feeding later portfolios |
 | `evolution/quarantined_learning_candidates.jsonl` | Unconfirmed legacy/self-scored learning proposals |
