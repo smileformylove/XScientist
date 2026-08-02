@@ -54,6 +54,84 @@ class BatchRuntimeImportTests(unittest.TestCase):
             self.assertIsNone(generator.learning_engine)
             self.assertTrue(Path(generator.batch_dir).is_dir())
 
+    def test_learning_enabled_constructor_shares_one_learning_state(self) -> None:
+        batch._ensure_runtime_imports()
+
+        class FakeKnowledgeBase:
+            def __init__(self, research_dir: str):
+                self.research_dir = research_dir
+
+        class FakeLearningEngine:
+            def __init__(self, knowledge_base: FakeKnowledgeBase):
+                self.kb = knowledge_base
+
+        class FakeAdaptiveWriter:
+            def __init__(self, learning_engine: FakeLearningEngine):
+                self.learning_engine = learning_engine
+
+        class FakeEvolutionEngine:
+            def __init__(
+                self,
+                research_dir: str,
+                *,
+                knowledge_base: FakeKnowledgeBase,
+                learning_engine: FakeLearningEngine,
+            ):
+                self.research_dir = research_dir
+                self.knowledge_base = knowledge_base
+                self.learning_engine = learning_engine
+
+        with (
+            mock.patch.object(batch, "_ensure_runtime_imports"),
+            mock.patch.object(
+                batch,
+                "SelfLearningKnowledgeBase",
+                FakeKnowledgeBase,
+                create=True,
+            ),
+            mock.patch.object(
+                batch,
+                "AdaptiveLearningEngine",
+                FakeLearningEngine,
+                create=True,
+            ),
+            mock.patch.object(
+                batch,
+                "AdaptiveWriter",
+                FakeAdaptiveWriter,
+                create=True,
+            ),
+            mock.patch.object(
+                batch,
+                "AutonomousEvolutionEngine",
+                FakeEvolutionEngine,
+                create=True,
+            ),
+            mock.patch.object(
+                batch,
+                "AgentOrchestrator",
+                mock.Mock,
+                create=True,
+            ),
+        ):
+            with tempfile.TemporaryDirectory() as td:
+                generator = batch.ContinuousPaperGenerator(
+                    research_dir=td,
+                    batch_name="shared-learning",
+                    paper_types=["normal"],
+                    enable_learning=True,
+                )
+
+        self.assertIs(generator.learning_engine.kb, generator.knowledge_base)
+        self.assertIs(
+            generator.evolution_engine.knowledge_base,
+            generator.knowledge_base,
+        )
+        self.assertIs(
+            generator.evolution_engine.learning_engine,
+            generator.learning_engine,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

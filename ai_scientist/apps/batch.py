@@ -949,7 +949,11 @@ class ContinuousPaperGenerator:
             self.adaptive_writer = AdaptiveWriter(self.learning_engine)
 
             # 初始化自主进化引擎
-            self.evolution_engine = AutonomousEvolutionEngine(str(self.research_dir))
+            self.evolution_engine = AutonomousEvolutionEngine(
+                str(self.research_dir),
+                knowledge_base=self.knowledge_base,
+                learning_engine=self.learning_engine,
+            )
             self.agent_orchestrator = AgentOrchestrator()
 
             print(f"✅ 自适应学习系统已启用")

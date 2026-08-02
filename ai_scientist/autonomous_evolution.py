@@ -58,6 +58,8 @@ class AutonomousEvolutionEngine:
         self,
         research_dir: str = str(OUTPUT_PATH),
         evolution_model: str = "claude-3-5-sonnet",
+        knowledge_base: Optional[SelfLearningKnowledgeBase] = None,
+        learning_engine: Optional[AdaptiveLearningEngine] = None,
     ):
         """
         初始化自主进化引擎
@@ -65,14 +67,35 @@ class AutonomousEvolutionEngine:
         Args:
             research_dir: 研究目录
             evolution_model: 用于进化的模型
+            knowledge_base: 可复用的知识库，避免在组合运行时重复加载状态
+            learning_engine: 可复用的学习引擎，必须与 knowledge_base 共享状态
         """
         self.research_dir = Path(research_dir)
         self.evolution_dir = self.research_dir / "evolution"
         self.evolution_dir.mkdir(parents=True, exist_ok=True)
 
-        # 初始化知识库和学习引擎
-        self.knowledge_base = SelfLearningKnowledgeBase(research_dir)
-        self.learning_engine = AdaptiveLearningEngine(self.knowledge_base)
+        # 复用组合层已创建的状态，避免同一进程中出现两套进化事实。
+        if learning_engine is not None:
+            engine_knowledge_base = getattr(learning_engine, "kb", None)
+            if knowledge_base is None:
+                knowledge_base = engine_knowledge_base
+            elif (
+                engine_knowledge_base is not None
+                and engine_knowledge_base is not knowledge_base
+            ):
+                raise ValueError(
+                    "learning_engine and knowledge_base must share the same state"
+                )
+        self.knowledge_base = (
+            knowledge_base
+            if knowledge_base is not None
+            else SelfLearningKnowledgeBase(research_dir)
+        )
+        self.learning_engine = (
+            learning_engine
+            if learning_engine is not None
+            else AdaptiveLearningEngine(self.knowledge_base)
+        )
 
         # 进化模型
         self.evolution_model = evolution_model

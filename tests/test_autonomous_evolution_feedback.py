@@ -8,6 +8,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load_autonomous_evolution_engine():
@@ -59,6 +60,35 @@ AutonomousEvolutionEngine = _load_autonomous_evolution_engine()
 class AutonomousEvolutionFeedbackTests(unittest.TestCase):
     def _engine_without_init(self) -> AutonomousEvolutionEngine:
         return AutonomousEvolutionEngine.__new__(AutonomousEvolutionEngine)
+
+    def test_constructor_reuses_shared_learning_state(self) -> None:
+        knowledge_base = object()
+        learning_engine = types.SimpleNamespace(kb=knowledge_base)
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch(
+                f"{AutonomousEvolutionEngine.__module__}.create_client",
+                return_value=(None, None),
+            ),
+        ):
+            engine = AutonomousEvolutionEngine(
+                td,
+                knowledge_base=knowledge_base,
+                learning_engine=learning_engine,
+            )
+
+        self.assertIs(engine.knowledge_base, knowledge_base)
+        self.assertIs(engine.learning_engine, learning_engine)
+
+    def test_constructor_rejects_split_learning_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(ValueError, "must share the same state"):
+                AutonomousEvolutionEngine(
+                    td,
+                    knowledge_base=object(),
+                    learning_engine=types.SimpleNamespace(kb=object()),
+                )
 
     def test_integrate_feedback_should_detect_polarity_conflict(self) -> None:
         engine = self._engine_without_init()
