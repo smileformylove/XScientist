@@ -279,15 +279,38 @@ _RUNTIME_IMPORT_ATTRS = {
     ),
 }
 
+_LEARNING_RUNTIME_ATTRS = {
+    "SelfLearningKnowledgeBase",
+    "PatternAnalyzer",
+    "AdaptiveLearningEngine",
+    "AdaptiveWriter",
+    "AutonomousEvolutionEngine",
+    "FeedbackSource",
+    "AgentOrchestrator",
+}
+_GUIDANCE_RUNTIME_ATTRS = {
+    "AgentGuidanceAPI",
+    "AgentGuidanceCoordinator",
+    "BaseAgent",
+    "register_agent_with_evolution",
+}
+_CORE_RUNTIME_ATTRS = set(_RUNTIME_IMPORT_ATTRS) - (
+    _LEARNING_RUNTIME_ATTRS | _GUIDANCE_RUNTIME_ATTRS
+)
+_RUNTIME_IMPORTS_LOADED: set[str] = set()
 
-def _ensure_runtime_imports() -> None:
+
+def _ensure_runtime_imports(names: set[str] | None = None) -> None:
     runtime_globals = globals()
-    if runtime_globals.get("_RUNTIME_IMPORTS_LOADED"):
-        return
-
-    for name, (module_name, attr_name) in _RUNTIME_IMPORT_ATTRS.items():
+    requested = set(_CORE_RUNTIME_ATTRS if names is None else names)
+    unknown = requested - set(_RUNTIME_IMPORT_ATTRS)
+    if unknown:
+        raise KeyError(f"unknown runtime imports: {sorted(unknown)}")
+    loaded = runtime_globals["_RUNTIME_IMPORTS_LOADED"]
+    for name in sorted(requested - loaded):
+        module_name, attr_name = _RUNTIME_IMPORT_ATTRS[name]
         runtime_globals[name] = load_module_attr(module_name, attr_name)
-    runtime_globals["_RUNTIME_IMPORTS_LOADED"] = True
+        loaded.add(name)
 
 
 def _try_minimal_ara(
@@ -920,6 +943,7 @@ class ContinuousPaperGenerator:
 
         # 初始化自适应学习系统
         if self.enable_learning:
+            _ensure_runtime_imports(_LEARNING_RUNTIME_ATTRS)
             self.knowledge_base = SelfLearningKnowledgeBase(str(self.research_dir))
             self.learning_engine = AdaptiveLearningEngine(self.knowledge_base)
             self.adaptive_writer = AdaptiveWriter(self.learning_engine)
@@ -2412,6 +2436,7 @@ class ContinuousPaperGenerator:
         if not self.enable_learning:
             return []
 
+        _ensure_runtime_imports(_GUIDANCE_RUNTIME_ATTRS)
         api = AgentGuidanceAPI(str(self.research_dir))
 
         if agent_name and agent_capabilities:
@@ -2468,6 +2493,7 @@ class ContinuousPaperGenerator:
         if not self.enable_learning:
             return {"error": "Learning system not enabled"}
 
+        _ensure_runtime_imports(_GUIDANCE_RUNTIME_ATTRS)
         api = AgentGuidanceAPI(str(self.research_dir))
 
         result = api.submit_guidance(
@@ -2489,6 +2515,7 @@ class ContinuousPaperGenerator:
         if not self.enable_learning:
             return {"error": "Learning system not enabled"}
 
+        _ensure_runtime_imports(_GUIDANCE_RUNTIME_ATTRS)
         coordinator = AgentGuidanceCoordinator(str(self.research_dir))
         return coordinator.generate_guidance_report()
 
@@ -2507,6 +2534,7 @@ class ContinuousPaperGenerator:
             print("⚠️  自适应学习未启用，无法注册Agent")
             return False
 
+        _ensure_runtime_imports(_GUIDANCE_RUNTIME_ATTRS)
         # 注册到编排器
         success = self.agent_orchestrator.register_agent(agent, group)
 
