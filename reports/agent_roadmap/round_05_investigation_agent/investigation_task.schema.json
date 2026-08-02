@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.local/schemas/investigation-task-v1.json",
+  "title": "Authorized investigation task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "partition",
+    "authorization",
+    "user_goal",
+    "media_scope",
+    "expected_evidence",
+    "irrelevant_evidence",
+    "no_match",
+    "forbidden_conclusions",
+    "success_criteria",
+    "annotation"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"},
+    "partition": {"enum": ["development", "holdout"]},
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_ref",
+        "allowed_purpose",
+        "approved_scope_sha256",
+        "approved_at",
+        "expires_at",
+        "deidentification"
+      ],
+      "properties": {
+        "authority_ref": {"type": "string", "minLength": 1},
+        "allowed_purpose": {"type": "string", "minLength": 1},
+        "approved_scope_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_at": {"type": "string", "format": "date-time"},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "deidentification": {"enum": ["real_authorized", "deidentified_authorized"]}
+      }
+    },
+    "user_goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "objects", "time", "locations", "behaviors", "constraints"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "objects": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "time": {"type": "array", "items": {"$ref": "#/$defs/timeRange"}},
+        "locations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "behaviors": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "constraints": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "media_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_sha256", "asset_ids", "camera_ids", "time_ranges"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "asset_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "camera_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "time_ranges": {"type": "array", "items": {"$ref": "#/$defs/timeRange"}}
+      },
+      "anyOf": [
+        {"properties": {"asset_ids": {"minItems": 1}}},
+        {"properties": {"camera_ids": {"minItems": 1}}}
+      ]
+    },
+    "expected_evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidenceLabel"}
+    },
+    "irrelevant_evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidenceLabel"}
+    },
+    "conflict_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["conflict_id", "hypothesis", "evidence_ids"],
+        "properties": {
+          "conflict_id": {"type": "string", "minLength": 1},
+          "hypothesis": {"type": "string", "minLength": 1},
+          "evidence_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string"},
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "no_match": {"type": "boolean"},
+    "forbidden_conclusions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "acceptable_tool_routes": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"$ref": "#/$defs/toolType"}
+      }
+    },
+    "success_criteria": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required_evidence_ids",
+        "required_conflict_ids",
+        "maximum_unsupported_claims",
+        "required_stop_reason"
+      ],
+      "properties": {
+        "required_evidence_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "required_conflict_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "maximum_unsupported_claims": {"const": 0},
+        "required_stop_reason": {
+          "enum": ["goal_completed", "no_match", "evidence_insufficient", "conflict_unresolved"]
+        }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label_origin",
+        "primary_annotator_id",
+        "reviewer_id",
+        "adjudication_status",
+        "annotated_at",
+        "protocol_version",
+        "llm_generated_labels"
+      ],
+      "properties": {
+        "label_origin": {"enum": ["human_verified", "source_record_human_verified"]},
+        "primary_annotator_id": {"type": "string", "minLength": 1},
+        "reviewer_id": {"type": "string", "minLength": 1},
+        "adjudication_status": {"const": "accepted"},
+        "annotated_at": {"type": "string", "format": "date-time"},
+        "protocol_version": {"type": "string", "minLength": 1},
+        "llm_generated_labels": {"const": false},
+        "notes": {"type": "string"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"no_match": {"const": true}}, "required": ["no_match"]},
+      "then": {
+        "properties": {
+          "expected_evidence": {"maxItems": 0},
+          "success_criteria": {
+            "properties": {"required_stop_reason": {"const": "no_match"}}
+          }
+        }
+      },
+      "else": {"properties": {"expected_evidence": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_ms", "end_ms"],
+      "properties": {
+        "start_ms": {"type": "integer", "minimum": 0},
+        "end_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "bbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x1", "y1", "x2", "y2"],
+      "properties": {
+        "x1": {"type": "integer", "minimum": 0},
+        "y1": {"type": "integer", "minimum": 0},
+        "x2": {"type": "integer", "minimum": 1},
+        "y2": {"type": "integer", "minimum": 1}
+      }
+    },
+    "toolType": {
+      "enum": [
+        "scene_search",
+        "frame_localize",
+        "region_ground",
+        "track_follow",
+        "entity_search",
+        "trajectory_filter",
+        "source_video_refine",
+        "conflict_check"
+      ]
+    },
+    "evidenceLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "evidence_type",
+        "asset_id",
+        "source_ref",
+        "relevance_grade",
+        "human_rationale"
+      ],
+      "properties": {
+        "evidence_id": {"type": "string", "minLength": 1},
+        "evidence_type": {"enum": ["scene", "frame", "region", "track", "entity"]},
+        "asset_id": {"type": "string", "minLength": 1},
+        "camera_id": {"type": "string"},
+        "start_ms": {"type": "integer", "minimum": 0},
+        "end_ms": {"type": "integer", "minimum": 0},
+        "frame_idx": {"type": "integer", "minimum": 0},
+        "target_type": {"enum": ["person", "vehicle", "plate", "object", "scene"]},
+        "bbox": {"$ref": "#/$defs/bbox"},
+        "track_id": {"type": "string"},
+        "entity_id": {"type": "string"},
+        "source_ref": {"type": "string", "minLength": 1},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "relevance_grade": {"type": "integer", "minimum": 1, "maximum": 3},
+        "human_rationale": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

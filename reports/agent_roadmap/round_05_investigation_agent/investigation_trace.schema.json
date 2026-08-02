@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.local/schemas/investigation-trace-v1.json",
+  "title": "Replayable investigation trace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "task_id",
+    "task_sha256",
+    "code_commit",
+    "configuration_sha256",
+    "mode",
+    "budget",
+    "model_fingerprints",
+    "hypotheses",
+    "steps",
+    "termination",
+    "final_clues",
+    "unsupported_statements",
+    "cost",
+    "replay"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "trace_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "task_sha256": {"$ref": "#/$defs/sha256"},
+    "code_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "configuration_sha256": {"$ref": "#/$defs/sha256"},
+    "mode": {"enum": ["fast", "balanced", "audit"]},
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_tool_calls", "max_wall_ms", "max_gpu_ms", "max_video_read_ms"],
+      "properties": {
+        "max_tool_calls": {"type": "integer", "minimum": 1},
+        "max_wall_ms": {"type": "integer", "minimum": 1},
+        "max_gpu_ms": {"type": "integer", "minimum": 0},
+        "max_video_read_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "model_fingerprints": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "hypotheses": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["hypothesis_id", "text", "status", "parent_id"],
+        "properties": {
+          "hypothesis_id": {"type": "string", "minLength": 1},
+          "text": {"type": "string", "minLength": 1},
+          "status": {"enum": ["open", "supported", "contradicted", "insufficient", "closed"]},
+          "parent_id": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "step_id",
+          "branch_id",
+          "hypothesis_id",
+          "tool_type",
+          "input_refs",
+          "input_sha256",
+          "output_refs",
+          "output_sha256",
+          "quality_gate",
+          "model_fingerprint",
+          "cache",
+          "timing",
+          "cost"
+        ],
+        "properties": {
+          "step_id": {"type": "integer", "minimum": 1},
+          "branch_id": {"type": "string", "minLength": 1},
+          "hypothesis_id": {"type": "string", "minLength": 1},
+          "tool_type": {"$ref": "#/$defs/toolType"},
+          "input_refs": {"type": "array", "items": {"type": "string"}},
+          "input_sha256": {"$ref": "#/$defs/sha256"},
+          "output_refs": {"type": "array", "items": {"type": "string"}},
+          "output_sha256": {"$ref": "#/$defs/sha256"},
+          "quality_gate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["passed", "reasons"],
+            "properties": {
+              "passed": {"type": "boolean"},
+              "reasons": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "model_fingerprint": {"type": ["string", "null"]},
+          "cache": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_sha256", "hit", "query_bound"],
+            "properties": {
+              "key_sha256": {"$ref": "#/$defs/sha256"},
+              "hit": {"type": "boolean"},
+              "query_bound": {"const": true}
+            }
+          },
+          "timing": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["started_at", "finished_at", "wall_ms"],
+            "properties": {
+              "started_at": {"type": "string", "format": "date-time"},
+              "finished_at": {"type": "string", "format": "date-time"},
+              "wall_ms": {"type": "number", "minimum": 0}
+            }
+          },
+          "cost": {"$ref": "#/$defs/cost"}
+        }
+      }
+    },
+    "termination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "at_step", "budget_exhausted"],
+      "properties": {
+        "reason": {
+          "enum": [
+            "goal_completed",
+            "no_match",
+            "evidence_insufficient",
+            "budget_exhausted",
+            "conflict_unresolved",
+            "permission_denied",
+            "capability_unavailable"
+          ]
+        },
+        "at_step": {"type": "integer", "minimum": 0},
+        "budget_exhausted": {"type": "boolean"}
+      }
+    },
+    "final_clues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["clue_id", "text", "source_refs", "replayable"],
+        "properties": {
+          "clue_id": {"type": "string", "minLength": 1},
+          "text": {"type": "string", "minLength": 1},
+          "source_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "replayable": {"const": true}
+        }
+      }
+    },
+    "unsupported_statements": {"type": "array", "maxItems": 0},
+    "cost": {"$ref": "#/$defs/cost"},
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "input_manifest_sha256", "ledger_sha256", "trace_sha256"],
+      "properties": {
+        "complete": {"const": true},
+        "input_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "ledger_sha256": {"$ref": "#/$defs/sha256"},
+        "trace_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "toolType": {
+      "enum": [
+        "scene_search",
+        "frame_localize",
+        "region_ground",
+        "track_follow",
+        "entity_search",
+        "trajectory_filter",
+        "source_video_refine",
+        "conflict_check"
+      ]
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu_ms", "cpu_ms", "video_read_ms", "tool_calls"],
+      "properties": {
+        "gpu_ms": {"type": "number", "minimum": 0},
+        "cpu_ms": {"type": "number", "minimum": 0},
+        "video_read_ms": {"type": "number", "minimum": 0},
+        "tool_calls": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
