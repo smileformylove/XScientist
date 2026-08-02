@@ -10,8 +10,19 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from tools.build_distribution import GENERATED_TARGETS, REPOSITORY_ROOT
+
 
 class DistributionBuildTests(unittest.TestCase):
+    def test_clean_build_targets_are_narrow_and_generated(self) -> None:
+        self.assertEqual(
+            {
+                path.relative_to(REPOSITORY_ROOT).as_posix()
+                for path in GENERATED_TARGETS
+            },
+            {"build", "compat/xscientist.egg-info"},
+        )
+
     def test_wheel_contains_public_api_entrypoints_and_runtime_resources(self) -> None:
         if shutil.which(sys.executable) is None:
             self.skipTest("python executable unavailable")
@@ -117,6 +128,12 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/blank_icbinb_latex/template.tex",
                 "ai_scientist/treesearch/utils/viz_templates/template.html",
                 "ai_scientist/protocol/schemas/manifest.schema.json",
+                "ai_scientist/fewshot_examples/132_automated_relational.txt",
+                "ai_scientist/fewshot_examples/132_automated_relational.json",
+                "ai_scientist/fewshot_examples/attention.txt",
+                "ai_scientist/fewshot_examples/attention.json",
+                "ai_scientist/fewshot_examples/2_carpe_diem.txt",
+                "ai_scientist/fewshot_examples/2_carpe_diem.json",
             }
             self.assertFalse(
                 required - names, f"missing wheel files: {required - names}"
@@ -128,6 +145,18 @@ class DistributionBuildTests(unittest.TestCase):
             self.assertFalse(
                 any(name.startswith("tests/") for name in names),
                 "wheel should not include the repository test suite",
+            )
+            self.assertFalse(
+                any(
+                    name.startswith("ai_scientist/fewshot_examples/")
+                    and name.endswith(".pdf")
+                    for name in names
+                ),
+                "text-backed review few-shots must not ship duplicate PDFs",
+            )
+            self.assertFalse(
+                any(name.endswith(".pyc") or "/__pycache__/" in name for name in names),
+                "wheel should never include interpreter cache artifacts",
             )
             source_only = {
                 "scripts/daemon/run_daemon_profile.py",

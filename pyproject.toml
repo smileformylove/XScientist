@@ -131,7 +131,6 @@ ai_scientist = [
   "blank_icbinb_latex/*",
   "blank_icml_latex/*",
   "fewshot_examples/*.json",
-  "fewshot_examples/*.pdf",
   "fewshot_examples/*.txt",
   "ideas/*.json",
   "ideas/*.md",
@@ -141,6 +140,10 @@ ai_scientist = [
   "treesearch/utils/viz_templates/*.html",
   "treesearch/utils/viz_templates/*.js",
 ]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "__pycache__/*"]
+ai_scientist = ["fewshot_examples/*.pdf"]
 
 [tool.setuptools.dynamic]
 version = { attr = "xscientist._version.__version__" }

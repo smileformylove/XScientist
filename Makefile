@@ -31,7 +31,7 @@ format:
 	$(PYTHON) -m black ai_scientist xscientist compat scripts tools tests
 
 package:
-	$(PYTHON) -m build --sdist --wheel
+	$(PYTHON) tools/build_distribution.py
 
 perf-record:
 	@test -n "$(OUTPUT)" || (echo "OUTPUT=/path/to/result.json is required" && exit 2)

@@ -297,9 +297,9 @@ def load_review(json_path):
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 fewshot_papers = [
-    os.path.join(dir_path, "fewshot_examples/132_automated_relational.pdf"),
-    os.path.join(dir_path, "fewshot_examples/attention.pdf"),
-    os.path.join(dir_path, "fewshot_examples/2_carpe_diem.pdf"),
+    os.path.join(dir_path, "fewshot_examples/132_automated_relational.txt"),
+    os.path.join(dir_path, "fewshot_examples/attention.txt"),
+    os.path.join(dir_path, "fewshot_examples/2_carpe_diem.txt"),
 ]
 
 fewshot_reviews = [
@@ -317,12 +317,8 @@ Note that while each review is formatted differently according to each reviewer'
     for paper_path, review_path in zip(
         fewshot_papers[:num_fs_examples], fewshot_reviews[:num_fs_examples]
     ):
-        txt_path = paper_path.replace(".pdf", ".txt")
-        if os.path.exists(txt_path):
-            with open(txt_path, "r") as f:
-                paper_text = f.read()
-        else:
-            paper_text = load_paper(paper_path)
+        with open(paper_path, "r", encoding="utf-8") as f:
+            paper_text = f.read()
         review_text = load_review(review_path)
         fewshot_prompt += f"""
 Paper:
