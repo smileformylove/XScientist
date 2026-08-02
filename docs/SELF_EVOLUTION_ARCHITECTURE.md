@@ -17,7 +17,9 @@ This distinction prevents a local repair, a persuasive self-review, or one
 unusual project from becoming a global system update. The legacy paper-level
 evolution engine is therefore L0. Its self-scored strategies and patterns are
 written to `quarantined_learning_candidates.jsonl`, not to trusted global
-knowledge.
+knowledge. Batch runs initialize this L0 engine and the external-agent
+orchestrator only when an evolution API is first used; ordinary adaptive
+generation does not pay their model-client, history-loading, or memory cost.
 
 ## Organization model
 

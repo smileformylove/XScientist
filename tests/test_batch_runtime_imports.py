@@ -18,10 +18,15 @@ class BatchRuntimeImportTests(unittest.TestCase):
 
     def test_core_import_partition_excludes_learning_and_guidance(self) -> None:
         self.assertFalse(batch._CORE_RUNTIME_ATTRS & batch._LEARNING_RUNTIME_ATTRS)
+        self.assertFalse(batch._CORE_RUNTIME_ATTRS & batch._EVOLUTION_RUNTIME_ATTRS)
         self.assertFalse(batch._CORE_RUNTIME_ATTRS & batch._GUIDANCE_RUNTIME_ATTRS)
+        self.assertFalse(batch._LEARNING_RUNTIME_ATTRS & batch._EVOLUTION_RUNTIME_ATTRS)
+        self.assertFalse(batch._LEARNING_RUNTIME_ATTRS & batch._GUIDANCE_RUNTIME_ATTRS)
+        self.assertFalse(batch._EVOLUTION_RUNTIME_ATTRS & batch._GUIDANCE_RUNTIME_ATTRS)
         self.assertEqual(
             batch._CORE_RUNTIME_ATTRS
             | batch._LEARNING_RUNTIME_ATTRS
+            | batch._EVOLUTION_RUNTIME_ATTRS
             | batch._GUIDANCE_RUNTIME_ATTRS,
             set(batch._RUNTIME_IMPORT_ATTRS),
         )
@@ -40,6 +45,7 @@ class BatchRuntimeImportTests(unittest.TestCase):
         self.assertEqual(batch._RUNTIME_IMPORTS_LOADED, batch._CORE_RUNTIME_ATTRS)
         self.assertEqual(len(resolved), len(batch._CORE_RUNTIME_ATTRS))
         self.assertFalse(batch._RUNTIME_IMPORTS_LOADED & batch._LEARNING_RUNTIME_ATTRS)
+        self.assertFalse(batch._RUNTIME_IMPORTS_LOADED & batch._EVOLUTION_RUNTIME_ATTRS)
         self.assertFalse(batch._RUNTIME_IMPORTS_LOADED & batch._GUIDANCE_RUNTIME_ATTRS)
 
     def test_learning_disabled_constructor_does_not_require_sklearn(self) -> None:
@@ -54,7 +60,7 @@ class BatchRuntimeImportTests(unittest.TestCase):
             self.assertIsNone(generator.learning_engine)
             self.assertTrue(Path(generator.batch_dir).is_dir())
 
-    def test_learning_enabled_constructor_shares_one_learning_state(self) -> None:
+    def test_evolution_services_are_lazy_and_share_learning_state(self) -> None:
         batch._ensure_runtime_imports()
 
         class FakeKnowledgeBase:
@@ -121,6 +127,9 @@ class BatchRuntimeImportTests(unittest.TestCase):
                     paper_types=["normal"],
                     enable_learning=True,
                 )
+                self.assertIsNone(generator.evolution_engine)
+                self.assertIsNone(generator.agent_orchestrator)
+                generator._ensure_evolution_services()
 
         self.assertIs(generator.learning_engine.kb, generator.knowledge_base)
         self.assertIs(

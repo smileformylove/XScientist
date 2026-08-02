@@ -284,18 +284,20 @@ _LEARNING_RUNTIME_ATTRS = {
     "PatternAnalyzer",
     "AdaptiveLearningEngine",
     "AdaptiveWriter",
+}
+_EVOLUTION_RUNTIME_ATTRS = {
     "AutonomousEvolutionEngine",
     "FeedbackSource",
     "AgentOrchestrator",
+    "register_agent_with_evolution",
 }
 _GUIDANCE_RUNTIME_ATTRS = {
     "AgentGuidanceAPI",
     "AgentGuidanceCoordinator",
     "BaseAgent",
-    "register_agent_with_evolution",
 }
 _CORE_RUNTIME_ATTRS = set(_RUNTIME_IMPORT_ATTRS) - (
-    _LEARNING_RUNTIME_ATTRS | _GUIDANCE_RUNTIME_ATTRS
+    _LEARNING_RUNTIME_ATTRS | _EVOLUTION_RUNTIME_ATTRS | _GUIDANCE_RUNTIME_ATTRS
 )
 _RUNTIME_IMPORTS_LOADED: set[str] = set()
 
@@ -948,22 +950,32 @@ class ContinuousPaperGenerator:
             self.learning_engine = AdaptiveLearningEngine(self.knowledge_base)
             self.adaptive_writer = AdaptiveWriter(self.learning_engine)
 
-            # 初始化自主进化引擎
-            self.evolution_engine = AutonomousEvolutionEngine(
-                str(self.research_dir),
-                knowledge_base=self.knowledge_base,
-                learning_engine=self.learning_engine,
-            )
-            self.agent_orchestrator = AgentOrchestrator()
+            # L0 进化与外部 Agent 仅在相关 API 首次调用时创建。
+            self.evolution_engine = None
+            self.agent_orchestrator = None
 
             print(f"✅ 自适应学习系统已启用")
-            print(f"✅ 自主进化系统已启用")
+            print(f"✅ 自主进化系统已就绪（按需启动）")
         else:
             self.knowledge_base = None
             self.learning_engine = None
             self.adaptive_writer = None
             self.evolution_engine = None
             self.agent_orchestrator = None
+
+    def _ensure_evolution_services(self) -> None:
+        """按需创建论文级进化服务，并复用自适应学习的单一状态源。"""
+        if not self.enable_learning:
+            raise RuntimeError("Learning system not enabled")
+        _ensure_runtime_imports(_EVOLUTION_RUNTIME_ATTRS)
+        if self.evolution_engine is None:
+            self.evolution_engine = AutonomousEvolutionEngine(
+                str(self.research_dir),
+                knowledge_base=self.knowledge_base,
+                learning_engine=self.learning_engine,
+            )
+        if self.agent_orchestrator is None:
+            self.agent_orchestrator = AgentOrchestrator()
 
     def _create_batch_structure(self):
         """创建批次目录结构"""
@@ -2539,6 +2551,7 @@ class ContinuousPaperGenerator:
             return False
 
         _ensure_runtime_imports(_GUIDANCE_RUNTIME_ATTRS)
+        self._ensure_evolution_services()
         # 注册到编排器
         success = self.agent_orchestrator.register_agent(agent, group)
 
@@ -2576,6 +2589,7 @@ class ContinuousPaperGenerator:
             return await self._generate_with_fallback(
                 idea, paper_type, experiment_results
             )
+        self._ensure_evolution_services()
 
         print("\n" + "=" * 80)
         print(f"🧬 使用自主进化系统生成 {paper_type.upper()} 论文")
@@ -2745,6 +2759,7 @@ class ContinuousPaperGenerator:
             print("⚠️  自适应学习未启用")
             return
 
+        self._ensure_evolution_services()
         self.evolution_engine.submit_feedback(
             FeedbackSource(source),
             feedback,
@@ -2758,6 +2773,7 @@ class ContinuousPaperGenerator:
         if not self.enable_learning:
             return {"enabled": False}
 
+        self._ensure_evolution_services()
         evolution_report = self.evolution_engine.get_evolution_report()
         agent_stats = self.agent_orchestrator.get_agent_statistics()
 
