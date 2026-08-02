@@ -95,6 +95,40 @@ class ServiceJobTests(unittest.TestCase):
         self.assertEqual(completed.result.stdout, "6789")
         self.assertEqual(completed.result.stderr, "ghij")
 
+    def test_state_io_does_not_hold_global_scheduler_lock(self) -> None:
+        client = mock.Mock()
+        client.run_project.return_value = CommandResult(
+            command=("python", "run.py"),
+            returncode=0,
+            stdout="done",
+            stderr="",
+            started_at="start",
+            finished_at="finish",
+        )
+        observed_lock_states: list[bool] = []
+        store = None
+
+        def write_json(path, payload) -> None:
+            if store is not None:
+                observed_lock_states.append(store.lock.locked())
+            Path(path).write_text(json.dumps(payload), encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as td:
+            store = JobStore(
+                client,
+                max_workers=2,
+                max_output_chars=20,
+                state_dir=td,
+                write_json=write_json,
+            )
+            try:
+                job = store.submit(ProjectRequest(project="demo", topic="topic.md"))
+                store.futures[job.id].result(timeout=5)
+            finally:
+                store.shutdown()
+
+        self.assertEqual(observed_lock_states, [False, False, False])
+
 
 if __name__ == "__main__":
     unittest.main()

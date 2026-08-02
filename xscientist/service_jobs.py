@@ -6,7 +6,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -89,8 +89,18 @@ class JobStore:
     def _job_path(self, job_id: str) -> Path:
         return self.state_dir / f"{job_id}.json"
 
-    def _persist_locked(self, job: Job) -> None:
+    def _persist(self, job: Job) -> None:
         self.write_json(self._job_path(job.id), job.to_dict())
+
+    def _persist_transition(self, job_id: str, **changes: Any) -> Job:
+        with self.lock:
+            candidate = replace(self.jobs[job_id], **changes)
+        self._persist(candidate)
+        with self.lock:
+            job = self.jobs[job_id]
+            for name, value in changes.items():
+                setattr(job, name, value)
+            return job
 
     def _restore(self) -> None:
         for path in sorted(self.state_dir.glob("*.json")):
@@ -110,19 +120,20 @@ class JobStore:
 
     def submit(self, request: ProjectRequest) -> Job:
         job = Job(id=uuid.uuid4().hex, request=request)
+        self._persist(job)
         with self.lock:
-            self._persist_locked(job)
             self.jobs[job.id] = job
             self.futures[job.id] = self.executor.submit(self._run, job.id)
         return job
 
     def _run(self, job_id: str) -> None:
-        job = self.jobs[job_id]
+        final_changes: dict[str, Any]
         try:
-            with self.lock:
-                job.status = "running"
-                job.started_at = _now_iso()
-                self._persist_locked(job)
+            job = self._persist_transition(
+                job_id,
+                status="running",
+                started_at=_now_iso(),
+            )
             result = self.client.run_project(job.request)
             result = CommandResult(
                 command=result.command,
@@ -132,19 +143,24 @@ class JobStore:
                 started_at=result.started_at,
                 finished_at=result.finished_at,
             )
-            with self.lock:
-                job.result = result
-                job.status = "succeeded" if result.ok else "failed"
+            final_changes = {
+                "result": result,
+                "status": "succeeded" if result.ok else "failed",
+            }
         except BaseException as exc:
-            with self.lock:
-                job.error = f"{type(exc).__name__}: {exc}"
-                job.status = "failed"
+            final_changes = {
+                "error": f"{type(exc).__name__}: {exc}",
+                "status": "failed",
+            }
         finally:
-            with self.lock:
-                job.finished_at = _now_iso()
-                try:
-                    self._persist_locked(job)
-                except OSError as exc:
+            final_changes["finished_at"] = _now_iso()
+            try:
+                self._persist_transition(job_id, **final_changes)
+            except OSError as exc:
+                with self.lock:
+                    job = self.jobs[job_id]
+                    for name, value in final_changes.items():
+                        setattr(job, name, value)
                     job.status = "failed"
                     job.error = f"StatePersistenceError: {exc}"
 
