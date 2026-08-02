@@ -10,9 +10,10 @@ import platform
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = 1
 DEFAULT_PROFILES = {
@@ -47,15 +48,22 @@ def _measurement_script(snippet: str) -> str:
     )
 
 
-def _measure_once(snippet: str, *, cwd: Path) -> dict[str, float]:
+def _measure_once(
+    snippet: str,
+    *,
+    cwd: Path,
+    env_overrides: Mapping[str, str] | None = None,
+) -> dict[str, float]:
+    environment = {
+        **os.environ,
+        "PYTHONHASHSEED": "0",
+    }
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    environment.update(env_overrides or {})
     completed = subprocess.run(
         [sys.executable, "-c", _measurement_script(snippet)],
         cwd=cwd,
-        env={
-            **os.environ,
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONHASHSEED": "0",
-        },
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -85,19 +93,29 @@ def record_profiles(
     if repeats < 3:
         raise PerformanceRegressionError("at least three repeats are required")
     root = Path(cwd).expanduser().resolve()
+    selected_profiles = dict(profiles or DEFAULT_PROFILES)
     results: dict[str, Any] = {}
-    for name, snippet in dict(profiles or DEFAULT_PROFILES).items():
-        samples = [_measure_once(snippet, cwd=root) for _ in range(repeats)]
-        seconds = [item["seconds"] for item in samples]
-        rss = [item["max_rss_native"] for item in samples]
-        results[name] = {
-            "snippet": snippet,
-            "repeat_count": repeats,
-            "median_seconds": statistics.median(seconds),
-            "p90_seconds": _percentile(seconds, 0.90),
-            "median_max_rss_native": statistics.median(rss),
-            "samples": samples,
-        }
+    with tempfile.TemporaryDirectory(prefix="xscientist-perf-pycache-") as cache_dir:
+        measurement_env = {"PYTHONPYCACHEPREFIX": cache_dir}
+        # Populate an isolated cache before sampling so results never depend on
+        # stale or missing bytecode in the developer checkout.
+        for snippet in selected_profiles.values():
+            _measure_once(snippet, cwd=root, env_overrides=measurement_env)
+        for name, snippet in selected_profiles.items():
+            samples = [
+                _measure_once(snippet, cwd=root, env_overrides=measurement_env)
+                for _ in range(repeats)
+            ]
+            seconds = [item["seconds"] for item in samples]
+            rss = [item["max_rss_native"] for item in samples]
+            results[name] = {
+                "snippet": snippet,
+                "repeat_count": repeats,
+                "median_seconds": statistics.median(seconds),
+                "p90_seconds": _percentile(seconds, 0.90),
+                "median_max_rss_native": statistics.median(rss),
+                "samples": samples,
+            }
     return {
         "schema_version": SCHEMA_VERSION,
         "recorded_at_epoch": time.time(),
@@ -107,6 +125,7 @@ def record_profiles(
             "platform": platform.platform(),
             "machine": platform.machine(),
             "rss_unit": "bytes" if sys.platform == "darwin" else "kibibytes",
+            "bytecode_cache_mode": "isolated-prewarmed",
         },
         "profiles": results,
     }

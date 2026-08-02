@@ -28,7 +28,9 @@ python tools/performance_regression.py compare \
 
 The default gate permits at most 5% median cold-import and peak-RSS regression,
 plus a small absolute noise allowance. Baseline and candidate environments must
-match exactly. For production-path refactors, also require:
+match exactly. Each recording prewarms a fresh, isolated bytecode cache before
+sampling, so edited source files and stale local `.pyc` files cannot skew the
+comparison. For production-path refactors, also require:
 
 - identical deterministic artifact and gate decisions for fixed inputs;
 - no increase in LLM calls, token budgets, retry limits, or fallback rate;

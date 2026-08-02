@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from tools.performance_regression import (
     DEFAULT_PROFILES,
     PerformanceRegressionError,
     compare_results,
+    record_profiles,
 )
 
 
@@ -52,6 +56,41 @@ class PerformanceRegressionTests(unittest.TestCase):
         candidate["environment"]["python"] = "different"
         with self.assertRaisesRegex(PerformanceRegressionError, "same Python"):
             compare_results(baseline, candidate)
+
+    def test_recording_uses_one_isolated_prewarmed_bytecode_cache(self) -> None:
+        cache_paths: list[Path] = []
+
+        def fake_measure(
+            snippet: str,
+            *,
+            cwd: Path,
+            env_overrides: dict[str, str],
+        ) -> dict[str, float]:
+            self.assertEqual(snippet, "pass")
+            self.assertTrue(cwd.is_absolute())
+            cache_paths.append(Path(env_overrides["PYTHONPYCACHEPREFIX"]))
+            return {"seconds": 0.01, "max_rss_native": 100.0}
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch(
+                "tools.performance_regression._measure_once",
+                side_effect=fake_measure,
+            ),
+        ):
+            result = record_profiles(
+                cwd=td,
+                repeats=3,
+                profiles={"profile": "pass"},
+            )
+
+        self.assertEqual(len(cache_paths), 4)
+        self.assertEqual(len(set(cache_paths)), 1)
+        self.assertFalse(cache_paths[0].exists())
+        self.assertEqual(
+            result["environment"]["bytecode_cache_mode"],
+            "isolated-prewarmed",
+        )
 
     def test_public_cli_import_stays_free_of_heavy_runtime_dependencies(self) -> None:
         forbidden = {
