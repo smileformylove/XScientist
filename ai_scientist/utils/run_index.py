@@ -187,15 +187,26 @@ def _stage_artifact_defaults(run_dir: Path, stage: str) -> bool:
     return False
 
 
-def is_stage_complete(run_dir: str | Path, stage: str) -> bool:
-    run_dir = Path(run_dir)
-    state = load_workflow_state(run_dir)
+def _is_stage_complete_from_state(
+    run_dir: Path,
+    stage: str,
+    state: dict[str, Any],
+) -> bool:
     stage_state = state.get("stages", {}).get(stage, {})
     if stage_state.get("status") == "completed":
         return True
     if stage_state.get("status") in {"stopped", "failed", "blocked"}:
         return False
     return _stage_artifact_defaults(run_dir, stage)
+
+
+def is_stage_complete(run_dir: str | Path, stage: str) -> bool:
+    run_dir = Path(run_dir)
+    return _is_stage_complete_from_state(
+        run_dir,
+        stage,
+        load_workflow_state(run_dir),
+    )
 
 
 def mark_stage_complete(
@@ -267,7 +278,7 @@ def infer_run_entry(
     )
     completed_stages = []
     for stage in stage_sequence:
-        if is_stage_complete(run_dir, stage):
+        if _is_stage_complete_from_state(run_dir, stage, state):
             completed_stages.append(stage)
 
     latest_stage = completed_stages[-1] if completed_stages else "initialized"
@@ -511,7 +522,7 @@ def infer_run_entry(
         "completed_stages": completed_stages,
         "latest_stage": latest_stage,
         "pdf_files": pdf_files,
-        "has_reviews": is_stage_complete(run_dir, "review"),
+        "has_reviews": _is_stage_complete_from_state(run_dir, "review", state),
         "has_latex": (run_dir / "latex").exists(),
         "batch_name": source_provenance.get("batch_name"),
         "batch_dir": source_provenance.get("batch_dir"),

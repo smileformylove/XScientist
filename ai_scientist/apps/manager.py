@@ -70,6 +70,7 @@ class ResearchManager:
         self.papers_dir = self.research_dir / "papers"
         self.ideas_dir = self.research_dir / "ideas"
         self.experiments_dir = self.research_dir / "experiments"
+        self._relative_path_cache: Dict[Path, str] = {}
 
     def list_batches(self) -> List[Dict]:
         """列出所有批次"""
@@ -2355,10 +2356,15 @@ class ResearchManager:
         }
 
     def _relative_output_path(self, path: Path) -> str:
+        cached = self._relative_path_cache.get(path)
+        if cached is not None:
+            return cached
         try:
-            return str(path.resolve().relative_to(self.research_dir.resolve()))
+            relative_path = str(path.resolve().relative_to(self.research_dir))
         except ValueError:
-            return str(path.resolve())
+            relative_path = str(path.resolve())
+        self._relative_path_cache[path] = relative_path
+        return relative_path
 
     def _get_index_entries(self, category: str = None) -> Dict[str, Dict]:
         index = load_run_index(self.research_dir)
@@ -2680,6 +2686,7 @@ class ResearchManager:
 
     def rebuild_index(self) -> Dict:
         """重建输出索引"""
+        self._relative_path_cache.clear()
         return rebuild_run_index(self.research_dir)
 
     def get_index_summary(self) -> Dict:
