@@ -165,7 +165,7 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
                 path=f"nodes[{index}].children",
             )
 
-    adjacency: dict[str, list[str]] = {node_id: [] for node_id in node_by_id}
+    adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
     indegree: dict[str, int] = {node_id: 0 for node_id in node_by_id}
     for edge in edge_entries:
         parent = edge["parent"]
@@ -173,7 +173,7 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
         if parent not in node_by_id or child not in node_by_id:
             continue
         if child not in adjacency[parent]:
-            adjacency[parent].append(child)
+            adjacency[parent].add(child)
             indegree[child] += 1
 
     ordered_ids = [

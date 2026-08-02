@@ -31,6 +31,13 @@ from .constants import CONTENT_HASH_ALGO
 # original length in the payload so two different long files hash differently.
 _MAX_CODE_BYTES = 256 * 1024  # 256 KiB — well above any realistic node code
 
+_CANONICAL_ENCODER = json.JSONEncoder(
+    sort_keys=True,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    default=str,
+)
+
 
 def _normalise_metric(metric: Any) -> dict[str, Any]:
     """Reduce a metric dict to its stable, hash-worthy subset.
@@ -56,7 +63,7 @@ def _normalise_metric(metric: Any) -> dict[str, Any]:
 
 def _canonical(payload: Any) -> str:
     """Deterministic JSON serialisation (sorted keys, no whitespace)."""
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return _CANONICAL_ENCODER.encode(payload)
 
 
 def content_hash(payload: dict[str, Any]) -> str:
@@ -67,7 +74,7 @@ def content_hash(payload: dict[str, Any]) -> str:
     identical inputs across processes.
     """
     canonical = _canonical(payload).encode("utf-8")
-    digest = hashlib.new(CONTENT_HASH_ALGO, canonical).hexdigest()
+    digest = hashlib.sha256(canonical).hexdigest()
     return f"{CONTENT_HASH_ALGO}:{digest}"
 
 
