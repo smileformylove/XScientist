@@ -630,6 +630,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [科研宪法](SCIENCE_CONSTITUTION.md)：不可静默弱化的科研原则、受保护资产与修订治理
 - [认知科技树](EPISTEMIC_GRAPH_SPEC.md)：问题、主张、反例及证据状态的追加式积累
 - [独立科研评估治理](EVALUATION_GOVERNANCE.md)：角色隔离、密封/前瞻/外部评测与高置信结论晋升门禁
+- [性能回归门禁](PERFORMANCE_GATES.md)：精简重构使用的冷启动、内存、延迟加载与行为等价预算
 - [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---

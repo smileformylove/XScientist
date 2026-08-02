@@ -7,7 +7,7 @@ PYTHON ?= $(shell \
 AUTH_FILE ?=
 PREFLIGHT_AUTH_ARG := $(if $(AUTH_FILE),--auth-file $(AUTH_FILE),)
 
-.PHONY: syntax test validate preflight smoke doctor format package executor-image
+.PHONY: syntax test validate preflight smoke doctor format package perf-record perf-compare executor-image
 
 syntax:
 	$(PYTHON) -m compileall -q ai_scientist xscientist compat scripts tools tests
@@ -32,6 +32,15 @@ format:
 
 package:
 	$(PYTHON) -m build --sdist --wheel
+
+perf-record:
+	@test -n "$(OUTPUT)" || (echo "OUTPUT=/path/to/result.json is required" && exit 2)
+	$(PYTHON) tools/performance_regression.py record --output "$(OUTPUT)"
+
+perf-compare:
+	@test -n "$(BASELINE)" || (echo "BASELINE=/path/to/baseline.json is required" && exit 2)
+	@test -n "$(CANDIDATE)" || (echo "CANDIDATE=/path/to/candidate.json is required" && exit 2)
+	$(PYTHON) tools/performance_regression.py compare --baseline "$(BASELINE)" --candidate "$(CANDIDATE)"
 
 executor-image:
 	docker build -f docker/Dockerfile.executor -t xscientist-exec:latest .
