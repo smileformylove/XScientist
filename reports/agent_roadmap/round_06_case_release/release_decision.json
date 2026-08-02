@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "repository": "XScientist",
+  "assessed_commit": "dd2b86dce30bb7ba2b87c485a7120425a7d05036",
+  "release_ready": false,
+  "status": "blocked",
+  "decision_reasons": [
+    "Rounds 02-04 did not produce accepted video localization or instance baselines",
+    "Round 05 defined evaluation schemas but has no investigation-agent runtime or labeled task results",
+    "No authorized case dataset with fixed case_id, evidence, no-match labels, and case-isolated splits exists in this repository",
+    "No case-linkage runtime, locked test set, three-method baseline, or human-review experiment exists"
+  ],
+  "operational_coverage": {
+    "covered_chains": 0,
+    "total_required_chains": 10,
+    "fraction": 0.0
+  },
+  "chain_status": [
+    {"chain": "scene_event", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "temporal_spatial_localization", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "person", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "plate", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "vehicle", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "object_instance", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "trajectory", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "agent_investigation", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "case_linkage", "status": "missing", "labeled": false, "proxy": false, "performance": false},
+    {"chain": "ingest_realtime", "status": "missing", "labeled": false, "proxy": false, "performance": false}
+  ],
+  "baseline_status": [
+    {"baseline": "direct_user_query_to_case", "status": "unavailable"},
+    {"baseline": "single_video_search_to_case", "status": "unavailable"},
+    {"baseline": "round05_investigation_agent_to_case", "status": "unavailable"}
+  ],
+  "ablation_status": [
+    {"ablation": "no_agent", "status": "not_run"},
+    {"ablation": "no_local_evidence", "status": "not_run"},
+    {"ablation": "no_spatiotemporal_topology", "status": "not_run"},
+    {"ablation": "no_conflict_search", "status": "not_run"},
+    {"ablation": "no_case_metadata", "status": "not_run"},
+    {"ablation": "full_system", "status": "not_run"}
+  ],
+  "accuracy_metrics": {
+    "case_recall_at_1": null,
+    "case_recall_at_3": null,
+    "case_recall_at_5": null,
+    "case_precision_at_1": null,
+    "case_precision_at_3": null,
+    "case_precision_at_5": null,
+    "mrr": null,
+    "ndcg": null,
+    "incorrect_case_link_rate": null,
+    "no_match_rejection": null,
+    "unsupported_case_statement_rate": null,
+    "key_evidence_coverage": null,
+    "conflict_evidence_discovery": null,
+    "person_vehicle_false_merge_rate": null,
+    "human_review_mean_time": null,
+    "human_review_mean_operations": null,
+    "reason": "No authorized locked case test set or runnable case-linkage system"
+  },
+  "performance_metrics": {
+    "end_to_end_p50_ms": null,
+    "end_to_end_p95_ms": null,
+    "end_to_end_p99_ms": null,
+    "stage_latency_ms": null,
+    "tool_calls": null,
+    "gpu_seconds": null,
+    "cpu_seconds": null,
+    "peak_memory_bytes": null,
+    "index_scale": null,
+    "concurrent_qps": null,
+    "hundred_camera_multiday_test": null,
+    "reason": "No runnable case-linkage pipeline, fixed task workload, or authorized media/case index"
+  },
+  "known_degradations": [
+    "Round 01 candidate project_import median was 1.9241% slower than baseline",
+    "Round 01 candidate batch_import median was 0.1767% slower than baseline"
+  ],
+  "failed_or_blocked_experiments": [
+    "Round 01 make smoke was blocked by an expired login session during validate --full-import-smoke",
+    "Round 02 temporal localization was not started because the required video repository and labeled segments were absent",
+    "Round 03 region/track optimization was not started because accepted temporal baseline and bbox/track labels were absent",
+    "Round 04 instance/trajectory optimization was not started because no runnable labeled object chain existed",
+    "Round 05 investigation-agent accuracy and performance evaluation was not started because no authorized task set or runtime existed",
+    "Round 06 case-linkage baselines, ablations, system evaluation, and human-review evaluation were not run"
+  ],
+  "customer_commitments_allowed": [
+    "The repository contains a validated schema and collection protocol for future authorized investigation-task evaluation",
+    "The XScientist CLI cold-start improvement measured in Round 01 can be reported within its documented scope"
+  ],
+  "customer_commitments_prohibited": [
+    "Accurate scene or event retrieval",
+    "Temporal or spatial localization accuracy",
+    "Person, vehicle, plate, or object identity matching",
+    "Cross-camera trajectory reconstruction",
+    "Investigation-agent task accuracy",
+    "Case or incident linkage accuracy",
+    "Human-review time savings",
+    "Hundred-camera or multi-day production performance",
+    "Production release readiness for video investigation or case linkage"
+  ],
+  "next_round_single_bottleneck": "An authorized, case-isolated, human-labeled and hash-locked end-to-end case-linkage test manifest is missing"
+}
