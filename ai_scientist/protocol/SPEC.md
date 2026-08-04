@@ -93,7 +93,10 @@ the combined `edges[]` / `parent_id` / `children` relation contains no cycle.
 Required top-level keys: `schema_version`, `nodes`, `edges`, `counts`.
 
 Each **node entry** in `nodes[]` must contain `id`. Recommended:
-`content_hash`, `parent_id`, `children`, `is_buggy`, `metric`, `step`, `stage`.
+`content_hash`, `is_buggy`, `metric`, `step`, `stage`. New producers SHOULD
+set `topology_encoding: "edges"` and omit the redundant node-local
+`parent_id` / `children` mirrors. Consumers MUST continue accepting those
+fields from legacy producers.
 
 Each **edge entry** in `edges[]` must contain `parent` and `child`.
 
@@ -176,10 +179,15 @@ Each claim links one manuscript assertion to one exploration node:
   "line": 142,
   "context": "F1=0.82 on the held-out set...",
   "options": {"stage": "ablation"},
-  "resolved": true,
-  "node": { ... snapshot from exploration_graph.json ... }
+  "claim_hash": "sha256:...",
+  "evidence_refs": ["sha256:..."],
+  "resolved": true
 }
 ```
+
+The embedded `node` snapshot is a legacy optional cache. New producers join
+through `node_id` / `evidence_refs` and MUST NOT duplicate the graph entry in
+every claim file.
 
 Producers scan the manuscript source for `\claimref{<node_id>}` markers
 (defined as a no-op LaTeX macro so the PDF stays clean). Unresolved claims
@@ -343,6 +351,10 @@ for the lifetime of the ARA; garbage collection, if it ever ships, will be
 a separate tool that walks manifests and prunes unreferenced blobs.
 
 Reference implementation: `ai_scientist.protocol.objects.ObjectStore`.
+
+XScientist exporters may use `<project>/.ara-store/` as a shared backing CAS.
+The ARA-local object path remains a hard-linked (or copied, when hard links are
+unavailable) portable view, so existing consumers require no resolver change.
 
 ## 11. LLM Call Log (`llm/calls.jsonl`)
 
@@ -753,9 +765,11 @@ regenerates and opens the HTML view in the default browser.
 
 ### 20.6 Portability
 
-**`bundle --ara <path> --dest <out.tar.gz> [--force] [--no-verify]`** —
-Pack an ARA into a portable tarball for hand-off to another host or
-long-term archival. Pre-flight refuses to bundle when `verify-lock`
+**`bundle --ara <path> --dest <out.tar.gz> [--profile index|fork|reproduce|audit] [--node ID] [--claim ID] [--force] [--no-verify]`** —
+Pack an ARA closure into a portable tarball for hand-off to another host or
+long-term archival. `audit` is the compatibility default; narrower profiles
+include only the metadata and objects required for their declared capability.
+Every tarball gains `bundle.manifest.json`. Pre-flight refuses to bundle when `verify-lock`
 reports `tampered` or `unlocked`; `revised` is allowed because the
 history chain is self-verifying. `--dest` inside the ARA is refused
 (self-reference guard, resolved symlink-safe) — the tarball would
@@ -763,7 +777,69 @@ otherwise recursively contain a partial copy of itself. `--force`
 overwrites an existing `<out.tar.gz>`; `--no-verify` skips the pre-flight
 integrity check (for offline recovery of a known-broken ARA).
 
-### 20.7 Exit-code conventions
+**`storage-report --ara <path> [--json]`** — Report physical/allocated/logical
+bytes, duplicate payload groups, per-directory usage, and reachable versus
+unreachable CAS objects.
+
+**`pin --ara <path> --name N --set HASH`** — Create `refs/pins/N`, making HASH
+a GC root. `--delete` removes a named pin and `--list` enumerates pins.
+
+**`gc --ara <path> [--grace-seconds N]`** — Write a root-stamped collection
+plan. `gc --apply PLAN` revalidates the root set and moves candidates to
+quarantine; `gc --restore RECEIPT` reverses it. Permanent removal requires the
+separate `gc --purge RECEIPT --purge-grace-seconds N` operation.
+
+**`compact --ara <path> --dest <new-ara>`** — Create a compacted successor
+without modifying the source. Legacy locks/history are preserved below
+`legacy/`; claims, topology, and verify output are rewritten into the compact
+reference-oriented forms and the successor receives a fresh manifest lock.
+
+**`hydrate --ara <path> [--hash HASH]`** — Restore missing ARA-local CAS views
+from the shared `<project>/.ara-store/` backing store. With no `--hash`, all
+hashes referenced by artifact metadata are considered.
+
+### 20.7 Semantic consumption
+
+ARA stores the complete raw record but consumers MUST NOT treat the complete
+directory as a prompt. Three derived layers provide bounded consumption:
+
+1. `events/research_events.jsonl` is an append-only ledger of admitted state,
+   evidence, decision, and verification events. Raw tool chatter and repeated
+   log lines remain in their native files and are not mirrored into the ledger.
+2. `catalog/semantic.sqlite` is a disposable query index joining nodes, claims,
+   relations, events, and object links. It is not protocol truth and MUST be
+   rebuildable from the manifest, graph, claims, event ledger, and verify
+   reports. `metadata.source_fingerprint` declares freshness.
+3. A `context_pack` is an ephemeral, content-addressed view for exactly one
+   intent: `continue`, `write`, `audit`, or `reproduce`. It records a target,
+   hard-closure items, optional ranked context, omissions, `source_refs`, and a
+   `source_closure_hash`.
+
+**`catalog --ara <path> [--rebuild]`** — Inspect index freshness or rebuild the
+semantic catalog. Normal ContextPack compilation rebuilds a stale/missing index
+automatically, so agents do not need to invoke this manually.
+
+**`context --ara <path> --intent continue|write|audit|reproduce [--node ID]
+[--claim ID] [--budget N] [--receipt] [--json]`** — Compile the smallest view
+for the named consumer. `--budget` only trims optional context; target identity,
+evidence refs, execution hooks, and verification rules form a hard closure.
+`--receipt` stores the exact pack in CAS and appends a compact receipt under
+`context/receipts.jsonl`.
+
+Pipeline producers integrate these views at mandatory consumption points:
+
+- before a BFTS node is planned, a live `continue` pack is added to the
+  worker's Memory and its object hash is written to `node.context_pack_refs`;
+- before the manuscript LLM writes claims, a `write` pack built from experiment
+  summaries and manuscript state is injected and later bound to claim records;
+- before review, an `audit` pack is appended to the reviewer instruction;
+- before `exec`/`verify`, a `reproduce` pack supplies the execution closure and
+  its hash is written to the verify report.
+
+ContextPack summaries are caches, not facts. Consumers verify them through
+`source_closure_hash` and may always drill down to the immutable source refs.
+
+### 20.8 Exit-code conventions
 
 Across every verb:
 

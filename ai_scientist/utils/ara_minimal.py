@@ -195,6 +195,20 @@ def export_minimal_ara(
             "no journal.json (this producer skips BFTS)",
             "no env/ snapshot (call `run_ara_fork.py freeze` if you need one)",
         ],
+        "capabilities": {
+            "inspect": "complete",
+            "fork": "unavailable",
+            "reproduce": "unavailable",
+            "audit": "partial",
+            "context": "partial",
+        },
+        "omissions": [
+            {
+                "kind": "exploration",
+                "reason": "producer skipped tree search and executable node creation",
+                "affects": ["fork", "reproduce", "audit"],
+            }
+        ],
     }
     if provenance:
         manifest_payload["provenance"] = dict(provenance)
@@ -221,6 +235,15 @@ def export_minimal_ara(
         ),
         encoding="utf-8",
     )
+
+    try:
+        from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
+
+        rebuild_semantic_catalog(ara_dir)
+    except Exception:
+        # The catalog is derived and rebuildable; a minimal ARA remains valid
+        # even when the host SQLite build is unavailable.
+        pass
 
     return ARAExportResult(
         root=ara_dir,

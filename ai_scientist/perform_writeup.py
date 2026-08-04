@@ -694,6 +694,29 @@ def perform_writeup(
         structured_context = render_manuscript_prompt_context(
             manuscript_state if isinstance(manuscript_state, dict) else {}
         )
+        try:
+            from ai_scientist.utils.ara_context import (
+                compile_live_write_context,
+                persist_active_context_pack,
+                render_context_pack_for_prompt,
+            )
+
+            write_context_pack = compile_live_write_context(
+                loaded_summaries,
+                manuscript_state if isinstance(manuscript_state, dict) else {},
+                budget_tokens=4000,
+            )
+            persist_active_context_pack(
+                write_context_pack,
+                consumer="writing_agent",
+            )
+            structured_context = (
+                structured_context
+                + "\n\n"
+                + render_context_pack_for_prompt(write_context_pack)
+            )
+        except Exception as exc:
+            print(f"Warning: ARA writing context unavailable: {exc}")
         big_model_system_message = (
             writeup_system_message_template.format(page_limit=page_limit)
             + "\n\n"

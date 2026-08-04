@@ -24,6 +24,7 @@ a valid ARA, just with `claims_count == 0` and a note in `manifest.missing`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -31,6 +32,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from ai_scientist.protocol import content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +169,33 @@ def _load_exploration_index(ara_dir: Path) -> dict[str, dict[str, Any]]:
     return index
 
 
+def _latest_writing_context_refs(ara_dir: Path) -> list[str]:
+    """Return the latest ContextPack(s) actually injected into the writer."""
+
+    path = ara_dir / "context" / "receipts.jsonl"
+    if not path.is_file():
+        return []
+    refs: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") != "compiled" or row.get("consumer") != "writing_agent":
+            continue
+        pack_ref = row.get("pack_ref")
+        value = pack_ref.get("hash") if isinstance(pack_ref, dict) else pack_ref
+        if isinstance(value, str) and value.startswith("sha256:"):
+            refs.append(value)
+    return refs[-3:]
+
+
 def write_claims_into_ara(
     *,
     ara_dir: str | Path,
@@ -181,19 +211,45 @@ def write_claims_into_ara(
     claims_root.mkdir(parents=True, exist_ok=True)
 
     index = _load_exploration_index(ara_dir)
+    writing_context_refs = _latest_writing_context_refs(ara_dir)
 
     all_claims: list[Claim] = []
+    document_hashes: dict[str, str] = {}
     for tex in tex_files:
-        all_claims.extend(scan_tex_for_claims(tex, tex_root=Path(tex).parent))
+        tex_path = Path(tex)
+        scanned = scan_tex_for_claims(tex_path, tex_root=tex_path.parent)
+        all_claims.extend(scanned)
+        try:
+            digest = hashlib.sha256(tex_path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        for claim in scanned:
+            document_hashes[claim.claim_id] = f"sha256:{digest}"
 
     unresolved: list[str] = []
     written: list[str] = []
     for claim in all_claims:
         node_meta = index.get(claim.node_id)
+        evidence_refs: list[str] = []
+        if isinstance(node_meta, dict):
+            node_hash = node_meta.get("content_hash")
+            if isinstance(node_hash, str) and node_hash:
+                evidence_refs.append(node_hash)
+        claim_hash = content_hash({
+            "assertion": re.sub(r"\s+", " ", claim.context).strip(),
+            "node_id": claim.node_id,
+            "options": claim.options,
+        })
         payload = {
             **claim.to_dict(),
+            "claim_hash": claim_hash,
+            "evidence_refs": evidence_refs,
+            "context_pack_refs": writing_context_refs,
+            "source": {
+                "document_hash": document_hashes.get(claim.claim_id),
+                "selector": {"type": "line", "value": claim.line},
+            },
             "resolved": node_meta is not None,
-            "node": node_meta,
             "recorded_at": _now_iso(),
         }
         target = claims_root / f"{claim.claim_id}.json"

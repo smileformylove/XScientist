@@ -20,7 +20,10 @@
     "fresh_metric": {"type": "object"},
     "comparison": {"type": "object"},
     "stdout_tail": {"type": "string"},
-    "stderr_tail": {"type": "string"}
+    "stderr_tail": {"type": "string"},
+    "stdout_ref": {"type": "object", "description": "CAS reference replacing an inline stdout tail."},
+    "stderr_ref": {"type": "object", "description": "CAS reference replacing an inline stderr tail."},
+    "verdict_ref": {"type": "object", "description": "CAS reference to the compact verdict payload."}
   },
   "additionalProperties": true
 }

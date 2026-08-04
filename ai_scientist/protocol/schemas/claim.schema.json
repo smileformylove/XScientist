@@ -7,15 +7,34 @@
   "required": ["claim_id", "node_id", "tex_file", "line", "resolved"],
   "properties": {
     "claim_id": {"type": "string"},
+    "claim_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Stable content identity for the assertion/evidence intent."
+    },
     "node_id": {"type": "string"},
     "tex_file": {"type": "string"},
     "line": {"type": "integer", "minimum": 0},
     "context": {"type": "string"},
     "options": {"type": "object"},
     "resolved": {"type": "boolean"},
+    "evidence_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "description": "Content-addressed evidence results supporting this claim."
+    },
+    "context_pack_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "description": "ContextPack object hashes supplied to the writer before this claim was produced."
+    },
+    "source": {
+      "type": "object",
+      "description": "Stable document hash plus a best-effort human source selector."
+    },
     "node": {
       "type": ["object", "null"],
-      "description": "Snapshot of the exploration_graph entry for node_id; null when unresolved."
+      "description": "Legacy optional cache of the exploration_graph entry. New producers SHOULD omit it and join by node_id/evidence_refs."
     },
     "recorded_at": {"type": "string"}
   },

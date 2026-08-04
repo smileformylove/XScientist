@@ -240,8 +240,9 @@ class ARAExporterTest(unittest.TestCase):
         )
         graph = json.loads((result.root / "exploration_graph.json").read_text())
         by_id = {node["id"]: node for node in graph["nodes"]}
-        self.assertEqual(by_id["child"]["parent_id"], "root")
-        self.assertEqual(by_id["root"]["children"], ["child"])
+        self.assertNotIn("parent_id", by_id["child"])
+        self.assertNotIn("children", by_id["root"])
+        self.assertEqual(graph["topology_encoding"], "edges")
         self.assertEqual(graph["edges"], [{"parent": "root", "child": "child", "stage": "serialized-run"}])
         self.assertEqual(graph["dag"]["topological_order"], ["root", "child"])
 
@@ -286,7 +287,11 @@ class ARAExporterTest(unittest.TestCase):
         self.assertEqual([node["id"] for node in graph["nodes"]], ["root", "child"])
         root = {node["id"]: node for node in graph["nodes"]}["root"]
         self.assertEqual(root["stages"], ["stage-1", "stage-2"])
-        self.assertEqual(root["children"], ["child"])
+        self.assertNotIn("children", root)
+        self.assertEqual(
+            graph["edges"],
+            [{"parent": "root", "child": "child", "stage": "stage-2"}],
+        )
         self.assertEqual(graph["dag"]["topological_order"], ["root", "child"])
 
     def test_html_renderer_merges_children_links_like_dag_analyzer(self) -> None:
@@ -371,6 +376,16 @@ class ClaimRegistryTest(unittest.TestCase):
         self.assertEqual(summary["resolved_count"], 2)
         self.assertIn("node_missing", summary["unresolved_node_ids"])
         self.assertTrue((export.root / "claims" / "_index.json").exists())
+        claim_files = [
+            path for path in (export.root / "claims").glob("*.json")
+            if not path.name.startswith("_")
+        ]
+        stored = [json.loads(path.read_text()) for path in claim_files]
+        resolved = next(row for row in stored if row["node_id"] == "node_root")
+        self.assertNotIn("node", resolved)
+        self.assertTrue(resolved["claim_hash"].startswith("sha256:"))
+        self.assertEqual(len(resolved["evidence_refs"]), 1)
+        self.assertTrue(resolved["source"]["document_hash"].startswith("sha256:"))
         # Manifest updated after.
         update_manifest_claim_count(export.manifest_path, summary["claim_count"])
         manifest = json.loads(export.manifest_path.read_text())

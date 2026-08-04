@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/storage_report.schema.json",
+  "title": "ARA Storage Report",
+  "type": "object",
+  "required": ["schema", "ara_root", "physical_bytes", "logical_bytes", "objects"],
+  "properties": {
+    "schema": {"const": "ara.storage.report.v1"},
+    "ara_root": {"type": "string"},
+    "physical_bytes": {"type": "integer", "minimum": 0},
+    "allocated_bytes": {"type": "integer", "minimum": 0},
+    "logical_bytes": {"type": "integer", "minimum": 0},
+    "unique_logical_bytes": {"type": "integer", "minimum": 0},
+    "duplicate_logical_bytes": {"type": "integer", "minimum": 0},
+    "objects": {"type": "object"}
+  },
+  "additionalProperties": true
+}

@@ -1570,6 +1570,7 @@ class ParallelAgent:
         best_stage2_plot_code=None,
         best_stage1_plot_code=None,
         seed_eval=False,
+        context_pack_ref=None,
     ):
         """Wrapper function that creates a fresh environment for each process"""
         from .journal import Node, Journal
@@ -1672,6 +1673,9 @@ class ParallelAgent:
                         print("Improving node with id: ", parent_node.id)
                         child_node = worker_agent._improve(parent_node)
                         child_node.parent = parent_node
+
+            if context_pack_ref:
+                child_node.context_pack_refs = [str(context_pack_ref)]
 
             # Execute and parse results
             print("Running code")
@@ -2317,7 +2321,38 @@ class ParallelAgent:
 
         print("Submitting tasks to process pool")
         futures = []
+        live_nodes = [node.to_dict() for node in self.journal.nodes]
         for node_data in node_data_list:
+            worker_memory_summary = memory_summary
+            context_pack_ref = None
+            try:
+                from ai_scientist.utils.ara_context import (
+                    compile_live_continue_context,
+                    persist_active_context_pack,
+                    render_context_pack_for_prompt,
+                )
+
+                context_pack = compile_live_continue_context(
+                    live_nodes,
+                    target_node_id=(str(node_data.get("id")) if node_data else None),
+                    stage=self.stage_name,
+                    budget_tokens=3000,
+                )
+                context_pack_ref = persist_active_context_pack(
+                    context_pack,
+                    consumer="experiment_agent",
+                )
+                context_prompt = render_context_pack_for_prompt(context_pack)
+                legacy_summary = str(memory_summary or "")[:6000]
+                worker_memory_summary = (
+                    f"{context_prompt}\n\n## Secondary journal synopsis\n{legacy_summary}"
+                    if legacy_summary
+                    else context_prompt
+                )
+            except Exception as exc:
+                # Live context is best-effort for old/ad-hoc runners. The final
+                # ARA catalog still provides deterministic post-run contexts.
+                logger.warning("Could not compile live ARA context: %s", exc)
             gpu_id = None
             if self.gpu_manager is not None:
                 try:
@@ -2331,6 +2366,7 @@ class ParallelAgent:
             if (
                 self.stage_name
                 and self.stage_name.startswith("2_")
+                and node_data is not None
                 and node_data["is_buggy"] is False
             ):
                 new_hyperparam_idea = self._generate_hyperparam_tuning_idea()
@@ -2341,6 +2377,7 @@ class ParallelAgent:
             elif (
                 self.stage_name
                 and self.stage_name.startswith("4_")
+                and node_data is not None
                 and node_data["is_buggy"] is False
             ):
                 new_ablation_idea = self._generate_ablation_idea()
@@ -2367,7 +2404,7 @@ class ParallelAgent:
                     self.task_desc,
                     self.cfg,
                     gpu_id,
-                    memory_summary,
+                    worker_memory_summary,
                     self.evaluation_metrics,
                     self.stage_name,
                     new_ablation_idea,
@@ -2376,6 +2413,7 @@ class ParallelAgent:
                     best_stage2_plot_code,
                     best_stage3_plot_code,
                     seed_eval,
+                    context_pack_ref,
                 )
             )
 
@@ -2402,6 +2440,20 @@ class ParallelAgent:
 
                 # Add node to journal's list and assign its step number
                 self.journal.append(result_node)
+                for ref in result_node.context_pack_refs or []:
+                    try:
+                        from ai_scientist.utils.ara_context import (
+                            record_active_context_consumption,
+                        )
+
+                        record_active_context_consumption(
+                            pack_ref=ref,
+                            consumer="experiment_agent",
+                            output_type="node",
+                            output_id=result_node.id,
+                        )
+                    except Exception:
+                        pass
                 print("Added result node to journal")
 
             except TimeoutError:

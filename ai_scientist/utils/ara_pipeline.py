@@ -80,6 +80,7 @@ class ARAFinalizeResult:
     claim_summary: dict[str, Any] | None = None
     claim_coverage: ClaimCoverageReport | None = None
     reexec_summary: dict[str, Any] | None = None
+    semantic_summary: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -258,6 +259,17 @@ def finalize_ara_for_idea(
             logger.exception("reexec_ara failed")
             result.reexec_summary = {"error": str(exc)}
 
+    # Promote only state-changing outcomes into the compact event ledger, then
+    # build the disposable query catalog. Both are derived from the complete
+    # ARA and can be rebuilt; failure must not invalidate the artifact itself.
+    try:
+        from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
+
+        result.semantic_summary = rebuild_semantic_catalog(export.root)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("ARA semantic catalog build failed")
+        result.semantic_summary = {"error": str(exc)}
+
     return result
 
 
@@ -315,5 +327,18 @@ def summarise_finalize(idea_idx: int, result: ARAFinalizeResult) -> list[str]:
                 f"[想法 #{idea_idx}] ARA re-exec: {result.reexec_summary.get('status')} "
                 f"nodes={result.reexec_summary.get('verdict_count')} "
                 f"report={result.reexec_summary.get('report_path')}"
+            )
+    if result.semantic_summary:
+        if "error" in result.semantic_summary:
+            lines.append(
+                f"[想法 #{idea_idx}] ⚠️  ARA semantic catalog failed: "
+                f"{result.semantic_summary['error']}"
+            )
+        else:
+            counts = result.semantic_summary.get("counts") or {}
+            lines.append(
+                f"[想法 #{idea_idx}] ARA context index: "
+                f"nodes={counts.get('nodes', 0)} claims={counts.get('claims', 0)} "
+                f"events={counts.get('events', 0)}"
             )
     return lines

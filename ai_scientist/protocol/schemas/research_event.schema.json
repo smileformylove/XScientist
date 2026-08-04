@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/research_event.schema.json",
+  "title": "ARA Research Event",
+  "description": "One admitted state, evidence, decision, or verification event. Raw chatter remains in native logs.",
+  "type": "object",
+  "required": ["schema_version", "protocol_kind", "event_id", "event_type", "timestamp", "actor", "subject"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"type": "string", "const": "research_event"},
+    "event_id": {"type": "string", "pattern": "^evt-[0-9a-f]{64}$"},
+    "event_type": {"type": "string"},
+    "timestamp": {"type": "string"},
+    "actor": {"type": "string"},
+    "source_key": {"type": "string"},
+    "subject": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": {"type": "string"},
+        "id": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "object_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "target_type", "target_id"],
+        "properties": {
+          "type": {"type": "string"},
+          "target_type": {"type": "string"},
+          "target_id": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "attributes": {"type": "object"}
+  },
+  "additionalProperties": true
+}

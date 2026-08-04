@@ -39,11 +39,47 @@ def execute_review_pass(
     pdf_path = pdf_path_resolver(paper_dir)
     job = None
     effective_review_plan = dict(review_plan)
+    effective_evidence_refs = list(evidence_refs or [])
     if review_role and review_role != "general":
         effective_review_plan["review_instruction"] = (
             f"{effective_review_plan['review_instruction']}\n\n"
             f"Reviewer role focus: {build_review_role_instruction(review_role)}"
         )
+    try:
+        from ai_scientist.protocol.llm_trace import active_ara_root
+        from ai_scientist.utils.ara_context import (
+            compile_context_pack,
+            compile_live_audit_context,
+            persist_active_context_pack,
+            render_context_pack_for_prompt,
+        )
+
+        active_root = active_ara_root()
+        if active_root and (Path(active_root) / "manifest.json").is_file():
+            review_context_pack = compile_context_pack(
+                active_root,
+                intent="audit",
+                budget_tokens=3000,
+            )
+        else:
+            review_context_pack = compile_live_audit_context(
+                evidence_refs=effective_evidence_refs,
+                review_plan=effective_review_plan,
+                budget_tokens=3000,
+            )
+        review_context_ref = persist_active_context_pack(
+            review_context_pack,
+            consumer="reviewer_agent",
+        )
+        if review_context_ref and review_context_ref not in effective_evidence_refs:
+            effective_evidence_refs.append(review_context_ref)
+        effective_review_plan["review_instruction"] = (
+            f"{effective_review_plan['review_instruction']}\n\n"
+            f"{render_context_pack_for_prompt(review_context_pack)}"
+        )
+    except Exception:
+        # Review must still work for library consumers without an active ARA.
+        pass
     if persist_job and project_root is not None:
         job = begin_review_job(
             project_root,
@@ -65,7 +101,7 @@ def execute_review_pass(
                 review_img=None,
                 pdf_path=pdf_path,
                 usage_summary=token_tracker.get_summary(),
-                evidence_refs=evidence_refs,
+                evidence_refs=effective_evidence_refs,
             )
         return {
             "found": False,
@@ -107,7 +143,7 @@ def execute_review_pass(
             review_img=review_img,
             pdf_path=pdf_path,
             usage_summary=token_tracker.get_summary(),
-            evidence_refs=evidence_refs,
+            evidence_refs=effective_evidence_refs,
         )
 
     return {

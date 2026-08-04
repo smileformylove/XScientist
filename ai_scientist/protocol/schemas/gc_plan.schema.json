@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/gc_plan.schema.json",
+  "title": "ARA Recoverable GC Plan",
+  "type": "object",
+  "required": ["schema", "plan_id", "ara_root", "roots_hash", "candidates"],
+  "properties": {
+    "schema": {"const": "ara.gc.plan.v1"},
+    "plan_id": {"type": "string"},
+    "ara_root": {"type": "string"},
+    "roots_hash": {"type": "string"},
+    "grace_seconds": {"type": "integer", "minimum": 0},
+    "candidate_count": {"type": "integer", "minimum": 0},
+    "candidate_bytes": {"type": "integer", "minimum": 0},
+    "candidates": {"type": "array", "items": {"type": "object"}},
+    "deferred": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": true
+}

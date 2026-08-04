@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/context_pack.schema.json",
+  "title": "ARA ContextPack",
+  "description": "A bounded task-specific view compiled from the complete stored record.",
+  "type": "object",
+  "required": ["schema_version", "protocol_kind", "intent", "target", "must_read", "source_refs", "source_closure_hash", "complete"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "protocol_kind": {"type": "string", "const": "context_pack"},
+    "intent": {"type": "string", "enum": ["continue", "write", "audit", "reproduce"]},
+    "target": {"type": "object"},
+    "consumer": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "must_read": {"type": "array"},
+    "decisive_evidence": {"type": "array"},
+    "failed_attempts": {"type": "array"},
+    "do_not_repeat": {"type": "array"},
+    "open_questions": {"type": "array"},
+    "constraints": {"type": "array"},
+    "related_claims": {"type": "array"},
+    "execution": {"type": "object"},
+    "verification_rules": {"type": "array"},
+    "source_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    },
+    "source_closure_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "pack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "complete": {"type": "boolean"},
+    "blockers": {"type": "array"},
+    "omitted": {"type": "object"},
+    "budget": {"type": "object"}
+  },
+  "additionalProperties": true
+}

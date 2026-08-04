@@ -8,6 +8,11 @@
   "properties": {
     "schema_version": {"type": "string"},
     "protocol_kind": {"type": "string", "const": "exploration_graph"},
+    "topology_encoding": {
+      "type": "string",
+      "enum": ["edges", "redundant"],
+      "description": "New producers use edges as the sole canonical topology; redundant denotes legacy parent_id/children mirrors."
+    },
     "generated_at": {"type": "string"},
     "source_journals": {"type": "array", "items": {"type": "string"}},
     "nodes": {
@@ -30,6 +35,11 @@
             "type": "array",
             "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "description": "messages_ref.hash values from llm/calls.jsonl that produced this node."
+          },
+          "context_pack_refs": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "description": "ContextPack object hashes injected immediately before this node was planned."
           },
           "stage": {"type": ["string", "null"]},
           "step": {"type": ["integer", "null"]},

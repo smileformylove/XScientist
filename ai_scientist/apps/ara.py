@@ -23,14 +23,17 @@ Sub-commands
                  manifest.history.jsonl) plus provenance ancestry walk.
 - ``refs``     — git-style local refs stored under ``<ara>/refs/``.
 
-None of these commands mutate the source ARA — they only read from it. Fork
-outputs go to a caller-supplied ``--dest``.
+Inspection commands are read-only. Explicit lifecycle commands (`pin`,
+`verify`, `gc`) may add caller-local refs, reports, plans, or quarantine
+records; `fork`, `bundle`, and `compact` write only to caller-supplied
+destinations.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -96,6 +99,36 @@ def _load_node(ara_root: Path, node_id: str) -> tuple[dict[str, Any], Path]:
     return meta, node_dir
 
 
+def _node_relationships(
+    graph: dict[str, Any], node_id: str
+) -> tuple[list[str], list[str]]:
+    """Return parents/children from canonical edges with legacy fallbacks."""
+
+    parents: list[str] = []
+    children: list[str] = []
+    for edge in graph.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        parent = str(edge.get("parent") or "").strip()
+        child = str(edge.get("child") or "").strip()
+        if child == node_id and parent and parent not in parents:
+            parents.append(parent)
+        if parent == node_id and child and child not in children:
+            children.append(child)
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+            continue
+        parent = str(node.get("parent_id") or "").strip()
+        if parent and parent not in parents:
+            parents.append(parent)
+        for child_value in node.get("children") or []:
+            child = str(child_value or "").strip()
+            if child and child not in children:
+                children.append(child)
+        break
+    return parents, children
+
+
 def _parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
     """CLI-side shim — the real implementation lives in
     ``ai_scientist.utils.ara_metric_parser``.
@@ -111,11 +144,23 @@ def _compare_metrics(recorded: Any, fresh: dict[str, Any], tolerance: float) -> 
 
 
 def _write_verify_report(ara_root: Path, node_id: str, report: dict[str, Any]) -> Path:
+    from ai_scientist.utils.ara_reexec import persist_reexec_verdict
+
     verify_dir = ara_root / "verify"
     verify_dir.mkdir(parents=True, exist_ok=True)
     stamp = re.sub(r"[^0-9T]", "", _now_iso())[:14] or "run"
     path = verify_dir / f"{node_id}_{stamp}.json"
-    path.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    compact = persist_reexec_verdict(ara_root, report)
+    path.write_text(
+        json.dumps(compact, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    try:
+        from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
+
+        rebuild_semantic_catalog(ara_root)
+    except Exception:
+        pass
     return path
 
 
@@ -127,6 +172,8 @@ def _write_verify_report(ara_root: Path, node_id: str, report: dict[str, Any]) -
 def cmd_inspect(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
+    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    parents, _ = _node_relationships(graph, args.node_id)
     metrics = _load_json(node_dir / "metrics.json") or {}
     print(f"# Node {args.node_id}")
     print(f"ARA root:      {ara_root}")
@@ -134,7 +181,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"Step:          {meta.get('step')}")
     print(f"Stage:         {meta.get('stage')}")
     print(f"Buggy:         {meta.get('is_buggy')}")
-    print(f"Parent:        {meta.get('parent_id')}")
+    print(f"Parent:        {parents[0] if parents else None}")
     print(f"Metric:        {metrics.get('metric')}")
     print(f"Analysis:      {(metrics.get('analysis') or '').strip()[:400]}")
     if (node_dir / "code.py").exists():
@@ -147,6 +194,29 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 def cmd_exec(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
+    context_pack_ref = None
+    context_error = None
+    try:
+        from ai_scientist.utils.ara_context import (
+            compile_context_pack,
+            persist_context_pack,
+        )
+
+        context_pack = compile_context_pack(
+            ara_root,
+            intent="reproduce",
+            node_id=args.node_id,
+            budget_tokens=4000,
+        )
+        context_pack_ref = persist_context_pack(
+            ara_root,
+            context_pack,
+            consumer="reproduce_agent",
+        )
+        if context_pack.get("blockers"):
+            context_error = "; ".join(str(item) for item in context_pack["blockers"])
+    except Exception as exc:  # Legacy ARAs remain executable; the report exposes the gap.
+        context_error = str(exc)
     code_path = node_dir / "code.py"
     if not code_path.exists():
         print(f"Node {args.node_id} has no code.py — nothing to execute.", file=sys.stderr)
@@ -201,6 +271,8 @@ def cmd_exec(args: argparse.Namespace) -> int:
         "recorded_metric": metrics_recorded,
         "fresh_metric": fresh_metric,
         "comparison": comparison,
+        "context_pack_ref": context_pack_ref,
+        "context_error": context_error,
         "stdout_tail": stdout_text[-4000:],
         "stderr_tail": stderr_text[-4000:],
     }
@@ -340,6 +412,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
                         "seed",
                     ],
                     "llm_call_refs": [],
+                    "context_pack_refs": [],
                     "stage": parent_node_entry.get("stage") or "forked",
                     "step": 0,
                     "parent_id": None,
@@ -400,6 +473,20 @@ def cmd_fork(args: argparse.Namespace) -> int:
             "no source journals (fork is a synthetic single-node ARA)",
             "no env/ snapshot (call `run_ara_fork.py freeze` after seeding)",
         ],
+        "capabilities": {
+            "inspect": "complete",
+            "fork": "complete" if bool(parent_code.strip()) else "unavailable",
+            "reproduce": "partial",
+            "audit": "partial",
+            "context": "complete",
+        },
+        "omissions": [
+            {
+                "kind": "environment",
+                "reason": "fork has no frozen environment snapshot",
+                "affects": ["reproduce", "audit"],
+            }
+        ],
         "provenance": provenance,
     }
     (dest / "manifest.json").write_text(
@@ -432,6 +519,12 @@ def cmd_fork(args: argparse.Namespace) -> int:
     (dest / "fork.json").write_text(
         json.dumps(fork_meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    try:
+        from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
+
+        rebuild_semantic_catalog(dest)
+    except Exception as exc:
+        print(f"[ara-fork] warning: semantic catalog unavailable: {exc}", file=sys.stderr)
     print(f"[ara-fork] forked node {args.node_id} into {dest}")
     return 0
 
@@ -755,6 +848,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
     metrics = _load_json(node_dir / "metrics.json") or {}
     plots = _load_json(node_dir / "plots.json") or {}
+    parents, children = _node_relationships(graph, args.node)
 
     code_path = node_dir / "code.py"
     code_text: str | None = None
@@ -789,8 +883,9 @@ def cmd_show(args: argparse.Namespace) -> int:
         "is_buggy": meta.get("is_buggy"),
         "is_seed_node": meta.get("is_seed_node"),
         "step": meta.get("step"),
-        "parent_id": meta.get("parent_id"),
-        "children": meta.get("children") or [],
+        "parent_id": parents[0] if parents else None,
+        "parent_ids": parents,
+        "children": children,
         "metric": metrics.get("metric") if metrics.get("metric") is not None else meta.get("metric"),
         "analysis": metrics.get("analysis"),
         "exec_time": metrics.get("exec_time"),
@@ -1399,7 +1494,9 @@ def cmd_claims(args: argparse.Namespace) -> int:
 
         rows.append({
             "claim_id": claim_id,
+            "claim_hash": payload.get("claim_hash"),
             "node_id": node_id,
+            "evidence_refs": payload.get("evidence_refs") or [],
             "node_content_hash": content_hash,
             "node_metric": metric,
             "node_is_buggy": is_buggy,
@@ -2085,6 +2182,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     interrupted run never leaves a half-written archive at ``dest``.
     """
     from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
+    from ai_scientist.utils.ara_storage import ARAStorageError, bundle_selection
 
     ara_root = _resolve_ara_root(args.ara)
     dest = Path(args.dest).expanduser().resolve()
@@ -2119,12 +2217,61 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
 
+    try:
+        selection = bundle_selection(
+            ara_root,
+            profile=args.profile,
+            node_ids=args.node,
+            claim_ids=args.claim,
+        )
+    except ARAStorageError as exc:
+        print(f"[ara-bundle] refused: {exc}", file=sys.stderr)
+        return 2
+    if selection["missing_object_refs"] and not args.allow_incomplete:
+        print(
+            "[ara-bundle] refusing incomplete closure; missing objects: "
+            + ", ".join(selection["missing_object_refs"][:8])
+            + (" ..." if len(selection["missing_object_refs"]) > 8 else ""),
+            file=sys.stderr,
+        )
+        return 2
+
+    lock = _load_json(ara_root / "manifest.lock") or {}
+    bundle_manifest = {
+        "schema": "ara.bundle.v1",
+        "created_at": _now_iso(),
+        "profile": selection["profile"],
+        "source_manifest_hash": lock.get("manifest_hash"),
+        "selected_nodes": selection["selected_nodes"],
+        "selected_claims": selection["selected_claims"],
+        "included_paths": selection["paths"],
+        "object_refs": selection["object_refs"],
+        "missing_object_refs": selection["missing_object_refs"],
+        "complete": not selection["missing_object_refs"],
+    }
+
     file_count = 0
     try:
         with tarfile.open(tmp, "w:gz") as tar:
-            # arcname = ara_root.name so extraction produces a folder, not
-            # scattered files. dereference=False keeps symlinks as symlinks.
-            tar.add(str(ara_root), arcname=ara_root.name, recursive=True)
+            for relative in selection["paths"]:
+                source = ara_root / relative
+                if source.is_file():
+                    tar.add(
+                        str(source),
+                        arcname=str(Path(ara_root.name) / relative),
+                        recursive=False,
+                    )
+            bundle_bytes = json.dumps(
+                bundle_manifest,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            ).encode("utf-8")
+            info = tarfile.TarInfo(str(Path(ara_root.name) / "bundle.manifest.json"))
+            info.size = len(bundle_bytes)
+            info.mtime = int(datetime.now(timezone.utc).timestamp())
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(bundle_bytes))
             # Count members after the fact so the log matches the archive.
             file_count = len(tar.getmembers())
     except OSError as exc:
@@ -2141,8 +2288,213 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         size_bytes = dest.stat().st_size
     except OSError:
         size_bytes = 0
+    print(f"[ara-bundle] profile={selection['profile']} complete={bundle_manifest['complete']}")
     print(f"[ara-bundle] wrote {dest} ({size_bytes} bytes, {file_count} files)")
     return 0
+
+
+def cmd_storage_report(args: argparse.Namespace) -> int:
+    """Report physical size, logical duplication, and CAS reachability."""
+
+    from ai_scientist.utils.ara_storage import ARAStorageError, storage_report
+
+    ara_root = _resolve_ara_root(args.ara)
+    try:
+        report = storage_report(ara_root)
+    except ARAStorageError as exc:
+        print(f"[ara-storage] {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+        return 0
+    print(f"# storage  {ara_root}")
+    print(f"Files:             {report['files']}")
+    print(f"Physical bytes:    {report['physical_bytes']}")
+    print(f"Allocated bytes:   {report['allocated_bytes']}")
+    print(f"Logical bytes:     {report['logical_bytes']}")
+    print(f"Duplicate bytes:   {report['duplicate_logical_bytes']}")
+    objects = report["objects"]
+    print(
+        "CAS objects:        "
+        f"{objects['count']} "
+        f"({objects['reachable']} reachable, {objects['unreachable']} unreachable)"
+    )
+    print(f"Reclaimable bytes: {objects['unreachable_bytes']}")
+    if report["by_category"]:
+        print("\n## categories")
+        for name, row in report["by_category"].items():
+            print(
+                f"  {name:<20} files={row['files']:<6} "
+                f"physical={row['physical_bytes']:<10} logical={row['logical_bytes']}"
+            )
+    return 0
+
+
+def cmd_pin(args: argparse.Namespace) -> int:
+    """Manage GC roots using the existing caller-local refs namespace."""
+
+    from ai_scientist.utils.ara_refs import RefError, delete_ref, list_refs, set_ref
+
+    ara_root = _resolve_ara_root(args.ara)
+    if args.list:
+        rows = [r for r in list_refs(ara_root) if r.name.startswith("pins/")]
+        if args.json:
+            print(json.dumps(
+                [{"name": r.name.removeprefix("pins/"), "target": r.target} for r in rows],
+                indent=2,
+                ensure_ascii=False,
+            ))
+        else:
+            for row in rows:
+                print(f"{row.name.removeprefix('pins/')}  {row.target}")
+        return 0
+    if not args.name:
+        print("[ara-pin] --name is required for --set/--delete", file=sys.stderr)
+        return 2
+    ref_name = f"pins/{args.name.strip('/')}"
+    if args.set:
+        try:
+            path = set_ref(ara_root, ref_name, args.set)
+        except RefError as exc:
+            print(f"[ara-pin] refused: {exc}", file=sys.stderr)
+            return 2
+        print(f"[ara-pin] {args.name} -> {args.set}  ({path})")
+        return 0
+    if args.delete:
+        if not delete_ref(ara_root, ref_name):
+            print(f"[ara-pin] pin {args.name!r} is not set", file=sys.stderr)
+            return 3
+        print(f"[ara-pin] deleted {args.name}")
+        return 0
+    print("[ara-pin] choose one of --set, --delete, or --list", file=sys.stderr)
+    return 2
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    """Plan, quarantine, restore, or explicitly purge unreachable objects."""
+
+    from ai_scientist.utils.ara_storage import (
+        ARAStorageError,
+        apply_gc_plan,
+        create_gc_plan,
+        purge_quarantine,
+        restore_quarantine,
+    )
+
+    try:
+        if args.apply:
+            result = apply_gc_plan(args.apply)
+        elif args.restore:
+            result = restore_quarantine(args.restore)
+        elif args.purge:
+            result = purge_quarantine(
+                args.purge,
+                grace_seconds=args.purge_grace_seconds,
+            )
+        else:
+            ara_root = _resolve_ara_root(args.ara)
+            result = create_gc_plan(
+                ara_root,
+                grace_seconds=args.grace_seconds,
+                write=True,
+            )
+    except ARAStorageError as exc:
+        print(f"[ara-gc] refused: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    """Create a compacted successor without mutating the source ARA."""
+
+    from ai_scientist.utils.ara_compact import compact_ara
+    from ai_scientist.utils.ara_storage import ARAStorageError
+
+    ara_root = _resolve_ara_root(args.ara)
+    try:
+        result = compact_ara(
+            ara_root,
+            args.dest,
+            drop_derived=not args.keep_derived,
+        )
+    except ARAStorageError as exc:
+        print(f"[ara-compact] refused: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_hydrate(args: argparse.Namespace) -> int:
+    """Restore local object views from the project-level shared CAS."""
+
+    from ai_scientist.utils.ara_storage import ARAStorageError, hydrate_objects
+
+    ara_root = _resolve_ara_root(args.ara)
+    try:
+        result = hydrate_objects(ara_root, hashes=args.hash)
+    except ARAStorageError as exc:
+        print(f"[ara-hydrate] refused: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0 if result["complete"] or args.allow_missing else 3
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """Show or rebuild the disposable semantic query index."""
+
+    from ai_scientist.utils.ara_catalog import (
+        catalog_status,
+        rebuild_semantic_catalog,
+    )
+
+    ara_root = _resolve_ara_root(args.ara)
+    try:
+        result = (
+            rebuild_semantic_catalog(ara_root)
+            if args.rebuild
+            else catalog_status(ara_root)
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        print(f"[ara-catalog] {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0 if args.rebuild or result.get("fresh") else 3
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    """Compile the smallest task-specific view over all stored information."""
+
+    from ai_scientist.utils.ara_context import (
+        ARAContextError,
+        compile_context_pack,
+        persist_context_pack,
+        render_context_pack_for_prompt,
+    )
+
+    ara_root = _resolve_ara_root(args.ara)
+    try:
+        pack = compile_context_pack(
+            ara_root,
+            intent=args.intent,
+            node_id=args.node,
+            claim_id=args.claim,
+            budget_tokens=args.budget,
+        )
+    except (ARAContextError, FileNotFoundError, OSError, ValueError) as exc:
+        print(f"[ara-context] {exc}", file=sys.stderr)
+        return 2
+    if args.receipt:
+        pack["persisted_ref"] = persist_context_pack(
+            ara_root,
+            pack,
+            consumer=pack.get("consumer"),
+        )
+    if args.json:
+        print(json.dumps(pack, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(render_context_pack_for_prompt(pack))
+    return 0 if pack.get("complete") or args.allow_incomplete else 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2422,7 +2774,138 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-verify", action="store_true",
         help="Skip the pre-flight verify_manifest_lock check.",
     )
+    bundle_p.add_argument(
+        "--profile",
+        choices=("index", "fork", "reproduce", "audit"),
+        default="audit",
+        help="Reachability profile to package (default: audit, compatible with full bundles).",
+    )
+    bundle_p.add_argument(
+        "--node",
+        action="append",
+        default=None,
+        help="Node to include for fork/reproduce profiles; repeatable.",
+    )
+    bundle_p.add_argument(
+        "--claim",
+        action="append",
+        default=None,
+        help="Claim whose evidence node should be included; repeatable.",
+    )
+    bundle_p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Write a bundle even when selected CAS references are unavailable.",
+    )
     bundle_p.set_defaults(func=cmd_bundle)
+
+    storage_p = sub.add_parser(
+        "storage-report",
+        help="Report ARA size, duplicate payloads, and reachable/unreachable CAS objects.",
+    )
+    storage_p.add_argument("--ara", required=True)
+    storage_p.add_argument("--json", action="store_true")
+    storage_p.set_defaults(func=cmd_storage_report)
+
+    pin_p = sub.add_parser(
+        "pin",
+        help="Manage refs/pins/* roots that storage GC must preserve.",
+    )
+    pin_p.add_argument("--ara", required=True)
+    pin_p.add_argument("--name", default=None, help="Pin name below refs/pins/.")
+    pin_action = pin_p.add_mutually_exclusive_group(required=True)
+    pin_action.add_argument("--set", metavar="HASH", help="Pin a content hash.")
+    pin_action.add_argument("--delete", action="store_true", help="Delete the named pin.")
+    pin_action.add_argument("--list", action="store_true", help="List all pins.")
+    pin_p.add_argument("--json", action="store_true")
+    pin_p.set_defaults(func=cmd_pin)
+
+    gc_p = sub.add_parser(
+        "gc",
+        help="Plan or apply recoverable collection of unreachable CAS objects.",
+    )
+    gc_action = gc_p.add_mutually_exclusive_group(required=True)
+    gc_action.add_argument("--ara", help="Create a GC plan for this ARA.")
+    gc_action.add_argument("--apply", metavar="PLAN", help="Move a plan's objects to quarantine.")
+    gc_action.add_argument("--restore", metavar="RECEIPT", help="Restore quarantined objects.")
+    gc_action.add_argument("--purge", metavar="RECEIPT", help="Permanently purge a quarantine.")
+    gc_p.add_argument(
+        "--grace-seconds",
+        type=int,
+        default=0,
+        help="Only plan unreferenced objects at least this old.",
+    )
+    gc_p.add_argument(
+        "--purge-grace-seconds",
+        type=int,
+        default=86400,
+        help="Minimum quarantine age before permanent purge (default: 86400).",
+    )
+    gc_p.set_defaults(func=cmd_gc)
+
+    compact_p = sub.add_parser(
+        "compact",
+        help="Create a compacted successor ARA; the source is never modified.",
+    )
+    compact_p.add_argument("--ara", required=True)
+    compact_p.add_argument("--dest", required=True)
+    compact_p.add_argument(
+        "--keep-derived",
+        action="store_true",
+        help="Keep regenerable exploration_graph HTML/summary files.",
+    )
+    compact_p.set_defaults(func=cmd_compact)
+
+    hydrate_p = sub.add_parser(
+        "hydrate",
+        help="Restore missing local CAS objects from <project>/.ara-store.",
+    )
+    hydrate_p.add_argument("--ara", required=True)
+    hydrate_p.add_argument(
+        "--hash", action="append", default=None,
+        help="Specific object hash to restore; repeatable. Defaults to all referenced hashes.",
+    )
+    hydrate_p.add_argument("--allow-missing", action="store_true")
+    hydrate_p.set_defaults(func=cmd_hydrate)
+
+    catalog_p = sub.add_parser(
+        "catalog",
+        help="Inspect or rebuild the derived semantic catalog used by context compilation.",
+    )
+    catalog_p.add_argument("--ara", required=True)
+    catalog_p.add_argument("--rebuild", action="store_true")
+    catalog_p.set_defaults(func=cmd_catalog)
+
+    context_p = sub.add_parser(
+        "context",
+        help="Compile a bounded task view for an experiment, writer, reviewer, or executor.",
+    )
+    context_p.add_argument("--ara", required=True)
+    context_p.add_argument(
+        "--intent",
+        required=True,
+        choices=("continue", "write", "audit", "reproduce"),
+    )
+    context_p.add_argument("--node", default=None, help="Target node id.")
+    context_p.add_argument("--claim", default=None, help="Target claim id.")
+    context_p.add_argument(
+        "--budget",
+        type=int,
+        default=12000,
+        help="Approximate token budget; hard execution/evidence closure is never trimmed.",
+    )
+    context_p.add_argument("--json", action="store_true")
+    context_p.add_argument(
+        "--receipt",
+        action="store_true",
+        help="Persist the exact ContextPack and a consumption-ready receipt.",
+    )
+    context_p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Exit zero even when the pack reports reproduction/evidence blockers.",
+    )
+    context_p.set_defaults(func=cmd_context)
 
     return parser
 

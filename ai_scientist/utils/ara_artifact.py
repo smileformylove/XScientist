@@ -309,6 +309,8 @@ def _export_nodes_from_journal(
         # Defensive: journal is JSON, but this list may arrive as any iterable
         # of strings (or nothing at all on legacy runs / seed nodes).
         llm_refs = [str(r) for r in llm_refs_raw if r]
+        context_refs_raw = raw.get("context_pack_refs") or []
+        context_refs = [str(r) for r in context_refs_raw if r]
         is_seed = bool(raw.get("is_seed_node"))
         evaluation_binding = evaluation_hash_binding(raw.get("evaluation_report"))
         hash_inputs = ["code", "metric"]
@@ -363,6 +365,7 @@ def _export_nodes_from_journal(
                 "content_hash": node_content_hash,
                 "content_hash_inputs": hash_inputs,
                 "llm_call_refs": llm_refs,
+                "context_pack_refs": context_refs,
                 "stage": stage_label,
                 "step": raw.get("step"),
                 "parent_id": str(parent_id) if parent_id else None,
@@ -384,6 +387,10 @@ def _export_nodes_from_journal(
 
         if parent_id:
             edges.append({"parent": str(parent_id), "child": node_id, "stage": stage_label})
+        for child_id in children:
+            child = str(child_id).strip()
+            if child:
+                edges.append({"parent": node_id, "child": child, "stage": stage_label})
 
     return node_entries, edges
 
@@ -469,14 +476,14 @@ def _normalize_graph_entries(
             "stage": edge.get("stage"),
         })
 
-    node_by_id = {str(node.get("id")): node for node in merged if node.get("id")}
-    for edge in normalized_edges:
-        parent_node = node_by_id.get(edge["parent"])
-        if not parent_node:
-            continue
-        children = parent_node.setdefault("children", [])
-        if edge["child"] not in children:
-            children.append(edge["child"])
+    # ``edges`` is the canonical topology for new exports.  Keeping parent_id
+    # and children alongside it made every relation appear up to three times
+    # and allowed the representations to drift.  Readers remain backwards
+    # compatible with older graphs that only carry node-local links.
+    for node in merged:
+        node.pop("parent_id", None)
+        node.pop("parent_id_conflicts", None)
+        node.pop("children", None)
 
     return merged, normalized_edges
 
@@ -638,7 +645,10 @@ def _snapshot_pipeline_artifacts(
     pipeline_dir = ara_dir / "pipeline"
     pipeline_dir.mkdir(parents=True, exist_ok=True)
     try:
-        store = ObjectStore(ara_dir)
+        store = ObjectStore(
+            ara_dir,
+            shared_root=project_dir / ".ara-store",
+        )
     except Exception:  # pragma: no cover - defensive
         return []
 
@@ -764,7 +774,10 @@ def _snapshot_seed_manifest(
         return None
 
     try:
-        store = ObjectStore(ara_dir)
+        store = ObjectStore(
+            ara_dir,
+            shared_root=project_dir / ".ara-store",
+        )
         ref = store.put_bytes(raw)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("ARA export: CAS put failed for seed: %s", exc)
@@ -814,6 +827,8 @@ def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
         "- `exploration_graph.html` — browser visualization of the exploration DAG.",
         "- `nodes/<id>/` — code, term_out, metrics, plots for each node. Fork from any node id.",
         "- `claims/` — machine-readable claims linking each manuscript assertion to its evidence node.",
+        "- `events/research_events.jsonl` — compact admitted state/evidence events (not raw chatter).",
+        "- `catalog/semantic.sqlite` — disposable, rebuildable query index over the complete record.",
         "- `repair_history.jsonl` — full self-review / repair trajectory.",
         "- `pareto_pool.json` — non-dominated manuscript candidates.",
         "- `env/` — config + model fingerprint needed to reproduce.",
@@ -824,6 +839,7 @@ def _write_agent_readme(root: Path, manifest: dict[str, Any]) -> None:
         "1. Pick a node id from `exploration_graph.json`.",
         "2. Read `nodes/<id>/code.py` and `metrics.json`.",
         "3. Continue the tree search with that node as the seed.",
+        "4. Before acting, compile a bounded view with `xscientist ara context --intent continue --node <id> --ara <root>`.",
         "",
         "Failed branches are first-class citizens: consult them to learn what NOT to try.",
     ]
@@ -900,6 +916,7 @@ def export_ara(
         {
             "schema_version": ARA_SCHEMA_VERSION,
             "protocol_kind": "exploration_graph",
+            "topology_encoding": "edges",
             "generated_at": _now_iso(),
             "nodes": all_nodes,
             "edges": all_edges,
@@ -1041,6 +1058,24 @@ def export_ara(
         },
         "references": references,
         "missing": missing,
+        "capabilities": {
+            "inspect": "complete",
+            "fork": "complete" if any(
+                (nodes_root / str(node.get("id") or "") / "code.py").exists()
+                for node in all_nodes
+            ) else "unavailable",
+            "reproduce": "partial",
+            "audit": "partial" if missing else "complete",
+            "context": "complete" if all_nodes else "partial",
+        },
+        "omissions": [
+            {
+                "kind": note.split(" ", 1)[0].rstrip(":"),
+                "reason": note,
+                "affects": ["reproduce", "audit"],
+            }
+            for note in missing
+        ],
     }
     if provenance:
         manifest["provenance"] = dict(provenance)

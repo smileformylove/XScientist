@@ -57,6 +57,26 @@
       "items": {"type": "string"},
       "description": "Human-readable notes about intentionally-absent sub-artifacts."
     },
+    "capabilities": {
+      "type": "object",
+      "description": "Machine-readable delivery guarantees. Common keys are inspect, fork, reproduce, and audit; values are complete, partial, external, or unavailable.",
+      "additionalProperties": true
+    },
+    "omissions": {
+      "type": "array",
+      "description": "Structured missing-material declarations and the capabilities they affect.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "reason"],
+        "properties": {
+          "kind": {"type": "string"},
+          "reason": {"type": "string"},
+          "affects": {"type": "array", "items": {"type": "string"}},
+          "resolver": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
     "signatures": {
       "type": "array",
       "description": "Optional detached signatures over manifest_hash (from manifest.lock). Each entry is opaque to the protocol — consumers verify against their own key ring. The signatures field itself is EXCLUDED from hash_manifest() so signing does not invalidate its own subject.",

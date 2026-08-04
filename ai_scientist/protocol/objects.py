@@ -29,6 +29,7 @@ import gzip
 import hashlib
 import json
 import os
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,14 +73,64 @@ class ObjectStore:
     process cannot leave half-written blobs.
     """
 
-    def __init__(self, ara_root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        ara_root: str | os.PathLike[str],
+        *,
+        shared_root: str | os.PathLike[str] | None = None,
+    ) -> None:
         self.root = Path(ara_root) / "objects" / CONTENT_HASH_ALGO
         self.root.mkdir(parents=True, exist_ok=True)
+        self.shared_root = (
+            Path(shared_root) / "objects" / CONTENT_HASH_ALGO
+            if shared_root is not None
+            else None
+        )
+        if self.shared_root is not None:
+            self.shared_root.mkdir(parents=True, exist_ok=True)
 
     # ---- internal helpers ------------------------------------------------
 
     def _path_for(self, hex_digest: str) -> Path:
         return self.root / hex_digest[:2] / hex_digest[2:]
+
+    def _shared_path_for(self, hex_digest: str) -> Path | None:
+        if self.shared_root is None:
+            return None
+        return self.shared_root / hex_digest[:2] / hex_digest[2:]
+
+    @staticmethod
+    def _write_once(target: Path, payload: bytes) -> None:
+        """Atomically materialise one encoded object if it is absent."""
+
+        if target.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(
+            f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        tmp.write_bytes(payload)
+        try:
+            os.replace(tmp, target)
+        except FileNotFoundError:
+            if not target.exists():
+                raise
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _link_or_copy(source: Path, target: Path) -> None:
+        """Create a local portable view, sharing blocks when possible."""
+
+        if target.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, target)
+        except OSError:
+            # Cross-device filesystems and some network mounts do not support
+            # hard links.  Copying preserves the old self-contained ARA
+            # contract; profile-aware bundles can still deduplicate later.
+            shutil.copy2(source, target)
 
     # ---- writes ----------------------------------------------------------
 
@@ -98,25 +149,15 @@ class ObjectStore:
         """
         digest = hashlib.new(CONTENT_HASH_ALGO, data).hexdigest()
         target = self._path_for(digest)
+        shared_target = self._shared_path_for(digest)
         gzipped = len(data) >= _GZIP_THRESHOLD
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or (shared_target is not None and not shared_target.exists()):
             payload = gzip.compress(data) if gzipped else data
-            # os.getpid + uuid4 makes the tmp name unique across processes
-            # and threads. Suffix stays hidden from the CAS listing.
-            tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            tmp.write_bytes(payload)
-            try:
-                os.replace(tmp, target)  # atomic on POSIX + Windows
-            except FileNotFoundError:
-                # Extremely rare: another writer replaced target in the
-                # window between the exists() check and our replace, then
-                # our tmp got cleaned by some external actor. The content
-                # is identical, so a missing tmp just means the write is
-                # already done — verify and continue.
-                if not target.exists():
-                    raise
-                tmp.unlink(missing_ok=True)
+            if shared_target is not None:
+                self._write_once(shared_target, payload)
+                self._link_or_copy(shared_target, target)
+            else:
+                self._write_once(target, payload)
         return ObjectRef(hash=f"{CONTENT_HASH_ALGO}:{digest}", size=len(data), gzip=gzipped)
 
     def put_text(self, text: str) -> ObjectRef:

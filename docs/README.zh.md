@@ -555,6 +555,16 @@ export AI_SCIENTIST_ARA_REEXEC=1
 
 默认关闭，避免非预期地重复调用外部 API/GPU。
 
+长期项目可使用 `xscientist ara storage-report`、`pin`、`gc`、按 profile
+计算闭包的 `bundle`，以及不改写原始工件的 `compact` 来控制记录增长；
+详见 [`ARA_STORAGE_LIFECYCLE.md`](ARA_STORAGE_LIFECYCLE.md)。
+
+完整历史仍然保存，但不会整包注入 Agent。节点扩展、写作、审查和复现前，
+系统会分别编译 `continue/write/audit/reproduce` ContextPack，并把 pack 哈希
+绑定到新节点、Claim 或验证报告。可使用 `xscientist ara catalog --ara <ara>`
+检查语义目录，或使用 `xscientist ara context --ara <ara> --intent continue
+--node <id>` 显式生成任务上下文。
+
 ### 从 ARA 接力（Fork-Continue）
 
 任何一个 XScientist 实例产出的 ARA 都可以作为下一次运行的种子——tree search 的首个 draft 直接使用指定节点的 code，跳过 LLM 冷启动，`provenance` 会自动写进 child ARA 的 `manifest.json`：

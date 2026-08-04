@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/gc_receipt.schema.json",
+  "title": "ARA Recoverable GC Receipt",
+  "type": "object",
+  "required": ["schema", "plan_id", "ara_root", "applied_at", "moved", "recoverable"],
+  "properties": {
+    "schema": {"const": "ara.gc.receipt.v1"},
+    "plan_id": {"type": "string"},
+    "ara_root": {"type": "string"},
+    "applied_at": {"type": "string"},
+    "moved_count": {"type": "integer", "minimum": 0},
+    "moved_bytes": {"type": "integer", "minimum": 0},
+    "moved": {"type": "array", "items": {"type": "object"}},
+    "skipped": {"type": "array", "items": {"type": "object"}},
+    "recoverable": {"const": true}
+  },
+  "additionalProperties": true
+}

@@ -137,6 +137,11 @@ class Node(DataClassJsonMixin):
     # two nodes with identical code but different prompts hash differently.
     llm_call_refs: list[str] = field(default_factory=list, kw_only=True)
 
+    # ContextPack object hashes injected immediately before this node was
+    # planned. This answers "what history did the agent actually see?" without
+    # copying the pack into every node or changing the experiment content hash.
+    context_pack_refs: list[str] = field(default_factory=list, kw_only=True)
+
     def __post_init__(self) -> None:
         # Ensure children is a set even if initialized with a list
         if isinstance(self.children, list):
@@ -315,6 +320,7 @@ class Node(DataClassJsonMixin):
             "is_seed_agg_node": self.is_seed_agg_node,
             "exec_time_feedback": self.exec_time_feedback,
             "llm_call_refs": list(self.llm_call_refs or []),
+            "context_pack_refs": list(self.context_pack_refs or []),
             "plot_term_out": self.plot_term_out,
             "plot_exec_time": self.plot_exec_time,
             "plot_exc_type": self.plot_exc_type,

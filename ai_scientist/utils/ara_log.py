@@ -261,6 +261,20 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
     if node_id not in by_id:
         raise KeyError(node_id)
 
+    parent_map: dict[str, list[str]] = {}
+    for edge in graph.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        parent = str(edge.get("parent") or "").strip()
+        child = str(edge.get("child") or "").strip()
+        if parent and child and parent not in parent_map.setdefault(child, []):
+            parent_map[child].append(parent)
+    # Legacy graphs may encode topology only on the node.
+    for current_id, node in by_id.items():
+        parent = str(node.get("parent_id") or "").strip()
+        if parent and parent not in parent_map.setdefault(current_id, []):
+            parent_map[current_id].append(parent)
+
     chain: list[dict[str, Any]] = []
     seen: set[str] = set()
     current: str | None = node_id
@@ -277,7 +291,8 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
                 chain[-1]["note"] = f"parent {current} not present in exploration_graph"
             break
         seen.add(current)
-        parent = node.get("parent_id")
+        parents = parent_map.get(current, [])
+        parent = parents[0] if parents else None
         chain.append({
             "id": str(node.get("id")),
             "content_hash": node.get("content_hash"),
@@ -286,6 +301,11 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
             "parent_id": (str(parent) if parent is not None else None),
             "metric": node.get("metric"),
         })
+        if len(parents) > 1:
+            chain[-1]["note"] = (
+                "multiple parents; ancestry follows the first edge and also has "
+                + ", ".join(parents[1:])
+            )
         current = str(parent) if parent is not None else None
     return chain
 

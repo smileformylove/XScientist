@@ -168,6 +168,41 @@ class BundleCLITests(unittest.TestCase):
         self.assertIn("inside ARA", err)
         self.assertFalse(dest.exists())
 
+    def test_index_profile_omits_node_payloads_and_writes_bundle_manifest(self) -> None:
+        ara = _make_ara(self.tmp, "index")
+        dest = self.tmp / "index.tar.gz"
+        rc, _, err = _run(
+            "bundle", "--ara", str(ara), "--dest", str(dest),
+            "--profile", "index",
+        )
+        self.assertEqual(rc, 0, msg=err)
+        with tarfile.open(dest, "r:gz") as tar:
+            names = tar.getnames()
+            bundle_name = f"{ara.name}/bundle.manifest.json"
+            self.assertIn(bundle_name, names)
+            payload = json.loads(tar.extractfile(bundle_name).read())
+        self.assertEqual(payload["profile"], "index")
+        self.assertFalse(any("/nodes/" in name for name in names))
+
+    def test_fork_profile_refuses_missing_selected_object_unless_allowed(self) -> None:
+        ara = _make_ara(self.tmp, "missing-object")
+        graph_path = ara / "exploration_graph.json"
+        graph = json.loads(graph_path.read_text())
+        graph["nodes"][0]["llm_call_refs"] = ["sha256:" + "f" * 64]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        dest = self.tmp / "missing.tar.gz"
+        rc, _, err = _run(
+            "bundle", "--ara", str(ara), "--dest", str(dest),
+            "--profile", "fork", "--node", "n1",
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("missing objects", err)
+        rc, _, err = _run(
+            "bundle", "--ara", str(ara), "--dest", str(dest),
+            "--profile", "fork", "--node", "n1", "--allow-incomplete",
+        )
+        self.assertEqual(rc, 0, msg=err)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

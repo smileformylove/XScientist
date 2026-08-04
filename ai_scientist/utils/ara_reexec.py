@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ai_scientist.protocol import ObjectStore
 from ai_scientist.utils.ara_artifact import ara_root_for_project
 from ai_scientist.utils.ara_metric_parser import compare_metrics, parse_metric_from_stdout
 
@@ -159,6 +160,31 @@ def reexec_node(
     return verdict
 
 
+def persist_reexec_verdict(
+    ara_root: str | Path,
+    verdict: dict[str, Any],
+) -> dict[str, Any]:
+    """Externalise output tails and return a compact, addressable verdict.
+
+    Older reports inlined both tails in every JSON file.  New reports retain
+    the same scalar/comparison fields but point at deduplicated CAS objects.
+    The compact verdict itself is also content-addressed so batch reports can
+    reference it without copying the complete payload.
+    """
+
+    root = Path(ara_root).expanduser().resolve()
+    store = ObjectStore(root)
+    compact = dict(verdict)
+    stdout_tail = str(compact.pop("stdout_tail", "") or "")
+    stderr_tail = str(compact.pop("stderr_tail", "") or "")
+    if stdout_tail:
+        compact["stdout_ref"] = store.put_text(stdout_tail).to_json()
+    if stderr_tail:
+        compact["stderr_ref"] = store.put_text(stderr_tail).to_json()
+    verdict_ref = store.put_json(compact)
+    return {**compact, "verdict_ref": verdict_ref.to_json()}
+
+
 def _write_reexec_report(ara_root: Path, verdicts: list[dict[str, Any]]) -> Path:
     verify_dir = ara_root / "verify"
     verify_dir.mkdir(parents=True, exist_ok=True)
@@ -169,13 +195,14 @@ def _write_reexec_report(ara_root: Path, verdicts: list[dict[str, Any]]) -> Path
         for v in verdicts
         if v.get("comparison", {}).get("within_tolerance") is True and not v.get("timed_out")
     )
+    compact_verdicts = [persist_reexec_verdict(ara_root, verdict) for verdict in verdicts]
     payload = {
         "schema": "ara.reexec.batch.v1",
         "generated_at": _now_iso(),
         "ara_root": str(ara_root),
         "verdict_count": len(verdicts),
         "passed": passed,
-        "verdicts": verdicts,
+        "verdicts": compact_verdicts,
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     return path
@@ -202,12 +229,45 @@ def reexec_ara(
 
     verdicts: list[dict[str, Any]] = []
     for nid in picks:
+        context_pack_ref = None
+        context_error = None
+        try:
+            from ai_scientist.utils.ara_context import (
+                compile_context_pack,
+                persist_context_pack,
+            )
+
+            context_pack = compile_context_pack(
+                ara_root,
+                intent="reproduce",
+                node_id=nid,
+                budget_tokens=4000,
+            )
+            context_pack_ref = persist_context_pack(
+                ara_root,
+                context_pack,
+                consumer="reproduce_agent",
+            )
+            if context_pack.get("blockers"):
+                context_error = "; ".join(
+                    str(item) for item in context_pack["blockers"]
+                )
+        except Exception as exc:  # Legacy/minimal ARAs can still execute.
+            context_error = str(exc)
         verdict = reexec_node(
             ara_root, nid, python=python, timeout=timeout, tolerance=tolerance
         )
+        verdict["context_pack_ref"] = context_pack_ref
+        verdict["context_error"] = context_error
         verdicts.append(verdict)
 
     report_path = _write_reexec_report(ara_root, verdicts)
+    try:
+        from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
+
+        rebuild_semantic_catalog(ara_root)
+    except Exception:
+        pass
     return {
         "status": "ok",
         "ara_root": str(ara_root),

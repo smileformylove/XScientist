@@ -507,7 +507,7 @@ flowchart TD
 
 This tree shares provenance with the git-like record, CLI logs, and node diffs: `exploration_graph.json` is the source of truth, while `exploration_graph.html`, `exploration_graph.summary.json`, `xscientist ara log`, `xscientist ara diff --only-node`, and `xscientist ara fork` are different views over the same graph. If the ARA directory is committed to git, git captures the file-level snapshot of that graph; XScientist's log/diff/fork commands expose the node-level history. So if a paper claim comes from `candidate2`, you can trace back through its parent experiment, failed repair path, ablation evidence, and the node that can seed the next fork.
 
-The `xscientist ara` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` and related sub-commands:
+The `xscientist ara` CLI ships `inspect` / `exec` / `fork` / `freeze` / `validate` / `verify` / `graph` / `catalog` / `context` and related sub-commands:
 
 ```bash
 # Print a node's metric / analysis / code size.
@@ -555,6 +555,18 @@ export AI_SCIENTIST_ARA_REEXEC=1
 ```
 
 Off by default because re-executing arbitrary code can hit external APIs / GPUs.
+
+For long-lived projects, `xscientist ara storage-report`, `pin`, `gc`,
+profile-aware `bundle`, and non-destructive `compact` keep artifact growth
+bounded without discarding claim/evidence lineage. See
+[`docs/ARA_STORAGE_LIFECYCLE.md`](docs/ARA_STORAGE_LIFECYCLE.md).
+
+Complete storage is not injected wholesale into agents. Before node expansion,
+writing, review, or reproduction, XScientist compiles an intent-specific
+ContextPack and records its hash on the resulting node, claim, or verify report.
+Inspect the derived index with `xscientist ara catalog --ara <ara>` or compile a
+view explicitly with `xscientist ara context --ara <ara> --intent continue
+--node <id>`.
 
 ### Fork-continue from an ARA
 
