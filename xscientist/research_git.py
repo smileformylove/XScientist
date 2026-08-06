@@ -17,10 +17,22 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
+
+try:  # pragma: no cover - platform-specific import
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - platform-specific import
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 import yaml
 from jsonschema import ValidationError, validate as validate_json
@@ -184,6 +196,44 @@ No remote is required and XScientist never pushes automatically.
 
 class ResearchGitError(RuntimeError):
     """A safe local-repository operation could not be completed."""
+
+
+@contextmanager
+def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
+    """Serialize scientific state transitions without leaving stale locks."""
+
+    raw_path = _run_git(repo, ["rev-parse", "--git-path", "xscientist-research.lock"]).stdout.strip()
+    lock_path = Path(raw_path)
+    if not lock_path.is_absolute():
+        lock_path = repo / lock_path
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise ResearchGitError(
+                        f"timed out waiting for research repository lock: {lock_path}"
+                    )
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @dataclass(frozen=True)
@@ -572,7 +622,114 @@ def _branch(repo: Path) -> str:
     return completed.stdout.strip() or "detached"
 
 
+def _checkpoint_id_from_commit(repo: Path, commit: str) -> str | None:
+    body = _run_git(repo, ["show", "-s", "--format=%B", commit]).stdout
+    values = [
+        line.split(":", 1)[1].strip()
+        for line in body.splitlines()
+        if line.startswith("Research-Checkpoint:")
+    ]
+    return values[-1] if values else None
+
+
+def _checkpoint_by_id_at_commit(
+    repo: Path,
+    commit: str,
+    checkpoint_id: str,
+) -> tuple[str, dict[str, Any]] | None:
+    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
+    for checkpoint_path in sorted(
+        path
+        for path in tree
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    ):
+        try:
+            payload = json.loads(
+                _run_git(repo, ["show", f"{commit}:{checkpoint_path}"]).stdout
+            )
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("checkpoint_id") == checkpoint_id:
+            return checkpoint_path, payload
+    return None
+
+
+def _latest_checkpoint_record(
+    repo: Path,
+    start: str = "HEAD",
+) -> tuple[str, str, dict[str, Any]] | None:
+    selected_commit = _run_git(repo, ["rev-parse", start], check=False)
+    if selected_commit.returncode:
+        return None
+    selected = selected_commit.stdout.strip()
+    history = _run_git(
+        repo,
+        ["log", "--first-parent", "--format=%H", start],
+        check=False,
+    )
+    if history.returncode:
+        return None
+    for commit in history.stdout.splitlines():
+        checkpoint_id = _checkpoint_id_from_commit(repo, commit)
+        if not checkpoint_id:
+            continue
+        resolved = _checkpoint_by_id_at_commit(repo, commit, checkpoint_id)
+        if resolved is not None:
+            path, _payload_at_origin = resolved
+            selected_blob = _run_git(
+                repo,
+                ["show", f"{selected}:{path}"],
+                check=False,
+            )
+            if selected_blob.returncode:
+                raise ResearchGitError(
+                    f"selected commit removed its latest research checkpoint: "
+                    f"{selected}:{path}"
+                )
+            try:
+                payload = json.loads(selected_blob.stdout)
+            except json.JSONDecodeError as exc:
+                raise ResearchGitError(
+                    f"invalid checkpoint at {selected}:{path}"
+                ) from exc
+            return commit, path, payload
+    return None
+
+
+def _checkpoint_parent_records(
+    repo: Path,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    head = _head(repo)
+    if head is None:
+        return []
+    checkpoint_at_head = _checkpoint_id_from_commit(repo, head)
+    if checkpoint_at_head:
+        resolved = _checkpoint_by_id_at_commit(repo, head, checkpoint_at_head)
+        if resolved is not None:
+            path, payload = resolved
+            return [(head, path, payload)]
+    ancestry = _run_git(repo, ["rev-list", "--parents", "-n", "1", head]).stdout.split()
+    starts = ancestry[1:] if len(ancestry) > 2 else [head]
+    records: list[tuple[str, str, dict[str, Any]]] = []
+    seen_hashes: set[str] = set()
+    for start in starts:
+        record = _latest_checkpoint_record(repo, start)
+        if record is None:
+            continue
+        checkpoint_hash = str(record[2].get("content_hash") or "")
+        if checkpoint_hash and checkpoint_hash not in seen_hashes:
+            records.append(record)
+            seen_hashes.add(checkpoint_hash)
+    return records
+
+
 def _previous_checkpoint(repo: Path) -> dict[str, Any] | None:
+    record = _latest_checkpoint_record(repo)
+    if record is not None:
+        return record[2]
+    # A repository initialized with --no-commit can still have an intentional
+    # uncommitted checkpoint. Fall back to the worktree only when no Git-bound
+    # checkpoint exists.
     candidates = sorted((repo / "checkpoints").glob("*.json"))
     for path in reversed(candidates):
         try:
@@ -836,8 +993,8 @@ def _commit_subject(stage: str, subject: str) -> str:
     return f"{category}({stage}): {clean_subject}"[:200]
 
 
-def create_checkpoint(
-    repo: str | Path,
+def _create_checkpoint_locked(
+    root: Path,
     *,
     stage: str,
     subject: str,
@@ -853,7 +1010,6 @@ def create_checkpoint(
     commit: bool = True,
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
-    root = _repository_root(repo)
     config = load_repository_config(root)
     if not stage or not stage.replace("-", "_").replace("_", "a").isalnum():
         raise ResearchGitError(
@@ -877,8 +1033,17 @@ def create_checkpoint(
             reason="no material research change matched the checkpoint policy",
         )
 
-    previous = _previous_checkpoint(root)
-    sequence = int((previous or {}).get("sequence") or 0) + 1
+    parent_records = _checkpoint_parent_records(root)
+    previous = parent_records[0][2] if parent_records else None
+    sequence = max(
+        (int(record[2].get("sequence") or 0) for record in parent_records),
+        default=0,
+    ) + 1
+    parent_checkpoint_hashes = [
+        str(record[2]["content_hash"])
+        for record in parent_records
+        if record[2].get("content_hash")
+    ]
     explicit_ara: list[str] = []
     for raw in ara_paths:
         relative = _normalise_relative(raw)
@@ -914,6 +1079,7 @@ def create_checkpoint(
         "branch": _branch(root),
         "parent_commit": _head(root),
         "previous_checkpoint_hash": (previous or {}).get("content_hash"),
+        "parent_checkpoint_hashes": parent_checkpoint_hashes,
         "changed_paths": sorted(material),
         "nodes": sorted({str(item) for item in nodes if str(item)}),
         "claims": sorted({str(item) for item in claims if str(item)}),
@@ -941,8 +1107,15 @@ def create_checkpoint(
     basename = f"{sequence:04d}-{slug}-{checkpoint_id[4:12]}"
     checkpoint_path = root / "checkpoints" / f"{basename}.json"
     markdown_path = root / "checkpoints" / f"{basename}.md"
-    _atomic_write_json(checkpoint_path, payload)
-    _atomic_write_text(markdown_path, _checkpoint_markdown(payload))
+    created_paths = [checkpoint_path, markdown_path]
+    try:
+        _atomic_write_json(checkpoint_path, payload)
+        _atomic_write_text(markdown_path, _checkpoint_markdown(payload))
+    except BaseException:
+        for created_path in created_paths:
+            created_path.unlink(missing_ok=True)
+        _fsync_directory(checkpoint_path.parent)
+        raise
     stage_paths = sorted(
         {
             *selected,
@@ -963,28 +1136,45 @@ def create_checkpoint(
             reason="checkpoint written without creating a Git commit",
         )
 
-    _run_git(root, ["add", "--", *stage_paths])
-    if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
-        raise ResearchGitError("checkpoint produced no staged Git change")
-    trailers = [
-        f"Research-Checkpoint: {checkpoint_id}",
-        f"Research-Stage: {stage}",
-        f"Research-State: {status}",
-        f"Research-Event: {checkpoint_hash}",
-    ]
-    trailers.extend(f"ARA-Manifest: {item['manifest_hash']}" for item in manifests)
-    if reproduce_command:
-        trailers.append(f"Reproduce: {reproduce_command}")
-    _run_git(
-        root,
-        [
-            "commit",
-            "-m",
-            _commit_subject(stage, subject),
-            "-m",
-            "\n".join(trailers),
-        ],
-    )
+    try:
+        _run_git(root, ["add", "--", *stage_paths])
+        if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+            raise ResearchGitError("checkpoint produced no staged Git change")
+        trailers = [
+            f"Research-Checkpoint: {checkpoint_id}",
+            f"Research-Stage: {stage}",
+            f"Research-State: {status}",
+            f"Research-Event: {checkpoint_hash}",
+        ]
+        trailers.extend(
+            f"Research-Parent: {item}" for item in parent_checkpoint_hashes
+        )
+        trailers.extend(f"ARA-Manifest: {item['manifest_hash']}" for item in manifests)
+        if reproduce_command:
+            trailers.append(f"Reproduce: {reproduce_command}")
+        _run_git(
+            root,
+            [
+                "commit",
+                "-m",
+                _commit_subject(stage, subject),
+                "-m",
+                "\n".join(trailers),
+            ],
+        )
+    except BaseException:
+        if _head(root) is None:
+            _run_git(
+                root,
+                ["rm", "--cached", "-q", "--ignore-unmatch", "--", *stage_paths],
+                check=False,
+            )
+        else:
+            _run_git(root, ["reset", "-q", "HEAD", "--", *stage_paths], check=False)
+        for created_path in created_paths:
+            created_path.unlink(missing_ok=True)
+        _fsync_directory(checkpoint_path.parent)
+        raise
     commit_hash = _head(root)
     return CheckpointResult(
         created=True,
@@ -996,6 +1186,43 @@ def create_checkpoint(
         staged_paths=tuple(stage_paths),
         excluded_paths=tuple(excluded),
     )
+
+
+def create_checkpoint(
+    repo: str | Path,
+    *,
+    stage: str,
+    subject: str,
+    summary: str = "",
+    status: str = "completed",
+    actor: str | None = None,
+    nodes: Sequence[str] = (),
+    claims: Sequence[str] = (),
+    ara_paths: Sequence[str] = (),
+    object_refs: Sequence[str] = (),
+    reproduce_command: str | None = None,
+    include: Sequence[str] = (),
+    commit: bool = True,
+    allow_checkpoint_only: bool = False,
+) -> CheckpointResult:
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        return _create_checkpoint_locked(
+            root,
+            stage=stage,
+            subject=subject,
+            summary=summary,
+            status=status,
+            actor=actor,
+            nodes=nodes,
+            claims=claims,
+            ara_paths=ara_paths,
+            object_refs=object_refs,
+            reproduce_command=reproduce_command,
+            include=include,
+            commit=commit,
+            allow_checkpoint_only=allow_checkpoint_only,
+        )
 
 
 def auto_checkpoint(
@@ -1065,14 +1292,13 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
     }
 
 
-def add_research_object(
-    repo: str | Path,
+def _add_research_object_locked(
+    root: Path,
     source: str | Path,
     *,
     logical_path: str | None = None,
     media_type: str | None = None,
 ) -> ObjectPointerResult:
-    root = _repository_root(repo)
     config = load_repository_config(root)
     source_path = Path(source).expanduser().resolve()
     if not source_path.is_file():
@@ -1124,23 +1350,28 @@ def add_research_object(
     )
 
 
+def add_research_object(
+    repo: str | Path,
+    source: str | Path,
+    *,
+    logical_path: str | None = None,
+    media_type: str | None = None,
+) -> ObjectPointerResult:
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        return _add_research_object_locked(
+            root,
+            source,
+            logical_path=logical_path,
+            media_type=media_type,
+        )
+
+
 def _checkpoint_at_commit(repo: Path, commit: str) -> tuple[str, dict[str, Any]]:
-    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
-    candidates = sorted(
-        path
-        for path in tree
-        if path.startswith("checkpoints/") and path.endswith(".json")
-    )
-    if not candidates:
+    record = _latest_checkpoint_record(repo, commit)
+    if record is None:
         raise ResearchGitError(f"commit {commit!r} contains no research checkpoint")
-    checkpoint_path = candidates[-1]
-    raw = _run_git(repo, ["show", f"{commit}:{checkpoint_path}"]).stdout
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ResearchGitError(
-            f"invalid checkpoint at {commit}:{checkpoint_path}"
-        ) from exc
+    _checkpoint_commit, checkpoint_path, payload = record
     return checkpoint_path, payload
 
 
@@ -1198,28 +1429,59 @@ def verify_research_repository(
         except (json.JSONDecodeError, ResearchGitError) as exc:
             errors.append(str(exc))
 
-    seen_sequences: dict[int, str] = {}
-    ordered = sorted(
-        checkpoints,
-        key=lambda item: (int(item[1].get("sequence") or 0), item[0]),
-    )
-    for checkpoint_path, payload in ordered:
-        sequence = int(payload.get("sequence") or 0)
-        previous_path = seen_sequences.get(sequence)
-        if previous_path:
+    checkpoints_by_hash: dict[str, tuple[str, dict[str, Any]]] = {}
+    parent_graph: dict[str, list[str]] = {}
+    for checkpoint_path, payload in checkpoints:
+        checkpoint_hash = str(payload.get("content_hash") or "")
+        if checkpoint_hash in checkpoints_by_hash:
+            errors.append(f"duplicate checkpoint content hash: {checkpoint_hash}")
+        checkpoints_by_hash[checkpoint_hash] = (checkpoint_path, payload)
+    for checkpoint_hash, (checkpoint_path, payload) in checkpoints_by_hash.items():
+        if "parent_checkpoint_hashes" in payload:
+            parents = [str(item) for item in payload.get("parent_checkpoint_hashes") or []]
+        else:
+            previous = payload.get("previous_checkpoint_hash")
+            parents = [str(previous)] if previous else []
+        parent_graph[checkpoint_hash] = parents
+        compatibility_parent = parents[0] if parents else None
+        if payload.get("previous_checkpoint_hash") != compatibility_parent:
             errors.append(
-                f"duplicate checkpoint sequence {sequence}: "
-                f"{previous_path}, {checkpoint_path}"
+                f"checkpoint compatibility parent mismatch at {checkpoint_path}"
             )
-        seen_sequences[sequence] = checkpoint_path
-    for index, (checkpoint_path, payload) in enumerate(ordered):
-        expected_previous = None if index == 0 else ordered[index - 1][1].get("content_hash")
-        if payload.get("previous_checkpoint_hash") != expected_previous:
+        parent_sequences: list[int] = []
+        for parent_hash in parents:
+            parent = checkpoints_by_hash.get(parent_hash)
+            if parent is None:
+                errors.append(
+                    f"checkpoint {checkpoint_path} references unknown parent: {parent_hash}"
+                )
+                continue
+            parent_sequences.append(int(parent[1].get("sequence") or 0))
+        expected_sequence = max(parent_sequences, default=0) + 1
+        if int(payload.get("sequence") or 0) != expected_sequence:
             errors.append(
-                f"checkpoint chain mismatch at {checkpoint_path}: "
-                f"expected previous {expected_previous}, got "
-                f"{payload.get('previous_checkpoint_hash')}"
+                f"checkpoint sequence mismatch at {checkpoint_path}: "
+                f"expected {expected_sequence}, got {payload.get('sequence')}"
             )
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(checkpoint_hash: str) -> None:
+        if checkpoint_hash in visited:
+            return
+        if checkpoint_hash in visiting:
+            errors.append(f"checkpoint ancestry contains a cycle at {checkpoint_hash}")
+            return
+        visiting.add(checkpoint_hash)
+        for parent_hash in parent_graph.get(checkpoint_hash, []):
+            if parent_hash in parent_graph:
+                visit(parent_hash)
+        visiting.remove(checkpoint_hash)
+        visited.add(checkpoint_hash)
+
+    for checkpoint_hash in parent_graph:
+        visit(checkpoint_hash)
 
     for pointer_path in sorted(
         path
@@ -1239,7 +1501,15 @@ def verify_research_repository(
         except (json.JSONDecodeError, ResearchGitError) as exc:
             errors.append(str(exc))
 
-    latest = ordered[-1][1] if ordered else None
+    latest: dict[str, Any] | None = None
+    try:
+        _latest_path, latest_payload = _checkpoint_at_commit(root, resolved)
+        latest = _validate_checkpoint_payload(
+            latest_payload,
+            checkpoint_path=f"{resolved}:{_latest_path}",
+        )
+    except ResearchGitError as exc:
+        errors.append(str(exc))
     if latest is None:
         errors.append(f"commit {resolved} contains no valid research checkpoint")
     else:
@@ -1358,8 +1628,8 @@ def research_diff(
     }
 
 
-def create_research_bundle(
-    repo: str | Path,
+def _create_research_bundle_locked(
+    root: Path,
     destination: str | Path,
     *,
     profile: str = "reproduce",
@@ -1367,7 +1637,6 @@ def create_research_bundle(
 ) -> dict[str, Any]:
     if profile not in {"index", "reproduce", "audit"}:
         raise ResearchGitError("bundle profile must be index, reproduce, or audit")
-    root = _repository_root(repo)
     store_root = _configured_store_root(root)
     dirty = _run_git(root, ["status", "--porcelain"]).stdout.strip()
     if dirty:
@@ -1450,6 +1719,23 @@ def create_research_bundle(
             for source, arcname in [*pointer_files, *object_files]:
                 archive.add(source, arcname=arcname, recursive=False)
     return {**manifest, "destination": str(dest)}
+
+
+def create_research_bundle(
+    repo: str | Path,
+    destination: str | Path,
+    *,
+    profile: str = "reproduce",
+    allow_incomplete: bool = False,
+) -> dict[str, Any]:
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        return _create_research_bundle_locked(
+            root,
+            destination,
+            profile=profile,
+            allow_incomplete=allow_incomplete,
+        )
 
 
 def _bundle_manifest_hash_valid(payload: dict[str, Any]) -> bool:

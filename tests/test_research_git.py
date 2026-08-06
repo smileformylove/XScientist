@@ -8,9 +8,11 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from jsonschema import validate
 
+import xscientist.research_git as research_git_module
 from ai_scientist.protocol.schemas import load_schema
 from xscientist.research_cli import main as research_main
 from xscientist.research_git import (
@@ -103,6 +105,33 @@ class LocalResearchGitTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ResearchGitError, "already contains staged"):
                 create_checkpoint(root, stage="preregister", subject="lock H1")
+
+    def test_checkpoint_commit_failure_restores_index_and_own_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            existing_checkpoints = set((root / "checkpoints").iterdir())
+            hypothesis = root / "hypotheses" / "h1.json"
+            hypothesis.write_text('{"hypothesis":"H1"}\n', encoding="utf-8")
+            real_run_git = research_git_module._run_git
+
+            def fail_commit(repo, args, *, check=True):
+                if args and args[0] == "commit":
+                    raise ResearchGitError("injected commit failure")
+                return real_run_git(repo, args, check=check)
+
+            with mock.patch.object(
+                research_git_module,
+                "_run_git",
+                side_effect=fail_commit,
+            ):
+                with self.assertRaisesRegex(ResearchGitError, "injected"):
+                    create_checkpoint(root, stage="preregister", subject="lock H1")
+
+            self.assertEqual(set((root / "checkpoints").iterdir()), existing_checkpoints)
+            self.assertTrue(hypothesis.is_file())
+            self.assertFalse(self._git(root, "diff", "--cached", "--name-only"))
+            self.assertIn("hypotheses/", self._git(root, "status", "--porcelain"))
 
     def test_checkpoint_skips_when_only_ignored_or_untracked_noise_changes(
         self,
@@ -374,6 +403,57 @@ class LocalResearchGitTests(unittest.TestCase):
             self.assertEqual(history[0]["trailers"]["Research-Stage"], ["evidence"])
             self.assertEqual(shown["checkpoint"]["claims"], ["c1"])
             self.assertTrue(any("claims/c1.json" in line for line in diff["changes"]))
+
+    def test_divergent_branches_converge_with_multiple_scientific_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            self._git(root, "switch", "-c", "hypothesis/a")
+            (root / "claims" / "a.json").write_text("{}\n", encoding="utf-8")
+            branch_a = create_checkpoint(
+                root,
+                stage="experiment",
+                subject="test branch A",
+            )
+            self._git(root, "switch", "main")
+            (root / "claims").mkdir(exist_ok=True)
+            (root / "claims" / "b.json").write_text("{}\n", encoding="utf-8")
+            branch_b = create_checkpoint(
+                root,
+                stage="experiment",
+                subject="test branch B",
+            )
+            self._git(
+                root,
+                "merge",
+                "--no-ff",
+                "hypothesis/a",
+                "-m",
+                "merge scientific branches",
+            )
+            (root / "manuscript" / "merge.md").write_text(
+                "# Converged evidence\n",
+                encoding="utf-8",
+            )
+
+            converged = create_checkpoint(
+                root,
+                stage="review",
+                subject="review converged evidence",
+            )
+            payload = json.loads(converged.checkpoint_path.read_text(encoding="utf-8"))
+            fsck = verify_research_repository(root)
+
+            self.assertEqual(payload["sequence"], 3)
+            self.assertEqual(
+                set(payload["parent_checkpoint_hashes"]),
+                {branch_a.content_hash, branch_b.content_hash},
+            )
+            self.assertEqual(
+                payload["previous_checkpoint_hash"],
+                payload["parent_checkpoint_hashes"][0],
+            )
+            self.assertTrue(fsck["ok"], fsck["errors"])
 
     def test_old_commit_resolves_its_own_pointer_set(self) -> None:
         with tempfile.TemporaryDirectory() as td:

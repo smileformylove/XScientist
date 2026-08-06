@@ -34,6 +34,12 @@
     "branch": {"type": "string"},
     "parent_commit": {"type": ["string", "null"]},
     "previous_checkpoint_hash": {"type": ["string", "null"]},
+    "parent_checkpoint_hashes": {
+      "type": "array",
+      "description": "Scientific parent checkpoint hashes. Merge convergence may have multiple parents; previous_checkpoint_hash remains the first-parent compatibility view.",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "uniqueItems": true
+    },
     "changed_paths": {"type": "array", "items": {"type": "string"}},
     "nodes": {"type": "array", "items": {"type": "string"}},
     "claims": {"type": "array", "items": {"type": "string"}},
