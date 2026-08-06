@@ -128,7 +128,9 @@ class LocalResearchGitTests(unittest.TestCase):
                 with self.assertRaisesRegex(ResearchGitError, "injected"):
                     create_checkpoint(root, stage="preregister", subject="lock H1")
 
-            self.assertEqual(set((root / "checkpoints").iterdir()), existing_checkpoints)
+            self.assertEqual(
+                set((root / "checkpoints").iterdir()), existing_checkpoints
+            )
             self.assertTrue(hypothesis.is_file())
             self.assertFalse(self._git(root, "diff", "--cached", "--name-only"))
             self.assertIn("hypotheses/", self._git(root, "status", "--porcelain"))
@@ -230,6 +232,10 @@ class LocalResearchGitTests(unittest.TestCase):
 
             self.assertEqual(restored["commit"], checkpoint.commit)
             self.assertTrue(restored["fsck"]["ok"])
+            self.assertEqual(
+                restored["fsck"]["repository"],
+                str((base / "restored").resolve()),
+            )
             self.assertEqual(restored["objects_restored"], 1)
             self.assertFalse(self._git(base / "restored", "remote"))
             self.assertFalse(self._git(base / "restored", "status", "--porcelain"))
@@ -305,6 +311,39 @@ class LocalResearchGitTests(unittest.TestCase):
 
             self.assertFalse(pointer.linked)
             self.assertEqual(pointer.store_path.read_bytes(), b"immutable evidence")
+
+    def test_configured_storage_paths_cannot_escape_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            config_path = root / "research.yaml"
+            config = config_path.read_text(encoding="utf-8")
+
+            config_path.write_text(
+                config.replace("root: .ara-store", "root: ../outside-cas"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ResearchGitError, "CAS root escapes"):
+                repository_status(root)
+
+            config_path.write_text(
+                config.replace(
+                    "pointer_directory: research-objects",
+                    "pointer_directory: ../outside-pointers",
+                ),
+                encoding="utf-8",
+            )
+            source = base / "evidence.bin"
+            source.write_bytes(b"contained evidence")
+            with self.assertRaisesRegex(
+                ResearchGitError,
+                "pointer directory escapes",
+            ):
+                add_research_object(root, source)
+
+            self.assertFalse((base / "outside-cas").exists())
+            self.assertFalse((base / "outside-pointers").exists())
 
     def test_reproduction_rejects_tampered_cas_payload(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -216,12 +216,15 @@ class ResearchGitError(RuntimeError):
 def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
     """Serialize scientific state transitions without leaving stale locks."""
 
-    raw_path = _run_git(repo, ["rev-parse", "--git-path", "xscientist-research.lock"]).stdout.strip()
+    raw_path = _run_git(
+        repo, ["rev-parse", "--git-path", "xscientist-research.lock"]
+    ).stdout.strip()
     lock_path = Path(raw_path)
     if not lock_path.is_absolute():
         lock_path = repo / lock_path
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as stream:
+        stream.seek(0, os.SEEK_END)
         if stream.tell() == 0:
             stream.write(b"\0")
             stream.flush()
@@ -411,7 +414,7 @@ def _environment_receipt(repo: Path) -> dict[str, Any]:
             path
             for pattern in _DEPENDENCY_LOCK_PATTERNS
             for path in repo.glob(pattern)
-            if path.is_file()
+            if path.is_file() and not path.is_symlink()
         },
         key=lambda path: path.relative_to(repo).as_posix(),
     )
@@ -500,7 +503,9 @@ def _compare_dependency_locks(worktree: Path, receipt: Any) -> list[dict[str, An
     for item in receipt.get("dependency_locks") or []:
         relative = _normalise_relative(str(item.get("path") or ""))
         target = worktree / relative
-        actual_hash = _hash_file(target) if target.is_file() else None
+        actual_hash = (
+            _hash_file(target) if target.is_file() and not target.is_symlink() else None
+        )
         if actual_hash != item.get("hash"):
             mismatches.append(
                 {
@@ -563,6 +568,23 @@ def _repository_root(path: str | Path, *, require_config: bool = True) -> Path:
     return root
 
 
+def _resolve_configured_path(root: Path, raw_path: Any, *, label: str) -> Path:
+    try:
+        relative = _normalise_relative(str(raw_path))
+    except ResearchGitError as exc:
+        raise ResearchGitError(
+            f"configured {label} escapes research repository: {raw_path}"
+        ) from exc
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"configured {label} escapes research repository: {relative}"
+        ) from exc
+    return target
+
+
 def load_repository_config(repo: str | Path) -> dict[str, Any]:
     root = _repository_root(repo)
     try:
@@ -580,6 +602,13 @@ def load_repository_config(repo: str | Path) -> dict[str, Any]:
         raise ResearchGitError(
             "local research repositories must keep git.auto_push false"
         )
+    storage = payload["storage"]
+    _resolve_configured_path(root, storage["root"], label="CAS root")
+    _resolve_configured_path(
+        root,
+        storage["pointer_directory"],
+        label="pointer directory",
+    )
     return payload
 
 
@@ -852,6 +881,10 @@ def _checkpoint_parent_records(
         record = _latest_checkpoint_record(repo, start)
         if record is None:
             continue
+        _validate_checkpoint_payload(
+            record[2],
+            checkpoint_path=f"{record[0]}:{record[1]}",
+        )
         checkpoint_hash = str(record[2].get("content_hash") or "")
         if checkpoint_hash and checkpoint_hash not in seen_hashes:
             records.append(record)
@@ -998,10 +1031,11 @@ def _pointer_records_at_commit(
 
 def _configured_store_root(repo: Path) -> Path:
     config = load_repository_config(repo)
-    relative = _normalise_relative(
-        str((config.get("storage") or {}).get("root") or ".ara-store")
+    return _resolve_configured_path(
+        repo,
+        (config.get("storage") or {}).get("root") or ".ara-store",
+        label="CAS root",
     )
-    return (repo / relative).resolve()
 
 
 def _pointer_store_path(
@@ -1171,10 +1205,13 @@ def _create_checkpoint_locked(
 
     parent_records = _checkpoint_parent_records(root)
     previous = parent_records[0][2] if parent_records else None
-    sequence = max(
-        (int(record[2].get("sequence") or 0) for record in parent_records),
-        default=0,
-    ) + 1
+    sequence = (
+        max(
+            (int(record[2].get("sequence") or 0) for record in parent_records),
+            default=0,
+        )
+        + 1
+    )
     parent_checkpoint_hashes = [
         str(record[2]["content_hash"])
         for record in parent_records
@@ -1284,9 +1321,7 @@ def _create_checkpoint_locked(
             f"Research-State: {status}",
             f"Research-Event: {checkpoint_hash}",
         ]
-        trailers.extend(
-            f"Research-Parent: {item}" for item in parent_checkpoint_hashes
-        )
+        trailers.extend(f"Research-Parent: {item}" for item in parent_checkpoint_hashes)
         trailers.extend(f"ARA-Manifest: {item['manifest_hash']}" for item in manifests)
         if reproduce_command:
             trailers.append(f"Reproduce: {reproduce_command}")
@@ -1406,7 +1441,11 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
     staged, changed = _changed_paths(root)
     selected, excluded = _select_paths(root, config, changed)
     previous = _previous_checkpoint(root)
-    store = root / str((config.get("storage") or {}).get("root") or ".ara-store")
+    store = _resolve_configured_path(
+        root,
+        (config.get("storage") or {}).get("root") or ".ara-store",
+        label="CAS root",
+    )
     object_files = (
         [path for path in store.rglob("*") if path.is_file()] if store.exists() else []
     )
@@ -1455,8 +1494,10 @@ def _add_research_object_locked(
     store_root = _configured_store_root(root)
     object_hash, object_size, store_path = _copy_into_store(source_path, store_root)
     digest = object_hash.split(":", 1)[1]
-    pointer_dir = root / str(
-        (config.get("storage") or {}).get("pointer_directory") or "research-objects"
+    pointer_dir = _resolve_configured_path(
+        root,
+        (config.get("storage") or {}).get("pointer_directory") or "research-objects",
+        label="pointer directory",
     )
     pointer_path = pointer_dir / f"sha256-{digest}.json"
     pointer_payload = {
@@ -1576,7 +1617,9 @@ def verify_research_repository(
         checkpoints_by_hash[checkpoint_hash] = (checkpoint_path, payload)
     for checkpoint_hash, (checkpoint_path, payload) in checkpoints_by_hash.items():
         if "parent_checkpoint_hashes" in payload:
-            parents = [str(item) for item in payload.get("parent_checkpoint_hashes") or []]
+            parents = [
+                str(item) for item in payload.get("parent_checkpoint_hashes") or []
+            ]
         else:
             previous = payload.get("previous_checkpoint_hash")
             parents = [str(previous)] if previous else []
@@ -1670,14 +1713,21 @@ def verify_research_repository(
             checked["ara_manifests"] += 1
             manifest_path = str(manifest_ref.get("path") or "")
             if manifest_path not in tree:
-                errors.append(f"checkpoint references missing ARA manifest: {manifest_path}")
+                errors.append(
+                    f"checkpoint references missing ARA manifest: {manifest_path}"
+                )
                 continue
             try:
                 manifest = json.loads(
                     _run_git(root, ["show", f"{resolved}:{manifest_path}"]).stdout
                 )
                 actual_hash = hash_manifest(manifest)
-            except (json.JSONDecodeError, ResearchGitError) as exc:
+            except (
+                json.JSONDecodeError,
+                ResearchGitError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 errors.append(f"cannot validate ARA manifest {manifest_path}: {exc}")
                 continue
             expected_hash = str(manifest_ref.get("manifest_hash") or "")
@@ -1918,7 +1968,9 @@ def research_diff(
             before_value, before_warning = _json_at_revision(
                 root, resolved_before, candidate
             )
-            after_value, after_warning = _json_at_revision(root, resolved_after, candidate)
+            after_value, after_warning = _json_at_revision(
+                root, resolved_after, candidate
+            )
             if before_warning:
                 structured_warnings.append(f"{candidate} before: {before_warning}")
             if after_warning:
@@ -2121,7 +2173,9 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                 entry_by_path: dict[str, dict[str, Any]] = {}
                 for entry in entries:
                     try:
-                        entry_path = _safe_bundle_member_name(str(entry.get("path") or ""))
+                        entry_path = _safe_bundle_member_name(
+                            str(entry.get("path") or "")
+                        )
                     except (AttributeError, ResearchGitError) as exc:
                         errors.append(f"invalid bundle entry path: {exc}")
                         continue
@@ -2143,7 +2197,9 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                     verification_root = Path(td)
                     repository_bundle = verification_root / "repository.gitbundle"
                     for entry_path, entry in sorted(entry_by_path.items()):
-                        matches = [member for member in members if member.name == entry_path]
+                        matches = [
+                            member for member in members if member.name == entry_path
+                        ]
                         if len(matches) != 1 or not matches[0].isfile():
                             continue
                         stream = archive.extractfile(matches[0])
@@ -2179,7 +2235,13 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                                     pointer,
                                     pointer_path=entry_path,
                                 )
-                                pointer_payloads[str(pointer["object_hash"])] = pointer
+                                object_hash = str(pointer["object_hash"])
+                                if object_hash in pointer_payloads:
+                                    errors.append(
+                                        "duplicate bundle pointer for object: "
+                                        f"{object_hash}"
+                                    )
+                                pointer_payloads[object_hash] = pointer
                             except (
                                 UnicodeDecodeError,
                                 json.JSONDecodeError,
@@ -2230,14 +2292,20 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                         errors.append("index bundle unexpectedly contains CAS payloads")
                     computed_missing: list[str] = []
                 else:
-                    computed_missing = sorted(set(pointer_payloads) - set(object_entries))
+                    computed_missing = sorted(
+                        set(pointer_payloads) - set(object_entries)
+                    )
                     for object_hash, pointer in pointer_payloads.items():
                         entry = object_entries.get(object_hash)
-                        if entry is not None and entry.get("size") != pointer.get("size"):
+                        if entry is not None and entry.get("size") != pointer.get(
+                            "size"
+                        ):
                             errors.append(
                                 f"CAS member size disagrees with pointer: {object_hash}"
                             )
-                declared_missing = sorted(str(item) for item in manifest.get("missing_objects") or [])
+                declared_missing = sorted(
+                    str(item) for item in manifest.get("missing_objects") or []
+                )
                 if declared_missing != computed_missing:
                     errors.append(
                         "bundle completeness mismatch: declared missing objects do not "
@@ -2273,7 +2341,9 @@ def _copy_verified_bundle_member(
     if source is None:
         raise ResearchGitError(f"cannot read bundle member: {member_name}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    handle, raw_temp = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    handle, raw_temp = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
     temp = Path(raw_temp)
     digest = hashlib.sha256()
     try:
@@ -2378,6 +2448,8 @@ def restore_research_bundle(
             )
         worktree.replace(destination_path)
         _fsync_directory(destination_path.parent)
+
+    fsck["repository"] = str(destination_path)
 
     return {
         "schema_version": "xscientist.research-bundle-restore.v1",
