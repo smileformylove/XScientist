@@ -17,9 +17,11 @@ from .research_git import (
     init_repository,
     repository_status,
     reproduce_checkpoint,
+    restore_research_bundle,
     research_diff,
     research_log,
     show_checkpoint,
+    verify_research_bundle,
     verify_research_repository,
 )
 
@@ -135,10 +137,17 @@ def _build_parser() -> argparse.ArgumentParser:
     object_add.add_argument("--json", action="store_true", dest="as_json")
 
     bundle_parser = subparsers.add_parser(
-        "bundle", help="Create an offline Git history and CAS evidence bundle."
+        "bundle", help="Create, verify, or restore an offline research bundle."
     )
+    bundle_parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["create", "verify", "restore"],
+        default="create",
+    )
+    bundle_parser.add_argument("bundle_path", nargs="?")
     bundle_parser.add_argument("--repo", default=".")
-    bundle_parser.add_argument("--dest", required=True)
+    bundle_parser.add_argument("--dest")
     bundle_parser.add_argument(
         "--profile", choices=["index", "reproduce", "audit"], default="reproduce"
     )
@@ -329,19 +338,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "bundle":
-            payload = create_research_bundle(
-                args.repo,
-                args.dest,
-                profile=args.profile,
-                allow_incomplete=args.allow_incomplete,
-            )
+            if args.action == "create":
+                if not args.dest:
+                    raise ResearchGitError("bundle create requires --dest")
+                payload = create_research_bundle(
+                    args.repo,
+                    args.dest,
+                    profile=args.profile,
+                    allow_incomplete=args.allow_incomplete,
+                )
+            elif args.action == "verify":
+                if not args.bundle_path:
+                    raise ResearchGitError("bundle verify requires a bundle path")
+                payload = verify_research_bundle(args.bundle_path)
+            else:
+                if not args.bundle_path or not args.dest:
+                    raise ResearchGitError(
+                        "bundle restore requires a bundle path and --dest"
+                    )
+                payload = restore_research_bundle(args.bundle_path, args.dest)
             if args.as_json:
                 _print_json(payload)
+            elif args.action == "verify":
+                print(f"Bundle:   {payload['bundle']}")
+                print(f"Valid:    {payload['ok']}")
+                for warning in payload["warnings"]:
+                    print(f"warning: {warning}", file=sys.stderr)
+                for error in payload["errors"]:
+                    print(f"error: {error}", file=sys.stderr)
+            elif args.action == "restore":
+                print(f"Bundle:     {payload['bundle']}")
+                print(f"Repository: {payload['repository']}")
+                print(f"HEAD:       {payload['commit']}")
+                print(f"Objects:    {payload['objects_restored']}")
             else:
                 print(f"Bundle:   {payload['destination']}")
                 print(f"Profile:  {payload['profile']}")
                 print(f"Complete: {payload['complete']}")
                 print(f"HEAD:     {payload['repository_head']}")
+            if args.action == "verify":
+                return 0 if payload["ok"] else 1
             return 0
 
         if args.command == "reproduce":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -20,9 +21,11 @@ from xscientist.research_git import (
     init_repository,
     repository_status,
     reproduce_checkpoint,
+    restore_research_bundle,
     research_diff,
     research_log,
     show_checkpoint,
+    verify_research_bundle,
     verify_research_repository,
 )
 
@@ -135,6 +138,7 @@ class LocalResearchGitTests(unittest.TestCase):
             )
             bundle_path = base / "research.tar.gz"
             bundle = create_research_bundle(root, bundle_path)
+            bundle_verification = verify_research_bundle(bundle_path)
             reproduction = reproduce_checkpoint(
                 root,
                 commit=checkpoint.commit or "HEAD",
@@ -146,6 +150,7 @@ class LocalResearchGitTests(unittest.TestCase):
 
             self.assertIn(pointer.object_hash, checkpoint_payload["object_refs"])
             self.assertTrue(bundle["complete"])
+            self.assertTrue(bundle_verification["ok"], bundle_verification["errors"])
             self.assertTrue(reproduction["objects_complete"])
             self.assertEqual(
                 (base / "reproduction" / "data" / "dataset.bin").read_bytes(),
@@ -166,6 +171,93 @@ class LocalResearchGitTests(unittest.TestCase):
                 {key: value for key, value in bundle.items() if key != "destination"},
                 load_schema("research_bundle"),
             )
+
+    def test_bundle_restore_round_trip_is_clean_and_reproducible(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"portable evidence")
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            checkpoint = create_checkpoint(
+                root,
+                stage="evidence",
+                subject="bind portable evidence",
+            )
+            bundle_path = base / "research.tar.gz"
+            create_research_bundle(root, bundle_path)
+
+            restored = restore_research_bundle(bundle_path, base / "restored")
+            inspection = reproduce_checkpoint(
+                base / "restored",
+                commit=checkpoint.commit or "HEAD",
+                destination=base / "restored-run",
+            )
+
+            self.assertEqual(restored["commit"], checkpoint.commit)
+            self.assertTrue(restored["fsck"]["ok"])
+            self.assertEqual(restored["objects_restored"], 1)
+            self.assertFalse(self._git(base / "restored", "remote"))
+            self.assertFalse(self._git(base / "restored", "status", "--porcelain"))
+            self.assertEqual(
+                (Path(inspection["worktree"]) / "data" / "evidence.bin").read_bytes(),
+                b"portable evidence",
+            )
+            restored_object = (
+                base
+                / "restored"
+                / ".ara-store"
+                / "objects"
+                / "sha256"
+                / pointer.object_hash.split(":", 1)[1]
+            )
+            self.assertEqual(restored_object.read_bytes(), b"portable evidence")
+
+    def test_bundle_verification_rejects_tampered_member(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"verified evidence")
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            create_checkpoint(root, stage="evidence", subject="bind data")
+            original = base / "research.tar.gz"
+            tampered = base / "tampered.tar.gz"
+            create_research_bundle(root, original)
+
+            with tarfile.open(original, "r:gz") as source_archive:
+                payloads = {
+                    member.name: source_archive.extractfile(member).read()
+                    for member in source_archive.getmembers()
+                    if member.isfile()
+                }
+            object_name = f"objects/sha256/{pointer.object_hash.split(':', 1)[1]}"
+            payloads[object_name] = b"tampered evidence"
+            with tarfile.open(tampered, "w:gz") as target_archive:
+                for name, payload in payloads.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(payload)
+                    target_archive.addfile(info, io.BytesIO(payload))
+
+            verification = verify_research_bundle(tampered)
+
+            self.assertFalse(verification["ok"])
+            self.assertTrue(
+                any("hash mismatch" in error for error in verification["errors"]),
+                verification["errors"],
+            )
+            with self.assertRaisesRegex(ResearchGitError, "verification failed"):
+                restore_research_bundle(tampered, base / "restored")
 
     def test_cas_snapshot_is_independent_from_mutable_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:

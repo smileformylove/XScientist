@@ -1452,6 +1452,349 @@ def create_research_bundle(
     return {**manifest, "destination": str(dest)}
 
 
+def _bundle_manifest_hash_valid(payload: dict[str, Any]) -> bool:
+    expected = str(payload.get("content_hash") or "")
+    scrubbed = {key: value for key, value in payload.items() if key != "content_hash"}
+    return bool(expected and content_hash(scrubbed) == expected)
+
+
+def _hash_stream(stream: Any) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+        size += len(chunk)
+    return f"sha256:{digest.hexdigest()}", size
+
+
+def _safe_bundle_member_name(name: str) -> str:
+    if "\\" in name:
+        raise ResearchGitError(f"unsafe bundle member path: {name}")
+    return _normalise_relative(name)
+
+
+def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
+    """Verify an offline research bundle without extracting its payload."""
+
+    bundle_path = Path(bundle).expanduser().resolve()
+    errors: list[str] = []
+    warnings: list[str] = []
+    checked = {"entries": 0, "bytes": 0, "pointers": 0, "objects": 0}
+    manifest: dict[str, Any] | None = None
+    if not bundle_path.is_file():
+        raise ResearchGitError(f"research bundle does not exist: {bundle_path}")
+
+    try:
+        with tarfile.open(bundle_path, "r:*") as archive:
+            members = archive.getmembers()
+            names = [member.name for member in members]
+            if len(names) != len(set(names)):
+                errors.append("bundle contains duplicate member names")
+            for member in members:
+                try:
+                    _safe_bundle_member_name(member.name)
+                except ResearchGitError as exc:
+                    errors.append(str(exc))
+                if not member.isfile():
+                    errors.append(f"bundle member is not a regular file: {member.name}")
+            manifest_members = [
+                member for member in members if member.name == "bundle.manifest.json"
+            ]
+            if len(manifest_members) != 1:
+                errors.append("bundle must contain exactly one bundle.manifest.json")
+            elif manifest_members[0].size > 8 * 1024 * 1024:
+                errors.append("bundle manifest exceeds the 8 MiB safety limit")
+            else:
+                stream = archive.extractfile(manifest_members[0])
+                if stream is None:
+                    errors.append("cannot read bundle.manifest.json")
+                else:
+                    try:
+                        manifest = json.loads(stream.read().decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        errors.append(f"invalid bundle manifest JSON: {exc}")
+            if manifest is not None:
+                try:
+                    validate_json(manifest, load_schema("research_bundle"))
+                except ValidationError as exc:
+                    errors.append(f"invalid bundle manifest: {exc.message}")
+                if not _bundle_manifest_hash_valid(manifest):
+                    errors.append("bundle manifest content hash verification failed")
+
+                entries = manifest.get("entries") or []
+                entry_by_path: dict[str, dict[str, Any]] = {}
+                for entry in entries:
+                    try:
+                        entry_path = _safe_bundle_member_name(str(entry.get("path") or ""))
+                    except (AttributeError, ResearchGitError) as exc:
+                        errors.append(f"invalid bundle entry path: {exc}")
+                        continue
+                    if entry_path in entry_by_path:
+                        errors.append(f"duplicate bundle manifest entry: {entry_path}")
+                    entry_by_path[entry_path] = entry
+                archive_paths = set(names) - {"bundle.manifest.json"}
+                expected_paths = set(entry_by_path)
+                for unexpected in sorted(archive_paths - expected_paths):
+                    errors.append(f"unlisted bundle member: {unexpected}")
+                for absent in sorted(expected_paths - archive_paths):
+                    errors.append(f"bundle manifest entry is absent: {absent}")
+
+                pointer_payloads: dict[str, dict[str, Any]] = {}
+                object_entries: dict[str, dict[str, Any]] = {}
+                with tempfile.TemporaryDirectory(
+                    prefix="xscientist_bundle_verify_"
+                ) as td:
+                    verification_root = Path(td)
+                    repository_bundle = verification_root / "repository.gitbundle"
+                    for entry_path, entry in sorted(entry_by_path.items()):
+                        matches = [member for member in members if member.name == entry_path]
+                        if len(matches) != 1 or not matches[0].isfile():
+                            continue
+                        stream = archive.extractfile(matches[0])
+                        if stream is None:
+                            errors.append(f"cannot read bundle member: {entry_path}")
+                            continue
+                        actual_hash, actual_size = _hash_stream(stream)
+                        checked["entries"] += 1
+                        checked["bytes"] += actual_size
+                        if actual_hash != entry.get("hash"):
+                            errors.append(
+                                f"bundle entry hash mismatch for {entry_path}: "
+                                f"expected {entry.get('hash')}, got {actual_hash}"
+                            )
+                        if actual_size != entry.get("size"):
+                            errors.append(
+                                f"bundle entry size mismatch for {entry_path}: "
+                                f"expected {entry.get('size')}, got {actual_size}"
+                            )
+                        if entry_path == "repository.gitbundle":
+                            source = archive.extractfile(matches[0])
+                            if source is not None:
+                                with repository_bundle.open("wb") as target:
+                                    shutil.copyfileobj(source, target, 1024 * 1024)
+                        elif entry_path.startswith("research-objects/"):
+                            checked["pointers"] += 1
+                            source = archive.extractfile(matches[0])
+                            if source is None:
+                                continue
+                            try:
+                                pointer = json.loads(source.read().decode("utf-8"))
+                                pointer = _validate_pointer_payload(
+                                    pointer,
+                                    pointer_path=entry_path,
+                                )
+                                pointer_payloads[str(pointer["object_hash"])] = pointer
+                            except (
+                                UnicodeDecodeError,
+                                json.JSONDecodeError,
+                                ResearchGitError,
+                            ) as exc:
+                                errors.append(str(exc))
+                        elif entry_path.startswith("objects/sha256/"):
+                            checked["objects"] += 1
+                            digest = PurePosixPath(entry_path).name
+                            declared_hash = f"sha256:{digest}"
+                            if actual_hash != declared_hash:
+                                errors.append(
+                                    f"CAS member path/hash mismatch for {entry_path}"
+                                )
+                            object_entries[declared_hash] = entry
+
+                    if not repository_bundle.is_file():
+                        errors.append("bundle lacks repository.gitbundle")
+                    else:
+                        _run_git(verification_root, ["init", "-q"])
+                        verified = _run_git(
+                            verification_root,
+                            ["bundle", "verify", str(repository_bundle)],
+                            check=False,
+                        )
+                        if verified.returncode:
+                            detail = (verified.stderr or verified.stdout).strip()
+                            errors.append(f"invalid Git bundle: {detail}")
+                        heads = _run_git(
+                            verification_root,
+                            ["bundle", "list-heads", str(repository_bundle)],
+                            check=False,
+                        )
+                        advertised = {
+                            line.split()[0]
+                            for line in heads.stdout.splitlines()
+                            if line.split()
+                        }
+                        repository_head = str(manifest.get("repository_head") or "")
+                        if heads.returncode or repository_head not in advertised:
+                            errors.append(
+                                "bundle repository_head is not advertised by the Git bundle"
+                            )
+
+                profile = str(manifest.get("profile") or "")
+                if profile == "index":
+                    if object_entries:
+                        errors.append("index bundle unexpectedly contains CAS payloads")
+                    computed_missing: list[str] = []
+                else:
+                    computed_missing = sorted(set(pointer_payloads) - set(object_entries))
+                    for object_hash, pointer in pointer_payloads.items():
+                        entry = object_entries.get(object_hash)
+                        if entry is not None and entry.get("size") != pointer.get("size"):
+                            errors.append(
+                                f"CAS member size disagrees with pointer: {object_hash}"
+                            )
+                declared_missing = sorted(str(item) for item in manifest.get("missing_objects") or [])
+                if declared_missing != computed_missing:
+                    errors.append(
+                        "bundle completeness mismatch: declared missing objects do not "
+                        "match archive contents"
+                    )
+                if bool(manifest.get("complete")) != (not computed_missing):
+                    errors.append("bundle completeness verdict is inconsistent")
+    except (OSError, tarfile.TarError) as exc:
+        errors.append(f"cannot read research bundle: {exc}")
+
+    return {
+        "schema_version": "xscientist.research-bundle-verification.v1",
+        "bundle": str(bundle_path),
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "checked": checked,
+        "manifest": manifest,
+    }
+
+
+def _copy_verified_bundle_member(
+    archive: tarfile.TarFile,
+    member_name: str,
+    destination: Path,
+    *,
+    expected_hash: str,
+) -> None:
+    matches = [member for member in archive.getmembers() if member.name == member_name]
+    if len(matches) != 1 or not matches[0].isfile():
+        raise ResearchGitError(f"bundle member is unavailable: {member_name}")
+    source = archive.extractfile(matches[0])
+    if source is None:
+        raise ResearchGitError(f"cannot read bundle member: {member_name}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, raw_temp = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    temp = Path(raw_temp)
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(handle, "wb") as target:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                target.write(chunk)
+                digest.update(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        actual_hash = f"sha256:{digest.hexdigest()}"
+        if actual_hash != expected_hash:
+            raise ResearchGitError(
+                f"bundle changed during restore for {member_name}: "
+                f"expected {expected_hash}, got {actual_hash}"
+            )
+        temp.replace(destination)
+        _fsync_directory(destination.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def restore_research_bundle(
+    bundle: str | Path,
+    destination: str | Path,
+) -> dict[str, Any]:
+    """Restore a verified Git and CAS research closure into a new directory."""
+
+    verification = verify_research_bundle(bundle)
+    if not verification["ok"]:
+        raise ResearchGitError(
+            "research bundle verification failed: " + "; ".join(verification["errors"])
+        )
+    manifest = verification.get("manifest") or {}
+    bundle_path = Path(bundle).expanduser().resolve()
+    destination_path = Path(destination).expanduser().resolve()
+    if destination_path.exists():
+        raise ResearchGitError(
+            f"bundle restore destination already exists: {destination_path}"
+        )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_by_path = {
+        str(entry["path"]): entry for entry in manifest.get("entries") or []
+    }
+
+    with tempfile.TemporaryDirectory(
+        prefix=".xscientist_restore_",
+        dir=destination_path.parent,
+    ) as td:
+        staging = Path(td)
+        git_bundle = staging / "repository.gitbundle"
+        worktree = staging / "repository"
+        with tarfile.open(bundle_path, "r:*") as archive:
+            repository_entry = entry_by_path["repository.gitbundle"]
+            _copy_verified_bundle_member(
+                archive,
+                "repository.gitbundle",
+                git_bundle,
+                expected_hash=str(repository_entry["hash"]),
+            )
+            _run_git(staging, ["clone", "-q", str(git_bundle), str(worktree)])
+            head = str(manifest["repository_head"])
+            branch = str(manifest.get("repository_branch") or "detached")
+            if branch == "detached":
+                _run_git(worktree, ["checkout", "-q", "--detach", head])
+            else:
+                _run_git(worktree, ["checkout", "-q", "-B", branch, head])
+            _run_git(worktree, ["remote", "remove", "origin"], check=False)
+            if _head(worktree) != head:
+                raise ResearchGitError(
+                    f"restored Git HEAD does not match bundle manifest: {head}"
+                )
+
+            store_root = _configured_store_root(worktree)
+            for entry_path, entry in sorted(entry_by_path.items()):
+                if entry_path.startswith("objects/sha256/"):
+                    digest = PurePosixPath(entry_path).name
+                    target = store_root / "objects" / "sha256" / digest
+                    _copy_verified_bundle_member(
+                        archive,
+                        entry_path,
+                        target,
+                        expected_hash=str(entry["hash"]),
+                    )
+                elif entry_path.startswith("research-objects/"):
+                    tracked_pointer = worktree / _normalise_relative(entry_path)
+                    if not tracked_pointer.is_file() or _hash_file(
+                        tracked_pointer
+                    ) != entry.get("hash"):
+                        raise ResearchGitError(
+                            f"bundle pointer differs from restored Git tree: {entry_path}"
+                        )
+
+        verify_objects = str(manifest.get("profile")) != "index"
+        fsck = verify_research_repository(
+            worktree,
+            commit=head,
+            verify_objects=verify_objects,
+        )
+        if not fsck["ok"]:
+            raise ResearchGitError(
+                "restored research repository failed fsck: " + "; ".join(fsck["errors"])
+            )
+        worktree.replace(destination_path)
+        _fsync_directory(destination_path.parent)
+
+    return {
+        "schema_version": "xscientist.research-bundle-restore.v1",
+        "bundle": str(bundle_path),
+        "repository": str(destination_path),
+        "commit": str(manifest["repository_head"]),
+        "branch": str(manifest.get("repository_branch") or "detached"),
+        "profile": str(manifest.get("profile") or ""),
+        "objects_restored": verification["checked"]["objects"],
+        "fsck": fsck,
+    }
+
+
 def _safe_hydration_target(worktree: Path, logical_path: str) -> Path:
     if str(logical_path).strip() in {"", "."}:
         return worktree.resolve()
@@ -1609,8 +1952,10 @@ __all__ = [
     "load_repository_config",
     "repository_status",
     "reproduce_checkpoint",
+    "restore_research_bundle",
     "research_diff",
     "research_log",
     "show_checkpoint",
+    "verify_research_bundle",
     "verify_research_repository",
 ]
