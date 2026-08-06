@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-git.v1/research_bundle.schema.json",
+  "title": "XScientist Offline Research Bundle",
+  "description": "A portable Git bundle plus the selected local CAS closure.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "created_at",
+    "profile",
+    "repository_head",
+    "repository_branch",
+    "complete",
+    "missing_objects",
+    "entries",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-bundle.v1"},
+    "protocol_kind": {"type": "string", "const": "research_bundle"},
+    "created_at": {"type": "string"},
+    "profile": {"type": "string", "enum": ["index", "reproduce", "audit"]},
+    "repository_head": {"type": "string"},
+    "repository_branch": {"type": "string"},
+    "complete": {"type": "boolean"},
+    "missing_objects": {"type": "array", "items": {"type": "string"}},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "hash", "size"],
+        "properties": {
+          "path": {"type": "string"},
+          "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

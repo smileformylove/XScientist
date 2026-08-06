@@ -291,6 +291,98 @@ def create_project_structure(
     return dirs
 
 
+def _local_research_git_question(topic: str | None) -> str | None:
+    if not topic:
+        return None
+    path = Path(topic).expanduser()
+    if not path.is_file():
+        return f"# Research question\n\n{topic.strip()}\n"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _initialize_local_research_git(args: argparse.Namespace) -> bool:
+    if getattr(args, "research_git", "off") != "local":
+        return False
+    from xscientist.research_git import ResearchGitError, init_repository
+
+    project_root = Path(args.project_dir).expanduser().resolve()
+    try:
+        if not (project_root / "research.yaml").is_file():
+            result = init_repository(
+                project_root,
+                name=project_root.name,
+                question=_local_research_git_question(args.topic),
+                policy=args.git_checkpoint_policy,
+                actor=args.git_user_name or "xscientist",
+                git_user_name=args.git_user_name,
+                git_user_email=args.git_user_email,
+            )
+            print(
+                "🧭 本地科研 Git 已初始化: "
+                f"commit={(result.commit or '')[:12]} policy={args.git_checkpoint_policy}"
+            )
+        else:
+            from xscientist.research_git import load_repository_config
+
+            load_repository_config(project_root)
+            print("🧭 使用已有本地科研 Git 仓库；不会配置 remote 或自动 push。")
+        return True
+    except ResearchGitError as exc:
+        if args.research_git_strict:
+            raise RuntimeError(
+                f"local research Git initialization failed: {exc}"
+            ) from exc
+        print(f"⚠️  本地科研 Git 初始化失败，研究流程继续但不会自动 checkpoint: {exc}")
+        return False
+
+
+def _record_local_research_checkpoint(
+    args: argparse.Namespace,
+    *,
+    stage: str,
+    subject: str,
+    summary: str,
+    status: str = "completed",
+    ara_paths: list[str] | None = None,
+) -> None:
+    if not getattr(args, "_research_git_active", False):
+        return
+    from xscientist.research_git import ResearchGitError, auto_checkpoint
+
+    project_root = Path(args.project_dir).expanduser().resolve()
+    relative_ara: list[str] = []
+    for raw in ara_paths or []:
+        try:
+            relative_ara.append(
+                Path(raw).expanduser().resolve().relative_to(project_root).as_posix()
+            )
+        except (ValueError, OSError):
+            continue
+    try:
+        result = auto_checkpoint(
+            project_root,
+            stage=stage,
+            subject=subject,
+            summary=summary,
+            status=status,
+            ara_paths=relative_ara,
+        )
+        if result.committed:
+            print(
+                f"🧭 科研 checkpoint: {(result.commit or '')[:12]} "
+                f"stage={stage} files={len(result.staged_paths)}"
+            )
+        elif result.reason:
+            print(f"🧭 科研 checkpoint 跳过: {result.reason}")
+    except ResearchGitError as exc:
+        if args.research_git_strict:
+            raise RuntimeError(f"local research Git checkpoint failed: {exc}") from exc
+        print(f"⚠️  本地科研 Git checkpoint 失败，研究产物已保留: {exc}")
+
+
 def _safe_load_json(path: str | Path, *, default=None):
     path_obj = Path(path)
     if not path_obj.exists():
@@ -2437,6 +2529,7 @@ def main(argv=None):
     # 创建项目结构
     dirs = create_project_structure(args.project_dir, output_root=args.output_root)
     args.project_dir = str(dirs["root"])
+    args._research_git_active = _initialize_local_research_git(args)
     record_model_provider_decisions(
         args.project_dir,
         requested_models,
@@ -2507,6 +2600,15 @@ def main(argv=None):
         print(
             "🧭 已生成结构化 idea cards / research_program，用于后续 planning、实验追踪和看板消费"
         )
+    _record_local_research_checkpoint(
+        args,
+        stage="ideation",
+        subject=f"record {len(ideas)} candidate ideas",
+        summary=(
+            "Record the ranked research candidates, research program, and "
+            "claim/evidence planning state before experiment execution."
+        ),
+    )
 
     requested_indices = (
         [int(x.strip()) for x in args.idea_indices.split(",")]
@@ -2678,6 +2780,27 @@ def main(argv=None):
                 status_icon = "✅" if result["status"] == "success" else "❌"
                 print(f"\n{status_icon} 想法 #{idx}: {result['status']}")
 
+        experiment_ara_paths = [
+            str(result.get("ara_manifest"))
+            for result in results
+            if result.get("ara_manifest")
+        ]
+        successful_experiments = sum(
+            1 for result in results if result.get("status") == "success"
+        )
+        _record_local_research_checkpoint(
+            args,
+            stage="experiment",
+            subject=f"record {len(results)} experiment outcomes",
+            summary=(
+                f"Record {successful_experiments} successful and "
+                f"{len(results) - successful_experiments} unsuccessful research outcomes, "
+                "including their ARA manifests and compact evidence state."
+            ),
+            status="completed" if successful_experiments else "failed",
+            ara_paths=experiment_ara_paths,
+        )
+
         summary_file, shortlist_file, summary_payload = save_project_summary(
             args.project_dir, results
         )
@@ -2728,6 +2851,18 @@ def main(argv=None):
                     "❌ 严格写作守护开启，但没有任何论文通过写作守护检查，任务视为失败"
                 )
                 sys.exit(1)
+
+        _record_local_research_checkpoint(
+            args,
+            stage="paper",
+            subject="freeze project summary and shortlist",
+            summary=(
+                "Record the project-level paper summary, shortlist, quality gates, "
+                "and final handoff state."
+            ),
+            status="completed",
+            ara_paths=experiment_ara_paths,
+        )
 
     print("\n" + "=" * 80)
     print("🎉 项目完成!")

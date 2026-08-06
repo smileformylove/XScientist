@@ -225,4 +225,23 @@ def build_parser(
         action="store_true",
         help="基准 ablation: 关闭 owner-aware reviewer repair routing。",
     )
+    parser.add_argument(
+        "--research-git",
+        choices=["off", "local"],
+        default="off",
+        help="为项目启用无需服务器的本地科研 Git 历史；默认关闭且永不自动 push。",
+    )
+    parser.add_argument(
+        "--git-checkpoint-policy",
+        choices=["manual", "stage", "milestone"],
+        default="milestone",
+        help="本地科研 Git checkpoint 策略。milestone 记录关键科研状态，stage 额外记录 ideation。",
+    )
+    parser.add_argument(
+        "--research-git-strict",
+        action="store_true",
+        help="本地科研 Git 初始化或 checkpoint 失败时终止流程；默认只警告并保留研究产物。",
+    )
+    parser.add_argument("--git-user-name", default=None)
+    parser.add_argument("--git-user-email", default=None)
     return parser

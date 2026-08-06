@@ -17,6 +17,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Manager read models | `ai_scientist/apps/manager_ranking.py`, `ai_scientist/apps/manager_reports.py` | Internal | Pure submission ranking/filtering plus Markdown rendering for manager boards |
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
+| Local research Git | `xscientist/research_git.py`, `xscientist/research_cli.py` | Semver-managed, local-only | Scientific checkpoints, safe Git staging, local CAS pointers, offline bundles, and commit-scoped reproduction |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Research integrity | `ai_scientist/utils/research_integrity.py` | Artifact-compatible | Immutable preregistration, blind verification, independent reproduction, claim promotion |
 | Discovery archive | `ai_scientist/utils/hypothesis_archive.py` | Artifact-compatible | Hypothesis lineage, proximity niches, Pareto fronts, quality-diverse selection, tournaments |
@@ -65,6 +66,13 @@ The FastAPI adapter in `xscientist/service.py` owns request validation,
 filesystem confinement, authentication, and routes. Background job execution
 and atomic state recovery live in `xscientist/service_jobs.py`, so the queue
 backend can later be replaced without changing HTTP contracts.
+
+The local research Git layer is deliberately independent of GitHub and the
+HTTP service. Each scientific project may initialize its own repository;
+commits carry compact research state and ARA hashes, while large immutable
+payloads remain in `.ara-store/`. File selection is deny-first and
+whitelist-based, pre-staged indexes are refused, and `auto_push: false` is a
+schema-enforced invariant. See [Local Research Git](LOCAL_RESEARCH_GIT.md).
 
 Source-operation helpers are included in Git and the source distribution, but
 not in the wheel. Installed users run `xscientist daemon`; repository operators

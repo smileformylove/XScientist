@@ -1,0 +1,1268 @@
+"""Local-first Git history for scientific projects.
+
+Git is used as the small, reviewable control plane. Large immutable payloads
+stay in the local ARA content-addressed store and enter commits as pointer
+records. Nothing in this module creates a remote or pushes data.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+import json
+import mimetypes
+import os
+import shlex
+import shutil
+import subprocess
+import tarfile
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Sequence
+
+import yaml
+from jsonschema import ValidationError, validate as validate_json
+
+from ai_scientist.protocol.hashing import content_hash, hash_manifest
+from ai_scientist.protocol.schemas import load_schema
+
+REPOSITORY_SCHEMA = "xscientist.research-repository.v1"
+CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
+OBJECT_POINTER_SCHEMA = "xscientist.research-object-pointer.v1"
+BUNDLE_SCHEMA = "xscientist.research-bundle.v1"
+
+DEFAULT_TRACK_PATTERNS = (
+    ".gitignore",
+    "research.yaml",
+    "question.md",
+    ".xscientist/**",
+    "hypotheses/**",
+    "claims/**",
+    "manuscript/**",
+    "checkpoints/**",
+    "research-objects/**",
+    "ara/**/manifest.json",
+    "ara/**/manifest.lock",
+    "ara/**/manifest.history.jsonl",
+    "ara/**/exploration_graph.json",
+    "ara/**/claims/*.json",
+    "ara/**/events/*.jsonl",
+    "ara/**/env/*.json",
+    "ara/**/env/*.yaml",
+    "ara/**/env/*.yml",
+    "ara/**/verify/*.json",
+    "00_config/*.json",
+    "00_config/*.yaml",
+    "00_config/*.yml",
+    "00_config/*.toml",
+    "01_ideas/*.json",
+    "01_ideas/*.md",
+    "02_experiments/**/code.py",
+    "02_experiments/**/run.sh",
+    "02_experiments/**/idea.json",
+    "02_experiments/**/idea.md",
+    "02_experiments/**/metrics.json",
+    "02_experiments/**/env.json",
+    "02_experiments/**/pipeline/*.json",
+    "02_experiments/**/claim_evidence_graph.json",
+    "02_experiments/**/experiment_registry.jsonl",
+    "02_experiments/**/research_plan.json",
+    "02_experiments/**/*.tex",
+    "02_experiments/**/*.bib",
+    "03_papers/*.tex",
+    "03_papers/*.bib",
+    "03_papers/*.md",
+    "04_logs/project_summary.json",
+    "04_logs/project_summary.md",
+    "04_logs/submission_shortlist.md",
+    "pipeline_manifest.json",
+    "science_constitution.json",
+    "epistemic_graph.json",
+    "research_plan.json",
+)
+
+DEFAULT_DENY_PATTERNS = (
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    ".ara-store/**",
+    "**/__pycache__/**",
+    "**/*.log",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/credentials.json",
+    "**/secrets.json",
+    "**/*token.json",
+    "**/*.pt",
+    "**/*.pth",
+    "**/*.ckpt",
+    "**/*.bin",
+    "**/*.npy",
+    "**/*.npz",
+    "**/*.parquet",
+    "**/*.arrow",
+    "**/*.zip",
+    "**/*.tar",
+    "**/*.tar.gz",
+    "**/*.pdf",
+    "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+)
+
+SECRET_DENY_PATTERNS = (
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/credentials.json",
+    "**/secrets.json",
+    "**/*token.json",
+)
+
+MILESTONE_STAGES = frozenset(
+    {"init", "preregister", "experiment", "evidence", "review", "paper", "release"}
+)
+
+_RESEARCH_GITIGNORE = """# XScientist local research repository
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Local content-addressed payloads (tracked through research-objects pointers)
+.ara-store/
+
+# Generated caches and raw logs
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+cache/
+
+# Large binary/scientific payloads: register with `xscientist research object add`
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.zip
+*.tar
+*.tar.gz
+*.pdf
+*.png
+*.jpg
+*.jpeg
+"""
+
+_REPOSITORY_NOTE = """# XScientist local research history
+
+This directory is a local-first scientific Git repository. Git tracks compact
+research state and checkpoints. Large immutable evidence is stored under
+`.ara-store/` and represented by committed files in `research-objects/`.
+
+No remote is required and XScientist never pushes automatically.
+"""
+
+
+class ResearchGitError(RuntimeError):
+    """A safe local-repository operation could not be completed."""
+
+
+@dataclass(frozen=True)
+class CheckpointResult:
+    created: bool
+    committed: bool
+    checkpoint_path: Path | None = None
+    commit: str | None = None
+    checkpoint_id: str | None = None
+    content_hash: str | None = None
+    staged_paths: tuple[str, ...] = ()
+    excluded_paths: tuple[str, ...] = ()
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "created": self.created,
+            "committed": self.committed,
+            "checkpoint_path": (
+                str(self.checkpoint_path) if self.checkpoint_path else None
+            ),
+            "commit": self.commit,
+            "checkpoint_id": self.checkpoint_id,
+            "content_hash": self.content_hash,
+            "staged_paths": list(self.staged_paths),
+            "excluded_paths": list(self.excluded_paths),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class ObjectPointerResult:
+    pointer_path: Path
+    store_path: Path
+    object_hash: str
+    size: int
+    linked: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pointer_path": str(self.pointer_path),
+            "store_path": str(self.store_path),
+            "object_hash": self.object_hash,
+            "size": self.size,
+            "linked": self.linked,
+        }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(raw_temp)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    _atomic_write_text(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+    )
+
+
+def _run_git(
+    repo: Path,
+    args: Sequence[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except FileNotFoundError as exc:
+        raise ResearchGitError("Git is required for local research history") from exc
+    if check and completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise ResearchGitError(f"git {' '.join(args)} failed: {detail}")
+    return completed
+
+
+def _normalise_relative(path: str | Path) -> str:
+    raw = str(path).replace("\\", "/")
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise ResearchGitError(f"unsafe repository-relative path: {path}")
+    return candidate.as_posix()
+
+
+def _matches(path: str, patterns: Iterable[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def _path_is_explicit(path: str, explicit: Iterable[str]) -> bool:
+    for raw in explicit:
+        prefix = _normalise_relative(raw).rstrip("/")
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _repository_root(path: str | Path, *, require_config: bool = True) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    if not candidate.exists():
+        raise ResearchGitError(f"research repository does not exist: {candidate}")
+    completed = _run_git(candidate, ["rev-parse", "--show-toplevel"])
+    root = Path(completed.stdout.strip()).resolve()
+    if require_config and not (root / "research.yaml").is_file():
+        raise ResearchGitError(
+            f"{root} is a Git repository but not an XScientist research repository; "
+            "run `xscientist research init <path>` first"
+        )
+    return root
+
+
+def load_repository_config(repo: str | Path) -> dict[str, Any]:
+    root = _repository_root(repo)
+    try:
+        payload = yaml.safe_load((root / "research.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ResearchGitError(f"cannot read research.yaml: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ResearchGitError("research.yaml must contain a YAML mapping")
+    try:
+        validate_json(payload, load_schema("research_repository"))
+    except ValidationError as exc:
+        raise ResearchGitError(f"invalid research.yaml: {exc.message}") from exc
+    git_config = payload["git"]
+    if git_config.get("auto_push") is not False:
+        raise ResearchGitError(
+            "local research repositories must keep git.auto_push false"
+        )
+    return payload
+
+
+def _config_text(
+    *,
+    name: str,
+    policy: str,
+    actor: str,
+    max_file_bytes: int,
+) -> str:
+    patterns = "\n".join(f"    - {json.dumps(item)}" for item in DEFAULT_TRACK_PATTERNS)
+    denied = "\n".join(f"    - {json.dumps(item)}" for item in DEFAULT_DENY_PATTERNS)
+    return f"""schema_version: {REPOSITORY_SCHEMA}
+name: {json.dumps(name, ensure_ascii=False)}
+question: question.md
+actor: {json.dumps(actor, ensure_ascii=False)}
+git:
+  mode: local
+  checkpoint_policy: {policy}
+  auto_commit: true
+  auto_push: false
+  max_file_bytes: {max_file_bytes}
+  track_patterns:
+{patterns}
+  deny_patterns:
+{denied}
+storage:
+  mode: local-cas
+  root: .ara-store
+  pointer_directory: research-objects
+"""
+
+
+def _ensure_git_identity(repo: Path, name: str | None, email: str | None) -> None:
+    current_name = _run_git(repo, ["config", "user.name"], check=False).stdout.strip()
+    current_email = _run_git(repo, ["config", "user.email"], check=False).stdout.strip()
+    if name:
+        _run_git(repo, ["config", "user.name", name])
+    elif not current_name:
+        _run_git(repo, ["config", "user.name", "XScientist"])
+    if email:
+        _run_git(repo, ["config", "user.email", email])
+    elif not current_email:
+        _run_git(repo, ["config", "user.email", "xscientist@localhost"])
+
+
+def init_repository(
+    path: str | Path,
+    *,
+    name: str | None = None,
+    question: str | None = None,
+    policy: str = "milestone",
+    actor: str = "xscientist",
+    git_user_name: str | None = None,
+    git_user_email: str | None = None,
+    max_file_bytes: int = 2 * 1024 * 1024,
+    commit: bool = True,
+) -> CheckpointResult:
+    if policy not in {"manual", "stage", "milestone"}:
+        raise ResearchGitError("checkpoint policy must be manual, stage, or milestone")
+    if max_file_bytes < 1024:
+        raise ResearchGitError("max_file_bytes must be at least 1024")
+    root = Path(path).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / "research.yaml").exists():
+        raise ResearchGitError(f"research repository is already initialized: {root}")
+
+    init = _run_git(root, ["init", "-b", "main"], check=False)
+    if init.returncode:
+        _run_git(root, ["init"])
+        _run_git(root, ["symbolic-ref", "HEAD", "refs/heads/main"])
+    _ensure_git_identity(root, git_user_name, git_user_email)
+
+    project_name = (name or root.name).strip() or "research-project"
+    _atomic_write_text(root / ".gitignore", _RESEARCH_GITIGNORE)
+    _atomic_write_text(
+        root / "research.yaml",
+        _config_text(
+            name=project_name,
+            policy=policy,
+            actor=actor,
+            max_file_bytes=max_file_bytes,
+        ),
+    )
+    question_text = (
+        question or "# Research question\n\nDescribe the research question.\n"
+    ).rstrip()
+    _atomic_write_text(root / "question.md", question_text + "\n")
+    _atomic_write_text(root / ".xscientist" / "README.md", _REPOSITORY_NOTE)
+    for directory in (
+        "hypotheses",
+        "claims",
+        "manuscript",
+        "checkpoints",
+        "research-objects",
+        "ara",
+    ):
+        (root / directory).mkdir(parents=True, exist_ok=True)
+
+    if not commit:
+        return CheckpointResult(
+            created=False,
+            committed=False,
+            reason="repository initialized without a commit",
+        )
+    return create_checkpoint(
+        root,
+        stage="init",
+        subject=f"initialize {project_name}",
+        summary="Initialize the local scientific repository and research question.",
+        status="completed",
+        actor=actor,
+        allow_checkpoint_only=True,
+    )
+
+
+def _git_paths(repo: Path, args: Sequence[str]) -> set[str]:
+    completed = _run_git(repo, list(args))
+    return {
+        item for item in completed.stdout.split("\0") if item and not item.endswith("/")
+    }
+
+
+def _changed_paths(repo: Path) -> tuple[set[str], set[str]]:
+    staged = _git_paths(repo, ["diff", "--cached", "--name-only", "-z"])
+    unstaged = _git_paths(repo, ["diff", "--name-only", "-z"])
+    untracked = _git_paths(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
+    return staged, unstaged | untracked
+
+
+def _select_paths(
+    repo: Path,
+    config: dict[str, Any],
+    paths: Iterable[str],
+    *,
+    explicit: Iterable[str] = (),
+) -> tuple[list[str], list[str]]:
+    git_config = config["git"]
+    allowed_patterns = tuple(git_config.get("track_patterns") or DEFAULT_TRACK_PATTERNS)
+    denied_patterns = tuple(git_config.get("deny_patterns") or DEFAULT_DENY_PATTERNS)
+    max_bytes = int(git_config.get("max_file_bytes") or 2 * 1024 * 1024)
+    selected: list[str] = []
+    excluded: list[str] = []
+    for raw in sorted(set(paths)):
+        try:
+            relative = _normalise_relative(raw)
+        except ResearchGitError:
+            excluded.append(f"{raw} (unsafe path)")
+            continue
+        if _matches(relative, denied_patterns):
+            excluded.append(f"{relative} (denied pattern)")
+            continue
+        if not (
+            _matches(relative, allowed_patterns)
+            or _path_is_explicit(relative, explicit)
+        ):
+            excluded.append(f"{relative} (not tracked by policy)")
+            continue
+        target = repo / relative
+        if target.exists() and target.is_file() and target.stat().st_size > max_bytes:
+            excluded.append(
+                f"{relative} ({target.stat().st_size} bytes exceeds {max_bytes}; add as research object)"
+            )
+            continue
+        selected.append(relative)
+    return selected, excluded
+
+
+def _head(repo: Path) -> str | None:
+    completed = _run_git(repo, ["rev-parse", "HEAD"], check=False)
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _branch(repo: Path) -> str:
+    completed = _run_git(repo, ["symbolic-ref", "--short", "HEAD"], check=False)
+    return completed.stdout.strip() or "detached"
+
+
+def _previous_checkpoint(repo: Path) -> dict[str, Any] | None:
+    candidates = sorted((repo / "checkpoints").glob("*.json"))
+    for path in reversed(candidates):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("protocol_kind") == "research_checkpoint"
+        ):
+            return payload
+    return None
+
+
+def _manifest_refs(repo: Path, paths: Iterable[str]) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    for relative in sorted(set(paths)):
+        path = repo / relative
+        if path.name != "manifest.json" or not path.is_file():
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        refs.append({"path": relative, "manifest_hash": hash_manifest(manifest)})
+    return refs
+
+
+def _pointer_records(repo: Path) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    pointer_root = repo / "research-objects"
+    if not pointer_root.exists():
+        return records
+    for path in sorted(pointer_root.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        object_hash = (
+            str(payload.get("object_hash") or "") if isinstance(payload, dict) else ""
+        )
+        if object_hash.startswith("sha256:"):
+            records[object_hash] = {
+                **payload,
+                "pointer_path": path.relative_to(repo).as_posix(),
+            }
+    return records
+
+
+def _pointer_records_at_commit(repo: Path, commit: str) -> dict[str, dict[str, Any]]:
+    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
+    records: dict[str, dict[str, Any]] = {}
+    for pointer_path in sorted(
+        path
+        for path in tree
+        if path.startswith("research-objects/") and path.endswith(".json")
+    ):
+        raw = _run_git(repo, ["show", f"{commit}:{pointer_path}"]).stdout
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        object_hash = (
+            str(payload.get("object_hash") or "") if isinstance(payload, dict) else ""
+        )
+        if object_hash.startswith("sha256:"):
+            records[object_hash] = {**payload, "pointer_path": pointer_path}
+    return records
+
+
+def _checkpoint_hash_valid(payload: dict[str, Any]) -> bool:
+    expected = str(payload.get("content_hash") or "")
+    scrubbed = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"checkpoint_id", "content_hash"}
+    }
+    return bool(expected and content_hash(scrubbed) == expected)
+
+
+def _checkpoint_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# {payload['subject']}",
+        "",
+        f"- Stage: `{payload['stage']}`",
+        f"- State: `{payload['status']}`",
+        f"- Actor: `{payload['actor']}`",
+        f"- Created: `{payload['created_at']}`",
+        f"- Checkpoint: `{payload['checkpoint_id']}`",
+        f"- Content hash: `{payload['content_hash']}`",
+        "",
+        payload.get("summary") or "No summary supplied.",
+        "",
+        "## Scientific changes",
+        "",
+    ]
+    lines.extend(f"- `{path}`" for path in payload.get("changed_paths") or [])
+    if not payload.get("changed_paths"):
+        lines.append("- Semantic checkpoint only; no additional tracked file changed.")
+    if payload.get("ara_manifests"):
+        lines.extend(["", "## ARA manifests", ""])
+        lines.extend(
+            f"- `{item['path']}` — `{item['manifest_hash']}`"
+            for item in payload["ara_manifests"]
+        )
+    command = (payload.get("reproduce") or {}).get("command")
+    if command:
+        lines.extend(["", "## Reproduce", "", "```bash", command, "```"])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _commit_subject(stage: str, subject: str) -> str:
+    category = {
+        "init": "research",
+        "ideation": "research",
+        "preregister": "research",
+        "experiment": "experiment",
+        "evidence": "evidence",
+        "review": "review",
+        "paper": "paper",
+        "release": "paper",
+        "failed": "experiment",
+    }.get(stage, "research")
+    clean_subject = " ".join(subject.strip().split())
+    if not clean_subject:
+        clean_subject = f"record {stage} checkpoint"
+    return f"{category}({stage}): {clean_subject}"[:200]
+
+
+def create_checkpoint(
+    repo: str | Path,
+    *,
+    stage: str,
+    subject: str,
+    summary: str = "",
+    status: str = "completed",
+    actor: str | None = None,
+    nodes: Sequence[str] = (),
+    claims: Sequence[str] = (),
+    ara_paths: Sequence[str] = (),
+    object_refs: Sequence[str] = (),
+    reproduce_command: str | None = None,
+    include: Sequence[str] = (),
+    commit: bool = True,
+    allow_checkpoint_only: bool = False,
+) -> CheckpointResult:
+    root = _repository_root(repo)
+    config = load_repository_config(root)
+    if not stage or not stage.replace("-", "_").replace("_", "a").isalnum():
+        raise ResearchGitError(
+            "stage must contain only letters, numbers, hyphens, or underscores"
+        )
+    if reproduce_command and any(char in reproduce_command for char in "\r\n"):
+        raise ResearchGitError("reproduction command must be a single line")
+    staged_before, changed = _changed_paths(root)
+    if staged_before:
+        raise ResearchGitError(
+            "checkpoint refused because the Git index already contains staged changes: "
+            + ", ".join(sorted(staged_before))
+        )
+    selected, excluded = _select_paths(root, config, changed, explicit=include)
+    material = [path for path in selected if not path.startswith("checkpoints/")]
+    if not material and not allow_checkpoint_only:
+        return CheckpointResult(
+            created=False,
+            committed=False,
+            excluded_paths=tuple(excluded),
+            reason="no material research change matched the checkpoint policy",
+        )
+
+    previous = _previous_checkpoint(root)
+    sequence = int((previous or {}).get("sequence") or 0) + 1
+    explicit_ara: list[str] = []
+    for raw in ara_paths:
+        relative = _normalise_relative(raw)
+        target = root / relative
+        if target.is_dir():
+            target = target / "manifest.json"
+            relative = target.relative_to(root).as_posix()
+        if not target.is_file() or target.name != "manifest.json":
+            raise ResearchGitError(
+                f"ARA path is not a manifest or ARA directory: {raw}"
+            )
+        explicit_ara.append(relative)
+    manifests = _manifest_refs(root, [*selected, *explicit_ara])
+
+    pointers = _pointer_records(root)
+    resolved_object_refs = sorted(
+        {
+            *(str(item) for item in object_refs if str(item).startswith("sha256:")),
+            *pointers.keys(),
+        }
+    )
+    created_at = _now_iso()
+    base_payload: dict[str, Any] = {
+        "schema_version": CHECKPOINT_SCHEMA,
+        "protocol_kind": "research_checkpoint",
+        "sequence": sequence,
+        "created_at": created_at,
+        "stage": stage,
+        "status": status,
+        "subject": " ".join(subject.strip().split()),
+        "summary": summary.strip(),
+        "actor": actor or str(config.get("actor") or "xscientist"),
+        "branch": _branch(root),
+        "parent_commit": _head(root),
+        "previous_checkpoint_hash": (previous or {}).get("content_hash"),
+        "changed_paths": sorted(material),
+        "nodes": sorted({str(item) for item in nodes if str(item)}),
+        "claims": sorted({str(item) for item in claims if str(item)}),
+        "ara_manifests": manifests,
+        "object_refs": resolved_object_refs,
+        "reproduce": {
+            "command": reproduce_command or "",
+            "working_directory": ".",
+        },
+    }
+    checkpoint_hash = content_hash(base_payload)
+    checkpoint_id = f"rcp-{checkpoint_hash.split(':', 1)[1][:16]}"
+    payload = {
+        **base_payload,
+        "checkpoint_id": checkpoint_id,
+        "content_hash": checkpoint_hash,
+    }
+    try:
+        validate_json(payload, load_schema("research_checkpoint"))
+    except ValidationError as exc:
+        raise ResearchGitError(
+            f"generated checkpoint is invalid: {exc.message}"
+        ) from exc
+    slug = "".join(char if char.isalnum() or char in "-_" else "-" for char in stage)
+    basename = f"{sequence:04d}-{slug}-{checkpoint_id[4:12]}"
+    checkpoint_path = root / "checkpoints" / f"{basename}.json"
+    markdown_path = root / "checkpoints" / f"{basename}.md"
+    _atomic_write_json(checkpoint_path, payload)
+    _atomic_write_text(markdown_path, _checkpoint_markdown(payload))
+    stage_paths = sorted(
+        {
+            *selected,
+            checkpoint_path.relative_to(root).as_posix(),
+            markdown_path.relative_to(root).as_posix(),
+        }
+    )
+
+    if not commit:
+        return CheckpointResult(
+            created=True,
+            committed=False,
+            checkpoint_path=checkpoint_path,
+            checkpoint_id=checkpoint_id,
+            content_hash=checkpoint_hash,
+            staged_paths=tuple(stage_paths),
+            excluded_paths=tuple(excluded),
+            reason="checkpoint written without creating a Git commit",
+        )
+
+    _run_git(root, ["add", "--", *stage_paths])
+    if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+        raise ResearchGitError("checkpoint produced no staged Git change")
+    trailers = [
+        f"Research-Checkpoint: {checkpoint_id}",
+        f"Research-Stage: {stage}",
+        f"Research-State: {status}",
+        f"Research-Event: {checkpoint_hash}",
+    ]
+    trailers.extend(f"ARA-Manifest: {item['manifest_hash']}" for item in manifests)
+    if reproduce_command:
+        trailers.append(f"Reproduce: {reproduce_command}")
+    _run_git(
+        root,
+        [
+            "commit",
+            "-m",
+            _commit_subject(stage, subject),
+            "-m",
+            "\n".join(trailers),
+        ],
+    )
+    commit_hash = _head(root)
+    return CheckpointResult(
+        created=True,
+        committed=True,
+        checkpoint_path=checkpoint_path,
+        commit=commit_hash,
+        checkpoint_id=checkpoint_id,
+        content_hash=checkpoint_hash,
+        staged_paths=tuple(stage_paths),
+        excluded_paths=tuple(excluded),
+    )
+
+
+def auto_checkpoint(
+    repo: str | Path,
+    *,
+    stage: str,
+    subject: str,
+    summary: str = "",
+    status: str = "completed",
+    nodes: Sequence[str] = (),
+    claims: Sequence[str] = (),
+    ara_paths: Sequence[str] = (),
+    reproduce_command: str | None = None,
+) -> CheckpointResult:
+    root = _repository_root(repo)
+    config = load_repository_config(root)
+    git_config = config["git"]
+    if not bool(git_config.get("auto_commit", True)):
+        return CheckpointResult(False, False, reason="auto_commit is disabled")
+    policy = str(git_config.get("checkpoint_policy") or "milestone")
+    if policy == "manual":
+        return CheckpointResult(False, False, reason="manual checkpoint policy")
+    if policy == "milestone" and stage not in MILESTONE_STAGES:
+        return CheckpointResult(
+            False, False, reason=f"{stage} is not a milestone stage"
+        )
+    return create_checkpoint(
+        root,
+        stage=stage,
+        subject=subject,
+        summary=summary,
+        status=status,
+        nodes=nodes,
+        claims=claims,
+        ara_paths=ara_paths,
+        reproduce_command=reproduce_command,
+    )
+
+
+def repository_status(repo: str | Path) -> dict[str, Any]:
+    root = _repository_root(repo)
+    config = load_repository_config(root)
+    staged, changed = _changed_paths(root)
+    selected, excluded = _select_paths(root, config, changed)
+    previous = _previous_checkpoint(root)
+    store = root / str((config.get("storage") or {}).get("root") or ".ara-store")
+    object_files = (
+        [path for path in store.rglob("*") if path.is_file()] if store.exists() else []
+    )
+    return {
+        "repository": str(root),
+        "name": config.get("name"),
+        "branch": _branch(root),
+        "head": _head(root),
+        "checkpoint_policy": config["git"].get("checkpoint_policy"),
+        "auto_commit": bool(config["git"].get("auto_commit", True)),
+        "auto_push": False,
+        "staged_paths": sorted(staged),
+        "eligible_changes": selected,
+        "excluded_changes": excluded,
+        "last_checkpoint": previous,
+        "object_store": {
+            "path": str(store),
+            "objects": len(object_files),
+            "bytes": sum(path.stat().st_size for path in object_files),
+        },
+    }
+
+
+def add_research_object(
+    repo: str | Path,
+    source: str | Path,
+    *,
+    logical_path: str | None = None,
+    media_type: str | None = None,
+) -> ObjectPointerResult:
+    root = _repository_root(repo)
+    config = load_repository_config(root)
+    source_path = Path(source).expanduser().resolve()
+    if not source_path.is_file():
+        raise ResearchGitError(f"research object is not a regular file: {source_path}")
+    object_hash = _hash_file(source_path)
+    digest = object_hash.split(":", 1)[1]
+    store_root = root / str((config.get("storage") or {}).get("root") or ".ara-store")
+    store_path = store_root / "objects" / "sha256" / digest
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    linked = False
+    if not store_path.exists():
+        try:
+            os.link(source_path, store_path)
+            linked = True
+        except OSError:
+            shutil.copy2(source_path, store_path)
+    elif _hash_file(store_path) != object_hash:
+        raise ResearchGitError(f"CAS collision or damaged object at {store_path}")
+
+    if logical_path:
+        logical = _normalise_relative(logical_path)
+    else:
+        try:
+            logical = source_path.relative_to(root).as_posix()
+        except ValueError:
+            logical = f"external/{source_path.name}"
+    if _matches(logical, SECRET_DENY_PATTERNS):
+        raise ResearchGitError(
+            f"refusing to register a denied secret/binary logical path: {logical}"
+        )
+    pointer_dir = root / str(
+        (config.get("storage") or {}).get("pointer_directory") or "research-objects"
+    )
+    pointer_path = pointer_dir / f"sha256-{digest}.json"
+    pointer_payload = {
+        "schema_version": OBJECT_POINTER_SCHEMA,
+        "protocol_kind": "research_object_pointer",
+        "object_hash": object_hash,
+        "size": source_path.stat().st_size,
+        "media_type": media_type
+        or mimetypes.guess_type(source_path.name)[0]
+        or "application/octet-stream",
+        "logical_path": logical,
+        "store_relpath": store_path.relative_to(root).as_posix(),
+        "created_at": _now_iso(),
+    }
+    pointer_payload["pointer_hash"] = content_hash(pointer_payload)
+    try:
+        validate_json(pointer_payload, load_schema("research_object_pointer"))
+    except ValidationError as exc:
+        raise ResearchGitError(
+            f"generated object pointer is invalid: {exc.message}"
+        ) from exc
+    _atomic_write_json(pointer_path, pointer_payload)
+    return ObjectPointerResult(
+        pointer_path=pointer_path,
+        store_path=store_path,
+        object_hash=object_hash,
+        size=source_path.stat().st_size,
+        linked=linked,
+    )
+
+
+def _checkpoint_at_commit(repo: Path, commit: str) -> tuple[str, dict[str, Any]]:
+    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
+    candidates = sorted(
+        path
+        for path in tree
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    )
+    if not candidates:
+        raise ResearchGitError(f"commit {commit!r} contains no research checkpoint")
+    checkpoint_path = candidates[-1]
+    raw = _run_git(repo, ["show", f"{commit}:{checkpoint_path}"]).stdout
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResearchGitError(
+            f"invalid checkpoint at {commit}:{checkpoint_path}"
+        ) from exc
+    return checkpoint_path, payload
+
+
+def show_checkpoint(repo: str | Path, commit: str = "HEAD") -> dict[str, Any]:
+    root = _repository_root(repo)
+    path, payload = _checkpoint_at_commit(root, commit)
+    return {
+        "commit": _run_git(root, ["rev-parse", commit]).stdout.strip(),
+        "path": path,
+        "checkpoint_hash_valid": _checkpoint_hash_valid(payload),
+        "checkpoint": payload,
+    }
+
+
+def research_log(repo: str | Path, *, limit: int = 20) -> list[dict[str, Any]]:
+    root = _repository_root(repo)
+    if limit < 1:
+        raise ResearchGitError("log limit must be at least 1")
+    separator = "%x1f"
+    record = "%x1e"
+    fmt = (
+        f"%H{separator}%h{separator}%aI{separator}%an{separator}%s{separator}%B{record}"
+    )
+    raw = _run_git(root, ["log", f"--max-count={limit}", f"--format={fmt}"]).stdout
+    entries: list[dict[str, Any]] = []
+    for item in raw.split("\x1e"):
+        fields = item.strip("\n").split("\x1f", 5)
+        if len(fields) != 6:
+            continue
+        full, short, authored_at, author, subject, body = fields
+        trailers: dict[str, list[str]] = {}
+        for line in body.splitlines():
+            if ": " not in line:
+                continue
+            key, value = line.split(": ", 1)
+            if key.startswith(("Research-", "ARA-", "Reproduce")):
+                trailers.setdefault(key, []).append(value)
+        entries.append(
+            {
+                "commit": full,
+                "short_commit": short,
+                "authored_at": authored_at,
+                "author": author,
+                "subject": subject,
+                "trailers": trailers,
+            }
+        )
+    return entries
+
+
+def research_diff(
+    repo: str | Path,
+    before: str = "HEAD~1",
+    after: str = "HEAD",
+) -> dict[str, Any]:
+    root = _repository_root(repo)
+    resolved_before = _run_git(root, ["rev-parse", before]).stdout.strip()
+    resolved_after = _run_git(root, ["rev-parse", after]).stdout.strip()
+    name_status = _run_git(
+        root,
+        [
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-status",
+            resolved_before,
+            resolved_after,
+        ],
+    ).stdout.splitlines()
+    stat = _run_git(
+        root, ["diff", "--stat", resolved_before, resolved_after]
+    ).stdout.rstrip()
+    return {
+        "before": resolved_before,
+        "after": resolved_after,
+        "changes": name_status,
+        "stat": stat,
+    }
+
+
+def create_research_bundle(
+    repo: str | Path,
+    destination: str | Path,
+    *,
+    profile: str = "reproduce",
+    allow_incomplete: bool = False,
+) -> dict[str, Any]:
+    if profile not in {"index", "reproduce", "audit"}:
+        raise ResearchGitError("bundle profile must be index, reproduce, or audit")
+    root = _repository_root(repo)
+    dirty = _run_git(root, ["status", "--porcelain"]).stdout.strip()
+    if dirty:
+        raise ResearchGitError(
+            "bundle refused because the research repository has uncommitted changes"
+        )
+    dest = Path(destination).expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        raise ResearchGitError(f"bundle destination already exists: {dest}")
+
+    pointers = _pointer_records(root)
+    missing: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="xscientist_research_bundle_") as td:
+        temp = Path(td)
+        git_bundle = temp / "repository.gitbundle"
+        _run_git(root, ["bundle", "create", str(git_bundle), "--all"])
+        entries: list[dict[str, Any]] = [
+            {
+                "path": "repository.gitbundle",
+                "hash": _hash_file(git_bundle),
+                "size": git_bundle.stat().st_size,
+            }
+        ]
+        object_files: list[tuple[Path, str]] = []
+        pointer_files: list[tuple[Path, str]] = []
+        for object_hash, pointer in sorted(pointers.items()):
+            pointer_source = root / str(pointer["pointer_path"])
+            pointer_arcname = str(pointer["pointer_path"])
+            pointer_files.append((pointer_source, pointer_arcname))
+            if profile == "index":
+                continue
+            store_path = root / _normalise_relative(pointer.get("store_relpath") or "")
+            if not store_path.is_file() or _hash_file(store_path) != object_hash:
+                missing.append(object_hash)
+                continue
+            object_arcname = f"objects/sha256/{object_hash.split(':', 1)[1]}"
+            object_files.append((store_path, object_arcname))
+        complete = not missing
+        if missing and not allow_incomplete:
+            raise ResearchGitError(
+                "bundle is missing required CAS objects: " + ", ".join(missing)
+            )
+        for source, arcname in [*pointer_files, *object_files]:
+            entries.append(
+                {
+                    "path": arcname,
+                    "hash": _hash_file(source),
+                    "size": source.stat().st_size,
+                }
+            )
+        manifest = {
+            "schema_version": BUNDLE_SCHEMA,
+            "protocol_kind": "research_bundle",
+            "created_at": _now_iso(),
+            "profile": profile,
+            "repository_head": _head(root),
+            "repository_branch": _branch(root),
+            "complete": complete,
+            "missing_objects": missing,
+            "entries": entries,
+        }
+        manifest["content_hash"] = content_hash(manifest)
+        try:
+            validate_json(manifest, load_schema("research_bundle"))
+        except ValidationError as exc:
+            raise ResearchGitError(
+                f"generated research bundle is invalid: {exc.message}"
+            ) from exc
+        manifest_path = temp / "bundle.manifest.json"
+        _atomic_write_json(manifest_path, manifest)
+        with tarfile.open(dest, "w:gz") as archive:
+            archive.add(git_bundle, arcname="repository.gitbundle", recursive=False)
+            archive.add(manifest_path, arcname="bundle.manifest.json", recursive=False)
+            for source, arcname in [*pointer_files, *object_files]:
+                archive.add(source, arcname=arcname, recursive=False)
+    return {**manifest, "destination": str(dest)}
+
+
+def _safe_hydration_target(worktree: Path, logical_path: str) -> Path:
+    if str(logical_path).strip() in {"", "."}:
+        return worktree.resolve()
+    relative = _normalise_relative(logical_path)
+    target = (worktree / relative).resolve()
+    try:
+        target.relative_to(worktree.resolve())
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"object logical path escapes worktree: {logical_path}"
+        ) from exc
+    return target
+
+
+def reproduce_checkpoint(
+    repo: str | Path,
+    *,
+    commit: str = "HEAD",
+    destination: str | Path | None = None,
+    execute: bool = False,
+    timeout_seconds: int = 600,
+) -> dict[str, Any]:
+    root = _repository_root(repo)
+    resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
+    checkpoint_path, checkpoint = _checkpoint_at_commit(root, resolved)
+    if not _checkpoint_hash_valid(checkpoint):
+        raise ResearchGitError(f"checkpoint hash verification failed at {resolved}")
+    pointers = _pointer_records_at_commit(root, resolved)
+    required = list(checkpoint.get("object_refs") or [])
+    missing = [
+        object_hash
+        for object_hash in required
+        if object_hash not in pointers
+        or not (root / str(pointers[object_hash].get("store_relpath") or "")).is_file()
+    ]
+    command = str((checkpoint.get("reproduce") or {}).get("command") or "").strip()
+    result: dict[str, Any] = {
+        "commit": resolved,
+        "checkpoint_path": checkpoint_path,
+        "checkpoint": checkpoint,
+        "command": command,
+        "objects_complete": not missing,
+        "missing_objects": missing,
+        "worktree": None,
+        "executed": False,
+    }
+    if destination is None:
+        if execute:
+            raise ResearchGitError(
+                "--execute requires an explicit reproduction destination"
+            )
+        return result
+    if timeout_seconds < 1:
+        raise ResearchGitError("reproduction timeout must be at least one second")
+    if missing:
+        raise ResearchGitError(
+            "cannot materialize reproduction; missing objects: " + ", ".join(missing)
+        )
+    worktree = Path(destination).expanduser().resolve()
+    if worktree.exists():
+        raise ResearchGitError(f"reproduction destination already exists: {worktree}")
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(root, ["worktree", "add", "--detach", str(worktree), resolved])
+    for object_hash in required:
+        pointer = pointers[object_hash]
+        source = root / str(pointer["store_relpath"])
+        target = _safe_hydration_target(worktree, str(pointer["logical_path"]))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_file() and _hash_file(target) == object_hash:
+                continue
+            raise ResearchGitError(
+                f"refusing to overwrite reproduction target: {target}"
+            )
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    result["worktree"] = str(worktree)
+    if execute:
+        if not command:
+            raise ResearchGitError("checkpoint does not declare a reproduction command")
+        argv = shlex.split(command)
+        if not argv:
+            raise ResearchGitError("checkpoint reproduction command is empty")
+        working_directory = str(
+            (checkpoint.get("reproduce") or {}).get("working_directory") or "."
+        )
+        cwd = _safe_hydration_target(worktree, working_directory)
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            result["executed"] = True
+            result["returncode"] = 124
+            result["timed_out"] = True
+            result["stdout"] = str(exc.stdout or "")[-20000:]
+            result["stderr"] = str(exc.stderr or "")[-20000:]
+            return result
+        result["executed"] = True
+        result["timed_out"] = False
+        result["returncode"] = completed.returncode
+        result["stdout"] = (completed.stdout or "")[-20000:]
+        result["stderr"] = (completed.stderr or "")[-20000:]
+    return result
+
+
+__all__ = [
+    "BUNDLE_SCHEMA",
+    "CHECKPOINT_SCHEMA",
+    "OBJECT_POINTER_SCHEMA",
+    "REPOSITORY_SCHEMA",
+    "CheckpointResult",
+    "ObjectPointerResult",
+    "ResearchGitError",
+    "add_research_object",
+    "auto_checkpoint",
+    "create_checkpoint",
+    "create_research_bundle",
+    "init_repository",
+    "load_repository_config",
+    "repository_status",
+    "reproduce_checkpoint",
+    "research_diff",
+    "research_log",
+    "show_checkpoint",
+]

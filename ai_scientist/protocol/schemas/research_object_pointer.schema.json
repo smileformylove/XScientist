@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-git.v1/research_object_pointer.schema.json",
+  "title": "XScientist Local Research Object Pointer",
+  "description": "A Git-safe pointer to one immutable payload in the local content-addressed store.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "object_hash",
+    "size",
+    "media_type",
+    "logical_path",
+    "store_relpath",
+    "created_at",
+    "pointer_hash"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-object-pointer.v1"},
+    "protocol_kind": {"type": "string", "const": "research_object_pointer"},
+    "object_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "size": {"type": "integer", "minimum": 0},
+    "media_type": {"type": "string"},
+    "logical_path": {"type": "string"},
+    "store_relpath": {"type": "string"},
+    "created_at": {"type": "string"},
+    "pointer_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

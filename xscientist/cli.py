@@ -17,6 +17,7 @@ from .entrypoints import (
     manager_main,
     preflight_main,
     project_main,
+    research_main,
     validate_main,
     zhipu_main,
 )
@@ -33,6 +34,7 @@ _DELEGATES = {
     "bfts": bfts_main,
     "zhipu": zhipu_main,
     "preflight": preflight_main,
+    "research": research_main,
 }
 
 
@@ -55,6 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("bfts", "Run the low-level BFTS experiment launcher."),
         ("zhipu", "Run the Zhipu-oriented experiment launcher."),
         ("preflight", "Check runtime dependencies and credentials."),
+        ("research", "Record scientific progress in a local Git repository."),
     ):
         subparser = subparsers.add_parser(
             name,

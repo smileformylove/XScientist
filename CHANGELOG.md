@@ -6,6 +6,14 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Added
+
+- Serverless local research Git repositories with scientific checkpoint
+  commits, safe staging policies, local CAS object pointers, offline Git/CAS
+  bundles, and commit-scoped reproduction worktrees.
+- Optional `--research-git local` integration for project runs, with manual,
+  stage, and milestone checkpoint policies and no automatic remote or push.
+
 ## [0.1.0] - 2026-08-06
 
 ### Added

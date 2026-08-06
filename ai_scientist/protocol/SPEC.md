@@ -857,3 +857,42 @@ Empty JSON results are always emitted as valid JSON on stdout (`[]`,
 `{"aras": [], "totals": {...}}`, `null` — pick the shape most natural
 for the verb) with any human commentary on stderr, so `--json | jq …`
 pipelines never break on a no-hit case.
+
+## 21. Local Research Git Binding
+
+ARA scientific state may be bound to an ordinary local Git history without a
+server. The binding is additive: ARA remains the scientific source of truth,
+while Git supplies checkout, branch, diff, tag, and chronological commit
+semantics.
+
+A research repository declares `research.yaml` conforming to
+`research_repository.schema.json`. Every admitted Git checkpoint adds one
+`checkpoints/<sequence>-<stage>-<id>.json` conforming to
+`research_checkpoint.schema.json` and a human-readable Markdown sibling.
+Checkpoint records bind ARA manifests, node/claim identifiers, CAS object
+hashes, the parent Git commit, the previous checkpoint hash, and an optional
+single-line reproduction command.
+
+The current Git commit SHA MUST NOT be embedded in its own tree. Producers put
+the checkpoint/event/manifest hashes in commit trailers instead:
+
+```text
+Research-Checkpoint: rcp-...
+Research-Stage: experiment
+Research-State: completed
+Research-Event: sha256:...
+ARA-Manifest: sha256:...
+```
+
+Large payloads use `research_object_pointer.schema.json`; the pointer enters
+Git and the immutable payload remains in the local CAS. Portable offline
+archives use `research_bundle.schema.json` and contain a normal
+`repository.gitbundle`, the selected pointer records, and the required CAS
+closure. A bundle is conformant only when its completeness verdict and entry
+hashes match the actual archive.
+
+Local mode enforces `auto_push: false`. Implementations MUST stage from an
+explicit allowlist, MUST apply the secret/large-payload deny policy before the
+allowlist, and MUST NOT absorb a caller-populated Git index into an automatic
+checkpoint. Branches represent genuine scientific divergence; commits
+represent state transitions within a branch.

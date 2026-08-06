@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-git.v1/research_repository.schema.json",
+  "title": "XScientist Local Research Repository Configuration",
+  "description": "Configuration for a serverless, local-first scientific Git repository.",
+  "type": "object",
+  "required": ["schema_version", "name", "question", "actor", "git", "storage"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-repository.v1"},
+    "name": {"type": "string"},
+    "question": {"type": "string"},
+    "actor": {"type": "string"},
+    "git": {
+      "type": "object",
+      "required": ["mode", "checkpoint_policy", "auto_commit", "auto_push", "max_file_bytes", "track_patterns", "deny_patterns"],
+      "properties": {
+        "mode": {"type": "string", "const": "local"},
+        "checkpoint_policy": {"type": "string", "enum": ["manual", "stage", "milestone"]},
+        "auto_commit": {"type": "boolean"},
+        "auto_push": {"type": "boolean", "const": false},
+        "max_file_bytes": {"type": "integer", "minimum": 1024},
+        "track_patterns": {"type": "array", "items": {"type": "string"}},
+        "deny_patterns": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": ["mode", "root", "pointer_directory"],
+      "properties": {
+        "mode": {"type": "string", "const": "local-cas"},
+        "root": {"type": "string"},
+        "pointer_directory": {"type": "string"}
+      }
+    }
+  },
+  "additionalProperties": true
+}

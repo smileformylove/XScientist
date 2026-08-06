@@ -1,11 +1,17 @@
 # XScientist
 
+[![PyPI version](https://img.shields.io/pypi/v/xscientist.svg)](https://pypi.org/project/xscientist/)
+[![Python versions](https://img.shields.io/pypi/pyversions/xscientist.svg)](https://pypi.org/project/xscientist/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/xscientist.svg)](https://pypi.org/project/xscientist/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Smoke Checks](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
-[![PyPI](https://img.shields.io/pypi/v/xscientist.svg)](https://pypi.org/project/xscientist/)
 
 Chinese README: [docs/README.zh.md](docs/README.zh.md)
+
+**Install:** `python -m pip install "xscientist[full]"` ·
+[PyPI package](https://pypi.org/project/xscientist/) ·
+[Latest release](https://github.com/smileformylove/XScientist/releases/latest) ·
+[Documentation](docs/)
 
 > A sustainable, self-improving autonomous research system: idea generation, experiment execution, paper writing, self-review loops, strategy scheduling, and long-running daemon ops.
 > Going a step further — we're not just building "better autonomous research"; we're building a **git-like protocol for research**, expanding outward along an automation tech tree whose root nodes are mathematics and physics.
@@ -37,6 +43,7 @@ Important notes:
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Local Research Git (no server required)](#local-research-git-no-server-required)
 - [Outputs & Observability](#outputs--observability)
   - [Integrity Forensics](#integrity-forensics)
   - [ARA bundles (agent-facing artifact)](#ara-bundles-agent-facing-artifact)
@@ -98,11 +105,13 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
+- Local research Git: a standalone scientific project can record milestone commits, branches, diffs, offline bundles, and commit-scoped reproduction without GitHub or any server; large evidence remains in local CAS and Git tracks compact pointers.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
 ## Public Interfaces
 
 - `xscientist`: unified CLI available after a GitHub or source installation
+- `xscientist research`: serverless local scientific Git history and offline backup
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
 
@@ -113,6 +122,7 @@ flowchart LR
 | Long-running research | `xscientist daemon` |
 | Inspect outputs and boards | `xscientist manager` |
 | Inspect/fork ARA artifacts | `xscientist ara` |
+| Record local research commits | `xscientist research` |
 | Embed in Python | `XScientist` + `ProjectRequest` |
 | Expose an HTTP service | `xscientist serve` / `create_app()` |
 
@@ -158,21 +168,33 @@ operations entrypoints.
 
 Install the stable release from PyPI:
 
+| Install target | Command | What it includes |
+|---|---|---|
+| SDK and ARA protocol tools | `python -m pip install xscientist` | Public Python API, CLI, schemas, and artifact tooling |
+| Research runtime | `python -m pip install "xscientist[full]"` | LLM providers, data/science libraries, and end-to-end workflows |
+| Runtime and HTTP service | `python -m pip install "xscientist[full,service]"` | Full runtime plus FastAPI and Uvicorn |
+
 ```bash
 # Lightweight SDK and protocol surface
-pip install xscientist
+python -m pip install xscientist
 
 # Complete research runtime (recommended for running projects)
-pip install "xscientist[full]"
+python -m pip install "xscientist[full]"
 
 # Complete runtime plus the FastAPI/Uvicorn service
-pip install "xscientist[full,service]"
+python -m pip install "xscientist[full,service]"
+```
+
+Pin the current release when you need an identical environment:
+
+```bash
+python -m pip install "xscientist[full]==0.1.0"
 ```
 
 To test unreleased development changes, install the current `main` branch:
 
 ```bash
-pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+python -m pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
 For a local clone or repository development:
@@ -183,29 +205,22 @@ cd XScientist
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
-pip install -e ".[full,service,dev]"
+python -m pip install -e ".[full,service,dev]"
 ```
 
 More reproducible (CI-style) install (optional):
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Verify the installation:
 
 ```bash
 xscientist --version
-xscientist info
+xscientist info --json
+xscientist --help
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
-```
-
-After the first PyPI release, the shorter commands will be:
-
-```bash
-pip install xscientist
-pip install "xscientist[full]"
-pip install "xscientist[full,service]"
 ```
 
 ### 2) Configure API keys (as needed)
@@ -293,7 +308,17 @@ Most scripts support stricter quality gates. During local debugging you may choo
 ## Usage
 
 Create a local topic file such as `topic.md` before running the examples below.
-Repository checkouts may also use `examples/example_topic.md`.
+It can start with a plain-language research question:
+
+```markdown
+# Research topic
+
+Evaluate whether retrieval-guided reflection improves the factual accuracy of
+long-form scientific synthesis, and design an ablation that isolates the effect.
+```
+
+Repository checkouts may instead use `examples/example_topic.md`. Run
+`xscientist <command> --help` whenever you need the full option list.
 
 ### A) Run a single project from a topic
 
@@ -414,6 +439,64 @@ xscientist feedback --feedback-dir ./feedback report
 ```
 
 More usage: `docs/guides/FEEDBACK_QUICKSTART.md`
+
+---
+
+## Local Research Git (no server required)
+
+Git does not require GitHub or a server. Initialize a standalone research
+repository and record only scientifically meaningful progress:
+
+```bash
+xscientist research init ./my-research \
+  --question "Does retrieval-guided reflection improve factual accuracy?"
+
+cd my-research
+
+# After editing hypotheses/h1.json:
+xscientist research checkpoint \
+  --stage preregister \
+  --subject "lock H1 and its falsifier"
+
+xscientist research log
+xscientist research diff HEAD~1 HEAD
+```
+
+Large datasets, models, and binary evidence stay in the local content-addressed
+store; Git receives only a small immutable pointer:
+
+```bash
+xscientist research object add ./raw/results.parquet \
+  --logical-path data/results.parquet
+xscientist research checkpoint \
+  --stage evidence \
+  --subject "register immutable result table"
+```
+
+Create a complete offline backup containing normal Git history and the CAS
+reproduction closure:
+
+```bash
+xscientist research bundle \
+  --profile reproduce \
+  --dest ../my-research-backup.tar.gz
+```
+
+An end-to-end project can opt into automatic local milestone commits:
+
+```bash
+xscientist project my_project \
+  --topic topic.md \
+  --research-git local \
+  --git-checkpoint-policy milestone
+```
+
+XScientist creates no remote and enforces `auto_push: false`. It stages through
+a deny-first whitelist, refuses a pre-populated Git index, excludes secrets and
+large blobs, verifies checkpoint hashes, and can materialize a selected commit
+with `xscientist research reproduce`. See
+[`docs/LOCAL_RESEARCH_GIT.md`](docs/LOCAL_RESEARCH_GIT.md) for checkpoint
+semantics, policies, branches, backup profiles, and later GitHub synchronization.
 
 ---
 
@@ -635,6 +718,7 @@ Currently organized example files:
 
 - [Project usage](docs/guides/PROJECT_USAGE.md): project workflow usage and flags
 - [SDK and API](docs/guides/SDK_AND_API.md): installation, Python SDK, CLI, and HTTP API
+- [Local Research Git](docs/LOCAL_RESEARCH_GIT.md): serverless scientific commits, local CAS, offline backup, and commit-scoped reproduction
 - [Feedback quick start](docs/guides/FEEDBACK_QUICKSTART.md): feedback system operations
 - [Configuration reference](docs/CONFIG_REFERENCE.md): detailed configuration and parameters
 - [Source orchestration](docs/SOURCE_ORCHESTRATION.md): source queues and recommended run postures

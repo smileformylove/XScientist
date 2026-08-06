@@ -102,6 +102,7 @@ xscientist-validate = "xscientist.entrypoints:validate_main"
 xscientist-bfts = "xscientist.entrypoints:bfts_main"
 xscientist-zhipu = "xscientist.entrypoints:zhipu_main"
 xscientist-preflight = "xscientist.entrypoints:preflight_main"
+xscientist-research = "xscientist.entrypoints:research_main"
 
 [tool.setuptools]
 include-package-data = true

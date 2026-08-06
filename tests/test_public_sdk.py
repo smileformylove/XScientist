@@ -99,6 +99,21 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIn("--high-quality-mode", argv)
         self.assertEqual(argv[argv.index("--num-workers") + 1], "3")
 
+    def test_project_request_can_enable_local_research_git_without_remote(self) -> None:
+        request = ProjectRequest(
+            project="demo",
+            topic="topic.md",
+            research_git="local",
+            git_checkpoint_policy="stage",
+            research_git_strict=True,
+        )
+
+        argv = request.to_argv()
+
+        self.assertEqual(argv[argv.index("--research-git") + 1], "local")
+        self.assertEqual(argv[argv.index("--git-checkpoint-policy") + 1], "stage")
+        self.assertIn("--research-git-strict", argv)
+
     def test_project_request_requires_an_input_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "topic or ideas"):
             ProjectRequest(project="demo").to_argv()

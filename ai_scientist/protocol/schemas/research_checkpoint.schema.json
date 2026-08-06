@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-git.v1/research_checkpoint.schema.json",
+  "title": "XScientist Local Research Checkpoint",
+  "description": "A compact scientific state transition bound to one local Git commit.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "checkpoint_id",
+    "sequence",
+    "created_at",
+    "stage",
+    "status",
+    "subject",
+    "actor",
+    "changed_paths",
+    "ara_manifests",
+    "object_refs",
+    "reproduce",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-checkpoint.v1"},
+    "protocol_kind": {"type": "string", "const": "research_checkpoint"},
+    "checkpoint_id": {"type": "string", "pattern": "^rcp-[0-9a-f]{16}$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string"},
+    "stage": {"type": "string"},
+    "status": {"type": "string"},
+    "subject": {"type": "string"},
+    "summary": {"type": "string"},
+    "actor": {"type": "string"},
+    "branch": {"type": "string"},
+    "parent_commit": {"type": ["string", "null"]},
+    "previous_checkpoint_hash": {"type": ["string", "null"]},
+    "changed_paths": {"type": "array", "items": {"type": "string"}},
+    "nodes": {"type": "array", "items": {"type": "string"}},
+    "claims": {"type": "array", "items": {"type": "string"}},
+    "ara_manifests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "manifest_hash"],
+        "properties": {
+          "path": {"type": "string"},
+          "manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "object_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    },
+    "reproduce": {
+      "type": "object",
+      "required": ["command", "working_directory"],
+      "properties": {
+        "command": {"type": "string"},
+        "working_directory": {"type": "string"}
+      }
+    },
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": true
+}

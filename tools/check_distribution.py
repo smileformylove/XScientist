@@ -56,6 +56,9 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "ai_scientist/protocol/SPEC.md",
             "ai_scientist/protocol/schemas/manifest.schema.json",
             "ai_scientist/protocol/schemas/context_pack.schema.json",
+            "ai_scientist/protocol/schemas/research_checkpoint.schema.json",
+            "xscientist/research_git.py",
+            "xscientist/research_cli.py",
             "ai_scientist/resources/configs/bfts_default.yaml",
         }
         missing = sorted(required_wheel - wheel_names)

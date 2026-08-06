@@ -33,6 +33,10 @@ class Kind(str, Enum):
     REFERENCE_MANIFEST = "reference_manifest"
     MANIFEST_LOCK = "manifest_lock"
     MANIFEST_REVISION = "manifest_revision"
+    RESEARCH_CHECKPOINT = "research_checkpoint"
+    RESEARCH_OBJECT_POINTER = "research_object_pointer"
+    RESEARCH_BUNDLE = "research_bundle"
+    RESEARCH_REPOSITORY = "research_repository"
 
     @classmethod
     def values(cls) -> tuple[str, ...]:
