@@ -24,6 +24,8 @@ from typing import Any
 
 import numpy as np
 
+from ai_scientist.utils.evaluation_binding import evaluation_hash_binding
+
 try:
     from numpy._core import multiarray as _numpy_multiarray
 except ImportError:  # pragma: no cover - compatibility with older NumPy
@@ -940,38 +942,3 @@ def evaluate_experiment_data(
                 "reason": str(exc),
             }
         )
-
-
-def evaluation_hash_binding(report: Any) -> dict[str, Any] | None:
-    """Return the stable subset that binds a verified evaluation into a node hash."""
-
-    if (
-        not isinstance(report, Mapping)
-        or report.get("status") != "verified"
-        or report.get("trust_tier") != "deterministic_verified"
-    ):
-        return None
-    report_without_result_hash = dict(report)
-    recorded_result_hash = report_without_result_hash.pop("result_hash", None)
-    try:
-        expected_result_hash = _canonical_hash(report_without_result_hash)
-    except (TypeError, ValueError):
-        return None
-    if not recorded_result_hash or recorded_result_hash != expected_result_hash:
-        return None
-    input_info = report.get("input")
-    if not isinstance(input_info, Mapping):
-        return None
-    required = {
-        "schema_version": report.get("schema_version"),
-        "evaluator_version": report.get("evaluator_version"),
-        "evaluator_hash": report.get("evaluator_hash"),
-        "input_hash": input_info.get("sha256"),
-        "result_hash": recorded_result_hash,
-    }
-    if not all(required.values()):
-        return None
-    for key in ("evaluator_hash", "input_hash", "result_hash"):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(required[key])):
-            return None
-    return required

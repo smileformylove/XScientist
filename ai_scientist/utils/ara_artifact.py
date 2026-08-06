@@ -51,11 +51,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
-from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 from ai_scientist.utils.ara_graph import (
     graph_with_dag_metadata,
     write_exploration_graph_visualization,
 )
+from ai_scientist.utils.evaluation_binding import evaluation_hash_binding
 from ai_scientist.utils.ara_manifest_lock import (
     append_manifest_revision,
     write_manifest_lock,
