@@ -397,12 +397,97 @@ class LocalResearchGitTests(unittest.TestCase):
             history = research_log(root)
             shown = show_checkpoint(root, second.commit or "HEAD")
             diff = research_diff(
-                root, first.commit or "HEAD~1", second.commit or "HEAD"
+                root,
+                first.commit or "HEAD~1",
+                second.commit or "HEAD",
+                deep=True,
             )
 
             self.assertEqual(history[0]["trailers"]["Research-Stage"], ["evidence"])
             self.assertEqual(shown["checkpoint"]["claims"], ["c1"])
             self.assertTrue(any("claims/c1.json" in line for line in diff["changes"]))
+            self.assertEqual(diff["semantic"]["claims"]["added"], ["c1"])
+            self.assertTrue(
+                any(
+                    change["file"] == "claims/c1.json"
+                    for change in diff["semantic"]["structured_changes"]
+                )
+            )
+
+    def test_environment_receipt_supports_strict_reproduction(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            (root / "requirements.txt").write_text(
+                "jsonschema==4.23.0\n",
+                encoding="utf-8",
+            )
+            checkpoint = create_checkpoint(
+                root,
+                stage="preregister",
+                subject="lock runtime",
+            )
+            payload = json.loads(checkpoint.checkpoint_path.read_text(encoding="utf-8"))
+            receipt = payload["reproduce"]["environment"]
+
+            validate(receipt, load_schema("research_environment"))
+            reproduction = reproduce_checkpoint(
+                root,
+                commit=checkpoint.commit or "HEAD",
+                destination=base / "strict-reproduction",
+                environment_policy="strict",
+            )
+
+            self.assertTrue(reproduction["environment"]["matches"])
+            self.assertEqual(
+                receipt["dependency_locks"][0]["path"],
+                "requirements.txt",
+            )
+
+    def test_environment_policy_reports_runtime_drift_and_strictly_refuses_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+
+            with mock.patch.object(
+                research_git_module.platform,
+                "python_version",
+                return_value="0.0.0",
+            ):
+                warning = reproduce_checkpoint(root, environment_policy="warn")
+                with self.assertRaisesRegex(ResearchGitError, "environment mismatch"):
+                    reproduce_checkpoint(root, environment_policy="strict")
+
+            self.assertFalse(warning["environment"]["matches"])
+            self.assertEqual(
+                warning["environment"]["mismatches"][0]["field"],
+                "python.version",
+            )
+
+    def test_strict_reproduction_refuses_dependency_lock_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            lock = root / "requirements.txt"
+            lock.write_text("jsonschema==4.23.0\n", encoding="utf-8")
+            create_checkpoint(root, stage="preregister", subject="lock dependencies")
+            lock.write_text("jsonschema==4.24.0\n", encoding="utf-8")
+            self._git(root, "add", "requirements.txt")
+            self._git(root, "commit", "-m", "mutate dependency lock without checkpoint")
+            destination = base / "strict-reproduction"
+
+            with self.assertRaisesRegex(ResearchGitError, "dependency lock mismatch"):
+                reproduce_checkpoint(
+                    root,
+                    destination=destination,
+                    environment_policy="strict",
+                )
+
+            self.assertFalse(destination.exists())
 
     def test_divergent_branches_converge_with_multiple_scientific_parents(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -870,8 +870,12 @@ A research repository declares `research.yaml` conforming to
 `checkpoints/<sequence>-<stage>-<id>.json` conforming to
 `research_checkpoint.schema.json` and a human-readable Markdown sibling.
 Checkpoint records bind ARA manifests, node/claim identifiers, CAS object
-hashes, the parent Git commit, the previous checkpoint hash, and an optional
-single-line reproduction command.
+hashes, the parent Git commit, scientific parent checkpoint hashes, and an
+optional single-line reproduction command. `previous_checkpoint_hash` is the
+first-parent compatibility view; `parent_checkpoint_hashes` carries every
+scientific parent when divergent Git branches converge. New checkpoints embed
+a `research_environment.schema.json` receipt under `reproduce.environment`,
+covering runtime identity and hashes of supported dependency lock files.
 
 The current Git commit SHA MUST NOT be embedded in its own tree. Producers put
 the checkpoint/event/manifest hashes in commit trailers instead:
@@ -889,10 +893,20 @@ Git and the immutable payload remains in the local CAS. Portable offline
 archives use `research_bundle.schema.json` and contain a normal
 `repository.gitbundle`, the selected pointer records, and the required CAS
 closure. A bundle is conformant only when its completeness verdict and entry
-hashes match the actual archive.
+hashes match the actual archive. A restore consumer MUST reject undeclared,
+duplicate, non-regular, unsafe, size-mismatched, and hash-mismatched archive
+members, MUST verify `repository.gitbundle`, and MUST revalidate the restored
+scientific closure before publishing it.
+
+CAS presence alone is not integrity. Reproduction consumers MUST validate the
+pointer schema and pointer hash, constrain `store_relpath` to the configured
+CAS, and verify payload size and content hash before materialization. A
+materialized object MUST NOT share mutable storage with its CAS source.
 
 Local mode enforces `auto_push: false`. Implementations MUST stage from an
 explicit allowlist, MUST apply the secret/large-payload deny policy before the
 allowlist, and MUST NOT absorb a caller-populated Git index into an automatic
 checkpoint. Branches represent genuine scientific divergence; commits
-represent state transitions within a branch.
+represent state transitions within a branch. Implementations SHOULD serialize
+repository mutations and MUST leave caller files and the pre-existing Git
+index intact when checkpoint creation fails.

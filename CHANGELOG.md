@@ -13,6 +13,10 @@ for its Python package; the ARA protocol has its own version in
   bundles, and commit-scoped reproduction worktrees.
 - Optional `--research-git local` integration for project runs, with manual,
   stage, and milestone checkpoint policies and no automatic remote or push.
+- Research repository `fsck`, tamper-detecting CAS reproduction, verified
+  bundle restore, branch-aware multi-parent checkpoints, repository mutation
+  locks, failure-safe checkpoint transactions, environment receipts, strict
+  reproduction compatibility checks, and structured scientific diffs.
 
 ## [0.1.0] - 2026-08-06
 

@@ -79,6 +79,8 @@ reverse lookup without a self-referential hash.
 xscientist research log --limit 20
 xscientist research show HEAD
 xscientist research diff HEAD~1 HEAD
+xscientist research diff HEAD~1 HEAD --deep
+xscientist research fsck
 
 # Read the reproduction closure without executing anything.
 xscientist research reproduce HEAD --json
@@ -87,13 +89,22 @@ xscientist research reproduce HEAD --json
 xscientist research reproduce HEAD --dest ../reproduce-head
 
 # Explicit opt-in: execute the checkpoint's single-line command without a shell.
-xscientist research reproduce HEAD --dest ../reproduce-run --execute
+xscientist research reproduce HEAD --dest ../reproduce-run --execute \
+  --environment-policy strict
 ```
 
-`reproduce` verifies the checkpoint content hash and resolves object pointers
-from the selected commit, not from the latest tree. It therefore continues to
-work when later commits add or remove pointers, provided the referenced local
-CAS objects remain available.
+`reproduce` verifies the checkpoint, pointer, object size, and object SHA-256,
+then copies CAS payloads into the detached worktree so experiments cannot
+mutate the store through hard links. It resolves pointers from the selected
+commit, not from the latest tree. Every new checkpoint also binds a compact,
+secret-free environment receipt containing Python/platform identity and hashes
+of supported dependency lock files. `warn` is the compatibility default;
+`strict` refuses runtime or lock drift; `ignore` records but does not gate it.
+
+`fsck` verifies the checkpoint ancestry DAG, ARA manifest bindings, pointer
+schemas and hashes, configured CAS paths, object sizes, and payload hashes.
+`--no-objects` skips the potentially expensive payload scan and reports that
+choice as a warning.
 
 ## Store large evidence without Git inflation
 
@@ -109,10 +120,10 @@ xscientist research checkpoint \
   --subject "register immutable result table"
 ```
 
-The object command hashes the payload, hard-links it into `.ara-store/` when
-possible (copying only when necessary), and writes a small pointer under
-`research-objects/`. Checkpoints bind the pointer hash; the payload itself is
-ignored by Git.
+The object command streams one independent immutable snapshot into
+`.ara-store/`, hashing during the copy, and writes a small pointer under
+`research-objects/`. Source-file edits after registration cannot mutate CAS.
+Checkpoints bind the pointer hash; the payload itself is ignored by Git.
 
 Secrets such as `.env`, credentials, private keys, and token files are denied
 both as direct Git files and as CAS logical paths.
@@ -123,6 +134,10 @@ both as direct Git files and as CAS logical paths.
 xscientist research bundle \
   --profile reproduce \
   --dest ../my-research-backup.tar.gz
+
+xscientist research bundle verify ../my-research-backup.tar.gz
+xscientist research bundle restore ../my-research-backup.tar.gz \
+  --dest ../restored-research
 ```
 
 Profiles:
@@ -135,7 +150,10 @@ Profiles:
 
 Bundling refuses dirty repositories and missing objects by default. The
 archive includes `bundle.manifest.json` with hashes, sizes, HEAD, profile, and
-a completeness verdict.
+a completeness verdict. Verification rejects duplicate, hidden, non-regular,
+unsafe, missing, size-mismatched, or hash-mismatched members. Restore writes
+only declared regular members, removes the temporary bundle remote, restores
+the exact HEAD, and runs `fsck` before publishing the destination directory.
 
 ## Integrate with an XScientist project run
 
@@ -164,6 +182,13 @@ scientific divergence:
 git switch -c hypothesis/retrieval-reflection
 git switch -c method/graph-rag
 ```
+
+Checkpoint sequence numbers are branch-local. When ordinary Git merges two
+scientific branches, the next checkpoint records both parent checkpoint hashes
+while retaining the first parent in `previous_checkpoint_hash` for v1 reader
+compatibility. Checkpoint creation, object registration, and bundle snapshots
+share a repository lock; a failed Git commit removes only the new checkpoint
+files and this attempt's staged entries, preserving user research files.
 
 When a remote becomes available:
 

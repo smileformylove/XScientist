@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-git.v1/research_environment.schema.json",
+  "title": "XScientist Research Reproduction Environment",
+  "description": "A compact, secret-free receipt for runtime compatibility and dependency lock identity.",
+  "type": "object",
+  "required": ["schema_version", "python", "platform", "dependency_locks", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-environment.v1"},
+    "python": {
+      "type": "object",
+      "required": ["implementation", "version"],
+      "properties": {
+        "implementation": {"type": "string"},
+        "version": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "platform": {
+      "type": "object",
+      "required": ["system", "release", "machine"],
+      "properties": {
+        "system": {"type": "string"},
+        "release": {"type": "string"},
+        "machine": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "dependency_locks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "hash", "size"],
+        "properties": {
+          "path": {"type": "string"},
+          "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

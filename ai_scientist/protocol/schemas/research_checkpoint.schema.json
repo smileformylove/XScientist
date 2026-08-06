@@ -63,7 +63,11 @@
       "required": ["command", "working_directory"],
       "properties": {
         "command": {"type": "string"},
-        "working_directory": {"type": "string"}
+        "working_directory": {"type": "string"},
+        "environment": {
+          "type": "object",
+          "description": "Content-addressed research_environment receipt. Optional for checkpoints created before environment receipts were introduced."
+        }
       }
     },
     "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}

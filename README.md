@@ -459,7 +459,8 @@ xscientist research checkpoint \
   --subject "lock H1 and its falsifier"
 
 xscientist research log
-xscientist research diff HEAD~1 HEAD
+xscientist research diff HEAD~1 HEAD --deep
+xscientist research fsck
 ```
 
 Large datasets, models, and binary evidence stay in the local content-addressed
@@ -480,6 +481,9 @@ reproduction closure:
 xscientist research bundle \
   --profile reproduce \
   --dest ../my-research-backup.tar.gz
+xscientist research bundle verify ../my-research-backup.tar.gz
+xscientist research bundle restore ../my-research-backup.tar.gz \
+  --dest ../restored-research
 ```
 
 An end-to-end project can opt into automatic local milestone commits:
@@ -493,8 +497,10 @@ xscientist project my_project \
 
 XScientist creates no remote and enforces `auto_push: false`. It stages through
 a deny-first whitelist, refuses a pre-populated Git index, excludes secrets and
-large blobs, verifies checkpoint hashes, and can materialize a selected commit
-with `xscientist research reproduce`. See
+large blobs, verifies checkpoint/pointer/CAS hashes, records a compact runtime
+and dependency-lock receipt, and can materialize a selected commit with
+`xscientist research reproduce`. Use `--environment-policy strict` when a
+runtime or dependency mismatch must fail closed. See
 [`docs/LOCAL_RESEARCH_GIT.md`](docs/LOCAL_RESEARCH_GIT.md) for checkpoint
 semantics, policies, branches, backup profiles, and later GitHub synchronization.
 

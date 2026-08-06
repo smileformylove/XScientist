@@ -36,6 +36,7 @@ class Kind(str, Enum):
     RESEARCH_CHECKPOINT = "research_checkpoint"
     RESEARCH_OBJECT_POINTER = "research_object_pointer"
     RESEARCH_BUNDLE = "research_bundle"
+    RESEARCH_ENVIRONMENT = "research_environment"
     RESEARCH_REPOSITORY = "research_repository"
 
     @classmethod

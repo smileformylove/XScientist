@@ -119,6 +119,11 @@ def _build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("before", nargs="?", default="HEAD~1")
     diff_parser.add_argument("after", nargs="?", default="HEAD")
     diff_parser.add_argument("--repo", default=".")
+    diff_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Compare structured scientific JSON fields up to the safety limit.",
+    )
     diff_parser.add_argument("--json", action="store_true", dest="as_json")
 
     object_parser = subparsers.add_parser(
@@ -162,6 +167,11 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce_parser.add_argument("--dest")
     reproduce_parser.add_argument("--execute", action="store_true")
     reproduce_parser.add_argument("--timeout", type=int, default=600)
+    reproduce_parser.add_argument(
+        "--environment-policy",
+        choices=["ignore", "warn", "strict"],
+        default="warn",
+    )
     reproduce_parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
@@ -310,7 +320,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "diff":
-            payload = research_diff(args.repo, args.before, args.after)
+            payload = research_diff(
+                args.repo,
+                args.before,
+                args.after,
+                deep=args.deep,
+            )
             if args.as_json:
                 _print_json(payload)
             else:
@@ -319,6 +334,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(line)
                 if payload["stat"]:
                     print(payload["stat"])
+                semantic = payload["semantic"]
+                print(
+                    "Scientific checkpoints: "
+                    f"{semantic['before_checkpoint']['checkpoint_id']} -> "
+                    f"{semantic['after_checkpoint']['checkpoint_id']}"
+                )
+                print(
+                    "Claims: "
+                    f"+{len(semantic['claims']['added'])} "
+                    f"-{len(semantic['claims']['removed'])}; "
+                    "nodes: "
+                    f"+{len(semantic['nodes']['added'])} "
+                    f"-{len(semantic['nodes']['removed'])}; "
+                    "objects: "
+                    f"+{len(semantic['objects']['added'])} "
+                    f"-{len(semantic['objects']['removed'])}"
+                )
+                if args.deep:
+                    print(
+                        "Structured field changes: "
+                        f"{len(semantic['structured_changes'])}"
+                    )
             return 0
 
         if args.command == "object" and args.object_command == "add":
@@ -387,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 destination=args.dest,
                 execute=args.execute,
                 timeout_seconds=args.timeout,
+                environment_policy=args.environment_policy,
             )
             if args.as_json:
                 _print_json(payload)
@@ -394,7 +432,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Commit:           {payload['commit']}")
                 print(f"Checkpoint:       {payload['checkpoint']['checkpoint_id']}")
                 print(f"Objects complete: {payload['objects_complete']}")
+                print(f"Environment:      {payload['environment']['matches']}")
                 print(f"Command:          {payload['command'] or '(not declared)'}")
+                if (
+                    args.environment_policy == "warn"
+                    and payload["environment"]["mismatches"]
+                ):
+                    for mismatch in payload["environment"]["mismatches"]:
+                        print(
+                            f"warning: environment mismatch: {mismatch['field']}",
+                            file=sys.stderr,
+                        )
                 if payload.get("worktree"):
                     print(f"Worktree:         {payload['worktree']}")
                 if payload.get("executed"):

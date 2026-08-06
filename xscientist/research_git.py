@@ -12,9 +12,11 @@ import hashlib
 import json
 import mimetypes
 import os
+import platform
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -44,6 +46,7 @@ REPOSITORY_SCHEMA = "xscientist.research-repository.v1"
 CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
 OBJECT_POINTER_SCHEMA = "xscientist.research-object-pointer.v1"
 BUNDLE_SCHEMA = "xscientist.research-bundle.v1"
+ENVIRONMENT_SCHEMA = "xscientist.research-environment.v1"
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -93,6 +96,17 @@ DEFAULT_TRACK_PATTERNS = (
     "science_constitution.json",
     "epistemic_graph.json",
     "research_plan.json",
+    "pyproject.toml",
+    "requirements*.txt",
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "environment*.yml",
+    "environment*.yaml",
+    "conda-lock*.yml",
+    "conda-lock*.yaml",
+    "Dockerfile",
+    "Dockerfile.*",
 )
 
 DEFAULT_DENY_PATTERNS = (
@@ -374,6 +388,128 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
+
+
+_DEPENDENCY_LOCK_PATTERNS = (
+    "pyproject.toml",
+    "requirements*.txt",
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "environment*.yml",
+    "environment*.yaml",
+    "conda-lock*.yml",
+    "conda-lock*.yaml",
+    "Dockerfile",
+    "Dockerfile.*",
+)
+
+
+def _environment_receipt(repo: Path) -> dict[str, Any]:
+    dependency_paths = sorted(
+        {
+            path
+            for pattern in _DEPENDENCY_LOCK_PATTERNS
+            for path in repo.glob(pattern)
+            if path.is_file()
+        },
+        key=lambda path: path.relative_to(repo).as_posix(),
+    )
+    base = {
+        "schema_version": ENVIRONMENT_SCHEMA,
+        "python": {
+            "implementation": sys.implementation.name,
+            "version": platform.python_version(),
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "dependency_locks": [
+            {
+                "path": path.relative_to(repo).as_posix(),
+                "hash": _hash_file(path),
+                "size": path.stat().st_size,
+            }
+            for path in dependency_paths
+        ],
+    }
+    receipt = {**base, "content_hash": content_hash(base)}
+    try:
+        validate_json(receipt, load_schema("research_environment"))
+    except ValidationError as exc:
+        raise ResearchGitError(
+            f"generated research environment receipt is invalid: {exc.message}"
+        ) from exc
+    return receipt
+
+
+def _environment_receipt_hash_valid(receipt: Any) -> bool:
+    if not isinstance(receipt, dict):
+        return False
+    expected = str(receipt.get("content_hash") or "")
+    scrubbed = {key: value for key, value in receipt.items() if key != "content_hash"}
+    return bool(expected and content_hash(scrubbed) == expected)
+
+
+def _compare_runtime_environment(receipt: Any) -> dict[str, Any]:
+    if not isinstance(receipt, dict) or not _environment_receipt_hash_valid(receipt):
+        return {
+            "recorded": False,
+            "matches": None,
+            "mismatches": [
+                {
+                    "field": "reproduce.environment",
+                    "expected": "valid environment receipt",
+                    "actual": "missing or invalid",
+                }
+            ],
+        }
+    expected_python = receipt.get("python") or {}
+    expected_platform = receipt.get("platform") or {}
+    actual = {
+        "python.implementation": sys.implementation.name,
+        "python.version": platform.python_version(),
+        "platform.system": platform.system(),
+        "platform.machine": platform.machine(),
+    }
+    expected = {
+        "python.implementation": expected_python.get("implementation"),
+        "python.version": expected_python.get("version"),
+        "platform.system": expected_platform.get("system"),
+        "platform.machine": expected_platform.get("machine"),
+    }
+    mismatches = [
+        {"field": field, "expected": expected[field], "actual": value}
+        for field, value in actual.items()
+        if expected[field] != value
+    ]
+    return {
+        "recorded": True,
+        "matches": not mismatches,
+        "mismatches": mismatches,
+        "recorded_content_hash": receipt.get("content_hash"),
+    }
+
+
+def _compare_dependency_locks(worktree: Path, receipt: Any) -> list[dict[str, Any]]:
+    if not isinstance(receipt, dict):
+        return []
+    mismatches: list[dict[str, Any]] = []
+    for item in receipt.get("dependency_locks") or []:
+        relative = _normalise_relative(str(item.get("path") or ""))
+        target = worktree / relative
+        actual_hash = _hash_file(target) if target.is_file() else None
+        if actual_hash != item.get("hash"):
+            mismatches.append(
+                {
+                    "field": f"dependency_locks.{relative}",
+                    "expected": item.get("hash"),
+                    "actual": actual_hash,
+                }
+            )
+    return mismatches
 
 
 def _copy_into_store(source: Path, store_root: Path) -> tuple[str, int, Path]:
@@ -1065,6 +1201,7 @@ def _create_checkpoint_locked(
             *pointers.keys(),
         }
     )
+    environment = _environment_receipt(root)
     created_at = _now_iso()
     base_payload: dict[str, Any] = {
         "schema_version": CHECKPOINT_SCHEMA,
@@ -1088,6 +1225,7 @@ def _create_checkpoint_locked(
         "reproduce": {
             "command": reproduce_command or "",
             "working_directory": ".",
+            "environment": environment,
         },
     }
     checkpoint_hash = content_hash(base_payload)
@@ -1598,10 +1736,98 @@ def research_log(repo: str | Path, *, limit: int = 20) -> list[dict[str, Any]]:
     return entries
 
 
+def _set_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, list[str]]:
+    before_set = {str(item) for item in before}
+    after_set = {str(item) for item in after}
+    return {
+        "added": sorted(after_set - before_set),
+        "removed": sorted(before_set - after_set),
+        "unchanged": sorted(before_set & after_set),
+    }
+
+
+def _manifest_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, Any]:
+    before_map = {
+        str(item.get("path")): str(item.get("manifest_hash"))
+        for item in before
+        if isinstance(item, dict)
+    }
+    after_map = {
+        str(item.get("path")): str(item.get("manifest_hash"))
+        for item in after
+        if isinstance(item, dict)
+    }
+    common = set(before_map) & set(after_map)
+    return {
+        "added": sorted(set(after_map) - set(before_map)),
+        "removed": sorted(set(before_map) - set(after_map)),
+        "changed": [
+            {
+                "path": path,
+                "before": before_map[path],
+                "after": after_map[path],
+            }
+            for path in sorted(common)
+            if before_map[path] != after_map[path]
+        ],
+        "unchanged": sorted(
+            path for path in common if before_map[path] == after_map[path]
+        ),
+    }
+
+
+def _structured_value_diff(
+    before: Any,
+    after: Any,
+    *,
+    path: str = "$",
+    changes: list[dict[str, Any]] | None = None,
+    limit: int = 2000,
+) -> list[dict[str, Any]]:
+    output = changes if changes is not None else []
+    if len(output) >= limit or before == after:
+        return output
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after), key=str):
+            if len(output) >= limit:
+                break
+            child = f"{path}.{key}"
+            if key not in before:
+                output.append({"path": child, "before": None, "after": after[key]})
+            elif key not in after:
+                output.append({"path": child, "before": before[key], "after": None})
+            else:
+                _structured_value_diff(
+                    before[key],
+                    after[key],
+                    path=child,
+                    changes=output,
+                    limit=limit,
+                )
+        return output
+    output.append({"path": path, "before": before, "after": after})
+    return output
+
+
+def _json_at_revision(repo: Path, commit: str, path: str) -> tuple[Any, str | None]:
+    blob = _run_git(repo, ["show", f"{commit}:{path}"], check=False)
+    if blob.returncode:
+        return None, None
+    encoded = blob.stdout.encode("utf-8")
+    if len(encoded) > 2 * 1024 * 1024:
+        return None, "exceeds 2 MiB semantic diff limit"
+    try:
+        return json.loads(blob.stdout), None
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc.msg}"
+
+
 def research_diff(
     repo: str | Path,
     before: str = "HEAD~1",
     after: str = "HEAD",
+    *,
+    deep: bool = False,
 ) -> dict[str, Any]:
     root = _repository_root(repo)
     resolved_before = _run_git(root, ["rev-parse", before]).stdout.strip()
@@ -1620,11 +1846,95 @@ def research_diff(
     stat = _run_git(
         root, ["diff", "--stat", resolved_before, resolved_after]
     ).stdout.rstrip()
+    before_path, before_checkpoint = _checkpoint_at_commit(root, resolved_before)
+    after_path, after_checkpoint = _checkpoint_at_commit(root, resolved_after)
+    fields = {
+        field: {
+            "before": before_checkpoint.get(field),
+            "after": after_checkpoint.get(field),
+            "changed": before_checkpoint.get(field) != after_checkpoint.get(field),
+        }
+        for field in ("stage", "status", "subject", "summary", "actor", "branch")
+    }
+    semantic: dict[str, Any] = {
+        "before_checkpoint": {
+            "path": before_path,
+            "checkpoint_id": before_checkpoint.get("checkpoint_id"),
+            "content_hash": before_checkpoint.get("content_hash"),
+            "hash_valid": _checkpoint_hash_valid(before_checkpoint),
+        },
+        "after_checkpoint": {
+            "path": after_path,
+            "checkpoint_id": after_checkpoint.get("checkpoint_id"),
+            "content_hash": after_checkpoint.get("content_hash"),
+            "hash_valid": _checkpoint_hash_valid(after_checkpoint),
+        },
+        "fields": fields,
+        "nodes": _set_delta(
+            before_checkpoint.get("nodes") or [],
+            after_checkpoint.get("nodes") or [],
+        ),
+        "claims": _set_delta(
+            before_checkpoint.get("claims") or [],
+            after_checkpoint.get("claims") or [],
+        ),
+        "objects": _set_delta(
+            before_checkpoint.get("object_refs") or [],
+            after_checkpoint.get("object_refs") or [],
+        ),
+        "ara_manifests": _manifest_delta(
+            before_checkpoint.get("ara_manifests") or [],
+            after_checkpoint.get("ara_manifests") or [],
+        ),
+        "environment_changed": (
+            ((before_checkpoint.get("reproduce") or {}).get("environment") or {}).get(
+                "content_hash"
+            )
+            != ((after_checkpoint.get("reproduce") or {}).get("environment") or {}).get(
+                "content_hash"
+            )
+        ),
+    }
+    structured_changes: list[dict[str, Any]] = []
+    structured_warnings: list[str] = []
+    if deep:
+        candidates: set[str] = set()
+        for line in name_status:
+            parts = line.split("\t")
+            for candidate in parts[1:]:
+                if candidate.endswith(".json") and (
+                    candidate.startswith(("hypotheses/", "claims/", "ara/"))
+                    or PurePosixPath(candidate).name
+                    in {
+                        "preregistration.json",
+                        "research_plan.json",
+                        "metrics.json",
+                        "verification_report.json",
+                        "exploration_graph.json",
+                    }
+                ):
+                    candidates.add(candidate)
+        for candidate in sorted(candidates):
+            before_value, before_warning = _json_at_revision(
+                root, resolved_before, candidate
+            )
+            after_value, after_warning = _json_at_revision(root, resolved_after, candidate)
+            if before_warning:
+                structured_warnings.append(f"{candidate} before: {before_warning}")
+            if after_warning:
+                structured_warnings.append(f"{candidate} after: {after_warning}")
+            if before_warning or after_warning:
+                continue
+            for change in _structured_value_diff(before_value, after_value):
+                structured_changes.append({"file": candidate, **change})
+    semantic["structured_changes"] = structured_changes
+    semantic["warnings"] = structured_warnings
     return {
         "before": resolved_before,
         "after": resolved_after,
         "changes": name_status,
         "stat": stat,
+        "semantic": semantic,
     }
 
 
@@ -2102,7 +2412,10 @@ def reproduce_checkpoint(
     destination: str | Path | None = None,
     execute: bool = False,
     timeout_seconds: int = 600,
+    environment_policy: str = "warn",
 ) -> dict[str, Any]:
+    if environment_policy not in {"ignore", "warn", "strict"}:
+        raise ResearchGitError("environment policy must be ignore, warn, or strict")
     root = _repository_root(repo)
     store_root = _configured_store_root(root)
     resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
@@ -2139,6 +2452,8 @@ def reproduce_checkpoint(
         if store_path is not None:
             verified_sources[object_hash] = store_path
     command = str((checkpoint.get("reproduce") or {}).get("command") or "").strip()
+    environment_receipt = (checkpoint.get("reproduce") or {}).get("environment")
+    environment = _compare_runtime_environment(environment_receipt)
     result: dict[str, Any] = {
         "commit": resolved,
         "checkpoint_path": checkpoint_path,
@@ -2148,9 +2463,16 @@ def reproduce_checkpoint(
         "missing_objects": missing,
         "damaged_objects": damaged,
         "object_errors": object_errors,
+        "environment_policy": environment_policy,
+        "environment": environment,
         "worktree": None,
         "executed": False,
     }
+    if environment_policy == "strict" and environment["mismatches"]:
+        raise ResearchGitError(
+            "reproduction environment mismatch: "
+            + ", ".join(item["field"] for item in environment["mismatches"])
+        )
     if destination is None:
         if execute:
             raise ResearchGitError(
@@ -2187,6 +2509,19 @@ def reproduce_checkpoint(
             raise ResearchGitError(
                 f"reproduction object changed during hydration: {object_hash}"
             )
+    dependency_mismatches = _compare_dependency_locks(worktree, environment_receipt)
+    environment["mismatches"].extend(dependency_mismatches)
+    environment["matches"] = environment["recorded"] and not environment["mismatches"]
+    if environment_policy == "strict" and dependency_mismatches:
+        _run_git(
+            root,
+            ["worktree", "remove", "--force", str(worktree)],
+            check=False,
+        )
+        raise ResearchGitError(
+            "reproduction dependency lock mismatch: "
+            + ", ".join(item["field"] for item in dependency_mismatches)
+        )
     result["worktree"] = str(worktree)
     if execute:
         if not command:
@@ -2225,6 +2560,7 @@ def reproduce_checkpoint(
 __all__ = [
     "BUNDLE_SCHEMA",
     "CHECKPOINT_SCHEMA",
+    "ENVIRONMENT_SCHEMA",
     "OBJECT_POINTER_SCHEMA",
     "REPOSITORY_SCHEMA",
     "CheckpointResult",
