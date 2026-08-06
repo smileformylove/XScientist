@@ -246,6 +246,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         temp.replace(path)
+        _fsync_directory(path.parent)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -255,6 +256,24 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
         path,
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
     )
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory entry update where the platform supports it."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        # Some filesystems do not support directory fsync. The file itself was
+        # already flushed, so keep the portable best-effort behaviour.
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _run_git(
@@ -305,6 +324,43 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
+
+
+def _copy_into_store(source: Path, store_root: Path) -> tuple[str, int, Path]:
+    """Copy one immutable snapshot into CAS and return hash, size, and path.
+
+    A hard link is deliberately not used: mutating the caller's source after
+    registration must never mutate the content-addressed object.
+    """
+
+    incoming = store_root / "incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    handle, raw_temp = tempfile.mkstemp(prefix="object-", dir=incoming)
+    temp = Path(raw_temp)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source.open("rb") as source_stream, os.fdopen(handle, "wb") as target:
+            for chunk in iter(lambda: source_stream.read(1024 * 1024), b""):
+                target.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        object_hash = f"sha256:{digest.hexdigest()}"
+        store_path = store_root / "objects" / "sha256" / digest.hexdigest()
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        if store_path.exists():
+            if not store_path.is_file() or _hash_file(store_path) != object_hash:
+                raise ResearchGitError(
+                    f"CAS collision or damaged object at {store_path}"
+                )
+        else:
+            temp.replace(store_path)
+            _fsync_directory(store_path.parent)
+        return object_hash, size, store_path
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _repository_root(path: str | Path, *, require_config: bool = True) -> Path:
@@ -547,7 +603,49 @@ def _manifest_refs(repo: Path, paths: Iterable[str]) -> list[dict[str, str]]:
     return refs
 
 
-def _pointer_records(repo: Path) -> dict[str, dict[str, Any]]:
+def _pointer_hash_valid(payload: dict[str, Any]) -> bool:
+    expected = str(payload.get("pointer_hash") or "")
+    scrubbed = {key: value for key, value in payload.items() if key != "pointer_hash"}
+    return bool(expected and content_hash(scrubbed) == expected)
+
+
+def _validate_pointer_payload(
+    payload: Any,
+    *,
+    pointer_path: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ResearchGitError(f"invalid research object pointer: {pointer_path}")
+    try:
+        validate_json(payload, load_schema("research_object_pointer"))
+    except ValidationError as exc:
+        raise ResearchGitError(
+            f"invalid research object pointer {pointer_path}: {exc.message}"
+        ) from exc
+    if not _pointer_hash_valid(payload):
+        raise ResearchGitError(
+            f"research object pointer hash verification failed: {pointer_path}"
+        )
+    _normalise_relative(str(payload.get("logical_path") or ""))
+    store_relpath = _normalise_relative(str(payload.get("store_relpath") or ""))
+    digest = str(payload["object_hash"]).split(":", 1)[1]
+    if PurePosixPath(store_relpath).parts[-3:] != ("objects", "sha256", digest):
+        raise ResearchGitError(
+            f"research object pointer has inconsistent CAS path: {pointer_path}"
+        )
+    pointer_name = PurePosixPath(pointer_path).name
+    if pointer_name.startswith("sha256-") and pointer_name != f"sha256-{digest}.json":
+        raise ResearchGitError(
+            f"research object pointer filename does not match its hash: {pointer_path}"
+        )
+    return payload
+
+
+def _pointer_records(
+    repo: Path,
+    *,
+    strict: bool = False,
+) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     pointer_root = repo / "research-objects"
     if not pointer_root.exists():
@@ -555,11 +653,18 @@ def _pointer_records(repo: Path) -> dict[str, dict[str, Any]]:
     for path in sorted(pointer_root.glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            payload = _validate_pointer_payload(
+                payload,
+                pointer_path=path.relative_to(repo).as_posix(),
+            )
+        except (OSError, json.JSONDecodeError, ResearchGitError) as exc:
+            if strict:
+                raise ResearchGitError(
+                    f"cannot validate research object pointer: "
+                    f"{path.relative_to(repo).as_posix()}: {exc}"
+                ) from exc
             continue
-        object_hash = (
-            str(payload.get("object_hash") or "") if isinstance(payload, dict) else ""
-        )
+        object_hash = str(payload.get("object_hash") or "")
         if object_hash.startswith("sha256:"):
             records[object_hash] = {
                 **payload,
@@ -568,7 +673,12 @@ def _pointer_records(repo: Path) -> dict[str, dict[str, Any]]:
     return records
 
 
-def _pointer_records_at_commit(repo: Path, commit: str) -> dict[str, dict[str, Any]]:
+def _pointer_records_at_commit(
+    repo: Path,
+    commit: str,
+    *,
+    strict: bool = True,
+) -> dict[str, dict[str, Any]]:
     tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
     records: dict[str, dict[str, Any]] = {}
     for pointer_path in sorted(
@@ -579,14 +689,72 @@ def _pointer_records_at_commit(repo: Path, commit: str) -> dict[str, dict[str, A
         raw = _run_git(repo, ["show", f"{commit}:{pointer_path}"]).stdout
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError:
+            payload = _validate_pointer_payload(payload, pointer_path=pointer_path)
+        except (json.JSONDecodeError, ResearchGitError) as exc:
+            if strict:
+                raise ResearchGitError(
+                    f"cannot validate research object pointer at "
+                    f"{commit}:{pointer_path}"
+                ) from exc
             continue
-        object_hash = (
-            str(payload.get("object_hash") or "") if isinstance(payload, dict) else ""
-        )
+        object_hash = str(payload.get("object_hash") or "")
         if object_hash.startswith("sha256:"):
             records[object_hash] = {**payload, "pointer_path": pointer_path}
     return records
+
+
+def _configured_store_root(repo: Path) -> Path:
+    config = load_repository_config(repo)
+    relative = _normalise_relative(
+        str((config.get("storage") or {}).get("root") or ".ara-store")
+    )
+    return (repo / relative).resolve()
+
+
+def _pointer_store_path(
+    repo: Path,
+    pointer: dict[str, Any],
+    *,
+    store_root: Path | None = None,
+) -> Path:
+    relative = _normalise_relative(str(pointer.get("store_relpath") or ""))
+    target = (repo / relative).resolve()
+    allowed_root = (store_root or _configured_store_root(repo)).resolve()
+    try:
+        target.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"research object store path escapes configured CAS: {relative}"
+        ) from exc
+    return target
+
+
+def _verify_pointer_object(
+    repo: Path,
+    object_hash: str,
+    pointer: dict[str, Any],
+    *,
+    store_root: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    try:
+        store_path = _pointer_store_path(repo, pointer, store_root=store_root)
+    except ResearchGitError as exc:
+        return None, str(exc)
+    if not store_path.is_file():
+        return None, f"missing CAS object: {object_hash}"
+    expected_size = int(pointer.get("size") or 0)
+    actual_size = store_path.stat().st_size
+    if actual_size != expected_size:
+        return store_path, (
+            f"CAS object size mismatch for {object_hash}: "
+            f"expected {expected_size}, got {actual_size}"
+        )
+    actual_hash = _hash_file(store_path)
+    if actual_hash != object_hash:
+        return store_path, (
+            f"CAS object hash mismatch for {object_hash}: got {actual_hash}"
+        )
+    return store_path, None
 
 
 def _checkpoint_hash_valid(payload: dict[str, Any]) -> bool:
@@ -597,6 +765,26 @@ def _checkpoint_hash_valid(payload: dict[str, Any]) -> bool:
         if key not in {"checkpoint_id", "content_hash"}
     }
     return bool(expected and content_hash(scrubbed) == expected)
+
+
+def _validate_checkpoint_payload(
+    payload: Any,
+    *,
+    checkpoint_path: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ResearchGitError(f"invalid research checkpoint: {checkpoint_path}")
+    try:
+        validate_json(payload, load_schema("research_checkpoint"))
+    except ValidationError as exc:
+        raise ResearchGitError(
+            f"invalid research checkpoint {checkpoint_path}: {exc.message}"
+        ) from exc
+    if not _checkpoint_hash_valid(payload):
+        raise ResearchGitError(
+            f"checkpoint hash verification failed: {checkpoint_path}"
+        )
+    return payload
 
 
 def _checkpoint_markdown(payload: dict[str, Any]) -> str:
@@ -705,7 +893,7 @@ def create_checkpoint(
         explicit_ara.append(relative)
     manifests = _manifest_refs(root, [*selected, *explicit_ara])
 
-    pointers = _pointer_records(root)
+    pointers = _pointer_records(root, strict=True)
     resolved_object_refs = sorted(
         {
             *(str(item) for item in object_refs if str(item).startswith("sha256:")),
@@ -889,21 +1077,6 @@ def add_research_object(
     source_path = Path(source).expanduser().resolve()
     if not source_path.is_file():
         raise ResearchGitError(f"research object is not a regular file: {source_path}")
-    object_hash = _hash_file(source_path)
-    digest = object_hash.split(":", 1)[1]
-    store_root = root / str((config.get("storage") or {}).get("root") or ".ara-store")
-    store_path = store_root / "objects" / "sha256" / digest
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    linked = False
-    if not store_path.exists():
-        try:
-            os.link(source_path, store_path)
-            linked = True
-        except OSError:
-            shutil.copy2(source_path, store_path)
-    elif _hash_file(store_path) != object_hash:
-        raise ResearchGitError(f"CAS collision or damaged object at {store_path}")
-
     if logical_path:
         logical = _normalise_relative(logical_path)
     else:
@@ -915,6 +1088,9 @@ def add_research_object(
         raise ResearchGitError(
             f"refusing to register a denied secret/binary logical path: {logical}"
         )
+    store_root = _configured_store_root(root)
+    object_hash, object_size, store_path = _copy_into_store(source_path, store_root)
+    digest = object_hash.split(":", 1)[1]
     pointer_dir = root / str(
         (config.get("storage") or {}).get("pointer_directory") or "research-objects"
     )
@@ -923,7 +1099,7 @@ def add_research_object(
         "schema_version": OBJECT_POINTER_SCHEMA,
         "protocol_kind": "research_object_pointer",
         "object_hash": object_hash,
-        "size": source_path.stat().st_size,
+        "size": object_size,
         "media_type": media_type
         or mimetypes.guess_type(source_path.name)[0]
         or "application/octet-stream",
@@ -943,8 +1119,8 @@ def add_research_object(
         pointer_path=pointer_path,
         store_path=store_path,
         object_hash=object_hash,
-        size=source_path.stat().st_size,
-        linked=linked,
+        size=object_size,
+        linked=False,
     )
 
 
@@ -976,6 +1152,143 @@ def show_checkpoint(repo: str | Path, commit: str = "HEAD") -> dict[str, Any]:
         "path": path,
         "checkpoint_hash_valid": _checkpoint_hash_valid(payload),
         "checkpoint": payload,
+    }
+
+
+def verify_research_repository(
+    repo: str | Path,
+    *,
+    commit: str = "HEAD",
+    verify_objects: bool = True,
+) -> dict[str, Any]:
+    """Verify the scientific closure visible from one Git revision."""
+
+    root = _repository_root(repo)
+    store_root = _configured_store_root(root)
+    resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
+    tree = set(
+        _run_git(root, ["ls-tree", "-r", "--name-only", resolved]).stdout.splitlines()
+    )
+    errors: list[str] = []
+    warnings: list[str] = []
+    checkpoints: list[tuple[str, dict[str, Any]]] = []
+    pointer_records: dict[str, dict[str, Any]] = {}
+    checked = {
+        "checkpoints": 0,
+        "pointers": 0,
+        "objects": 0,
+        "ara_manifests": 0,
+    }
+
+    for checkpoint_path in sorted(
+        path
+        for path in tree
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    ):
+        checked["checkpoints"] += 1
+        try:
+            payload = json.loads(
+                _run_git(root, ["show", f"{resolved}:{checkpoint_path}"]).stdout
+            )
+            payload = _validate_checkpoint_payload(
+                payload,
+                checkpoint_path=f"{resolved}:{checkpoint_path}",
+            )
+            checkpoints.append((checkpoint_path, payload))
+        except (json.JSONDecodeError, ResearchGitError) as exc:
+            errors.append(str(exc))
+
+    seen_sequences: dict[int, str] = {}
+    ordered = sorted(
+        checkpoints,
+        key=lambda item: (int(item[1].get("sequence") or 0), item[0]),
+    )
+    for checkpoint_path, payload in ordered:
+        sequence = int(payload.get("sequence") or 0)
+        previous_path = seen_sequences.get(sequence)
+        if previous_path:
+            errors.append(
+                f"duplicate checkpoint sequence {sequence}: "
+                f"{previous_path}, {checkpoint_path}"
+            )
+        seen_sequences[sequence] = checkpoint_path
+    for index, (checkpoint_path, payload) in enumerate(ordered):
+        expected_previous = None if index == 0 else ordered[index - 1][1].get("content_hash")
+        if payload.get("previous_checkpoint_hash") != expected_previous:
+            errors.append(
+                f"checkpoint chain mismatch at {checkpoint_path}: "
+                f"expected previous {expected_previous}, got "
+                f"{payload.get('previous_checkpoint_hash')}"
+            )
+
+    for pointer_path in sorted(
+        path
+        for path in tree
+        if path.startswith("research-objects/") and path.endswith(".json")
+    ):
+        checked["pointers"] += 1
+        try:
+            payload = json.loads(
+                _run_git(root, ["show", f"{resolved}:{pointer_path}"]).stdout
+            )
+            payload = _validate_pointer_payload(payload, pointer_path=pointer_path)
+            object_hash = str(payload["object_hash"])
+            if object_hash in pointer_records:
+                errors.append(f"duplicate pointer for object {object_hash}")
+            pointer_records[object_hash] = {**payload, "pointer_path": pointer_path}
+        except (json.JSONDecodeError, ResearchGitError) as exc:
+            errors.append(str(exc))
+
+    latest = ordered[-1][1] if ordered else None
+    if latest is None:
+        errors.append(f"commit {resolved} contains no valid research checkpoint")
+    else:
+        for object_hash in latest.get("object_refs") or []:
+            pointer = pointer_records.get(str(object_hash))
+            if pointer is None:
+                errors.append(f"checkpoint references missing pointer: {object_hash}")
+                continue
+            if verify_objects:
+                checked["objects"] += 1
+                _store_path, object_error = _verify_pointer_object(
+                    root,
+                    str(object_hash),
+                    pointer,
+                    store_root=store_root,
+                )
+                if object_error:
+                    errors.append(object_error)
+        for manifest_ref in latest.get("ara_manifests") or []:
+            checked["ara_manifests"] += 1
+            manifest_path = str(manifest_ref.get("path") or "")
+            if manifest_path not in tree:
+                errors.append(f"checkpoint references missing ARA manifest: {manifest_path}")
+                continue
+            try:
+                manifest = json.loads(
+                    _run_git(root, ["show", f"{resolved}:{manifest_path}"]).stdout
+                )
+                actual_hash = hash_manifest(manifest)
+            except (json.JSONDecodeError, ResearchGitError) as exc:
+                errors.append(f"cannot validate ARA manifest {manifest_path}: {exc}")
+                continue
+            expected_hash = str(manifest_ref.get("manifest_hash") or "")
+            if actual_hash != expected_hash:
+                errors.append(
+                    f"ARA manifest hash mismatch for {manifest_path}: "
+                    f"expected {expected_hash}, got {actual_hash}"
+                )
+
+    if not verify_objects:
+        warnings.append("CAS payload verification was skipped by request")
+    return {
+        "schema_version": "xscientist.research-fsck.v1",
+        "repository": str(root),
+        "commit": resolved,
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "checked": checked,
     }
 
 
@@ -1055,6 +1368,7 @@ def create_research_bundle(
     if profile not in {"index", "reproduce", "audit"}:
         raise ResearchGitError("bundle profile must be index, reproduce, or audit")
     root = _repository_root(repo)
+    store_root = _configured_store_root(root)
     dirty = _run_git(root, ["status", "--porcelain"]).stdout.strip()
     if dirty:
         raise ResearchGitError(
@@ -1086,8 +1400,13 @@ def create_research_bundle(
             pointer_files.append((pointer_source, pointer_arcname))
             if profile == "index":
                 continue
-            store_path = root / _normalise_relative(pointer.get("store_relpath") or "")
-            if not store_path.is_file() or _hash_file(store_path) != object_hash:
+            store_path, object_error = _verify_pointer_object(
+                root,
+                object_hash,
+                pointer,
+                store_root=store_root,
+            )
+            if object_error or store_path is None:
                 missing.append(object_hash)
                 continue
             object_arcname = f"objects/sha256/{object_hash.split(':', 1)[1]}"
@@ -1156,26 +1475,50 @@ def reproduce_checkpoint(
     timeout_seconds: int = 600,
 ) -> dict[str, Any]:
     root = _repository_root(repo)
+    store_root = _configured_store_root(root)
     resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
     checkpoint_path, checkpoint = _checkpoint_at_commit(root, resolved)
-    if not _checkpoint_hash_valid(checkpoint):
-        raise ResearchGitError(f"checkpoint hash verification failed at {resolved}")
+    checkpoint = _validate_checkpoint_payload(
+        checkpoint,
+        checkpoint_path=f"{resolved}:{checkpoint_path}",
+    )
     pointers = _pointer_records_at_commit(root, resolved)
     required = list(checkpoint.get("object_refs") or [])
-    missing = [
-        object_hash
-        for object_hash in required
-        if object_hash not in pointers
-        or not (root / str(pointers[object_hash].get("store_relpath") or "")).is_file()
-    ]
+    missing: list[str] = []
+    damaged: list[str] = []
+    object_errors: dict[str, str] = {}
+    verified_sources: dict[str, Path] = {}
+    for object_hash in required:
+        pointer = pointers.get(object_hash)
+        if pointer is None:
+            missing.append(object_hash)
+            object_errors[object_hash] = "missing object pointer at selected commit"
+            continue
+        store_path, object_error = _verify_pointer_object(
+            root,
+            object_hash,
+            pointer,
+            store_root=store_root,
+        )
+        if object_error:
+            if store_path is None or not store_path.is_file():
+                missing.append(object_hash)
+            else:
+                damaged.append(object_hash)
+            object_errors[object_hash] = object_error
+            continue
+        if store_path is not None:
+            verified_sources[object_hash] = store_path
     command = str((checkpoint.get("reproduce") or {}).get("command") or "").strip()
     result: dict[str, Any] = {
         "commit": resolved,
         "checkpoint_path": checkpoint_path,
         "checkpoint": checkpoint,
         "command": command,
-        "objects_complete": not missing,
+        "objects_complete": not missing and not damaged,
         "missing_objects": missing,
+        "damaged_objects": damaged,
+        "object_errors": object_errors,
         "worktree": None,
         "executed": False,
     }
@@ -1187,9 +1530,11 @@ def reproduce_checkpoint(
         return result
     if timeout_seconds < 1:
         raise ResearchGitError("reproduction timeout must be at least one second")
-    if missing:
+    if missing or damaged:
+        detail = [*missing, *damaged]
         raise ResearchGitError(
-            "cannot materialize reproduction; missing objects: " + ", ".join(missing)
+            "cannot materialize reproduction; missing or damaged objects: "
+            + ", ".join(detail)
         )
     worktree = Path(destination).expanduser().resolve()
     if worktree.exists():
@@ -1198,7 +1543,7 @@ def reproduce_checkpoint(
     _run_git(root, ["worktree", "add", "--detach", str(worktree), resolved])
     for object_hash in required:
         pointer = pointers[object_hash]
-        source = root / str(pointer["store_relpath"])
+        source = verified_sources[object_hash]
         target = _safe_hydration_target(worktree, str(pointer["logical_path"]))
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
@@ -1207,10 +1552,12 @@ def reproduce_checkpoint(
             raise ResearchGitError(
                 f"refusing to overwrite reproduction target: {target}"
             )
-        try:
-            os.link(source, target)
-        except OSError:
-            shutil.copy2(source, target)
+        shutil.copy2(source, target)
+        if _hash_file(target) != object_hash:
+            target.unlink(missing_ok=True)
+            raise ResearchGitError(
+                f"reproduction object changed during hydration: {object_hash}"
+            )
     result["worktree"] = str(worktree)
     if execute:
         if not command:
@@ -1265,4 +1612,5 @@ __all__ = [
     "research_diff",
     "research_log",
     "show_checkpoint",
+    "verify_research_repository",
 ]

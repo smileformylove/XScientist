@@ -20,6 +20,7 @@ from .research_git import (
     research_diff,
     research_log,
     show_checkpoint,
+    verify_research_repository,
 )
 
 
@@ -74,6 +75,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument("--repo", default=".")
     status_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    fsck_parser = subparsers.add_parser(
+        "fsck", help="Verify checkpoints, ARA bindings, pointers, and CAS objects."
+    )
+    fsck_parser.add_argument("--repo", default=".")
+    fsck_parser.add_argument("--commit", default="HEAD")
+    fsck_parser.add_argument("--no-objects", action="store_true")
+    fsck_parser.add_argument("--json", action="store_true", dest="as_json")
 
     checkpoint_parser = subparsers.add_parser(
         "checkpoint", help="Create a safe scientific checkpoint and local Git commit."
@@ -200,6 +209,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = repository_status(args.repo)
             _print_json(payload) if args.as_json else _human_status(payload)
             return 0
+
+        if args.command == "fsck":
+            payload = verify_research_repository(
+                args.repo,
+                commit=args.commit,
+                verify_objects=not args.no_objects,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                verdict = "ok" if payload["ok"] else "failed"
+                print(f"Research repository: {verdict}")
+                print(f"Commit:              {payload['commit']}")
+                checked = payload["checked"]
+                print(
+                    "Checked:             "
+                    f"{checked['checkpoints']} checkpoints, "
+                    f"{checked['pointers']} pointers, "
+                    f"{checked['objects']} objects, "
+                    f"{checked['ara_manifests']} ARA manifests"
+                )
+                for warning in payload["warnings"]:
+                    print(f"warning: {warning}", file=sys.stderr)
+                for error in payload["errors"]:
+                    print(f"error: {error}", file=sys.stderr)
+            return 0 if payload["ok"] else 1
 
         if args.command == "checkpoint":
             result = create_checkpoint(

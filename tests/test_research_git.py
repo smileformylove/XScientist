@@ -23,6 +23,7 @@ from xscientist.research_git import (
     research_diff,
     research_log,
     show_checkpoint,
+    verify_research_repository,
 )
 
 
@@ -165,6 +166,98 @@ class LocalResearchGitTests(unittest.TestCase):
                 {key: value for key, value in bundle.items() if key != "destination"},
                 load_schema("research_bundle"),
             )
+
+    def test_cas_snapshot_is_independent_from_mutable_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"immutable evidence")
+
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            source.write_bytes(b"changed after registration")
+
+            self.assertFalse(pointer.linked)
+            self.assertEqual(pointer.store_path.read_bytes(), b"immutable evidence")
+
+    def test_reproduction_rejects_tampered_cas_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"verified evidence")
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            checkpoint = create_checkpoint(root, stage="evidence", subject="bind data")
+            pointer.store_path.write_bytes(b"tampered evidence")
+
+            inspection = reproduce_checkpoint(root, commit=checkpoint.commit or "HEAD")
+
+            self.assertFalse(inspection["objects_complete"])
+            self.assertEqual(inspection["damaged_objects"], [pointer.object_hash])
+            with self.assertRaisesRegex(ResearchGitError, "missing or damaged"):
+                reproduce_checkpoint(
+                    root,
+                    commit=checkpoint.commit or "HEAD",
+                    destination=base / "reproduction",
+                )
+
+    def test_fsck_detects_pointer_and_object_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"verified evidence")
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            create_checkpoint(root, stage="evidence", subject="bind data")
+
+            clean = verify_research_repository(root)
+            pointer.store_path.write_bytes(b"damaged")
+            damaged = verify_research_repository(root)
+
+            self.assertTrue(clean["ok"])
+            self.assertFalse(damaged["ok"])
+            self.assertTrue(
+                any("CAS object" in error for error in damaged["errors"]),
+                damaged["errors"],
+            )
+
+    def test_reproduction_refuses_tampered_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"verified evidence")
+            pointer = add_research_object(
+                root,
+                source,
+                logical_path="data/evidence.bin",
+            )
+            checkpoint = create_checkpoint(root, stage="evidence", subject="bind data")
+            payload = json.loads(pointer.pointer_path.read_text(encoding="utf-8"))
+            payload["size"] += 1
+            pointer.pointer_path.write_text(json.dumps(payload), encoding="utf-8")
+            self._git(root, "add", f"research-objects/{pointer.pointer_path.name}")
+            self._git(root, "commit", "-m", "tamper pointer")
+
+            with self.assertRaisesRegex(ResearchGitError, "cannot validate"):
+                reproduce_checkpoint(root, commit="HEAD")
+            self.assertTrue(checkpoint.commit)
 
     def test_log_show_and_diff_expose_scientific_history(self) -> None:
         with tempfile.TemporaryDirectory() as td:
