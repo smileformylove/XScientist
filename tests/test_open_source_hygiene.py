@@ -14,6 +14,8 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_repository_root_visible_files_are_intentional(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         expected = {
+            "CHANGELOG.md",
+            "CITATION.cff",
             "LICENSE",
             "MANIFEST.in",
             "Makefile",
@@ -148,10 +150,8 @@ class OpenSourceHygieneTests(unittest.TestCase):
                 text,
             )
             self.assertIn("PyPI", text)
-        self.assertIn(
-            "has not been published to PyPI yet", self.readme_path.read_text()
-        )
-        self.assertIn("尚未发布到 PyPI", self.chinese_readme_path.read_text())
+        self.assertIn("pip install xscientist", self.readme_path.read_text())
+        self.assertIn("从 PyPI 安装稳定版本", self.chinese_readme_path.read_text())
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (
@@ -248,9 +248,9 @@ class OpenSourceHygieneTests(unittest.TestCase):
 
     def test_smoke_workflow_should_upload_ci_artifacts(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
-        self.assertIn(
-            "actions/upload-artifact@v7",
+        self.assertRegex(
             workflow_text,
+            r"actions/upload-artifact@[0-9a-f]{40}\s+# v7\.",
             msg="Smoke workflow should upload failure artifacts for diagnosis",
         )
         self.assertIn(
@@ -264,35 +264,36 @@ class OpenSourceHygieneTests(unittest.TestCase):
             msg="Smoke workflow should upload the hidden .ci-output directory",
         )
 
-    def test_workflows_should_use_node24_actions(self) -> None:
-        smoke_text = self.workflow_path.read_text(encoding="utf-8")
-        release_text = self.release_workflow_path.read_text(encoding="utf-8")
-        for expected in (
-            "actions/checkout@v7",
-            "actions/setup-python@v6",
-            "actions/upload-artifact@v7",
-        ):
-            self.assertIn(expected, smoke_text)
-            self.assertIn(expected, release_text)
-        self.assertIn("actions/download-artifact@v8", release_text)
+    def test_workflows_pin_actions_to_immutable_commits(self) -> None:
+        for path in (self.workflow_path, self.release_workflow_path):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if "uses:" not in line:
+                    continue
+                self.assertRegex(
+                    line,
+                    r"uses:\s*[^\s@]+@[0-9a-f]{40}(?:\s+#.*)?$",
+                    msg=f"{path.name}:{line_number} must pin an immutable action commit",
+                )
 
     def test_smoke_workflow_should_run_syntax_checks(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "python -m compileall -q ai_scientist xscientist compat scripts tools tests",
+            "make PYTHON=python syntax",
             workflow_text,
-            msg="Smoke workflow should compile Python sources for syntax regressions",
+            msg="Smoke workflow should use the canonical syntax target",
         )
-        self.assertIn(
-            "bash -n run_stable_daemon.sh",
-            workflow_text,
-            msg="Smoke workflow should validate run_stable_daemon.sh syntax",
-        )
-        self.assertIn(
-            "bash -n start_research.sh",
-            workflow_text,
-            msg="Smoke workflow should validate start_research.sh syntax",
-        )
+
+    def test_smoke_workflow_has_compatibility_and_coverage_gates(self) -> None:
+        workflow_text = self.workflow_path.read_text(encoding="utf-8")
+        for version in ("3.10", "3.11", "3.12"):
+            self.assertIn(version, workflow_text)
+        for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
+            self.assertIn(runner, workflow_text)
+        self.assertIn("python -m coverage run", workflow_text)
+        self.assertIn("tools/engineering_checks.py", workflow_text)
+        self.assertIn("tools/check_distribution.py", workflow_text)
 
     def test_pyproject_should_expose_public_package_and_entrypoints(self) -> None:
         text = self.pyproject_path.read_text(encoding="utf-8")
@@ -304,9 +305,15 @@ class OpenSourceHygieneTests(unittest.TestCase):
 
     def test_release_workflow_should_use_pypi_trusted_publishing(self) -> None:
         text = self.release_workflow_path.read_text(encoding="utf-8")
-        self.assertIn("pypa/gh-action-pypi-publish@release/v1", text)
+        self.assertRegex(
+            text,
+            r"pypa/gh-action-pypi-publish@[0-9a-f]{40}\s+# release/v1",
+        )
         self.assertIn("id-token: write", text)
-        self.assertIn("python -m build --sdist --wheel", text)
+        self.assertIn("tools/build_distribution.py", text)
+        self.assertIn("tools/check_distribution.py", text)
+        self.assertIn("tools/check_release.py", text)
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", text)
 
     def test_pyproject_should_define_python_floor_and_black_config(self) -> None:
         text = self.pyproject_path.read_text(encoding="utf-8")

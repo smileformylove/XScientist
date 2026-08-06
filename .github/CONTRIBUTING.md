@@ -15,16 +15,22 @@ This repository is intended to be **safe to run and safe to publish**. Please he
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[full,service,dev]" -c requirements/constraints-ci.txt
 ```
 
 ## Running tests / checks
 
 ```bash
-python -m compileall -q ai_scientist xscientist compat scripts tools tests
-python -m pytest -q
-python -m xscientist validate --full-import-smoke
+make syntax
+make engineering
+make test
+make coverage
+make package-check
 ```
+
+`make smoke` also runs the repository validator and requires a valid local
+login session. See `docs/ENGINEERING.md` for CI lanes, dependency policy, and
+the release checklist.
 
 ## Code style
 
@@ -39,7 +45,13 @@ python -m xscientist validate --full-import-smoke
    - Problem statement
    - What changed
    - How you tested
+   - Research/ARA artifact impact
+   - Risk and rollback
    - Any compatibility notes (Python version, OS, GPU requirements)
+
+Changes to protocol schemas, claim/evidence binding, re-execution, CAS
+reachability, or ContextPack selection must include focused compatibility
+tests. Do not weaken a quality gate solely to make CI pass.
 
 ## Reporting issues
 

@@ -3212,6 +3212,21 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_supported_python()
 
+    if is_source_checkout():
+        from tools.engineering_checks import run_checks
+
+        engineering_errors = [
+            error
+            for check_errors in run_checks(PROJECT_ROOT).values()
+            for error in check_errors
+        ]
+        if engineering_errors:
+            raise RuntimeError(
+                "Engineering consistency checks failed:\n- "
+                + "\n- ".join(engineering_errors)
+            )
+        print("[OK] engineering consistency checks passed")
+
     os.environ.setdefault(
         "RESEARCH_OUTPUT_DIR", tempfile.mkdtemp(prefix="ai_scientist_validate_")
     )

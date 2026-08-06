@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 [![Smoke Checks](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
-![PyPI](https://img.shields.io/badge/PyPI-not%20published-orange.svg)
+[![PyPI](https://img.shields.io/pypi/v/xscientist.svg)](https://pypi.org/project/xscientist/)
 
 English README: [README.md](../README.md)
 
@@ -19,7 +19,8 @@ English README: [README.md](../README.md)
 
 重要提示（建议先读）：
 
-- 发布状态：当前版本 `0.2.0` 已支持从 GitHub 或源码安装，但**尚未发布到 PyPI**；首次正式发布前，`pip install xscientist` 会失败。
+- 发布状态：`0.1.0` 是首个公开 PyPI 版本。只有在明确需要尚未发布的
+  开发改动时，才建议从 `main` 分支安装。
 - 成本：运行会调用大模型/检索服务，可能产生 API 费用与较长运行时间。
 - 可靠性：生成内容可能存在错误或幻觉；请务必自行复核关键结论、数据与引用。
 - 输出目录：默认**不会**把运行产物写入仓库目录（避免污染开源仓库）。
@@ -71,7 +72,7 @@ English README: [README.md](../README.md)
 
 XScientist 想做的不只是「一个更好的全自动科研系统」，更是一层**可 git 的科研协议**——让研究这件事像代码一样可 diff、可 fork、可 review、可 rebase：
 
-- **协议先于系统**：`ai_scientist/protocol/`（ARA v1）用 6 份 JSON Schema + 一个 `content_hash` 归一化算法，把一次研究运行沉淀成机读工件。第三方 producer / consumer 无需依赖 XScientist 本身也能实现同一协议——就像 git 之于代码。
+- **协议先于系统**：`ai_scientist/protocol/`（ARA v1）用一组带版本的 JSON Schema + 一个 `content_hash` 归一化算法，把一次研究运行沉淀成机读工件。第三方 producer / consumer 无需依赖 XScientist 本身也能实现同一协议——就像 git 之于代码。
 - **每次运行都是一个 commit**：ARA 把 exploration graph、每个节点的 `code / term_out / metrics / plots`、失败分支、修复轨迹、Pareto 池和环境指纹一起归档；每一份 manuscript 断言用 `\claimref{node_id}` 反向锚回其证据节点。
 - **fork-continue 而非冷启动**：任一节点都可通过 `xscientist ara fork` 导出一份「本身也是合规 ARA」的种子，下一次运行直接接力（provenance 自动落进 child ARA），跨系统 / 跨团队都可以延续。
 - **自动化的科技树，数学与物理是根节点**：我们相信科研的可自动化程度沿着一棵树展开——**数学和物理是根节点**，越靠近根的问题「协议 / 证据 / 复核」信号越强、更适合被机器扩展；越靠近叶子（工程、经验、社会科学）越依赖人类判断。XScientist 的重心先落在根附近：把「可验证、可复现、可 fork」的部分自动化，把「值得人类花时间的」部分显式暴露给评审者。
@@ -170,16 +171,22 @@ tools/                   仅供仓库使用的验证工具
 
 ### 1) 安装
 
-PyPI 状态：当前尚未发布。请直接从 GitHub 的 `main` 分支安装：
+从 PyPI 安装稳定版本：
 
 ```bash
 # 轻量 SDK 与协议接口
-pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install xscientist
 
 # 完整科研运行环境（运行项目时推荐）
-pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[full]"
 
 # 完整运行环境与 FastAPI/Uvicorn 服务
+pip install "xscientist[full,service]"
+```
+
+如需测试尚未发布的开发改动，可安装当前 `main` 分支：
+
+```bash
 pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
@@ -197,7 +204,7 @@ pip install -e ".[full,service,dev]"
 更稳定的"CI 风格"安装（可选）：
 
 ```bash
-pip install -r requirements.txt -c requirements/constraints-ci.txt
+pip install -r requirements.txt
 ```
 
 验证安装：
@@ -586,7 +593,7 @@ xscientist project <B_project> \
 
 ### 协议规范
 
-`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含 6 份 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。规范正文见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md)。
+`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含一组带版本的 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。工程一致性检查会直接从注册表读取 Schema 清单，避免文档中的手写数量再次漂移。规范正文见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md)。
 
 ### A/B 加速证据实验
 
@@ -641,6 +648,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [认知科技树](EPISTEMIC_GRAPH_SPEC.md)：问题、主张、反例及证据状态的追加式积累
 - [独立科研评估治理](EVALUATION_GOVERNANCE.md)：角色隔离、密封/前瞻/外部评测与高置信结论晋升门禁
 - [性能回归门禁](PERFORMANCE_GATES.md)：精简重构使用的冷启动、内存、延迟加载与行为等价预算
+- [工程指南](ENGINEERING.md)：支持环境、依赖策略、CI 分层、打包契约与发布清单
 - [优化总结](guides/OPTIMIZATION_SUMMARY.md)：既有优化工作汇总
 
 ---
@@ -648,9 +656,14 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 ## 开发与测试
 
 - 单元测试：`make test`
+- 覆盖率回归门禁：`make coverage`（全仓分支覆盖率基线 45%）
+- 元数据、依赖与协议一致性：`make engineering`
 - 语法/导入/校验 smoke：`make smoke`
 - 更严格的本地 doctor：`make doctor`（需要有效登录会话）
 - 代码格式化：`make format`
+- 构建并检查 wheel/sdist：`make package-check`
+
+工程策略、CI 分层、依赖规则与发布清单见 [`docs/ENGINEERING.md`](ENGINEERING.md)。
 
 ---
 

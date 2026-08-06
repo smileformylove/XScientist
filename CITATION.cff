@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: >-
+  If you use XScientist, cite both the software and the system report, and
+  record the commit, configuration, model versions, and artifact identifiers
+  used by your research run.
+title: XScientist
+type: software
+authors:
+  - family-names: Luo
+    given-names: Jixiang
+version: 0.1.0
+license: Apache-2.0
+repository-code: https://github.com/smileformylove/XScientist
+url: https://github.com/smileformylove/XScientist
+keywords:
+  - autonomous research
+  - research agents
+  - scientific reproducibility
+  - provenance
+preferred-citation:
+  type: article
+  title: >-
+    XScientist: A Git-Like Research Protocol for Long-Running Autonomous
+    Scientific Discovery
+  authors:
+    - family-names: Luo
+      given-names: Jixiang
+  year: 2026
+  doi: 10.48550/arXiv.2607.12301
+  url: https://arxiv.org/abs/2607.12301

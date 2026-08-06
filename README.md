@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Smoke Checks](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main)](https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
-![PyPI](https://img.shields.io/badge/PyPI-not%20published-orange.svg)
+[![PyPI](https://img.shields.io/pypi/v/xscientist.svg)](https://pypi.org/project/xscientist/)
 
 Chinese README: [docs/README.zh.md](docs/README.zh.md)
 
@@ -19,7 +19,8 @@ System report:
 
 Important notes:
 
-- Release status: version `0.2.0` is installable from GitHub or a source checkout, but **has not been published to PyPI yet**. `pip install xscientist` will not work until the first release is published.
+- Release status: `0.1.0` is the first public PyPI release. Use the `main`
+  branch only when you intentionally want unreleased development changes.
 - Cost: running the system calls LLMs / retrieval services and may incur API fees and long runtimes.
 - Reliability: model outputs may contain errors or hallucinations; verify key claims, data, and citations yourself.
 - Output isolation: by default, run outputs are written outside this git repo (to avoid polluting an open-source repository).
@@ -56,7 +57,7 @@ Important notes:
 
 We don't just want a better "fully automated researcher" — we want a **git-like protocol for research** that makes doing science diffable, forkable, reviewable, and rebasable, just like code:
 
-- **Protocol before system.** `ai_scientist/protocol/` (ARA v1) pins down what a research run looks like on disk: six JSON Schemas and a `content_hash` normalisation rule. Any third-party producer or consumer can implement the same protocol without depending on the rest of XScientist — the same way git is not the only tool that reads a git object database.
+- **Protocol before system.** `ai_scientist/protocol/` (ARA v1) pins down what a research run looks like on disk through a versioned JSON Schema suite and a `content_hash` normalisation rule. Any third-party producer or consumer can implement the same protocol without depending on the rest of XScientist — the same way git is not the only tool that reads a git object database.
 - **Every run is a commit.** An ARA archives the exploration graph, per-node `code / term_out / metrics / plots`, failed branches, the repair trajectory, the Pareto pool, and an environment fingerprint. Every manuscript claim is pinned back to its evidence node via `\claimref{node_id}`.
 - **Fork-continue, not cold-start.** Any node can be forked with `xscientist ara fork` into a directory that is itself a conformant ARA. The next run seeds from it, and provenance lands automatically in the child ARA — across systems, teams, or long time gaps.
 - **An automation tech tree with maths and physics at the root.** We believe the parts of science that are automatable form a *tree*: **mathematics and physics are the root nodes**, where "protocol / evidence / verification" signals are strongest and machines can safely go furthest; the further out you go toward engineering, human factors, or social science, the more indispensable human judgment becomes. XScientist starts near the root — automate what is verifiable, reproducible, and forkable, and surface the rest to human reviewers explicitly.
@@ -155,17 +156,22 @@ operations entrypoints.
 
 ### 1) Install
 
-PyPI status: the package is not published yet. Install the current `main`
-branch directly from GitHub:
+Install the stable release from PyPI:
 
 ```bash
 # Lightweight SDK and protocol surface
-pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install xscientist
 
 # Complete research runtime (recommended for running projects)
-pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[full]"
 
 # Complete runtime plus the FastAPI/Uvicorn service
+pip install "xscientist[full,service]"
+```
+
+To test unreleased development changes, install the current `main` branch:
+
+```bash
 pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
@@ -183,7 +189,7 @@ pip install -e ".[full,service,dev]"
 More reproducible (CI-style) install (optional):
 
 ```bash
-pip install -r requirements.txt -c requirements/constraints-ci.txt
+pip install -r requirements.txt
 ```
 
 Verify the installation:
@@ -589,7 +595,7 @@ Under the hood the seed manifest is passed through the `AI_SCIENTIST_ARA_SEED_PA
 
 ### Protocol package
 
-`ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): six JSON Schemas, a `content_hash` normalisation algorithm, and a minimal conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
+`ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): a versioned JSON Schema suite, a `content_hash` normalisation algorithm, and a minimal conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. The engineering check derives the schema inventory from the registry so documentation does not depend on a hand-maintained count. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
 
 ### A/B evidence harness
 
@@ -644,6 +650,7 @@ Currently organized example files:
 - [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md): cumulative questions, claims, refutations, and evidence-state transitions
 - [Independent evaluation governance](docs/EVALUATION_GOVERNANCE.md): disjoint authorities, sealed/prospective/external tests, and high-confidence promotion gates
 - [Performance regression gates](docs/PERFORMANCE_GATES.md): cold-import, memory, lazy-loading, and behavior-equivalence budgets for simplification work
+- [Engineering guide](docs/ENGINEERING.md): supported environments, dependency policy, CI lanes, packaging contract, and release checklist
 - [Optimization summary](docs/guides/OPTIMIZATION_SUMMARY.md): prior optimization work
 
 ---
@@ -651,9 +658,15 @@ Currently organized example files:
 ## Development
 
 - Unit tests: `make test`
+- Coverage regression gate: `make coverage` (45% branch-aware whole-repository baseline)
+- Metadata/dependency/protocol consistency: `make engineering`
 - Syntax/import/validation smoke: `make smoke`
 - Stricter local doctor: `make doctor` (requires a valid login session)
 - Formatting: `make format`
+- Build and inspect both wheel and sdist: `make package-check`
+
+Engineering policy, CI lanes, dependency rules, and the release checklist are
+documented in [`docs/ENGINEERING.md`](docs/ENGINEERING.md).
 
 ---
 

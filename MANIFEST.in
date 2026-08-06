@@ -2,12 +2,15 @@ prune tests
 graft scripts
 include run_stable_daemon.sh
 include start_research.sh
+include CHANGELOG.md
+include CITATION.cff
 graft configs
 graft requirements
 graft docs
 include .github/CONTRIBUTING.md
 include .github/CODE_OF_CONDUCT.md
 include .github/SECURITY.md
+include .github/PULL_REQUEST_TEMPLATE.md
 graft examples
 graft tools
 global-exclude __pycache__ *.py[cod] .DS_Store

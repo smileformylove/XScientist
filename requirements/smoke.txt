@@ -23,6 +23,7 @@ pymupdf4llm
 seaborn
 
 # Common runtime / validation dependencies
+coverage
 numpy
 psutil
 PyYAML

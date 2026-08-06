@@ -36,36 +36,36 @@ dependencies = [
 
 [project.optional-dependencies]
 full = [
-  "anthropic",
-  "backoff",
+  "anthropic>=0.25",
+  "backoff>=2.0",
   "black>=24.0",
-  "openai",
-  "zhipuai",
-  "matplotlib",
-  "pillow",
-  "pandas",
-  "pypdf",
-  "pymupdf",
-  "pymupdf4llm",
-  "seaborn",
-  "numpy",
-  "psutil",
-  "requests",
-  "scikit-learn",
-  "transformers",
-  "datasets",
-  "tiktoken",
-  "tqdm",
-  "rich",
-  "humanize",
-  "dataclasses-json",
-  "genson",
-  "shutup",
-  "python-igraph",
-  "coolname",
-  "omegaconf",
-  "boto3",
-  "huggingface-hub",
+  "openai>=1.40",
+  "zhipuai>=2.0",
+  "matplotlib>=3.8",
+  "pillow>=10",
+  "pandas>=2",
+  "pypdf>=4",
+  "pymupdf>=1.24",
+  "pymupdf4llm>=0.0.20",
+  "seaborn>=0.13",
+  "numpy>=1.26",
+  "psutil>=5.9",
+  "requests>=2.31",
+  "scikit-learn>=1.4",
+  "transformers>=4.40",
+  "datasets>=2.19",
+  "tiktoken>=0.7",
+  "tqdm>=4.66",
+  "rich>=13",
+  "humanize>=4",
+  "dataclasses-json>=0.6",
+  "genson>=1.2",
+  "shutup>=0.2",
+  "python-igraph>=0.11",
+  "coolname>=2",
+  "omegaconf>=2.3",
+  "boto3>=1.34",
+  "huggingface-hub>=0.23",
 ]
 service = [
   "fastapi>=0.115",
@@ -75,13 +75,18 @@ service = [
 dev = [
   "black>=24.0",
   "build>=1.2",
+  "coverage[toml]>=7.6",
   "httpx>=0.27",
+  "pytest>=8.0",
+  "twine>=6.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/smileformylove/XScientist"
 Repository = "https://github.com/smileformylove/XScientist"
 Issues = "https://github.com/smileformylove/XScientist/issues"
+Changelog = "https://github.com/smileformylove/XScientist/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/smileformylove/XScientist/tree/main/docs"
 
 [project.scripts]
 xscientist = "xscientist.cli:main"
@@ -165,3 +170,20 @@ extend-exclude = '''
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+
+[tool.coverage.run]
+branch = true
+source = ["ai_scientist", "xscientist", "compat", "scripts", "tools"]
+omit = [
+  "*/__pycache__/*",
+  "*/site-packages/*",
+]
+
+[tool.coverage.report]
+fail_under = 45
+precision = 1
+show_missing = true
+skip_covered = true
+
+[tool.coverage.xml]
+output = ".ci-output/coverage.xml"

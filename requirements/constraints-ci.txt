@@ -32,6 +32,7 @@ scikit-learn>=1.4,<2
 transformers>=4.40,<5
 datasets>=2.19,<5
 tiktoken>=0.7,<1
+tomli>=2,<3
 tqdm>=4.66,<5
 rich>=13,<15
 humanize>=4,<5
@@ -46,3 +47,13 @@ omegaconf>=2.3,<3
 botocore>=1.34,<2
 boto3>=1.34,<2
 huggingface-hub>=0.23,<2
+
+# Engineering / service extras
+build>=1.2,<2
+coverage>=7.6,<8
+fastapi>=0.115,<1
+httpx>=0.27,<1
+pydantic>=2.5,<3
+pytest>=8,<10
+twine>=6,<7
+uvicorn>=0.30,<1

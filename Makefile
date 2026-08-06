@@ -7,7 +7,7 @@ PYTHON ?= $(shell \
 AUTH_FILE ?=
 PREFLIGHT_AUTH_ARG := $(if $(AUTH_FILE),--auth-file $(AUTH_FILE),)
 
-.PHONY: syntax test validate preflight smoke doctor format package perf-record perf-compare executor-image
+.PHONY: syntax test coverage engineering validate preflight smoke doctor format package package-check perf-record perf-compare executor-image
 
 syntax:
 	$(PYTHON) -m compileall -q ai_scientist xscientist compat scripts tools tests
@@ -17,13 +17,23 @@ syntax:
 test:
 	$(PYTHON) -m unittest discover -s tests -p "test_*.py"
 
+coverage:
+	$(PYTHON) -m coverage erase
+	$(PYTHON) -m coverage run -m unittest discover -s tests -p "test_*.py"
+	@mkdir -p .ci-output
+	$(PYTHON) -m coverage xml
+	$(PYTHON) -m coverage report
+
+engineering:
+	$(PYTHON) tools/engineering_checks.py
+
 validate:
 	$(PYTHON) -m xscientist validate --full-import-smoke
 
 preflight:
 	$(PYTHON) -m xscientist preflight --strict $(PREFLIGHT_AUTH_ARG)
 
-smoke: syntax test validate
+smoke: syntax engineering test validate
 
 doctor: smoke preflight
 
@@ -32,6 +42,9 @@ format:
 
 package:
 	$(PYTHON) tools/build_distribution.py
+
+package-check: package
+	$(PYTHON) tools/check_distribution.py --dist-dir dist
 
 perf-record:
 	@test -n "$(OUTPUT)" || (echo "OUTPUT=/path/to/result.json is required" && exit 2)

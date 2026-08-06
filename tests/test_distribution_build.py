@@ -58,7 +58,10 @@ class DistributionBuildTests(unittest.TestCase):
             sdist = next(out_dir.glob("xscientist-*.tar.gz"))
             with tarfile.open(sdist) as archive:
                 sdist_names = set(archive.getnames())
-                archive.extractall(out_dir)
+                if sys.version_info >= (3, 12):
+                    archive.extractall(out_dir, filter="data")
+                else:  # Python 3.10/3.11 compatibility lane.
+                    archive.extractall(out_dir)
             sdist_root = next(iter(sdist_names)).split("/", 1)[0]
             extracted_root = out_dir / sdist_root
             wheel_build = subprocess.run(
@@ -187,8 +190,11 @@ class DistributionBuildTests(unittest.TestCase):
                 "sdist should retain repository-only validation",
             )
             for source_asset in (
+                "CHANGELOG.md",
+                "CITATION.cff",
                 ".github/CODE_OF_CONDUCT.md",
                 ".github/CONTRIBUTING.md",
+                ".github/PULL_REQUEST_TEMPLATE.md",
                 ".github/SECURITY.md",
                 "configs/bfts/bfts_config.yaml",
                 "configs/bfts/bfts_config_deep.yaml",
@@ -196,6 +202,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "configs/environment/example.env",
                 "docs/CONFIG_REFERENCE.md",
                 "docs/ARCHITECTURE.md",
+                "docs/ENGINEERING.md",
                 "docs/OPERATIONS_CHECKLIST.md",
                 "docs/README.zh.md",
                 "examples/example_topic.md",

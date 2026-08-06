@@ -5,14 +5,68 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: smoke-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  smoke:
+  compatibility:
+    name: Core / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.11"
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install core package
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e . -c requirements/constraints-ci.txt
+          python -m pip check
+
+      - name: Exercise core SDK and protocol
+        run: |
+          python -m unittest discover -s tests -p "test_protocol.py"
+          python -m unittest discover -s tests -p "test_config_paths_defaults.py"
+          python -c "import xscientist; from xscientist import ProjectRequest, XScientist; assert xscientist.__version__ and ProjectRequest and XScientist"
+          python -m xscientist info --json
+
+      - name: Exercise extended SDK behavior
+        if: runner.os != 'Windows'
+        run: python -m unittest discover -s tests -p "test_public_sdk.py"
+
+  full-smoke:
+    name: Full engineering and artifact checks
+    needs: compatibility
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -20,13 +74,13 @@ jobs:
       AI_SCIENTIST_AUTH_FILE: ${{ github.workspace }}/.ci-output/auth/session.json
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: pip
           cache-dependency-path: |
             requirements/smoke.txt
             requirements/constraints-ci.txt
@@ -41,6 +95,10 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel 2>&1 | tee .ci-output/logs/pip-bootstrap.log
           python -m pip install build 2>&1 | tee .ci-output/logs/pip-build-install.log
           python -m pip install --retries 5 --timeout 60 -r requirements/smoke.txt -c requirements/constraints-ci.txt 2>&1 | tee .ci-output/logs/pip-install.log
+          python -m pip check 2>&1 | tee .ci-output/logs/pip-check.log
+
+      - name: Run engineering consistency checks
+        run: python tools/engineering_checks.py 2>&1 | tee .ci-output/logs/engineering.log
 
       - name: Seed login session for CI
         run: |
@@ -70,25 +128,21 @@ jobs:
       - name: Run syntax checks
         run: |
           set -o pipefail
-          python -m compileall -q ai_scientist xscientist compat scripts tools tests 2>&1 | tee .ci-output/logs/syntax.log
-          bash -n run_stable_daemon.sh 2>&1 | tee .ci-output/logs/run_stable_daemon_syntax.log
-          bash -n start_research.sh 2>&1 | tee .ci-output/logs/start_research_syntax.log
+          make PYTHON=python syntax 2>&1 | tee .ci-output/logs/syntax.log
 
-      - name: Run open-source hygiene tests
+      - name: Run tests with coverage regression gate
         run: |
           set -o pipefail
-          python -m unittest discover -s tests -p "test_*.py" 2>&1 | tee .ci-output/logs/unittest.log
+          python -m coverage erase
+          python -m coverage run -m unittest discover -s tests -p "test_*.py" 2>&1 | tee .ci-output/logs/unittest.log
+          python -m coverage xml
+          python -m coverage report 2>&1 | tee .ci-output/logs/coverage.log
 
       - name: ARA protocol conformance smoke
-        # O5: assert the exporter still produces a strict-mode-valid ARA, and
-        # that the stub A/B still short-circuits the LLM draft. Any regression
-        # here means either the on-disk schema drifted or the seed short-
-        # circuit stopped working — both are protocol-level failures worth
-        # blocking on.
         run: |
           set -o pipefail
           python - <<'PY' 2>&1 | tee .ci-output/logs/ara_protocol_smoke.log
-          import json, os, subprocess, sys, tempfile
+          import json, subprocess, sys, tempfile
           from pathlib import Path
 
           from ai_scientist.utils.ara_artifact import export_ara
@@ -111,7 +165,7 @@ jobs:
               "node2parent": {}, "__version": "2",
           }))
           ara = export_ara(project_dir=tmp / "parent", exp_dir=exp,
-                          idea={"Name": "smoke"}, timestamp="20260101")
+                           idea={"Name": "smoke"}, timestamp="20260101")
           seed_manifest = build_seed_manifest_from_ara_node(
               ara_root=ara.root, node_id="n1"
           )
@@ -131,10 +185,11 @@ jobs:
           set -o pipefail
           python -m xscientist validate --full-import-smoke 2>&1 | tee .ci-output/logs/validate_repo.log
 
-      - name: Build distribution artifacts
+      - name: Build and inspect distribution artifacts
         run: |
           set -o pipefail
-          python -m build --sdist --wheel 2>&1 | tee .ci-output/logs/package-build.log
+          python tools/build_distribution.py --outdir .ci-output/dist 2>&1 | tee .ci-output/logs/package-build.log
+          python tools/check_distribution.py --dist-dir .ci-output/dist 2>&1 | tee .ci-output/logs/package-check.log
 
       - name: Run preflight
         run: |
@@ -143,7 +198,7 @@ jobs:
 
       - name: Upload smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-checks-artifacts
           path: .ci-output/

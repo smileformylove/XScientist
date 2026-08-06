@@ -1,0 +1,58 @@
+name: Research reproduction report
+description: Report success, divergence, or failure when replaying an ARA or published result.
+title: "[Reproduction]: "
+labels: [reproduction]
+body:
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Reproduced
+        - Partially reproduced
+        - Diverged
+        - Could not execute
+    validations:
+      required: true
+  - type: input
+    id: artifact
+    attributes:
+      label: Artifact identifier
+      description: ARA root hash, bundle hash, release asset, or stable URL.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Code commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and execution policy
+      description: Python, packages, container digest, hardware, model IDs, seed, and network policy.
+    validations:
+      required: true
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Expected versus observed
+      description: Include metrics, tolerances, failed verification rules, and relevant claim IDs.
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: Verification receipt
+      description: Paste a sanitized receipt or link to a content-addressed copy.
+      render: json
+  - type: checkboxes
+    id: integrity
+    attributes:
+      label: Reporting integrity
+      options:
+        - label: I did not replace missing observations with estimates or generated evidence.
+          required: true
+        - label: I removed credentials and restricted data.
+          required: true

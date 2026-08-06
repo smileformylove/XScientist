@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a scoped product, protocol, or engineering improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete limitation before proposing a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: users
+    attributes:
+      label: Intended users and workflow
+      description: Who consumes the result, at what stage, and for what decision?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and artifact impact
+      description: Address ARA schemas, storage growth, replay, privacy, and migration.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Prefer measurable behavior and failure conditions.
+    validations:
+      required: true

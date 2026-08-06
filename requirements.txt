@@ -1,3 +1,7 @@
+# Apply the repository's tested compatibility window by default. A concrete
+# research run should additionally persist its resolved environment in ARA.
+-c requirements/constraints-ci.txt
+
 # LLM APIs
 anthropic
 backoff
