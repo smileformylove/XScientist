@@ -115,6 +115,10 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 f"unsupported experiment attempt status: {raw_status}"
             )
+        if payload.get("study_phase") == "confirmatory" and not preregistration_id:
+            raise ResearchGitError(
+                "confirmatory experiment requires a locked preregistration"
+            )
         relations = []
         if preregistration_id:
             registration = self.repository.get(preregistration_id)

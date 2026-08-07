@@ -525,6 +525,45 @@ and record only scientifically meaningful progress:
 xscientist git doctor
 ```
 
+For everyday research, the high-level commands record the object, select only
+that change, and create one checkpoint automatically:
+
+```bash
+xscientist research hypothesis \
+  "Retrieval reflection improves factual accuracy" \
+  --falsifier "accuracy does not exceed the fixed baseline"
+
+xscientist research preregister <hypothesis-object-id> \
+  --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
+  --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
+
+xscientist research experiment \
+  "Seed 7 exceeded the fixed wall-clock budget" \
+  --status timeout --failure-class budget_exhausted \
+  --metric elapsed_seconds=600 --seed 7
+
+xscientist research evidence \
+  "The timeout reproduced under the sealed environment" \
+  --attempt <experiment-object-id> --verified
+
+xscientist research review \
+  "Independent replication and leakage checks passed" \
+  --evaluates <evidence-object-id> --verifier independent-reviewer \
+  --decision pass
+
+xscientist research claim \
+  "The method is not evaluable within the fixed budget" \
+  --evidence <evidence-object-id>
+```
+
+Failed and timed-out experiments are committed as first-class history. The
+`preregister` command creates and locks the confirmatory plan before execution;
+`review` creates an independent review and deterministic gate. A confirmatory
+experiment must bind that preregistration, and a `--verified` claim must bind a
+passing gate decision. Use `--no-commit` only when assembling several objects
+into a later manual checkpoint. `--split-file` stores only its SHA-256 digest,
+never the source path or contents; automated workflows may pass `--split-hash`.
+
 ```bash
 xscientist research init ./my-research \
   --question "Does retrieval-guided reflection improve factual accuracy?"

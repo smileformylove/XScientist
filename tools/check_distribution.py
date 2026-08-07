@@ -63,6 +63,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_lifecycle.py",
             "xscientist/research_evolution.py",
             "xscientist/git_support.py",
+            "xscientist/research_commands.py",
             "ai_scientist/resources/configs/bfts_default.yaml",
         }
         missing = sorted(required_wheel - wheel_names)

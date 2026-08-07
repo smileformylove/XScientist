@@ -7,10 +7,14 @@ should depend on `xscientist`; contributors may work in `ai_scientist`.
 
 ## Installation profiles
 
-The package has not been published to PyPI yet. Install the current version
-from GitHub or a local clone:
+The stable package is available from PyPI. Unreleased Research VCS changes must
+be installed from the branch that contains them until the next release:
 
 ```bash
+pip install xscientist
+pip install "xscientist[full]"
+pip install "xscientist[full,service]"
+
 pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
 pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
 pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
@@ -19,9 +23,8 @@ pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XS
 pip install -e ".[full,service,dev]"
 ```
 
-After the first PyPI release, the equivalent commands will be
-`pip install xscientist`, `pip install "xscientist[full]"`, and
-`pip install "xscientist[full,service]"`.
+Run `xscientist git doctor` after installation to verify the local Research VCS
+adapter and its safe-merge capabilities.
 
 ## Package boundary
 
@@ -31,6 +34,10 @@ xscientist/                 Public, versioned integration surface
 ├── models.py               Stable request/result data models
 ├── cli.py                  Unified `xscientist` command
 ├── service.py              Optional FastAPI service
+├── research_vcs.py         Backend-independent scientific version-control API
+├── research_lifecycle.py   Evidence-gated research transitions
+├── research_evolution.py   Agent candidate promotion and rollback
+├── research_commands.py    One-command researcher workflows
 └── entrypoints.py          Compatibility workflow dispatch
 
 ai_scientist/               Internal workflow implementation
@@ -112,6 +119,33 @@ These methods do not launch models or modify research artifacts. They reuse the
 same manager read models as the CLI and are suitable for dashboards, notebooks,
 and embedding applications.
 
+Native research version control is also available without launching a model:
+
+```python
+from xscientist import ResearchLifecycle, ResearchRepository
+
+repository = ResearchRepository.init(
+    "./study",
+    question="Does method A improve the fixed baseline?",
+)
+lifecycle = ResearchLifecycle(repository)
+```
+
+The CLI provides both research-native and familiar version-control verbs:
+
+```bash
+xscientist git doctor
+xscientist research hypothesis "H1" --falsifier "no improvement"
+xscientist research preregister <hypothesis-id> \
+  --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
+  --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
+xscientist research experiment "run failed" --status failed
+xscientist research review "independent checks passed" \
+  --evaluates <evidence-id> --verifier independent-reviewer --decision pass
+xscientist git add -A
+xscientist git commit --stage evidence -m "bind result"
+```
+
 ## Unified CLI
 
 ```bash
@@ -122,6 +156,8 @@ xscientist daemon --help
 xscientist manager --help
 xscientist ara --help
 xscientist auth status
+xscientist git doctor
+xscientist research --help
 ```
 
 Direct compatibility commands (`xscientist-project`, `xscientist-batch`,

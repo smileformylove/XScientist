@@ -103,6 +103,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/research_lifecycle.py",
                 "xscientist/research_evolution.py",
                 "xscientist/git_support.py",
+                "xscientist/research_commands.py",
                 "run_project.py",
                 "ai_scientist/apps/project.py",
                 "ai_scientist/apps/project_cli.py",

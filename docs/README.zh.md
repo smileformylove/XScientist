@@ -510,6 +510,34 @@ XScientist 直接提供科研对象和科研操作，使用者无需操作 Git �
 可以先创建一个独立的本地科研仓库，只在科研状态发生实质变化时提交：
 
 ```bash
+xscientist git doctor
+
+xscientist research hypothesis \
+  "检索反思能够提高事实准确率" \
+  --falsifier "准确率不高于固定基线"
+
+xscientist research preregister <假设对象ID> \
+  --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
+  --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
+
+xscientist research experiment \
+  "种子 7 超过固定时间预算" \
+  --status timeout --failure-class budget_exhausted \
+  --metric elapsed_seconds=600 --seed 7
+
+xscientist research review \
+  "独立复验和数据泄漏检查均通过" \
+  --evaluates <证据对象ID> --verifier independent-reviewer \
+  --decision pass
+```
+
+这些高层命令默认自动完成记录、精确选择和 checkpoint；失败与超时实验同样进入
+正式历史。`preregister` 会在实验前生成计划并锁定预注册，`review` 会生成独立评审
+和确定性门禁。确证性实验必须绑定该预注册，晋级为 verified 的结论必须绑定通过的
+门禁。`--split-file` 只保存 SHA-256 摘要，不保存源文件路径或正文；自动化流程也可
+直接使用 `--split-hash`。需要组合多个对象时才使用 `--no-commit` 和下面的底层暂存命令。
+
+```bash
 xscientist research init ./my-research \
   --question "检索引导的反思是否能提高事实准确性？"
 

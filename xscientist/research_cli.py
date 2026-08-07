@@ -122,6 +122,65 @@ def _parse_relations(values: Sequence[str]) -> list[dict[str, str]]:
     return relations
 
 
+def _parse_assignments(values: Sequence[str], *, label: str) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for value in values:
+        name, separator, raw = value.partition("=")
+        name = name.strip()
+        if not separator or not name or not raw.strip():
+            raise ResearchGitError(f"{label} must use NAME=VALUE")
+        if name in parsed:
+            raise ResearchGitError(f"duplicate {label} name: {name}")
+        try:
+            parsed[name] = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed[name] = raw.strip()
+    return parsed
+
+
+def _hash_local_file(path_value: str) -> str:
+    import hashlib
+
+    path = Path(path_value).expanduser()
+    if not path.is_file():
+        raise ResearchGitError("dataset split file was not found")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ResearchGitError("dataset split file could not be read") from exc
+    return "sha256:" + digest.hexdigest()
+
+
+def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) -> None:
+    recorded = result["object"]
+    related = result.get("related") or []
+    checkpoint = result.get("checkpoint")
+    payload = {
+        "object": recorded.to_dict(),
+        "related_objects": [item.to_dict() for item in related],
+        "checkpoint": checkpoint.to_dict() if checkpoint is not None else None,
+    }
+    if as_json:
+        _print_json(payload)
+        return
+    action = "Recorded" if recorded.created else "Reused"
+    print(f"{action} {label}: {recorded.object_id} ({recorded.state})")
+    for item in related:
+        related_action = "Recorded" if item.created else "Reused"
+        print(
+            f"{related_action} related {item.kind}: " f"{item.object_id} ({item.state})"
+        )
+    if checkpoint is None:
+        print("Checkpoint: not requested")
+    elif checkpoint.committed:
+        print(f"Checkpoint: {checkpoint.checkpoint_id}")
+    else:
+        print(f"Checkpoint skipped: {checkpoint.reason}")
+
+
 def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -137,6 +196,127 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         help="Check the local version-control backend and required capabilities.",
     )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    hypothesis_parser = subparsers.add_parser(
+        "hypothesis",
+        help="Record and checkpoint one falsifiable hypothesis.",
+    )
+    hypothesis_parser.add_argument("statement")
+    hypothesis_parser.add_argument("--falsifier", required=True)
+    hypothesis_parser.add_argument("--rationale", default="")
+    hypothesis_parser.add_argument("--prediction", action="append", default=[])
+    hypothesis_parser.add_argument("--repo", default=".")
+    hypothesis_parser.add_argument("-m", "--message")
+    hypothesis_parser.add_argument("--no-commit", action="store_true")
+    hypothesis_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    preregistration_parser = subparsers.add_parser(
+        "preregister",
+        help="Lock a confirmatory plan and dataset split before experiments run.",
+    )
+    preregistration_parser.add_argument("hypothesis_id")
+    preregistration_parser.add_argument("--dataset", required=True)
+    preregistration_parser.add_argument("--metric", required=True)
+    preregistration_parser.add_argument("--baseline", required=True)
+    split_source = preregistration_parser.add_mutually_exclusive_group(required=True)
+    split_source.add_argument(
+        "--split-hash",
+        help="Frozen dataset split digest as sha256:<64 hexadecimal characters>.",
+    )
+    split_source.add_argument(
+        "--split-file",
+        help="Hash a local dataset split without storing its path or contents.",
+    )
+    preregistration_parser.add_argument("--registered-by", required=True)
+    preregistration_parser.add_argument("--minimum-effect", type=float)
+    preregistration_parser.add_argument("--alpha", type=float, default=0.05)
+    preregistration_parser.add_argument("--minimum-seeds", type=int, default=3)
+    preregistration_parser.add_argument("--repo", default=".")
+    preregistration_parser.add_argument("-m", "--message")
+    preregistration_parser.add_argument("--no-commit", action="store_true")
+    preregistration_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    experiment_parser = subparsers.add_parser(
+        "experiment",
+        help="Record one successful, failed, timed-out, or cancelled experiment.",
+    )
+    experiment_parser.add_argument("summary")
+    experiment_parser.add_argument(
+        "--status",
+        required=True,
+        choices=[
+            "success",
+            "completed",
+            "failed",
+            "error",
+            "timeout",
+            "timed_out",
+            "cancelled",
+            "canceled",
+            "running",
+        ],
+    )
+    experiment_parser.add_argument(
+        "--study-phase",
+        choices=["exploratory", "confirmatory"],
+        default="exploratory",
+    )
+    experiment_parser.add_argument("--plan")
+    experiment_parser.add_argument("--preregistration")
+    experiment_parser.add_argument(
+        "--metric", action="append", default=[], help="Metric as NAME=VALUE."
+    )
+    experiment_parser.add_argument("--seed", action="append", type=int, default=[])
+    experiment_parser.add_argument("--failure-class", default="")
+    experiment_parser.add_argument("--repo", default=".")
+    experiment_parser.add_argument("-m", "--message")
+    experiment_parser.add_argument("--no-commit", action="store_true")
+    experiment_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="Bind a result to experiment attempts and supported/refuted objects.",
+    )
+    evidence_parser.add_argument("result")
+    evidence_parser.add_argument("--attempt", action="append", required=True)
+    evidence_parser.add_argument("--supports", action="append", default=[])
+    evidence_parser.add_argument("--refutes", action="append", default=[])
+    evidence_parser.add_argument(
+        "--metric", action="append", default=[], help="Metric as NAME=VALUE."
+    )
+    evidence_parser.add_argument("--verified", action="store_true")
+    evidence_parser.add_argument("--repo", default=".")
+    evidence_parser.add_argument("-m", "--message")
+    evidence_parser.add_argument("--no-commit", action="store_true")
+    evidence_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Record an independent review and compute its promotion gate.",
+    )
+    review_parser.add_argument("summary")
+    review_parser.add_argument("--evaluates", action="append", required=True)
+    review_parser.add_argument("--verifier", required=True)
+    review_parser.add_argument("--decision", choices=["pass", "hold"], required=True)
+    review_parser.add_argument("--failure", action="append", default=[])
+    review_parser.add_argument("--repo", default=".")
+    review_parser.add_argument("-m", "--message")
+    review_parser.add_argument("--no-commit", action="store_true")
+    review_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    claim_parser = subparsers.add_parser(
+        "claim",
+        help="Record an evidence-bound claim; verified claims require a passing gate.",
+    )
+    claim_parser.add_argument("statement")
+    claim_parser.add_argument("--evidence", action="append", required=True)
+    claim_parser.add_argument("--scope", default="")
+    claim_parser.add_argument("--gate")
+    claim_parser.add_argument("--verified", action="store_true")
+    claim_parser.add_argument("--repo", default=".")
+    claim_parser.add_argument("-m", "--message")
+    claim_parser.add_argument("--no-commit", action="store_true")
+    claim_parser.add_argument("--json", action="store_true", dest="as_json")
 
     init_parser = subparsers.add_parser(
         "init", help="Initialize a local research repository."
@@ -423,6 +603,109 @@ def main(
                 if payload.get("install_hint"):
                     print(_display_text(payload["install_hint"]), file=sys.stderr)
             return 0 if payload["ok"] else 1
+
+        if args.command == "hypothesis":
+            from .research_commands import save_hypothesis
+
+            result = save_hypothesis(
+                args.repo,
+                statement=args.statement,
+                falsifier=args.falsifier,
+                rationale=args.rationale,
+                predictions=args.prediction,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("hypothesis", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "experiment":
+            from .research_commands import save_experiment
+
+            result = save_experiment(
+                args.repo,
+                summary=args.summary,
+                status=args.status,
+                study_phase=args.study_phase,
+                plan_id=args.plan,
+                preregistration_id=args.preregistration,
+                metrics=_parse_assignments(args.metric, label="metric"),
+                seeds=args.seed,
+                failure_class=args.failure_class,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("experiment", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "preregister":
+            from .research_commands import save_preregistration
+
+            result = save_preregistration(
+                args.repo,
+                hypothesis_id=args.hypothesis_id,
+                dataset=args.dataset,
+                metric=args.metric,
+                baseline=args.baseline,
+                split_hash=args.split_hash or _hash_local_file(args.split_file),
+                registered_by=args.registered_by,
+                minimum_effect=args.minimum_effect,
+                alpha=args.alpha,
+                minimum_seeds=args.minimum_seeds,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("preregistration", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "evidence":
+            from .research_commands import save_evidence
+
+            result = save_evidence(
+                args.repo,
+                result_summary=args.result,
+                attempt_ids=args.attempt,
+                supports=args.supports,
+                refutes=args.refutes,
+                metrics=_parse_assignments(args.metric, label="metric"),
+                verified=args.verified,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("evidence", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "claim":
+            from .research_commands import save_claim
+
+            result = save_claim(
+                args.repo,
+                statement=args.statement,
+                evidence_ids=args.evidence,
+                scope=args.scope,
+                gate_id=args.gate,
+                verified=args.verified,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("claim", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "review":
+            from .research_commands import save_review
+
+            result = save_review(
+                args.repo,
+                summary=args.summary,
+                evaluates=args.evaluates,
+                verifier_id=args.verifier,
+                decision=args.decision,
+                required_failures=args.failure,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("gate decision", result, as_json=args.as_json)
+            return 0
 
         if args.command == "init":
             result = init_repository(
