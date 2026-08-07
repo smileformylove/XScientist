@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -30,6 +31,8 @@ from ai_scientist.utils.science_constitution import (
     build_science_constitution,
     save_science_constitution,
 )
+from xscientist import ResearchEvolution, ResearchRepository
+from xscientist.research_git import ResearchGitError
 
 
 def _digest(char: str) -> str:
@@ -395,6 +398,129 @@ class EvolutionGateTests(unittest.TestCase):
             history = root / "evolution_gate_history.jsonl"
             rows = [json.loads(line) for line in history.read_text().splitlines()]
             self.assertEqual(rows[0]["decision"], "promote_to_canary")
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_research_vcs_blocks_shadow_candidate_from_stable_line(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                question="Can the agent improve without weakening integrity?",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+            evolution = ResearchEvolution(repository)
+            evolution.candidate_line("search-policy-v2")
+            evolution.candidate(_candidate(), constitution=_constitution())
+            repository.switch("main")
+
+            preview = repository.merge_preview("evolve/search-policy-v2")
+
+            self.assertFalse(preview["clean"])
+            self.assertIn(
+                "ungated_agent_candidate",
+                {item["type"] for item in preview["conflicts"]},
+            )
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_candidate_api_refuses_stable_line(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+
+            with self.assertRaisesRegex(ResearchGitError, r"evolve/\*"):
+                ResearchEvolution(repository).candidate(
+                    _candidate(),
+                    constitution=_constitution(),
+                )
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_approved_candidate_can_merge_and_rollback_is_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                question="Can the agent improve without weakening integrity?",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+            evolution = ResearchEvolution(repository)
+            evolution.candidate_line("search-policy-v2")
+            candidate_payload = _candidate()
+            candidate = evolution.candidate(
+                candidate_payload,
+                constitution=_constitution(),
+            )["candidate"]
+            gate_payload = _gate(candidate=candidate_payload)
+            evaluation = evolution.evaluate(
+                gate_payload,
+                constitution=_constitution(),
+                candidate_id=candidate.object_id,
+                evaluator_id="service:independent-evaluator",
+            )["evaluation"]
+            canary = _canary(candidate_payload)
+            promotion_payload = approve_production_promotion(
+                gate_payload,
+                canary,
+                constitution=_constitution(),
+                approver_ids=["human:release-owner"],
+            )
+            promoted = evolution.promote(
+                promotion_payload,
+                constitution=_constitution(),
+                candidate_id=candidate.object_id,
+                evaluation_id=evaluation.object_id,
+            )["promoted_candidate"]
+            repository.switch("main")
+
+            preview = repository.merge_preview("evolve/search-policy-v2")
+            merged = repository.merge("evolve/search-policy-v2")
+            rollback = ResearchEvolution(repository).rollback(
+                canary["rollback_receipt"],
+                candidate_id=candidate.object_id,
+                promoted_id=promoted.object_id,
+                trigger="canary_quality_regression",
+            )
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
+            self.assertTrue(merged.commit)
+            self.assertEqual(rollback["decision"].state, "superseded")
+            self.assertTrue(repository.fsck()["ok"])
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_held_evolution_evaluation_cannot_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+            evolution = ResearchEvolution(repository)
+            evolution.candidate_line("held-search-policy")
+            candidate_payload = _candidate()
+            candidate = evolution.candidate(
+                candidate_payload,
+                constitution=_constitution(),
+            )["candidate"]
+            held_gate = _gate(
+                candidate=candidate_payload,
+                samples=[_sample(index, regressed=True) for index in range(5)],
+            )
+            evaluation = evolution.evaluate(
+                held_gate,
+                constitution=_constitution(),
+                candidate_id=candidate.object_id,
+                evaluator_id="service:independent-evaluator",
+            )["evaluation"]
+
+            with self.assertRaisesRegex(ResearchGitError, "verified independent"):
+                evolution.promote(
+                    {},
+                    constitution=_constitution(),
+                    candidate_id=candidate.object_id,
+                    evaluation_id=evaluation.object_id,
+                )
 
     def test_public_cli_runs_shadow_gate_and_persists_report(self) -> None:
         from xscientist.cli import main

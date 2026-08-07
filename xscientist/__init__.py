@@ -7,6 +7,7 @@ from ._version import __version__
 if TYPE_CHECKING:
     from .client import XScientist
     from .models import CommandResult, ProjectRequest, ServiceSettings
+    from .research_evolution import ResearchEvolution
     from .research_lifecycle import ResearchLifecycle
     from .research_vcs import ResearchRepository
 
@@ -32,6 +33,10 @@ def __getattr__(name: str) -> Any:
         from .research_lifecycle import ResearchLifecycle
 
         value = ResearchLifecycle
+    elif name == "ResearchEvolution":
+        from .research_evolution import ResearchEvolution
+
+        value = ResearchEvolution
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals()[name] = value
@@ -55,6 +60,7 @@ def create_app(*args, **kwargs):
 __all__ = [
     "CommandResult",
     "ProjectRequest",
+    "ResearchEvolution",
     "ResearchLifecycle",
     "ResearchRepository",
     "ServiceSettings",

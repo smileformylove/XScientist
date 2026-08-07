@@ -2424,6 +2424,12 @@ def verify_research_repository(
     if latest is None:
         errors.append(f"commit {resolved} contains no valid research checkpoint")
     else:
+        if latest.get("branch") in {"main", "stable"}:
+            for conflict in _stable_evolution_conflicts({}, typed_objects):
+                errors.append(
+                    "stable research contains an ungated agent candidate: "
+                    + str(conflict.get("candidate") or "unknown")
+                )
         for object_hash in latest.get("object_refs") or []:
             pointer = pointer_records.get(str(object_hash))
             if pointer is None:
@@ -2964,6 +2970,83 @@ def _semantic_merge_conflicts(
     return conflicts
 
 
+def _stable_evolution_conflicts(
+    base: dict[str, dict[str, Any]],
+    source: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    new_objects = {
+        object_id: source[object_id] for object_id in sorted(set(source) - set(base))
+    }
+    draft_candidates = {
+        object_id
+        for object_id, payload in new_objects.items()
+        if payload.get("kind") == "agent_candidate" and payload.get("state") == "draft"
+    }
+    authorized: set[str] = set()
+    for promoted_id, payload in new_objects.items():
+        if (
+            payload.get("kind") != "agent_candidate"
+            or payload.get("state") != "promoted"
+        ):
+            continue
+        superseded = {
+            str(item.get("target") or "")
+            for item in payload.get("relations") or []
+            if item.get("type") == "supersedes"
+        }
+        evaluation_ids = {
+            str(item.get("target") or "")
+            for item in payload.get("relations") or []
+            if item.get("type") == "evaluates"
+        }
+        evaluations_valid = bool(evaluation_ids) and all(
+            source.get(object_id, {}).get("kind") == "agent_evaluation"
+            and source.get(object_id, {}).get("state") == "verified"
+            and source.get(object_id, {}).get("payload", {}).get("decision")
+            == "promote_to_canary"
+            and not source.get(object_id, {})
+            .get("payload", {})
+            .get("required_failures")
+            for object_id in evaluation_ids
+        )
+        promoted_payload = payload.get("payload") or {}
+        candidate_payload = promoted_payload.get("candidate") or {}
+        promotion_payload = promoted_payload.get("promotion") or {}
+        exact_hash = candidate_payload.get("candidate_hash")
+        promotion_valid = (
+            bool(exact_hash)
+            and promotion_payload.get("decision") == "approved"
+            and promotion_payload.get("production_promotion_allowed") is True
+            and (promotion_payload.get("candidate") or {}).get("candidate_hash")
+            == exact_hash
+            and bool(promotion_payload.get("approver_ids"))
+            and all(
+                str(item).startswith("human:")
+                for item in promotion_payload.get("approver_ids") or []
+            )
+        )
+        decision_valid = any(
+            decision.get("kind") == "gate_decision"
+            and decision.get("state") == "promoted"
+            and any(
+                relation.get("type") == "promotes"
+                and relation.get("target") == promoted_id
+                for relation in decision.get("relations") or []
+            )
+            for decision in new_objects.values()
+        )
+        if evaluations_valid and promotion_valid and decision_valid:
+            authorized.update(superseded)
+    return [
+        {
+            "type": "ungated_agent_candidate",
+            "candidate": object_id,
+            "message": "stable research cannot admit a shadow-only agent candidate",
+        }
+        for object_id in sorted(draft_candidates - authorized)
+    ]
+
+
 def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
     """Perform a read-only backend and scientific conflict preflight."""
 
@@ -3003,11 +3086,16 @@ def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
         .stdout.strip()
         .splitlines()
     )
+    base_objects = _research_objects_at_commit(root, base_commit)
+    target_objects = _research_objects_at_commit(root, target_commit)
+    source_objects = _research_objects_at_commit(root, source_commit)
     conflicts = _semantic_merge_conflicts(
-        _research_objects_at_commit(root, base_commit),
-        _research_objects_at_commit(root, target_commit),
-        _research_objects_at_commit(root, source_commit),
+        base_objects,
+        target_objects,
+        source_objects,
     )
+    if _branch(root) in {"main", "stable"}:
+        conflicts.extend(_stable_evolution_conflicts(base_objects, source_objects))
     if backend.returncode:
         paths = sorted(ours_changed & theirs_changed)
         conflicts.append(
