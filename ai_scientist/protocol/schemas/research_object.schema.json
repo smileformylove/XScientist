@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_object.schema.json",
+  "title": "XScientist Research VCS Object",
+  "description": "One immutable, content-addressed scientific or agent-evolution object.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol_kind",
+    "object_id",
+    "kind",
+    "state",
+    "payload",
+    "relations",
+    "actor",
+    "provenance",
+    "created_at",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "xscientist.research-object.v1"
+    },
+    "protocol_kind": {
+      "type": "string",
+      "const": "research_object"
+    },
+    "object_id": {
+      "type": "string",
+      "pattern": "^rso-[0-9a-f]{16}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "question",
+        "hypothesis",
+        "preregistration",
+        "research_plan",
+        "experiment_attempt",
+        "metric",
+        "evidence",
+        "claim",
+        "review",
+        "gate_decision",
+        "manuscript",
+        "reproduction",
+        "agent_candidate",
+        "agent_evaluation"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "locked",
+        "running",
+        "completed",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "rejected",
+        "superseded",
+        "verified",
+        "promoted"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "relations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["type", "target"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "depends_on",
+              "supports",
+              "refutes",
+              "supersedes",
+              "reproduces",
+              "contradicts",
+              "derived_from",
+              "evaluates",
+              "promotes"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "actor": {
+      "type": "object",
+      "required": ["actor_id", "authority"],
+      "properties": {
+        "actor_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "type": "string",
+          "enum": [
+            "research_agent",
+            "recorder",
+            "independent_evaluator",
+            "deterministic_gate",
+            "human"
+          ]
+        },
+        "agent_version": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "environment_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "prompt_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "policy_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "evaluator_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "dataset_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "seeds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "additionalProperties": false
+}

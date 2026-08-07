@@ -38,6 +38,7 @@ class Kind(str, Enum):
     RESEARCH_BUNDLE = "research_bundle"
     RESEARCH_ENVIRONMENT = "research_environment"
     RESEARCH_REPOSITORY = "research_repository"
+    RESEARCH_OBJECT = "research_object"
 
     @classmethod
     def values(cls) -> tuple[str, ...]:

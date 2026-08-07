@@ -13,6 +13,7 @@ import json
 import mimetypes
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -40,8 +41,17 @@ import yaml
 from jsonschema import ValidationError, validate as validate_json
 
 from ai_scientist.protocol.hashing import content_hash, hash_manifest
+from ai_scientist.protocol.research_vcs import (
+    ResearchObjectError,
+    build_research_object,
+    validate_research_object,
+)
 from ai_scientist.protocol.schemas import load_schema
-from ai_scientist.utils.privacy import format_privacy_findings, scan_paths
+from ai_scientist.utils.privacy import (
+    format_privacy_findings,
+    redact_sensitive_payload,
+    scan_paths,
+)
 
 REPOSITORY_SCHEMA = "xscientist.research-repository.v1"
 CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
@@ -297,6 +307,28 @@ class ObjectPointerResult:
             "object_hash": self.object_hash,
             "size": self.size,
             "linked": self.linked,
+        }
+
+
+@dataclass(frozen=True)
+class ResearchObjectResult:
+    """Result of recording one immutable, typed Research VCS object."""
+
+    created: bool
+    path: Path
+    object_id: str
+    object_hash: str
+    kind: str
+    state: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "created": self.created,
+            "path": str(self.path),
+            "object_id": self.object_id,
+            "object_hash": self.object_hash,
+            "kind": self.kind,
+            "state": self.state,
         }
 
 
@@ -724,6 +756,132 @@ def init_repository(
         actor=actor,
         allow_checkpoint_only=True,
     )
+
+
+def _research_object_path(root: Path, payload: dict[str, Any]) -> Path:
+    kind = str(payload["kind"])
+    object_id = str(payload["object_id"])
+    return root / ".xscientist" / "objects" / kind / f"{object_id}.json"
+
+
+def _refuse_private_research_object(payload: dict[str, Any]) -> None:
+    if redact_sensitive_payload(payload) != payload:
+        raise ResearchGitError(
+            "privacy gate refused the research object; matched values were not displayed"
+        )
+
+
+def record_research_object(
+    repo: str | Path,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    state: str = "draft",
+    relations: Sequence[dict[str, Any]] = (),
+    actor: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> ResearchObjectResult:
+    """Record one immutable scientific object in the repository working state.
+
+    Recording is idempotent: the same semantic object resolves to the same
+    object ID and path. The caller creates a research commit separately so one
+    atomic scientific transition may bind several related objects.
+    """
+
+    root = _repository_root(repo)
+    try:
+        research_object = build_research_object(
+            kind=kind,
+            payload=payload,
+            state=state,
+            relations=relations,
+            actor=actor,
+            provenance=provenance,
+        )
+    except ResearchObjectError as exc:
+        raise ResearchGitError(str(exc)) from exc
+    _refuse_private_research_object(research_object)
+    target = _research_object_path(root, research_object)
+    with _repository_lock(root):
+        if target.exists():
+            try:
+                existing = validate_research_object(
+                    json.loads(target.read_text(encoding="utf-8"))
+                )
+            except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
+                raise ResearchGitError(
+                    f"existing research object is damaged: {target.relative_to(root)}"
+                ) from exc
+            if existing["content_hash"] != research_object["content_hash"]:
+                raise ResearchGitError(
+                    f"research object identifier collision: {research_object['object_id']}"
+                )
+            persisted = existing
+            created = False
+        else:
+            _atomic_write_json(target, research_object)
+            findings = scan_paths(root, [target.relative_to(root)])
+            if findings:
+                target.unlink(missing_ok=True)
+                _fsync_directory(target.parent)
+                raise ResearchGitError(
+                    "privacy gate refused the research object; matched values were not displayed:\n"
+                    + format_privacy_findings(findings)
+                )
+            persisted = research_object
+            created = True
+    return ResearchObjectResult(
+        created=created,
+        path=target,
+        object_id=str(persisted["object_id"]),
+        object_hash=str(persisted["content_hash"]),
+        kind=str(persisted["kind"]),
+        state=str(persisted["state"]),
+    )
+
+
+def load_research_object(repo: str | Path, object_id: str) -> dict[str, Any]:
+    """Load and validate one typed Research VCS object from working state."""
+
+    root = _repository_root(repo)
+    normalized = str(object_id or "").strip()
+    if not re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
+        raise ResearchGitError("invalid research object identifier")
+    matches = sorted((root / ".xscientist" / "objects").glob(f"*/{normalized}.json"))
+    if not matches:
+        raise ResearchGitError(f"research object not found: {normalized}")
+    if len(matches) != 1:
+        raise ResearchGitError(f"duplicate research object identifier: {normalized}")
+    try:
+        return validate_research_object(json.loads(matches[0].read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
+        raise ResearchGitError(f"research object is damaged: {normalized}") from exc
+
+
+def list_research_objects(
+    repo: str | Path,
+    *,
+    kind: str | None = None,
+    state: str | None = None,
+) -> list[dict[str, Any]]:
+    """List validated typed objects in deterministic order."""
+
+    root = _repository_root(repo)
+    object_root = root / ".xscientist" / "objects"
+    pattern = f"{kind}/*.json" if kind else "*/*.json"
+    rows: list[dict[str, Any]] = []
+    for path in sorted(object_root.glob(pattern)):
+        try:
+            payload = validate_research_object(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
+            raise ResearchGitError(
+                f"research object is damaged: {path.relative_to(root)}"
+            ) from exc
+        if state is None or payload["state"] == state:
+            rows.append(payload)
+    return sorted(rows, key=lambda row: (row["kind"], row["object_id"]))
 
 
 def _git_paths(repo: Path, args: Sequence[str]) -> set[str]:
@@ -2648,6 +2806,7 @@ __all__ = [
     "REPOSITORY_SCHEMA",
     "CheckpointResult",
     "ObjectPointerResult",
+    "ResearchObjectResult",
     "ResearchGitError",
     "add_research_object",
     "auto_checkpoint",
@@ -2655,6 +2814,9 @@ __all__ = [
     "create_research_bundle",
     "init_repository",
     "load_repository_config",
+    "load_research_object",
+    "list_research_objects",
+    "record_research_object",
     "repository_status",
     "reproduce_checkpoint",
     "restore_research_bundle",
