@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 
 from ai_scientist.protocol.research_vcs import (
     ResearchObjectError,
@@ -12,7 +14,9 @@ from ai_scientist.protocol.research_vcs import (
     validate_research_object,
 )
 from xscientist import ResearchRepository
+from xscientist.research_cli import main as research_main
 from xscientist.research_git import ResearchGitError
+from xscientist.research_git import add_research_object
 
 
 class ResearchObjectProtocolTests(unittest.TestCase):
@@ -116,11 +120,175 @@ class ResearchRepositoryTests(unittest.TestCase):
             repository = self._init(root)
             secret = "sk-" + "q" * 40
 
-            with self.assertRaisesRegex(ResearchGitError, "privacy gate refused") as caught:
+            with self.assertRaisesRegex(
+                ResearchGitError, "privacy gate refused"
+            ) as caught:
                 repository.record("evidence", {"credential": secret})
 
             self.assertNotIn(secret, str(caught.exception))
             self.assertEqual(repository.objects(), [])
+
+    def test_native_stage_commits_only_the_selected_research_change(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            question = repository.record("question", {"text": "Q1"})
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            question_path = question.path.relative_to(repository.path).as_posix()
+            hypothesis_path = hypothesis.path.relative_to(repository.path).as_posix()
+
+            staged = repository.stage([question_path])
+            status = repository.status()
+            checkpoint = repository.commit(
+                stage="ideation",
+                subject="record only the selected question",
+                staged_only=True,
+            )
+
+            self.assertEqual(staged.paths, (question_path,))
+            self.assertEqual(status["research_stage"]["paths"], [question_path])
+            self.assertIn(question_path, checkpoint.staged_paths)
+            self.assertNotIn(hypothesis_path, checkpoint.staged_paths)
+            self.assertEqual(repository.status()["research_stage"]["paths"], [])
+            self.assertIn(hypothesis_path, repository.status()["eligible_changes"])
+
+    def test_native_stage_detects_content_changed_after_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            result = repository.record("hypothesis", {"statement": "H1"})
+            relative = result.path.relative_to(repository.path).as_posix()
+            repository.stage([relative])
+            result.path.write_text(result.path.read_text(encoding="utf-8") + " ")
+
+            with self.assertRaisesRegex(ResearchGitError, "changed after selection"):
+                repository.commit(
+                    stage="ideation",
+                    subject="must not commit stale selection",
+                    staged_only=True,
+                )
+
+    def test_native_stage_binds_only_selected_large_object_pointers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            repository = self._init(root)
+            first_source = base / "first.bin"
+            second_source = base / "second.bin"
+            first_source.write_bytes(b"first evidence")
+            second_source.write_bytes(b"second evidence")
+            first = add_research_object(
+                root, first_source, logical_path="data/first.bin"
+            )
+            second = add_research_object(
+                root, second_source, logical_path="data/second.bin"
+            )
+            first_path = first.pointer_path.relative_to(repository.path).as_posix()
+            second_path = second.pointer_path.relative_to(repository.path).as_posix()
+
+            repository.stage([first_path])
+            checkpoint = repository.commit(
+                stage="evidence",
+                subject="bind selected evidence only",
+                staged_only=True,
+            )
+            verification = repository.fsck()
+
+            self.assertIn(
+                first.object_hash, repository.show()["checkpoint"]["object_refs"]
+            )
+            self.assertNotIn(
+                second.object_hash, repository.show()["checkpoint"]["object_refs"]
+            )
+            self.assertIn(first_path, checkpoint.staged_paths)
+            self.assertNotIn(second_path, checkpoint.staged_paths)
+            self.assertTrue(verification["ok"], verification["errors"])
+
+    def test_research_branches_and_tags_use_scientific_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+
+            forked = repository.fork("hypothesis/h1")
+            result = repository.record("hypothesis", {"statement": "H1"})
+            repository.commit(stage="ideation", subject="explore H1")
+            tag = repository.tag("result/h1-v1")
+            branches = repository.branches()
+            tags = repository.tags()
+
+            self.assertTrue(forked["current"])
+            self.assertEqual(repository.status()["branch"], "hypothesis/h1")
+            self.assertEqual(
+                [item["name"] for item in branches],
+                ["hypothesis/h1", "main"],
+            )
+            self.assertEqual(
+                tag["checkpoint_id"], repository.show()["checkpoint"]["checkpoint_id"]
+            )
+            self.assertEqual(tags[0]["name"], "result/h1-v1")
+            self.assertEqual(tags[0]["checkpoint_id"], tag["checkpoint_id"])
+            self.assertTrue(result.path.is_file())
+            with self.assertRaisesRegex(ResearchGitError, "already exists"):
+                repository.tag("result/h1-v1")
+
+    def test_switch_refuses_uncommitted_research(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.fork("alternative", switch=False)
+            repository.record("hypothesis", {"statement": "uncommitted"})
+
+            with self.assertRaisesRegex(ResearchGitError, "clean working state"):
+                repository.switch("alternative")
+
+    def test_cli_runs_native_record_stage_commit_and_branch_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            commands = [
+                [
+                    "init",
+                    str(root),
+                    "--question",
+                    "Does H1 improve the metric?",
+                    "--git-user-name",
+                    "Research Test",
+                    "--git-user-email",
+                    "research@example.invalid",
+                ],
+                [
+                    "record",
+                    "hypothesis",
+                    "--repo",
+                    str(root),
+                    "--data",
+                    '{"statement":"H1"}',
+                ],
+                ["stage", "--repo", str(root), "--all"],
+                [
+                    "checkpoint",
+                    "--repo",
+                    str(root),
+                    "--stage",
+                    "ideation",
+                    "--subject",
+                    "record H1",
+                    "--staged",
+                ],
+                ["branch", "alternative", "--repo", str(root)],
+            ]
+
+            for command in commands:
+                with self.subTest(command=command), redirect_stdout(io.StringIO()):
+                    self.assertEqual(research_main(command), 0)
+
+            repository = ResearchRepository(root)
+            self.assertEqual(
+                repository.objects(kind="hypothesis")[0]["payload"], {"statement": "H1"}
+            )
+            self.assertEqual(
+                [item["name"] for item in repository.branches()],
+                ["alternative", "main"],
+            )
 
     def test_damaged_object_is_never_returned_as_valid(self) -> None:
         with tempfile.TemporaryDirectory() as td:

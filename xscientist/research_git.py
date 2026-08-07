@@ -50,6 +50,7 @@ from ai_scientist.protocol.schemas import load_schema
 from ai_scientist.utils.privacy import (
     format_privacy_findings,
     redact_sensitive_payload,
+    redact_sensitive_text,
     scan_paths,
 )
 
@@ -329,6 +330,24 @@ class ResearchObjectResult:
             "object_hash": self.object_hash,
             "kind": self.kind,
             "state": self.state,
+        }
+
+
+@dataclass(frozen=True)
+class ResearchStageResult:
+    """The native Research VCS staging selection."""
+
+    paths: tuple[str, ...]
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    excluded: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "paths": list(self.paths),
+            "added": list(self.added),
+            "removed": list(self.removed),
+            "excluded": list(self.excluded),
         }
 
 
@@ -853,7 +872,9 @@ def load_research_object(repo: str | Path, object_id: str) -> dict[str, Any]:
     if len(matches) != 1:
         raise ResearchGitError(f"duplicate research object identifier: {normalized}")
     try:
-        return validate_research_object(json.loads(matches[0].read_text(encoding="utf-8")))
+        return validate_research_object(
+            json.loads(matches[0].read_text(encoding="utf-8"))
+        )
     except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
         raise ResearchGitError(f"research object is damaged: {normalized}") from exc
 
@@ -896,6 +917,165 @@ def _changed_paths(repo: Path) -> tuple[set[str], set[str]]:
     unstaged = _git_paths(repo, ["diff", "--name-only", "-z"])
     untracked = _git_paths(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
     return staged, unstaged | untracked
+
+
+def _research_stage_path(repo: Path) -> Path:
+    raw = _run_git(repo, ["rev-parse", "--git-path", "xscientist/stage.json"]).stdout
+    path = Path(raw.strip())
+    return path if path.is_absolute() else repo / path
+
+
+def _worktree_fingerprint(repo: Path, relative: str) -> str:
+    target = repo / _normalise_relative(relative)
+    if target.is_symlink():
+        raise ResearchGitError(f"research staging refuses symbolic links: {relative}")
+    if not target.exists():
+        return "deleted"
+    if not target.is_file():
+        raise ResearchGitError(f"research staging requires a regular file: {relative}")
+    return _hash_file(target)
+
+
+def _stage_payload(repo: Path, entries: dict[str, str]) -> dict[str, Any]:
+    base = {
+        "schema_version": "xscientist.research-stage.v1",
+        "head": _head(repo),
+        "entries": [
+            {"path": path, "fingerprint": entries[path]} for path in sorted(entries)
+        ],
+    }
+    return {**base, "content_hash": content_hash(base)}
+
+
+def _load_research_stage(repo: Path) -> dict[str, Any]:
+    path = _research_stage_path(repo)
+    if not path.is_file():
+        return _stage_payload(repo, {})
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ResearchGitError("native research stage is damaged") from exc
+    if not isinstance(payload, dict):
+        raise ResearchGitError("native research stage is damaged")
+    base = {key: value for key, value in payload.items() if key != "content_hash"}
+    if (
+        payload.get("schema_version") != "xscientist.research-stage.v1"
+        or payload.get("content_hash") != content_hash(base)
+        or not isinstance(payload.get("entries"), list)
+    ):
+        raise ResearchGitError("native research stage failed integrity validation")
+    seen: set[str] = set()
+    for item in payload["entries"]:
+        if not isinstance(item, dict) or set(item) != {"path", "fingerprint"}:
+            raise ResearchGitError("native research stage is damaged")
+        relative = _normalise_relative(str(item["path"]))
+        if relative in seen or not isinstance(item["fingerprint"], str):
+            raise ResearchGitError("native research stage is damaged")
+        seen.add(relative)
+    return payload
+
+
+def _write_research_stage(repo: Path, entries: dict[str, str]) -> None:
+    path = _research_stage_path(repo)
+    if entries:
+        _atomic_write_json(path, _stage_payload(repo, entries))
+        return
+    path.unlink(missing_ok=True)
+    if path.parent.exists():
+        _fsync_directory(path.parent)
+
+
+def research_stage(
+    repo: str | Path,
+    paths: Sequence[str] = (),
+    *,
+    all_changes: bool = False,
+) -> ResearchStageResult:
+    """Select exact scientific changes for the next research commit."""
+
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        if all_changes and paths:
+            raise ResearchGitError(
+                "use either explicit research paths or all_changes=True"
+            )
+        config = load_repository_config(root)
+        git_staged, changed = _changed_paths(root)
+        if git_staged:
+            raise ResearchGitError(
+                "research staging refused because the backend index is not clean"
+            )
+        requested = (
+            set(changed)
+            if all_changes
+            else {_normalise_relative(path) for path in paths}
+        )
+        if not requested:
+            raise ResearchGitError("specify research paths or use all_changes=True")
+        missing = sorted(requested - changed)
+        if missing:
+            raise ResearchGitError(
+                "research paths have no working-state change: " + ", ".join(missing)
+            )
+        selected, excluded = _select_paths(root, config, requested, explicit=paths)
+        if not selected:
+            return ResearchStageResult(paths=(), excluded=tuple(excluded))
+        findings = scan_paths(root, selected)
+        if findings:
+            raise ResearchGitError(
+                "privacy gate refused research staging; matched values were not displayed:\n"
+                + format_privacy_findings(findings)
+            )
+        current = _load_research_stage(root)
+        if current.get("head") != _head(root) and current.get("entries"):
+            raise ResearchGitError(
+                "native research stage belongs to another repository state; unstage it first"
+            )
+        entries = {
+            str(item["path"]): str(item["fingerprint"])
+            for item in current.get("entries") or []
+        }
+        before = set(entries)
+        for relative in selected:
+            entries[relative] = _worktree_fingerprint(root, relative)
+        _write_research_stage(root, entries)
+        return ResearchStageResult(
+            paths=tuple(sorted(entries)),
+            added=tuple(sorted(set(entries) - before)),
+            excluded=tuple(excluded),
+        )
+
+
+def research_unstage(
+    repo: str | Path,
+    paths: Sequence[str] = (),
+    *,
+    all_paths: bool = False,
+) -> ResearchStageResult:
+    """Remove paths from the native stage without modifying research files."""
+
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        current = _load_research_stage(root)
+        entries = {
+            str(item["path"]): str(item["fingerprint"])
+            for item in current.get("entries") or []
+        }
+        requested = (
+            set(entries) if all_paths else {_normalise_relative(path) for path in paths}
+        )
+        if not requested:
+            raise ResearchGitError("specify staged paths or use all_paths=True")
+        unknown = sorted(requested - set(entries))
+        if unknown:
+            raise ResearchGitError(
+                "research paths are not staged: " + ", ".join(unknown)
+            )
+        removed = tuple(sorted(requested))
+        for relative in requested:
+            entries.pop(relative, None)
+        _write_research_stage(root, entries)
+        return ResearchStageResult(paths=tuple(sorted(entries)), removed=removed)
 
 
 def _select_paths(
@@ -1336,6 +1516,7 @@ def _create_checkpoint_locked(
     object_refs: Sequence[str] = (),
     reproduce_command: str | None = None,
     include: Sequence[str] = (),
+    only_paths: Sequence[str] | None = None,
     commit: bool = True,
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
@@ -1352,7 +1533,16 @@ def _create_checkpoint_locked(
             "checkpoint refused because the Git index already contains staged changes: "
             + ", ".join(sorted(staged_before))
         )
-    selected, excluded = _select_paths(root, config, changed, explicit=include)
+    candidates = changed
+    if only_paths is not None:
+        normalized_only = {_normalise_relative(path) for path in only_paths}
+        absent = sorted(normalized_only - changed)
+        if absent:
+            raise ResearchGitError(
+                "staged research paths no longer contain a change: " + ", ".join(absent)
+            )
+        candidates = changed & normalized_only
+    selected, excluded = _select_paths(root, config, candidates, explicit=include)
     material = [path for path in selected if not path.startswith("checkpoints/")]
     if not material and not allow_checkpoint_only:
         return CheckpointResult(
@@ -1391,6 +1581,26 @@ def _create_checkpoint_locked(
     manifests = _manifest_refs(root, [*selected, *explicit_ara])
 
     pointers = _pointer_records(root, strict=True)
+    if only_paths is not None:
+        selected_pointer_paths = {
+            path for path in selected if path.startswith("research-objects/")
+        }
+        head = _head(root)
+        committed_pointers = (
+            _pointer_records_at_commit(root, head, strict=True) if head else {}
+        )
+        pointers = {
+            object_hash: item
+            for object_hash, item in committed_pointers.items()
+            if item.get("pointer_path") not in selected_pointer_paths
+        }
+        pointers.update(
+            {
+                object_hash: item
+                for object_hash, item in _pointer_records(root, strict=True).items()
+                if item.get("pointer_path") in selected_pointer_paths
+            }
+        )
     resolved_object_refs = sorted(
         {
             *(str(item) for item in object_refs if str(item).startswith("sha256:")),
@@ -1567,6 +1777,65 @@ def create_checkpoint(
         )
 
 
+def commit_research_stage(
+    repo: str | Path,
+    *,
+    stage: str,
+    subject: str,
+    summary: str = "",
+    status: str = "completed",
+    actor: str | None = None,
+    nodes: Sequence[str] = (),
+    claims: Sequence[str] = (),
+    ara_paths: Sequence[str] = (),
+    object_refs: Sequence[str] = (),
+    reproduce_command: str | None = None,
+) -> CheckpointResult:
+    """Commit exactly the native-stage selection as one scientific transition."""
+
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        staged = _load_research_stage(root)
+        entries = {
+            str(item["path"]): str(item["fingerprint"])
+            for item in staged.get("entries") or []
+        }
+        if not entries:
+            raise ResearchGitError("native research stage is empty")
+        if staged.get("head") != _head(root):
+            raise ResearchGitError(
+                "native research stage belongs to another repository state; unstage it first"
+            )
+        stale = [
+            path
+            for path, expected in entries.items()
+            if _worktree_fingerprint(root, path) != expected
+        ]
+        if stale:
+            raise ResearchGitError(
+                "staged research content changed after selection: "
+                + ", ".join(sorted(stale))
+                + "; stage it again"
+            )
+        result = _create_checkpoint_locked(
+            root,
+            stage=stage,
+            subject=subject,
+            summary=summary,
+            status=status,
+            actor=actor,
+            nodes=nodes,
+            claims=claims,
+            ara_paths=ara_paths,
+            object_refs=object_refs,
+            reproduce_command=reproduce_command,
+            only_paths=tuple(entries),
+        )
+        if result.committed:
+            _write_research_stage(root, {})
+        return result
+
+
 def auto_checkpoint(
     repo: str | Path,
     *,
@@ -1618,6 +1887,7 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
     object_files = (
         [path for path in store.rglob("*") if path.is_file()] if store.exists() else []
     )
+    research_stage_payload = _load_research_stage(root)
     return {
         "repository": str(root),
         "name": config.get("name"),
@@ -1627,6 +1897,13 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
         "auto_commit": bool(config["git"].get("auto_commit", True)),
         "auto_push": False,
         "staged_paths": sorted(staged),
+        "research_stage": {
+            "head": research_stage_payload.get("head"),
+            "paths": [
+                str(item["path"])
+                for item in research_stage_payload.get("entries") or []
+            ],
+        },
         "eligible_changes": selected,
         "excluded_changes": excluded,
         "last_checkpoint": previous,
@@ -1636,6 +1913,194 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
             "bytes": sum(path.stat().st_size for path in object_files),
         },
     }
+
+
+def _validate_research_ref_name(name: str, *, kind: str) -> str:
+    normalized = str(name or "").strip()
+    if not normalized or normalized.startswith("-"):
+        raise ResearchGitError(f"invalid research {kind} name")
+    candidate = normalized if kind == "branch" else f"refs/tags/{normalized}"
+    arguments = ["check-ref-format"]
+    if kind == "branch":
+        arguments.append("--branch")
+    arguments.append(candidate)
+    completed = _run_git(Path.cwd(), arguments, check=False)
+    if completed.returncode:
+        raise ResearchGitError(f"invalid research {kind} name: {normalized}")
+    return normalized
+
+
+def list_research_branches(repo: str | Path) -> list[dict[str, Any]]:
+    """List research lines with their latest scientific checkpoint."""
+
+    root = _repository_root(repo)
+    current = _branch(root)
+    raw = _run_git(
+        root,
+        [
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname:short)%00%(objectname)%00%(subject)",
+            "refs/heads",
+        ],
+    ).stdout
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        fields = line.split("\0", 2)
+        if len(fields) != 3:
+            continue
+        name, commit, subject = fields
+        checkpoint = _latest_checkpoint_record(root, name)
+        checkpoint_payload = checkpoint[2] if checkpoint is not None else {}
+        rows.append(
+            {
+                "name": name,
+                "current": name == current,
+                "commit": commit,
+                "subject": subject,
+                "checkpoint_id": checkpoint_payload.get("checkpoint_id"),
+                "stage": checkpoint_payload.get("stage"),
+                "status": checkpoint_payload.get("status"),
+            }
+        )
+    return rows
+
+
+def create_research_branch(
+    repo: str | Path,
+    name: str,
+    *,
+    from_ref: str = "HEAD",
+    switch: bool = False,
+) -> dict[str, Any]:
+    """Fork a named research line without requiring backend commands."""
+
+    root = _repository_root(repo)
+    normalized = _validate_research_ref_name(name, kind="branch")
+    with _repository_lock(root):
+        _run_git(root, ["rev-parse", "--verify", f"{from_ref}^{{commit}}"])
+        existing = _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{normalized}"],
+            check=False,
+        )
+        if existing.returncode == 0:
+            raise ResearchGitError(f"research branch already exists: {normalized}")
+        if switch:
+            _require_clean_research_switch(root)
+        _run_git(root, ["branch", "--", normalized, from_ref])
+        if switch:
+            _run_git(root, ["switch", "--", normalized])
+        return {
+            "name": normalized,
+            "commit": _run_git(root, ["rev-parse", normalized]).stdout.strip(),
+            "current": switch,
+            "from": _run_git(root, ["rev-parse", from_ref]).stdout.strip(),
+        }
+
+
+def _require_clean_research_switch(root: Path) -> None:
+    git_staged, changed = _changed_paths(root)
+    semantic_stage = _load_research_stage(root).get("entries") or []
+    if git_staged or changed or semantic_stage:
+        raise ResearchGitError(
+            "research branch switch requires a clean working state and empty research stage"
+        )
+
+
+def switch_research_branch(repo: str | Path, name: str) -> dict[str, Any]:
+    """Switch research lines only when no working evidence can be overwritten."""
+
+    root = _repository_root(repo)
+    normalized = _validate_research_ref_name(name, kind="branch")
+    with _repository_lock(root):
+        _require_clean_research_switch(root)
+        exists = _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{normalized}"],
+            check=False,
+        )
+        if exists.returncode:
+            raise ResearchGitError(f"research branch not found: {normalized}")
+        _run_git(root, ["switch", "--", normalized])
+        return {
+            "name": normalized,
+            "commit": _head(root),
+            "current": True,
+        }
+
+
+def create_research_tag(
+    repo: str | Path,
+    name: str,
+    *,
+    commit: str = "HEAD",
+    annotation: str = "",
+) -> dict[str, Any]:
+    """Create an immutable, annotated name for a scientific checkpoint."""
+
+    root = _repository_root(repo)
+    normalized = _validate_research_ref_name(name, kind="tag")
+    with _repository_lock(root):
+        resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
+        exists = _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/tags/{normalized}"],
+            check=False,
+        )
+        if exists.returncode == 0:
+            raise ResearchGitError(f"research tag already exists: {normalized}")
+        _path, checkpoint = _checkpoint_at_commit(root, resolved.stdout.strip())
+        message = annotation.strip() or (
+            f"Research checkpoint {checkpoint['checkpoint_id']}\n\n"
+            f"Research-Checkpoint: {checkpoint['checkpoint_id']}\n"
+            f"Research-Event: {checkpoint['content_hash']}"
+        )
+        if redact_sensitive_text(message) != message:
+            raise ResearchGitError(
+                "privacy gate refused the research tag annotation; matched values were not displayed"
+            )
+        _run_git(
+            root,
+            ["tag", "-a", normalized, resolved.stdout.strip(), "-m", message],
+        )
+        return {
+            "name": normalized,
+            "commit": resolved.stdout.strip(),
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "content_hash": checkpoint["content_hash"],
+        }
+
+
+def list_research_tags(repo: str | Path) -> list[dict[str, Any]]:
+    root = _repository_root(repo)
+    raw = _run_git(
+        root,
+        [
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname:short)%00%(*objectname)%00%(objectname)",
+            "refs/tags",
+        ],
+    ).stdout
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        fields = line.split("\0")
+        if len(fields) != 3:
+            continue
+        name, peeled, tag_object = fields
+        commit = peeled or tag_object
+        checkpoint = _latest_checkpoint_record(root, commit)
+        rows.append(
+            {
+                "name": name,
+                "commit": commit,
+                "checkpoint_id": (
+                    checkpoint[2].get("checkpoint_id") if checkpoint else None
+                ),
+            }
+        )
+    return rows
 
 
 def _add_research_object_locked(
@@ -2807,22 +3272,31 @@ __all__ = [
     "CheckpointResult",
     "ObjectPointerResult",
     "ResearchObjectResult",
+    "ResearchStageResult",
     "ResearchGitError",
     "add_research_object",
     "auto_checkpoint",
+    "commit_research_stage",
     "create_checkpoint",
+    "create_research_branch",
     "create_research_bundle",
+    "create_research_tag",
     "init_repository",
     "load_repository_config",
     "load_research_object",
     "list_research_objects",
+    "list_research_branches",
+    "list_research_tags",
     "record_research_object",
     "repository_status",
     "reproduce_checkpoint",
     "restore_research_bundle",
     "research_diff",
     "research_log",
+    "research_stage",
+    "research_unstage",
     "show_checkpoint",
+    "switch_research_branch",
     "verify_research_bundle",
     "verify_research_repository",
 ]

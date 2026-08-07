@@ -9,6 +9,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.protocol.research_vcs import (
+    RESEARCH_OBJECT_KINDS,
+    RESEARCH_OBJECT_STATES,
+    RESEARCH_RELATION_TYPES,
+)
 from ai_scientist.utils.privacy import (
     portable_path,
     redact_sensitive_payload,
@@ -18,15 +23,26 @@ from ai_scientist.utils.privacy import (
 from .research_git import (
     ResearchGitError,
     add_research_object,
+    commit_research_stage,
     create_checkpoint,
+    create_research_branch,
     create_research_bundle,
+    create_research_tag,
     init_repository,
+    list_research_branches,
+    list_research_objects,
+    list_research_tags,
+    load_research_object,
+    record_research_object,
     repository_status,
     reproduce_checkpoint,
     restore_research_bundle,
     research_diff,
     research_log,
+    research_stage,
+    research_unstage,
     show_checkpoint,
+    switch_research_branch,
     verify_research_bundle,
     verify_research_repository,
 )
@@ -64,12 +80,51 @@ def _read_question(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _read_object_payload(args: argparse.Namespace) -> dict[str, Any]:
+    if args.data is not None and args.file is not None:
+        raise ResearchGitError("use only one of --data or --file")
+    if args.file is not None:
+        path = Path(args.file).expanduser()
+        if not path.is_file():
+            raise ResearchGitError("research object payload file was not found")
+        raw = path.read_text(encoding="utf-8")
+    elif args.data is not None:
+        raw = args.data
+    else:
+        raise ResearchGitError("record requires --data or --file")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResearchGitError(
+            f"research object payload is invalid JSON: {exc.msg}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ResearchGitError("research object payload must be a JSON object")
+    return payload
+
+
+def _parse_relations(values: Sequence[str]) -> list[dict[str, str]]:
+    relations: list[dict[str, str]] = []
+    for value in values:
+        relation_type, separator, remainder = value.partition(":")
+        target, role_separator, role = remainder.partition(":")
+        if not separator or relation_type not in RESEARCH_RELATION_TYPES or not target:
+            raise ResearchGitError(
+                "relation must be TYPE:TARGET[:ROLE] using a supported relation type"
+            )
+        relation = {"type": relation_type, "target": target}
+        if role_separator and role:
+            relation["role"] = role
+        relations.append(relation)
+    return relations
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xscientist research",
         description=(
-            "Record scientific progress in a local Git repository. "
-            "No server or remote is required and no command pushes automatically."
+            "Version scientific questions, hypotheses, evidence, evaluations, and "
+            "manuscripts locally. No server is required and no command pushes automatically."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -108,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fsck_parser.add_argument("--json", action="store_true", dest="as_json")
 
     checkpoint_parser = subparsers.add_parser(
-        "checkpoint", help="Create a safe scientific checkpoint and local Git commit."
+        "checkpoint", help="Commit a safe, reproducible scientific checkpoint."
     )
     checkpoint_parser.add_argument("--repo", default=".")
     checkpoint_parser.add_argument("--stage", required=True)
@@ -124,9 +179,82 @@ def _build_parser() -> argparse.ArgumentParser:
     checkpoint_parser.add_argument("--include", action="append", default=[])
     checkpoint_parser.add_argument("--no-commit", action="store_true")
     checkpoint_parser.add_argument("--allow-checkpoint-only", action="store_true")
+    checkpoint_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Commit exactly the paths selected by `research stage`.",
+    )
     checkpoint_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    log_parser = subparsers.add_parser("log", help="Show scientific Git history.")
+    record_parser = subparsers.add_parser(
+        "record", help="Record one immutable, typed scientific object."
+    )
+    record_parser.add_argument("kind", choices=RESEARCH_OBJECT_KINDS)
+    record_parser.add_argument("--repo", default=".")
+    record_parser.add_argument(
+        "--state", choices=RESEARCH_OBJECT_STATES, default="draft"
+    )
+    record_parser.add_argument("--data", help="Payload as a JSON object.")
+    record_parser.add_argument("--file", help="Read the JSON payload from a file.")
+    record_parser.add_argument(
+        "--relation",
+        action="append",
+        default=[],
+        help="Scientific relation as TYPE:TARGET[:ROLE].",
+    )
+    record_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    objects_parser = subparsers.add_parser(
+        "objects", help="List or inspect typed scientific objects."
+    )
+    objects_parser.add_argument("object_id", nargs="?")
+    objects_parser.add_argument("--repo", default=".")
+    objects_parser.add_argument("--kind", choices=RESEARCH_OBJECT_KINDS)
+    objects_parser.add_argument("--state", choices=RESEARCH_OBJECT_STATES)
+    objects_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    stage_parser = subparsers.add_parser(
+        "stage", help="Select exact research changes for the next checkpoint."
+    )
+    stage_parser.add_argument("paths", nargs="*")
+    stage_parser.add_argument("--repo", default=".")
+    stage_parser.add_argument("--all", action="store_true", dest="all_changes")
+    stage_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    unstage_parser = subparsers.add_parser(
+        "unstage", help="Remove paths from research staging without changing files."
+    )
+    unstage_parser.add_argument("paths", nargs="*")
+    unstage_parser.add_argument("--repo", default=".")
+    unstage_parser.add_argument("--all", action="store_true", dest="all_paths")
+    unstage_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    branch_parser = subparsers.add_parser(
+        "branch", help="List or fork independent research lines."
+    )
+    branch_parser.add_argument("name", nargs="?")
+    branch_parser.add_argument("--repo", default=".")
+    branch_parser.add_argument("--from", default="HEAD", dest="from_ref")
+    branch_parser.add_argument("--switch", action="store_true")
+    branch_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    switch_parser = subparsers.add_parser(
+        "switch", help="Switch to another clean research line."
+    )
+    switch_parser.add_argument("name")
+    switch_parser.add_argument("--repo", default=".")
+    switch_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    tag_parser = subparsers.add_parser(
+        "tag", help="List or immutably name scientific checkpoints."
+    )
+    tag_parser.add_argument("name", nargs="?")
+    tag_parser.add_argument("--repo", default=".")
+    tag_parser.add_argument("--commit", default="HEAD")
+    tag_parser.add_argument("--annotation", default="")
+    tag_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    log_parser = subparsers.add_parser("log", help="Show scientific history.")
     log_parser.add_argument("--repo", default=".")
     log_parser.add_argument("--limit", type=int, default=20)
     log_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -203,6 +331,7 @@ def _human_status(payload: dict[str, Any]) -> None:
     print(f"HEAD:              {payload['head'] or '(no commit)'}")
     print(f"Checkpoint policy: {payload['checkpoint_policy']}")
     print(f"Auto push:         {payload['auto_push']}")
+    print(f"Research staged:   {len(payload['research_stage']['paths'])}")
     print(f"Eligible changes:  {len(payload['eligible_changes'])}")
     print(f"Excluded changes:  {len(payload['excluded_changes'])}")
     store = payload["object_store"]
@@ -278,8 +407,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if payload["ok"] else 1
 
         if args.command == "checkpoint":
-            result = create_checkpoint(
-                args.repo,
+            operation = commit_research_stage if args.staged else create_checkpoint
+            checkpoint_kwargs = dict(
+                repo=args.repo,
                 stage=args.stage,
                 subject=args.subject,
                 summary=args.summary,
@@ -290,10 +420,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ara_paths=args.ara,
                 object_refs=args.object_ref,
                 reproduce_command=args.reproduce,
-                include=args.include,
-                commit=not args.no_commit,
-                allow_checkpoint_only=args.allow_checkpoint_only,
             )
+            if not args.staged:
+                checkpoint_kwargs.update(
+                    include=args.include,
+                    commit=not args.no_commit,
+                    allow_checkpoint_only=args.allow_checkpoint_only,
+                )
+            elif args.no_commit or args.allow_checkpoint_only or args.include:
+                raise ResearchGitError(
+                    "--staged cannot be combined with --no-commit, "
+                    "--allow-checkpoint-only, or --include"
+                )
+            result = operation(**checkpoint_kwargs)
             payload = result.to_dict()
             if args.as_json:
                 _print_json(payload)
@@ -310,6 +449,126 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("Excluded by safety policy:")
                 for item in result.excluded_paths:
                     print(f"  - {item}")
+            return 0
+
+        if args.command == "record":
+            result = record_research_object(
+                args.repo,
+                kind=args.kind,
+                state=args.state,
+                payload=_read_object_payload(args),
+                relations=_parse_relations(args.relation),
+            )
+            if args.as_json:
+                _print_json(result.to_dict())
+            else:
+                action = "Recorded" if result.created else "Already recorded"
+                print(f"{action}: {result.object_id}")
+                print(f"Kind/state: {result.kind} / {result.state}")
+                print(f"Path:       {_display_path(result.path)}")
+            return 0
+
+        if args.command == "objects":
+            if args.object_id:
+                payload = load_research_object(args.repo, args.object_id)
+            else:
+                payload = list_research_objects(
+                    args.repo,
+                    kind=args.kind,
+                    state=args.state,
+                )
+            if args.as_json or args.object_id:
+                _print_json(payload)
+            else:
+                for item in payload:
+                    print(
+                        f"{item['object_id']} {item['kind']} "
+                        f"[{item['state']}] {item['content_hash']}"
+                    )
+            return 0
+
+        if args.command == "stage":
+            result = research_stage(
+                args.repo,
+                args.paths,
+                all_changes=args.all_changes,
+            )
+            if args.as_json:
+                _print_json(result.to_dict())
+            else:
+                print(f"Research stage: {len(result.paths)} path(s)")
+                for path in result.paths:
+                    print(f"  {path}")
+                for item in result.excluded:
+                    print(f"excluded: {_display_text(item)}", file=sys.stderr)
+            return 0
+
+        if args.command == "unstage":
+            result = research_unstage(
+                args.repo,
+                args.paths,
+                all_paths=args.all_paths,
+            )
+            if args.as_json:
+                _print_json(result.to_dict())
+            else:
+                print(f"Research stage: {len(result.paths)} path(s)")
+            return 0
+
+        if args.command == "branch":
+            payload = (
+                create_research_branch(
+                    args.repo,
+                    args.name,
+                    from_ref=args.from_ref,
+                    switch=args.switch,
+                )
+                if args.name
+                else list_research_branches(args.repo)
+            )
+            if args.as_json:
+                _print_json(payload)
+            elif args.name:
+                marker = " and switched" if args.switch else ""
+                print(f"Research branch created{marker}: {payload['name']}")
+            else:
+                for item in payload:
+                    marker = "*" if item["current"] else " "
+                    print(
+                        f"{marker} {item['name']} "
+                        f"{(item['checkpoint_id'] or '-')}: {item['subject']}"
+                    )
+            return 0
+
+        if args.command == "switch":
+            payload = switch_research_branch(args.repo, args.name)
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Research branch: {payload['name']}")
+                print(f"Commit:          {payload['commit']}")
+            return 0
+
+        if args.command == "tag":
+            payload = (
+                create_research_tag(
+                    args.repo,
+                    args.name,
+                    commit=args.commit,
+                    annotation=args.annotation,
+                )
+                if args.name
+                else list_research_tags(args.repo)
+            )
+            if args.as_json:
+                _print_json(payload)
+            elif args.name:
+                print(
+                    f"Research tag: {payload['name']} -> " f"{payload['checkpoint_id']}"
+                )
+            else:
+                for item in payload:
+                    print(f"{item['name']} {item['checkpoint_id'] or '-'}")
             return 0
 
         if args.command == "log":

@@ -8,15 +8,24 @@ from typing import Any, Mapping, Sequence
 from .research_git import (
     CheckpointResult,
     ResearchObjectResult,
+    ResearchStageResult,
+    commit_research_stage,
     create_checkpoint,
+    create_research_branch,
+    create_research_tag,
     init_repository,
     list_research_objects,
+    list_research_branches,
+    list_research_tags,
     load_research_object,
     record_research_object,
     repository_status,
     research_diff,
     research_log,
+    research_stage,
+    research_unstage,
     show_checkpoint,
+    switch_research_branch,
     verify_research_repository,
 )
 
@@ -89,6 +98,22 @@ class ResearchRepository:
     ) -> list[dict[str, Any]]:
         return list_research_objects(self.path, kind=kind, state=state)
 
+    def stage(
+        self,
+        paths: Sequence[str] = (),
+        *,
+        all_changes: bool = False,
+    ) -> ResearchStageResult:
+        return research_stage(self.path, paths, all_changes=all_changes)
+
+    def unstage(
+        self,
+        paths: Sequence[str] = (),
+        *,
+        all_paths: bool = False,
+    ) -> ResearchStageResult:
+        return research_unstage(self.path, paths, all_paths=all_paths)
+
     def commit(
         self,
         *,
@@ -97,8 +122,10 @@ class ResearchRepository:
         summary: str = "",
         status: str = "completed",
         actor: str | None = None,
+        staged_only: bool = False,
     ) -> CheckpointResult:
-        return create_checkpoint(
+        operation = commit_research_stage if staged_only else create_checkpoint
+        return operation(
             self.path,
             stage=stage,
             subject=subject,
@@ -108,6 +135,43 @@ class ResearchRepository:
         )
 
     checkpoint = commit
+
+    def branches(self) -> list[dict[str, Any]]:
+        return list_research_branches(self.path)
+
+    def fork(
+        self,
+        name: str,
+        *,
+        from_ref: str = "HEAD",
+        switch: bool = True,
+    ) -> dict[str, Any]:
+        return create_research_branch(
+            self.path,
+            name,
+            from_ref=from_ref,
+            switch=switch,
+        )
+
+    def switch(self, name: str) -> dict[str, Any]:
+        return switch_research_branch(self.path, name)
+
+    def tag(
+        self,
+        name: str,
+        *,
+        commit: str = "HEAD",
+        annotation: str = "",
+    ) -> dict[str, Any]:
+        return create_research_tag(
+            self.path,
+            name,
+            commit=commit,
+            annotation=annotation,
+        )
+
+    def tags(self) -> list[dict[str, Any]]:
+        return list_research_tags(self.path)
 
     def log(self, *, limit: int = 20) -> list[dict[str, Any]]:
         return research_log(self.path, limit=limit)
@@ -124,7 +188,9 @@ class ResearchRepository:
     ) -> dict[str, Any]:
         return research_diff(self.path, before, after, deep=deep)
 
-    def fsck(self, *, commit: str = "HEAD", verify_objects: bool = True) -> dict[str, Any]:
+    def fsck(
+        self, *, commit: str = "HEAD", verify_objects: bool = True
+    ) -> dict[str, Any]:
         return verify_research_repository(
             self.path,
             commit=commit,
