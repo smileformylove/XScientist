@@ -71,7 +71,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("bfts", "Run the low-level BFTS experiment launcher."),
         ("zhipu", "Run the Zhipu-oriented experiment launcher."),
         ("preflight", "Check runtime dependencies and credentials."),
-        ("research", "Record scientific progress in a local Git repository."),
+        ("research", "Use native version control for scientific progress."),
     ):
         subparser = subparsers.add_parser(
             name,

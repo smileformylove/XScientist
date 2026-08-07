@@ -17,22 +17,49 @@ loadable at runtime without a Python dependency.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .constants import PROTOCOL_VERSION, Kind
 from .graph import analyze_exploration_graph, graph_with_dag_metadata
 from .hashing import build_provenance, content_hash, hash_manifest, hash_node_payload
 from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
 from .objects import ObjectRef, ObjectStore
-from .research_vcs import (
-    RESEARCH_AUTHORITIES,
-    RESEARCH_OBJECT_KINDS,
-    RESEARCH_OBJECT_STATES,
-    RESEARCH_RELATION_TYPES,
-    ResearchObjectError,
-    build_research_object,
-    validate_research_object,
-)
 from .schemas import available_schemas, load_schema
 from .validator import ValidationReport, validate_ara, validate_manifest
+
+if TYPE_CHECKING:
+    from .research_vcs import (
+        RESEARCH_AUTHORITIES,
+        RESEARCH_OBJECT_KINDS,
+        RESEARCH_OBJECT_STATES,
+        RESEARCH_RELATION_TYPES,
+        ResearchObjectError,
+        build_research_object,
+        validate_research_object,
+    )
+
+
+_RESEARCH_VCS_EXPORTS = {
+    "RESEARCH_AUTHORITIES",
+    "RESEARCH_OBJECT_KINDS",
+    "RESEARCH_OBJECT_STATES",
+    "RESEARCH_RELATION_TYPES",
+    "ResearchObjectError",
+    "build_research_object",
+    "validate_research_object",
+}
+
+
+def __getattr__(name: str):
+    """Load the optional JSON Schema validator only when Research VCS is used."""
+
+    if name not in _RESEARCH_VCS_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from . import research_vcs
+
+    value = getattr(research_vcs, name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "PROTOCOL_VERSION",

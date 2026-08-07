@@ -1,20 +1,24 @@
-# Local Research Git
+# Native Research Version Control
 
-XScientist can record scientific progress in a normal local Git repository.
-No GitHub account, remote, daemon, or server is required. A remote can be added
-later without rewriting any local commit, branch, or tag.
+XScientist versions scientific meaning directly: questions, hypotheses,
+preregistrations, experiment attempts, evidence, claims, reviews, gate
+decisions, manuscripts, reproductions, and agent-evolution candidates. No
+GitHub account, remote, daemon, or server is required. Git is the current local
+persistence adapter; public operations and identifiers remain Research VCS
+semantics.
 
 The design separates three concerns:
 
 | Layer | Stores | Why |
 |---|---|---|
-| Git | Questions, hypotheses, code, compact metrics, claim/evidence links, checkpoints, and content hashes | Small, diffable scientific history |
+| Research VCS | Typed objects, relations, semantic stage, research lines, commits, gates, and provenance | Stable public scientific history |
 | ARA | Exploration DAG, provenance, verification state, and reproducibility metadata | Scientific semantics |
 | Local CAS | Datasets, models, binaries, full logs, and other immutable payloads | Complete storage without inflating Git |
+| Git adapter | Durable commit graph and optional interoperability | Replaceable implementation detail |
 
-XScientist never creates a remote and never pushes automatically. Every Git
-mutation is scoped to the research repository and uses an explicit file
-whitelist; it never runs `git add -A`.
+XScientist never creates a remote and never pushes automatically. Every backend
+mutation is scoped to the research repository and uses an explicit privacy and
+file policy; it never stages the whole working tree implicitly.
 
 ## Start a standalone research repository
 
@@ -25,7 +29,7 @@ xscientist research init ./my-research \
 
 cd my-research
 xscientist research status
-git log --oneline --graph
+xscientist research log
 ```
 
 Initialization creates `research.yaml`, `question.md`, a safety-oriented
@@ -34,14 +38,18 @@ checkpoint commit. If Git has no configured identity, the repository receives
 the local-only fallback `XScientist <xscientist@localhost>`; pass
 `--git-user-name` and `--git-user-email` to choose an explicit identity.
 
-## Record scientific progress
+## Record typed scientific progress
 
 ```bash
-# Add or edit hypotheses/h1.json first.
-xscientist research checkpoint \
-  --stage preregister \
-  --subject "lock H1 and its falsifier" \
-  --summary "Prospective metric, baseline, seed, and stopping rule."
+# Record one immutable object. Repeating identical content is idempotent.
+xscientist research record hypothesis \
+  --data '{"statement":"H1","falsifier":"no improvement over baseline"}'
+
+# Select exact changes and create one atomic scientific transition.
+xscientist research stage --all
+xscientist research checkpoint --staged \
+  --stage ideation \
+  --subject "record H1 and its falsifier"
 
 # Bind a completed experiment and ARA manifest.
 xscientist research checkpoint \
@@ -58,7 +66,7 @@ xscientist research checkpoint \
   --claim c12
 ```
 
-Checkpoint commits contain machine-readable trailers:
+Research commits contain machine-readable trailers in the current adapter:
 
 ```text
 Research-Checkpoint: rcp-...
@@ -69,9 +77,9 @@ ARA-Manifest: sha256:...
 Reproduce: xscientist ara verify ...
 ```
 
-The current commit SHA is intentionally not embedded in its own tree. Git is
-the outer identity; manifest/event hashes in the commit trailers provide the
-reverse lookup without a self-referential hash.
+The backend commit SHA is intentionally not embedded in its own tree. Research
+object/checkpoint content hashes remain the scientific identities and avoid a
+self-referential hash.
 
 ## Inspect, compare, and reproduce
 
@@ -160,37 +168,49 @@ the exact HEAD, and runs `fsck` before publishing the destination directory.
 ```bash
 xscientist project my_project \
   --topic topic.md \
-  --research-git local \
-  --git-checkpoint-policy milestone
+  --checkpoint-policy milestone
 ```
 
-The project directory becomes its own nested/local Git repository. The
+Research VCS is enabled by default; use `--research-vcs off` only for an
+explicitly history-free run. The project directory gets a local adapter. The
 `milestone` policy records initialization, experiment outcomes, and final
 paper/shortlist state. `stage` additionally records ideation. `manual` creates
 only the initialization commit; later checkpoints are operator-controlled.
 
-Use `--research-git-strict` when checkpoint failure must fail the research
-command. Without it, expensive research outputs are preserved and Git errors
+Use `--research-vcs-strict` when checkpoint failure must fail the research
+command. Without it, expensive research outputs are preserved and adapter errors
 are surfaced as warnings for later repair.
 
-## Branches and later GitHub synchronization
+## Research lines, semantic merge, and provenance
 
 Use commits for progress within one line of inquiry and branches only for real
 scientific divergence:
 
 ```bash
-git switch -c hypothesis/retrieval-reflection
-git switch -c method/graph-rag
+xscientist research branch hypothesis/retrieval-reflection --switch
+xscientist research branch challenge/graph-rag
+xscientist research switch challenge/graph-rag
+xscientist research merge hypothesis/retrieval-reflection --preview
+xscientist research merge hypothesis/retrieval-reflection
+xscientist research blame <research-object-id>
 ```
 
-Checkpoint sequence numbers are branch-local. When ordinary Git merges two
+Checkpoint sequence numbers are branch-local. When Research VCS merges two
 scientific branches, the next checkpoint records both parent checkpoint hashes
 while retaining the first parent in `previous_checkpoint_hash` for v1 reader
 compatibility. Checkpoint creation, object registration, and bundle snapshots
 share a repository lock; a failed Git commit removes only the new checkpoint
 files and this attempt's staged entries, preserving user research files.
 
-When a remote becomes available:
+The native merge preflight blocks file conflicts, opposing support/refutation,
+incompatible locked preregistrations, differing metric definitions, and
+ungated agent candidates entering `main`/`stable`. A successful merge retains
+both scientific parents.
+
+## Optional Git interoperability
+
+When an operator explicitly wants a Git remote, the current adapter can use
+ordinary Git commands:
 
 ```bash
 git remote add origin <url>

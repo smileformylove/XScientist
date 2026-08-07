@@ -63,6 +63,9 @@ class OnboardingTests(unittest.TestCase):
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
             self.assertIn("xscientist provider add zhipu", readme)
+            self.assertIn("xscientist manager list-papers", readme)
+            self.assertIn("xscientist research objects", readme)
+            self.assertNotIn("--research-git", readme)
             self.assertNotIn("\n+  --model", readme)
 
     def test_non_default_provider_requires_matching_explicit_model(self) -> None:

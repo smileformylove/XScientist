@@ -58,7 +58,7 @@ English README: [README.md](../README.md)
     - [B) 连续运行/批量生成（适合跑一段时间）](#b-连续运行批量生成适合跑一段时间)
     - [C) Daemon 长期自治运行（推荐用于"持续迭代"）](#c-daemon-长期自治运行推荐用于持续迭代)
     - [D) 反馈系统监控](#d-反馈系统监控)
-  - [本地科研 Git（不需要服务器）](#本地科研-git不需要服务器)
+  - [原生科研版本控制（不需要服务器）](#原生科研版本控制不需要服务器)
   - [输出与可观测性](#输出与可观测性)
     - [科研完整性取证（Integrity Forensics）](#科研完整性取证integrity-forensics)
     - [ARA 工件（面向下游智能体）](#ara-工件面向下游智能体)
@@ -122,7 +122,7 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
-- **本地科研 Git**：无需 GitHub 或服务器即可按科研里程碑 commit、branch、diff、离线备份和按 commit 复现；大型证据留在本地 CAS，Git 只保存紧凑指针。
+- **原生 Research VCS**：无需 GitHub 或服务器即可版本化假设、预注册、实验、证据、结论、评审和智能体进化；支持语义暂存、研究分支、差异、合并、溯源、离线备份与复现。Git 只是当前可替换的存储适配器。
 - **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `xscientist ara` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
 ## 公共接口
@@ -130,7 +130,7 @@ flowchart LR
 - `xscientist`：PyPI wheel 与源码 checkout 都可直接使用的统一 CLI
 - `xscientist init`：面向已安装包的工作区与快速配置脚手架
 - `xscientist provider`：安全添加、检查和切换模型供应商
-- `xscientist research`：无需服务器的本地科研 Git 历史与离线备份
+- `xscientist research`：原生科研版本控制与离线备份
 - `from xscientist import XScientist, ProjectRequest`：稳定 Python SDK
 - `from xscientist import create_app`：可选 FastAPI 应用工厂
 
@@ -143,7 +143,7 @@ flowchart LR
 | 长期自治运行 | `xscientist daemon` |
 | 查看产物和看板 | `xscientist manager` |
 | 检查/接力 ARA | `xscientist ara` |
-| 记录本地科研 commit | `xscientist research` |
+| 版本化假设、证据与结论 | `xscientist research` |
 | 嵌入 Python 应用 | `XScientist` + `ProjectRequest` |
 | 提供 HTTP 服务 | `xscientist serve` / `create_app()` |
 
@@ -504,10 +504,10 @@ xscientist feedback --feedback-dir ./feedback report
 
 ---
 
-## 本地科研 Git（不需要服务器）
+## 原生科研版本控制（不需要服务器）
 
-Git 本身不依赖 GitHub 或服务器。可以先创建一个独立的本地科研仓库，只在
-科研状态发生实质变化时 commit：
+XScientist 直接提供科研对象和科研操作，使用者无需操作 Git 或连接 GitHub。
+可以先创建一个独立的本地科研仓库，只在科研状态发生实质变化时提交：
 
 ```bash
 xscientist research init ./my-research \
@@ -515,13 +515,15 @@ xscientist research init ./my-research \
 
 cd my-research
 
-# 编辑 hypotheses/h1.json 后：
-xscientist research checkpoint \
-  --stage preregister \
-  --subject "锁定 H1 与证伪条件"
+xscientist research record hypothesis \
+  --data '{"statement":"H1","falsifier":"不优于基线"}'
+xscientist research stage --all
+xscientist research checkpoint --staged \
+  --stage ideation --subject "记录 H1 与证伪条件"
 
 xscientist research log
 xscientist research diff HEAD~1 HEAD
+xscientist research blame <科研对象 ID>
 ```
 
 大型数据、模型和二进制证据保存在本地 CAS，Git 只记录不可变指针：
@@ -542,18 +544,18 @@ xscientist research bundle \
   --dest ../my-research-backup.tar.gz
 ```
 
-完整项目运行也可以选择自动记录本地里程碑：
+完整项目运行默认自动记录本地里程碑：
 
 ```bash
 xscientist project my_project \
   --topic topic.md \
-  --research-git local \
-  --git-checkpoint-policy milestone
+  --checkpoint-policy milestone
 ```
 
-XScientist 不创建 remote，并通过 schema 强制 `auto_push: false`。提交采用
-deny-first 白名单，拒绝已有 staged 内容，排除密钥和大文件，并验证 checkpoint
-哈希。`xscientist research reproduce` 可以把指定 commit 物化成独立 worktree。
+只有明确不需要本地历史时才使用 `--research-vcs off`。XScientist 不创建 remote，
+并通过 schema 强制 `auto_push: false`；它排除密钥和大文件，验证对象、关系与
+checkpoint 哈希，保存失败和负面结果，并阻止未通过门禁的结论与智能体候选进入
+稳定线。`xscientist research reproduce` 可以物化指定科研 checkpoint。
 完整说明见 [`docs/LOCAL_RESEARCH_GIT.md`](LOCAL_RESEARCH_GIT.md)。
 
 ---
@@ -773,7 +775,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 
 - [项目使用指南](guides/PROJECT_USAGE.md)：项目流用法与参数说明
 - [SDK 与 API](guides/SDK_AND_API.md)：安装、Python SDK、CLI 与 HTTP API
-- [本地科研 Git](LOCAL_RESEARCH_GIT.md)：无需服务器的科研 commit、本地 CAS、离线备份与按 commit 复现
+- [原生科研版本控制](LOCAL_RESEARCH_GIT.md)：科研对象、语义分支/合并、本地 CAS、离线备份与复现
 - [科研版本控制规范](RESEARCH_VCS_SPEC.md)：原生科研对象、分支、语义合并、知识晋级与 Agent 进化不变量
 - [反馈系统快速入门](guides/FEEDBACK_QUICKSTART.md)：反馈系统运维方式
 - [配置参考](CONFIG_REFERENCE.md)：更细的配置与参数说明

@@ -8,6 +8,15 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Native Research VCS objects and public Python APIs for semantic staging,
+  research lines, immutable tags, typed diff, provenance blame, safe
+  multi-parent merge, and integrity-aware repository verification.
+- Evidence-gated lifecycle APIs covering hypotheses, plans, locked
+  preregistrations, successful/failed/timed-out attempts, evidence, claims,
+  independent review, gate decisions, and manuscripts.
+- Versioned self-evolution lines with shadow candidates, sealed evaluation,
+  canary-bound promotion, stable-line admission checks, and append-only
+  rollback receipts.
 - Serverless local research Git repositories with scientific checkpoint
   commits, safe staging policies, local CAS object pointers, offline Git/CAS
   bundles, and commit-scoped reproduction worktrees.
@@ -30,6 +39,11 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- End-to-end project runs now enable local Research VCS milestone history by
+  default; `--research-vcs off` remains the explicit opt-out and all legacy
+  `--research-git*` spellings remain accepted.
+- Documentation and generated workspaces present Git as a replaceable local
+  persistence adapter rather than equating Research VCS with source hosting.
 - Project, batch, direct console, daemon, and preflight entrypoints now inherit
   the active workspace provider and default model while preserving explicit
   per-role model overrides.

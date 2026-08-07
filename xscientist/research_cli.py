@@ -1,4 +1,4 @@
-"""Command-line interface for local-first scientific Git history."""
+"""Command-line interface for native, local-first research version control."""
 
 from __future__ import annotations
 
@@ -812,7 +812,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(payload.get("returncode") or 0) if args.execute else 0
     except ResearchGitError as exc:
         print(
-            f"research git error: {redact_sensitive_text(str(exc))}",
+            f"research vcs error: {redact_sensitive_text(str(exc))}",
             file=sys.stderr,
         )
         return 2

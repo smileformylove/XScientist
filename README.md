@@ -43,7 +43,7 @@ Important notes:
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Usage](#usage)
-- [Local Research Git (no server required)](#local-research-git-no-server-required)
+- [Native Research Version Control (no server required)](#native-research-version-control-no-server-required)
 - [Outputs & Observability](#outputs--observability)
   - [Integrity Forensics](#integrity-forensics)
   - [ARA bundles (agent-facing artifact)](#ara-bundles-agent-facing-artifact)
@@ -105,7 +105,7 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
-- Local research Git: a standalone scientific project can record milestone commits, branches, diffs, offline bundles, and commit-scoped reproduction without GitHub or any server; large evidence remains in local CAS and Git tracks compact pointers.
+- Native Research VCS: a project can record typed objects, stage semantic changes, fork research lines, inspect provenance, merge compatible findings, create offline bundles, and reproduce checkpoints without GitHub or any server. Git is the current replaceable persistence adapter, not the user-facing research model.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
 ## Public Interfaces
@@ -113,7 +113,7 @@ flowchart LR
 - `xscientist`: unified CLI available from the PyPI wheel or a source checkout
 - `xscientist init`: installed-package-first workspace and configuration scaffold
 - `xscientist provider`: secure provider setup, readiness inspection, and switching
-- `xscientist research`: serverless local scientific Git history and offline backup
+- `xscientist research`: native scientific version control and offline backup
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
 
@@ -126,7 +126,7 @@ flowchart LR
 | Long-running research | `xscientist daemon` |
 | Inspect outputs and boards | `xscientist manager` |
 | Inspect/fork ARA artifacts | `xscientist ara` |
-| Record local research commits | `xscientist research` |
+| Version hypotheses, evidence, and claims | `xscientist research` |
 | Embed in Python | `XScientist` + `ProjectRequest` |
 | Expose an HTTP service | `xscientist serve` / `create_app()` |
 
@@ -513,10 +513,11 @@ More usage: `docs/guides/FEEDBACK_QUICKSTART.md`
 
 ---
 
-## Local Research Git (no server required)
+## Native Research Version Control (no server required)
 
-Git does not require GitHub or a server. Initialize a standalone research
-repository and record only scientifically meaningful progress:
+XScientist exposes research-native objects and operations; users do not need to
+operate Git or connect a GitHub repository. Initialize a standalone repository
+and record only scientifically meaningful progress:
 
 ```bash
 xscientist research init ./my-research \
@@ -524,15 +525,42 @@ xscientist research init ./my-research \
 
 cd my-research
 
-# After editing hypotheses/h1.json:
-xscientist research checkpoint \
-  --stage preregister \
-  --subject "lock H1 and its falsifier"
+# Record and selectively commit a typed hypothesis.
+xscientist research record hypothesis \
+  --data '{"statement":"H1","falsifier":"no improvement over baseline"}'
+xscientist research stage --all
+xscientist research checkpoint --staged \
+  --stage ideation --subject "record H1 and its falsifier"
+
+# Fork and inspect an independent research line.
+xscientist research branch challenge/h1 --switch
+xscientist research branch
 
 xscientist research log
 xscientist research diff HEAD~1 HEAD --deep
+xscientist research blame <research-object-id>
 xscientist research fsck
 ```
+
+The same semantics are available as a stable Python API:
+
+```python
+from xscientist import ResearchLifecycle, ResearchRepository
+
+repository = ResearchRepository("./my-research")
+lifecycle = ResearchLifecycle(repository)
+
+# Failed and timed-out work is first-class history, not discarded noise.
+lifecycle.experiment_attempt(
+    {"status": "timeout", "failure_class": "budget_exhausted"},
+    commit=True,
+)
+```
+
+`ResearchEvolution` applies the same model to the agent itself: candidates live
+on `evolve/*` lines and require hash-bound independent evaluation, canary work,
+human approval, and a verified rollback receipt before entering `main` or
+`stable`.
 
 Large datasets, models, and binary evidence stay in the local content-addressed
 store; Git receives only a small immutable pointer:
@@ -557,21 +585,21 @@ xscientist research bundle restore ../my-research-backup.tar.gz \
   --dest ../restored-research
 ```
 
-An end-to-end project can opt into automatic local milestone commits:
+An end-to-end project enables local milestone versioning by default:
 
 ```bash
 xscientist project my_project \
   --topic topic.md \
-  --research-git local \
-  --git-checkpoint-policy milestone
+  --checkpoint-policy milestone
 ```
 
-XScientist creates no remote and enforces `auto_push: false`. It stages through
-a deny-first whitelist, refuses a pre-populated Git index, excludes secrets and
-large blobs, verifies checkpoint/pointer/CAS hashes, records a compact runtime
-and dependency-lock receipt, and can materialize a selected commit with
-`xscientist research reproduce`. Use `--environment-policy strict` when a
-runtime or dependency mismatch must fail closed. See
+Use `--research-vcs off` only when a caller explicitly does not want local
+history. XScientist creates no remote and enforces `auto_push: false`. It uses a
+deny-first privacy policy, excludes secrets and large blobs, validates typed
+objects and relations, records negative outcomes, preserves independent gate
+decisions, and can materialize a selected checkpoint with `xscientist research
+reproduce`. Use `--environment-policy strict` when a runtime or dependency
+mismatch must fail closed. See
 [`docs/LOCAL_RESEARCH_GIT.md`](docs/LOCAL_RESEARCH_GIT.md) for checkpoint
 semantics, policies, branches, backup profiles, and later GitHub synchronization.
 
@@ -795,7 +823,7 @@ Currently organized example files:
 
 - [Project usage](docs/guides/PROJECT_USAGE.md): project workflow usage and flags
 - [SDK and API](docs/guides/SDK_AND_API.md): installation, Python SDK, CLI, and HTTP API
-- [Local Research Git](docs/LOCAL_RESEARCH_GIT.md): serverless scientific commits, local CAS, offline backup, and commit-scoped reproduction
+- [Native Research Version Control](docs/LOCAL_RESEARCH_GIT.md): typed scientific objects, semantic branches/merge, local CAS, offline backup, and checkpoint-scoped reproduction
 - [Research Version Control specification](docs/RESEARCH_VCS_SPEC.md): native research objects, branches, semantic merge, promotion, and agent-evolution invariants
 - [Feedback quick start](docs/guides/FEEDBACK_QUICKSTART.md): feedback system operations
 - [Configuration reference](docs/CONFIG_REFERENCE.md): detailed configuration and parameters

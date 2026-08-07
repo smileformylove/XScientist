@@ -5,6 +5,7 @@ import io
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from contextlib import redirect_stdout
 
@@ -507,6 +508,36 @@ class ResearchRepositoryTests(unittest.TestCase):
                 repository.get(result.object_id)
             with self.assertRaisesRegex(ResearchGitError, "damaged"):
                 repository.objects()
+
+    def test_concurrent_idempotent_recording_has_no_loss_or_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                repeated = list(
+                    pool.map(
+                        lambda _index: repository.record(
+                            "evidence",
+                            {"result": "same deterministic evidence"},
+                        ),
+                        range(24),
+                    )
+                )
+                distinct = list(
+                    pool.map(
+                        lambda index: repository.record(
+                            "metric",
+                            {"name": "score", "seed": index, "value": index / 10},
+                        ),
+                        range(16),
+                    )
+                )
+
+            self.assertEqual(sum(item.created for item in repeated), 1)
+            self.assertEqual(len({item.object_id for item in repeated}), 1)
+            self.assertEqual(len({item.object_id for item in distinct}), 16)
+            self.assertEqual(len(repository.objects()), 17)
 
 
 if __name__ == "__main__":

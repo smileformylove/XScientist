@@ -191,15 +191,15 @@ Edit `topic.md`, then run:
 xscientist project first-study \\
   --topic topic.md \\
   --bfts-config bfts_config.yaml \\
-  --num-ideas 1 \\
-  --research-git local
+  --num-ideas 1
 ```
 
 Inspect the outputs without starting another model call:
 
 ```bash
-xscientist manager list
+xscientist manager list-papers
 xscientist research status --repo outputs/projects/first-study
+xscientist research objects --repo outputs/projects/first-study
 ```
 
 Use `xscientist project --help` for all quality, budget, workflow, and venue
