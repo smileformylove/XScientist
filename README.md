@@ -796,6 +796,7 @@ Currently organized example files:
 - [Project usage](docs/guides/PROJECT_USAGE.md): project workflow usage and flags
 - [SDK and API](docs/guides/SDK_AND_API.md): installation, Python SDK, CLI, and HTTP API
 - [Local Research Git](docs/LOCAL_RESEARCH_GIT.md): serverless scientific commits, local CAS, offline backup, and commit-scoped reproduction
+- [Research Version Control specification](docs/RESEARCH_VCS_SPEC.md): native research objects, branches, semantic merge, promotion, and agent-evolution invariants
 - [Feedback quick start](docs/guides/FEEDBACK_QUICKSTART.md): feedback system operations
 - [Configuration reference](docs/CONFIG_REFERENCE.md): detailed configuration and parameters
 - [Source orchestration](docs/SOURCE_ORCHESTRATION.md): source queues and recommended run postures

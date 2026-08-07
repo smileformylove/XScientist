@@ -774,6 +774,7 @@ python -m ai_scientist.experiments.ara_ab.harness real \
 - [项目使用指南](guides/PROJECT_USAGE.md)：项目流用法与参数说明
 - [SDK 与 API](guides/SDK_AND_API.md)：安装、Python SDK、CLI 与 HTTP API
 - [本地科研 Git](LOCAL_RESEARCH_GIT.md)：无需服务器的科研 commit、本地 CAS、离线备份与按 commit 复现
+- [科研版本控制规范](RESEARCH_VCS_SPEC.md)：原生科研对象、分支、语义合并、知识晋级与 Agent 进化不变量
 - [反馈系统快速入门](guides/FEEDBACK_QUICKSTART.md)：反馈系统运维方式
 - [配置参考](CONFIG_REFERENCE.md)：更细的配置与参数说明
 - [Source 编排](SOURCE_ORCHESTRATION.md)：source queue 编排与运行姿态建议
