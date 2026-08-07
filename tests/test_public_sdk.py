@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ from ai_scientist.resources import (
 )
 from xscientist import ProjectRequest, ServiceSettings, XScientist
 from xscientist.cli import main as cli_main
-from xscientist.entrypoints import project_main
+from xscientist.entrypoints import batch_main, project_main
 from xscientist.service import run_server
 
 
@@ -224,26 +225,44 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         project.assert_called_once_with(["--help"])
 
-    def test_workflow_entrypoint_reports_missing_full_dependencies_cleanly(
+    def test_workflow_help_does_not_require_full_dependencies(
         self,
     ) -> None:
         real_import = __import__("importlib").import_module
 
-        def fail_run_project(name: str, package=None):
-            if name == "ai_scientist.apps.project":
+        def fail_full_workflows(name: str, package=None):
+            if name in {"ai_scientist.apps.project", "ai_scientist.apps.batch"}:
                 error = ModuleNotFoundError("No module named 'numpy'")
                 error.name = "numpy"
                 raise error
             return real_import(name, package)
 
         with (
+            mock.patch.object(sys, "stdout"),
             mock.patch(
                 "xscientist.entrypoints.importlib.import_module",
-                side_effect=fail_run_project,
+                side_effect=fail_full_workflows,
             ),
-            mock.patch("sys.stderr") as stderr,
         ):
-            exit_code = project_main(["--help"])
+            project_exit_code = project_main(["--help"])
+            batch_exit_code = batch_main(["--help"])
+
+        self.assertEqual(project_exit_code, 0)
+        self.assertEqual(batch_exit_code, 0)
+
+    def test_workflow_entrypoint_reports_missing_full_dependencies_cleanly(
+        self,
+    ) -> None:
+        error = ModuleNotFoundError("No module named 'numpy'")
+        error.name = "numpy"
+        with (
+            mock.patch.object(sys, "stderr") as stderr,
+            mock.patch(
+                "xscientist.entrypoints.importlib.import_module",
+                side_effect=error,
+            ),
+        ):
+            exit_code = project_main(["demo", "--topic", "topic.md"])
 
         self.assertEqual(exit_code, 2)
         output = "".join(
