@@ -13,6 +13,13 @@ from ai_scientist.utils.auth_session import (
     session_user,
     validate_session,
 )
+from ai_scientist.utils.privacy import portable_path
+
+
+def _auth_location() -> str:
+    """Describe the session location without exposing a host-local path."""
+
+    return portable_path(auth_file_path(), base=".")
 
 
 def _format_time(raw: str) -> str:
@@ -51,7 +58,7 @@ def main() -> int:
         print("✅ 登录成功")
         print(f"   用户: {session.get('username')}")
         print(f"   过期: {_format_time(str(session.get('expires_at') or ''))}")
-        print(f"   会话文件: {auth_file_path()}")
+        print(f"   会话文件: {_auth_location()}")
         return 0
 
     if args.cmd == "status":
@@ -59,14 +66,14 @@ def main() -> int:
         if not ok:
             print("❌ 未登录")
             print(f"   原因: {reason}")
-            print(f"   会话文件: {auth_file_path()}")
+            print(f"   会话文件: {_auth_location()}")
             return 1
         print("✅ 已登录")
         print(f"   用户: {session_user()}")
         print(f"   签发: {_format_time(str(session.get('issued_at') or ''))}")
         print(f"   过期: {_format_time(str(session.get('expires_at') or ''))}")
         print(f"   最近活动: {_format_time(str(session.get('last_seen_at') or ''))}")
-        print(f"   会话文件: {auth_file_path()}")
+        print(f"   会话文件: {_auth_location()}")
         return 0
 
     if args.cmd == "logout":
@@ -75,7 +82,7 @@ def main() -> int:
             print("✅ 已退出登录")
         else:
             print("ℹ️ 当前没有可删除的登录会话")
-        print(f"   会话文件: {auth_file_path()}")
+        print(f"   会话文件: {_auth_location()}")
         return 0
 
     parser.error("unknown command")

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ai_scientist.protocol.hashing import content_hash
+from ai_scientist.utils.privacy import resolve_portable_path
 
 _HASH_RE = re.compile(r"^([a-z0-9][a-z0-9_-]*):([0-9a-f]{64})$")
 _METADATA_SUFFIXES = {".json", ".jsonl"}
@@ -497,7 +498,11 @@ def hydrate_objects(
     manifest = _load_json(root / "manifest.json")
     if not isinstance(manifest, dict) or not manifest.get("project_dir"):
         raise ARAStorageError("manifest.project_dir is required to locate .ara-store")
-    project_dir = Path(str(manifest["project_dir"])).expanduser().resolve()
+    project_dir = resolve_portable_path(manifest["project_dir"], base=root)
+    if project_dir is None:
+        raise ARAStorageError(
+            "manifest.project_dir is not a resolvable local reference"
+        )
     shared_root = project_dir / ".ara-store" / "objects"
     requested = {
         str(value)

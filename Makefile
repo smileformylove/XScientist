@@ -7,7 +7,7 @@ PYTHON ?= $(shell \
 AUTH_FILE ?=
 PREFLIGHT_AUTH_ARG := $(if $(AUTH_FILE),--auth-file $(AUTH_FILE),)
 
-.PHONY: syntax test coverage engineering validate preflight smoke doctor format package package-check perf-record perf-compare executor-image
+.PHONY: syntax test coverage engineering privacy validate preflight smoke doctor format package package-check perf-record perf-compare executor-image
 
 syntax:
 	$(PYTHON) -m compileall -q ai_scientist xscientist compat scripts tools tests
@@ -15,11 +15,11 @@ syntax:
 	bash -n start_research.sh
 
 test:
-	$(PYTHON) -m unittest discover -s tests -p "test_*.py"
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m unittest discover -s tests -p "test_*.py"
 
 coverage:
 	$(PYTHON) -m coverage erase
-	$(PYTHON) -m coverage run -m unittest discover -s tests -p "test_*.py"
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m coverage run -m unittest discover -s tests -p "test_*.py"
 	@mkdir -p .ci-output
 	$(PYTHON) -m coverage xml
 	$(PYTHON) -m coverage report
@@ -27,11 +27,14 @@ coverage:
 engineering:
 	$(PYTHON) tools/engineering_checks.py
 
+privacy:
+	$(PYTHON) tools/privacy_audit.py
+
 validate:
-	$(PYTHON) -m xscientist validate --full-import-smoke
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m xscientist validate --full-import-smoke
 
 preflight:
-	$(PYTHON) -m xscientist preflight --strict $(PREFLIGHT_AUTH_ARG)
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m xscientist preflight --strict $(PREFLIGHT_AUTH_ARG)
 
 smoke: syntax engineering test validate
 

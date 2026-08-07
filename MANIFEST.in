@@ -13,4 +13,4 @@ include .github/SECURITY.md
 include .github/PULL_REQUEST_TEMPLATE.md
 graft examples
 graft tools
-global-exclude __pycache__ *.py[cod] .DS_Store
+global-exclude __pycache__ *.py[cod] .DS_Store .env .env.* *.pem *.key credentials.json secrets.json

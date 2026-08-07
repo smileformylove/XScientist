@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ import yaml
 
 from ai_scientist.resources import bfts_config_path
 from ai_scientist.utils.atomic_io import atomic_write_text
+from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ._version import __version__
 from .provider_config import (
     DEFAULT_MODELS,
@@ -209,10 +209,20 @@ options. API calls can incur cost; set explicit limits under `llm_budget` in
 
 
 def _render_files(*, profile: str, provider: str, model: str) -> dict[str, str]:
+    secret_ignores = (
+        ".env\n"
+        ".env.*\n"
+        "!.env.example\n"
+        ".secrets/\n"
+        "*.pem\n"
+        "*.key\n"
+        "credentials.json\n"
+        "secrets.json\n"
+    )
     return {
-        ".dockerignore": ".env\noutputs/\n__pycache__/\n*.py[cod]\n",
+        ".dockerignore": secret_ignores + "outputs/\n__pycache__/\n*.py[cod]\n",
         ".env.example": _render_env(provider),
-        ".gitignore": ".env\noutputs/\n__pycache__/\n*.py[cod]\n",
+        ".gitignore": secret_ignores + "outputs/\n__pycache__/\n*.py[cod]\n",
         ".xscientist/providers.json": json.dumps(
             provider_config_payload(provider=provider, model=model),
             indent=2,
@@ -255,7 +265,7 @@ def create_workspace(
 
     root = Path(directory).expanduser().resolve()
     if root.exists() and not root.is_dir():
-        raise WorkspaceInitError(f"workspace path is not a directory: {root}")
+        raise WorkspaceInitError("workspace path is not a directory")
     conflicts = [name for name in WORKSPACE_FILES if (root / name).exists()]
     directory_conflicts = [name for name in conflicts if (root / name).is_dir()]
     if directory_conflicts:
@@ -274,16 +284,19 @@ def create_workspace(
     for relative, content in files.items():
         atomic_write_text(root / relative, content)
 
+    workspace_view = portable_path(root, base=Path.cwd())
+    if workspace_view == REDACTED_PATH:
+        workspace_view = "<workspace>"
     return {
         "ok": True,
-        "workspace": str(root),
+        "workspace": workspace_view,
         "profile": normalized_profile,
         "provider": normalized_provider,
         "model": selected_model,
         "files": list(WORKSPACE_FILES),
         "secrets_written": False,
         "next_steps": [
-            f"cd {shlex.quote(str(root))}",
+            f"cd {workspace_view}",
             f"xscientist provider add {normalized_provider}",
             "xscientist provider list",
             "xscientist auth login --user <your-name>",

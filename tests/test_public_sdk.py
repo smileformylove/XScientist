@@ -212,7 +212,9 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIsInstance(payload["research_runtime_ready"], bool)
         self.assertIsInstance(payload["service_ready"], bool)
         self.assertIsInstance(payload["missing_research_packages"], list)
-        self.assertTrue(Path(payload["output_root"]).is_absolute())
+        self.assertIn(payload["output_root"], {"<configured>", "<default>"})
+        self.assertFalse(Path(payload["python_executable"]).is_absolute())
+        self.assertFalse(payload["host_paths_disclosed"])
         self.assertEqual(payload["quickstart"], "xscientist init my-research")
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:

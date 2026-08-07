@@ -25,8 +25,9 @@ def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
     )
 
 
-def _project(tmp: Path, sub: str, nodes: list[dict],
-             *, provenance: dict | None = None) -> tuple[Path, Path]:
+def _project(
+    tmp: Path, sub: str, nodes: list[dict], *, provenance: dict | None = None
+) -> tuple[Path, Path]:
     project = tmp / sub
     exp = project / "02_experiments" / f"20260709_{sub}"
     (exp / "logs" / "0-run").mkdir(parents=True)
@@ -37,10 +38,14 @@ def _project(tmp: Path, sub: str, nodes: list[dict],
 
 def _basic_node(nid: str) -> dict:
     return {
-        "id": nid, "step": 0, "code": "print('ok')",
+        "id": nid,
+        "step": 0,
+        "code": "print('ok')",
         "_term_out": [],
         "metric": {"value": 0.5, "maximize": True, "name": "acc"},
-        "is_buggy": False, "parent_id": None, "children": [],
+        "is_buggy": False,
+        "parent_id": None,
+        "children": [],
     }
 
 
@@ -86,13 +91,17 @@ class LogEngineTests(unittest.TestCase):
         pp, ep = _project(self.tmp, "parent", [_basic_node("np")])
         parent = export_ara(project_dir=pp, exp_dir=ep, idea={"Name": "parent"})
         # Find parent node's content_hash
-        parent_graph = json.loads((Path(parent.root) / "exploration_graph.json").read_text())
+        parent_graph = json.loads(
+            (Path(parent.root) / "exploration_graph.json").read_text()
+        )
         parent_node_hash = parent_graph["nodes"][0]["content_hash"]
 
         # Build child ARA that claims parent as its ancestor.
         pc, ec = _project(self.tmp, "child", [_basic_node("nc")])
         child = export_ara(
-            project_dir=pc, exp_dir=ec, idea={"Name": "child"},
+            project_dir=pc,
+            exp_dir=ec,
+            idea={"Name": "child"},
             provenance={
                 "parent_ara_root": str(parent.root),
                 "parent_node_id": "np",
@@ -103,14 +112,17 @@ class LogEngineTests(unittest.TestCase):
         self.assertEqual(len(log.ancestors), 1)
         anc = log.ancestors[0]
         self.assertEqual(anc.depth, 1)
-        self.assertEqual(anc.ara_root, str(parent.root))
+        self.assertFalse(Path(anc.ara_root).is_absolute())
+        self.assertEqual((Path(child.root) / anc.ara_root).resolve(), parent.root)
         self.assertTrue(anc.reachable)
         self.assertTrue(anc.hash_verified)
 
     def test_provenance_unreachable_when_parent_path_missing(self) -> None:
         pc, ec = _project(self.tmp, "orphan", [_basic_node("nc")])
         child = export_ara(
-            project_dir=pc, exp_dir=ec, idea={"Name": "orphan"},
+            project_dir=pc,
+            exp_dir=ec,
+            idea={"Name": "orphan"},
             provenance={
                 "parent_ara_root": "/nonexistent/parent/path/xyz",
                 "parent_node_id": "np",
@@ -124,12 +136,16 @@ class LogEngineTests(unittest.TestCase):
         # content_hash still records the parent identity even without a path
         self.assertEqual(anc.content_hash, "sha256:" + "d" * 64)
 
-    def test_ancestry_verify_reports_mismatch_when_parent_node_hash_differs(self) -> None:
+    def test_ancestry_verify_reports_mismatch_when_parent_node_hash_differs(
+        self,
+    ) -> None:
         pp, ep = _project(self.tmp, "p", [_basic_node("np")])
         parent = export_ara(project_dir=pp, exp_dir=ep, idea={"Name": "p"})
         pc, ec = _project(self.tmp, "c", [_basic_node("nc")])
         child = export_ara(
-            project_dir=pc, exp_dir=ec, idea={"Name": "c"},
+            project_dir=pc,
+            exp_dir=ec,
+            idea={"Name": "c"},
             provenance={
                 "parent_ara_root": str(parent.root),
                 "parent_node_id": "np",
@@ -153,18 +169,34 @@ def _write_exploration_graph(ara_root: Path, nodes: list[dict]) -> None:
     # chain directly (including a cycle no journal writer would emit).
     ara_root.mkdir(parents=True, exist_ok=True)
     (ara_root / "exploration_graph.json").write_text(
-        json.dumps({"schema_version": "1.0.0",
-                    "protocol_kind": "exploration_graph",
-                    "nodes": nodes, "edges": []}),
+        json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "protocol_kind": "exploration_graph",
+                "nodes": nodes,
+                "edges": [],
+            }
+        ),
         encoding="utf-8",
     )
 
 
-def _node(nid: str, *, parent: str | None = None, buggy: bool = False,
-          seed: bool = False, metric: object = None) -> dict:
-    return {"id": nid, "parent_id": parent, "is_buggy": buggy,
-            "is_seed_node": seed, "metric": metric,
-            "content_hash": f"sha256:{(nid * 20)[:64]}"}
+def _node(
+    nid: str,
+    *,
+    parent: str | None = None,
+    buggy: bool = False,
+    seed: bool = False,
+    metric: object = None,
+) -> dict:
+    return {
+        "id": nid,
+        "parent_id": parent,
+        "is_buggy": buggy,
+        "is_seed_node": seed,
+        "metric": metric,
+        "content_hash": f"sha256:{(nid * 20)[:64]}",
+    }
 
 
 class WalkNodeAncestryTests(unittest.TestCase):
@@ -175,11 +207,14 @@ class WalkNodeAncestryTests(unittest.TestCase):
 
     def test_walk_node_ancestry_leaf_to_root(self) -> None:
         ara = self.tmp / "ara"
-        _write_exploration_graph(ara, [
-            _node("n1", metric={"value": 0.1}),
-            _node("n2", parent="n1", metric={"value": 0.2}),
-            _node("n3", parent="n2", buggy=True, metric={"value": 0.3}),
-        ])
+        _write_exploration_graph(
+            ara,
+            [
+                _node("n1", metric={"value": 0.1}),
+                _node("n2", parent="n1", metric={"value": 0.2}),
+                _node("n3", parent="n2", buggy=True, metric={"value": 0.3}),
+            ],
+        )
         chain = walk_node_ancestry(ara, "n3")
         self.assertEqual([e["id"] for e in chain], ["n3", "n2", "n1"])
         self.assertTrue(chain[0]["is_buggy"])
@@ -202,8 +237,9 @@ class WalkNodeAncestryTests(unittest.TestCase):
 
     def test_walk_node_ancestry_cycle_guard(self) -> None:
         ara = self.tmp / "cyc"
-        _write_exploration_graph(ara, [_node("n1", parent="n2"),
-                                       _node("n2", parent="n1")])
+        _write_exploration_graph(
+            ara, [_node("n1", parent="n2"), _node("n2", parent="n1")]
+        )
         chain = walk_node_ancestry(ara, "n1")
         # Terminates; each node appears at most once; note explains truncation.
         self.assertEqual(sorted(e["id"] for e in chain), ["n1", "n2"])
@@ -228,10 +264,19 @@ def _make_ara(tmp: Path, sub: str, nodes: list[dict]) -> Path:
     return Path(export_ara(project_dir=project, exp_dir=exp, idea={"Name": sub}).root)
 
 
-def _journal_node(nid: str, parent: str | None = None, children: list | None = None) -> dict:
-    return {"id": nid, "step": 0, "code": "print('x')", "_term_out": [],
-            "metric": {"value": 0.5, "maximize": True, "name": "acc"},
-            "is_buggy": False, "parent_id": parent, "children": children or []}
+def _journal_node(
+    nid: str, parent: str | None = None, children: list | None = None
+) -> dict:
+    return {
+        "id": nid,
+        "step": 0,
+        "code": "print('x')",
+        "_term_out": [],
+        "metric": {"value": 0.5, "maximize": True, "name": "acc"},
+        "is_buggy": False,
+        "parent_id": parent,
+        "children": children or [],
+    }
 
 
 def _run_cli(*argv: str) -> tuple[int, str, str]:
@@ -248,10 +293,14 @@ class LogNodeCLITests(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
 
     def test_log_node_json_shape(self) -> None:
-        ara = _make_ara(self.tmp, "chain", [
-            _journal_node("n1", children=["n2"]),
-            _journal_node("n2", parent="n1"),
-        ])
+        ara = _make_ara(
+            self.tmp,
+            "chain",
+            [
+                _journal_node("n1", children=["n2"]),
+                _journal_node("n2", parent="n1"),
+            ],
+        )
         rc, out, _ = _run_cli("log", "--ara", str(ara), "--node", "n2", "--json")
         self.assertEqual(rc, 0)
         payload = json.loads(out)

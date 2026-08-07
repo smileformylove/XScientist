@@ -21,6 +21,7 @@ from ai_scientist.utils.experiment_run_lock import (
     ExperimentRunLock,
     ExperimentRunLocked,
     _sanitized_command,
+    _local_host_id,
     experiment_lock_root,
 )
 from ai_scientist.utils.launcher_workflow import (
@@ -46,8 +47,9 @@ class ExperimentRunLockTests(unittest.TestCase):
 
             self.assertEqual(ctx.exception.lock_path, root.resolve() / LOCK_DIR_NAME)
             self.assertEqual(ctx.exception.owner["pid"], os.getpid())
-            self.assertEqual(ctx.exception.owner["hostname"], socket.gethostname())
-            self.assertEqual(ctx.exception.owner["config_path"], str(config_path))
+            self.assertNotIn("hostname", ctx.exception.owner)
+            self.assertEqual(ctx.exception.owner["host_id"], _local_host_id())
+            self.assertEqual(ctx.exception.owner["config_path"], "config.yaml")
             self.assertIn("heartbeat_at", ctx.exception.owner)
             self.assertIn("lease_timeout_seconds", ctx.exception.owner)
 
@@ -225,9 +227,7 @@ class ExperimentRunLockTests(unittest.TestCase):
                 if read_count == 1:
                     return original_owner
                 if read_count == 2:
-                    owner_path.write_text(
-                        json.dumps(refreshed_owner), encoding="utf-8"
-                    )
+                    owner_path.write_text(json.dumps(refreshed_owner), encoding="utf-8")
                 return refreshed_owner
 
             with (
@@ -312,6 +312,17 @@ class ExperimentRunLockTests(unittest.TestCase):
             ],
         )
 
+    def test_owner_command_redacts_non_secret_absolute_paths(self) -> None:
+        rendered = _sanitized_command(
+            [
+                "runner.py",
+                "--input",
+                "/" + "Users/private-person/research/data.json",
+            ]
+        )
+        self.assertNotIn("private-person", " ".join(rendered))
+        self.assertIn("[REDACTED_PATH]", rendered)
+
     def test_generated_run_configs_are_unique_and_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -334,8 +345,8 @@ class ExperimentRunLockTests(unittest.TestCase):
             self.assertTrue(second.is_file())
             self.assertEqual(first.parent, idea_dir / ".xscientist" / "configs")
             first_payload = yaml.safe_load(first.read_text(encoding="utf-8"))
-            self.assertEqual(first_payload["workspace_dir"], str(idea_dir))
-            self.assertEqual(first_payload["desc_file"], str(idea_path))
+            self.assertEqual(first_payload["workspace_dir"], "../..")
+            self.assertEqual(first_payload["desc_file"], "../../idea.json")
 
     @mock.patch(
         "ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager._perform_experiments_bfts_locked"

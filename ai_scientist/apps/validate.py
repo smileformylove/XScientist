@@ -87,7 +87,7 @@ def run_installed_package_smoke() -> None:
         latex_template_dir("icbinb") / "template.tex",
         latex_template_dir("icml") / "template.tex",
     ]
-    missing = [str(path) for path in required if not path.is_file()]
+    missing = [path.name for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"Installed package resources are missing: {missing}")
     manifest_schema = load_schema("manifest")
@@ -108,7 +108,7 @@ def run_installed_package_smoke() -> None:
             {
                 "version": xscientist.__version__,
                 "resources": len(required) + 1,
-                "project_root": str(PROJECT_ROOT),
+                "project_root_disclosed": False,
             },
             ensure_ascii=False,
         ),

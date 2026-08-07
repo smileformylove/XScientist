@@ -8,6 +8,7 @@ import numpy as np
 from igraph import Graph
 from ..journal import Journal
 from .serialize import atomic_write_json, atomic_write_text
+from ai_scientist.utils.privacy import portable_path
 
 from rich import print
 
@@ -480,4 +481,5 @@ def create_unified_viz(cfg, current_stage_viz_path):
     # Write the unified visualization
     atomic_write_text(unified_viz_path, html)
 
-    print(f"[green]Created unified visualization at {unified_viz_path}[/green]")
+    display_path = portable_path(unified_viz_path, base=Path.cwd())
+    print(f"[green]Created unified visualization at {display_path}[/green]")

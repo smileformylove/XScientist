@@ -7,6 +7,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -94,6 +95,25 @@ class LocalResearchGitTests(unittest.TestCase):
             self.assertNotIn(".env", tree)
             self.assertNotIn("hypotheses/large.json", tree)
             self.assertTrue(any("exceeds" in item for item in result.excluded_paths))
+
+    def test_checkpoint_privacy_gate_rejects_secret_content_without_echoing_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            token = "sk-" + "q" * 32
+            unsafe = root / "hypotheses" / "unsafe.json"
+            unsafe.write_text(json.dumps({"credential": token}), encoding="utf-8")
+
+            with self.assertRaises(ResearchGitError) as caught:
+                create_checkpoint(root, stage="preregister", subject="unsafe")
+
+            message = str(caught.exception)
+            self.assertIn("privacy gate refused", message)
+            self.assertIn("hypotheses/unsafe.json", message)
+            self.assertNotIn(token, message)
+            self.assertFalse(self._git(root, "diff", "--cached", "--name-only"))
 
     def test_checkpoint_refuses_a_prepopulated_index(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -643,22 +663,26 @@ class LocalResearchGitTests(unittest.TestCase):
     def test_unified_cli_supports_init_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "research"
-            self.assertEqual(
-                research_main(
-                    [
-                        "init",
-                        str(root),
-                        "--question",
-                        "Does H1 hold?",
-                        "--git-user-name",
-                        "Research Test",
-                        "--git-user-email",
-                        "research@example.invalid",
-                    ]
-                ),
-                0,
-            )
-            self.assertEqual(research_main(["status", "--repo", str(root)]), 0)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    research_main(
+                        [
+                            "init",
+                            str(root),
+                            "--question",
+                            "Does H1 hold?",
+                            "--git-user-name",
+                            "Research Test",
+                            "--git-user-email",
+                            "research@example.invalid",
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(research_main(["status", "--repo", str(root)]), 0)
+            self.assertNotIn(str(root), output.getvalue())
+            self.assertIn("[REDACTED_PATH]", output.getvalue())
 
 
 if __name__ == "__main__":

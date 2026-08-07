@@ -300,6 +300,17 @@ xscientist provider add openai \
 `OPENAI_COMPAT_API_KEY` 与 `OPENAI_COMPAT_BASE_URL`。`provider remove` 只删除
 供应商元数据，会刻意保留已经存储的凭证。
 
+提交代码、分享 ARA 或发起 PR 前，运行只报告位置、不回显命中内容的隐私审计：
+
+```bash
+xscientist privacy audit .
+xscientist privacy audit . --history   # 同时检查可达的 Git 历史对象
+```
+
+审计结果只包含规则名、范围和相对文件名。持久化 LLM trace 始终脱敏 API Key、
+邮箱、机器标识和宿主机路径；旧的 `AI_SCIENTIST_LLM_REDACT=0` 也不能关闭这道
+存储边界。科研 checkpoint 在暂存文件前会执行同一套门禁。
+
 ### 3) 登录（必需）
 
 ```bash

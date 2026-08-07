@@ -66,7 +66,9 @@ def _normalize(text: Any) -> str:
 
 
 def _owner_aware_repair_disabled() -> bool:
-    return str(os.environ.get("AI_SCIENTIST_DISABLE_OWNER_AWARE_REPAIR") or "").strip().lower() in {
+    return str(
+        os.environ.get("AI_SCIENTIST_DISABLE_OWNER_AWARE_REPAIR") or ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -94,7 +96,10 @@ def _infer_lane(task: dict[str, Any]) -> str:
 
 def _infer_owner(task: dict[str, Any], lane: str) -> tuple[str, str]:
     if _owner_aware_repair_disabled() or lane == "generic_rewrite":
-        return ("repair_agent", "Owner-aware routing is disabled for this ablation run.")
+        return (
+            "repair_agent",
+            "Owner-aware routing is disabled for this ablation run.",
+        )
     blocker_class = str(task.get("blocker_class") or "").strip().lower()
     role = str(task.get("role") or "").strip().lower()
     primary_target_type = str(task.get("primary_target_type") or "").strip().lower()
@@ -104,14 +109,30 @@ def _infer_owner(task: dict[str, Any], lane: str) -> tuple[str, str]:
         "statistical_gap",
     }:
         return ("experiment_agent", "Requires stronger evidence or protocol detail.")
-    if lane == "figure_repair" or primary_target_type == "figure" or blocker_class == "figure_gap":
-        return ("figure_agent", "Issue is centered on figures, captions, or visual packaging.")
+    if (
+        lane == "figure_repair"
+        or primary_target_type == "figure"
+        or blocker_class == "figure_gap"
+    ):
+        return (
+            "figure_agent",
+            "Issue is centered on figures, captions, or visual packaging.",
+        )
     if blocker_class in {"oversell", "novelty_risk", "citation_gap", "positioning_gap"}:
-        return ("storyline_editor", "Issue is about claim scope, novelty framing, or overstatement.")
-    if role in {"clarity", "style_snob", "desk_reject_editor"} or lane == "section_rewrite":
+        return (
+            "storyline_editor",
+            "Issue is about claim scope, novelty framing, or overstatement.",
+        )
+    if (
+        role in {"clarity", "style_snob", "desk_reject_editor"}
+        or lane == "section_rewrite"
+    ):
         return ("writing_agent", "Issue is primarily narrative clarity or exposition.")
     if lane == "triage":
-        return ("planner_agent", "Issue needs routing, scoping, or dependency clarification.")
+        return (
+            "planner_agent",
+            "Issue needs routing, scoping, or dependency clarification.",
+        )
     return ("repair_agent", "Generic repair fallback.")
 
 
@@ -123,15 +144,23 @@ def _build_execution_steps(task: dict[str, Any], lane: str) -> list[str]:
     issue_text = str(task.get("issue_text") or "").strip()
     target_label = str(task.get("primary_target_label") or "target").strip()
     if lane == "generic_rewrite":
-        return [f"Handle the reviewer issue for {target_label} through a generic rewrite lane: {issue_text}"]
+        return [
+            f"Handle the reviewer issue for {target_label} through a generic rewrite lane: {issue_text}"
+        ]
     if lane == "figure_repair":
-        return [f"Revise the figure package for {target_label} to resolve: {issue_text}"]
+        return [
+            f"Revise the figure package for {target_label} to resolve: {issue_text}"
+        ]
     if lane == "claim_repair":
-        return [f"Rewrite and tighten the claim framing for {target_label}: {issue_text}"]
+        return [
+            f"Rewrite and tighten the claim framing for {target_label}: {issue_text}"
+        ]
     if lane == "evidence_followup":
         return [f"Run or surface a stronger evidence check for: {issue_text}"]
     if lane == "method_repair":
-        return [f"Clarify the reproducibility and setup details for {target_label}: {issue_text}"]
+        return [
+            f"Clarify the reproducibility and setup details for {target_label}: {issue_text}"
+        ]
     if lane == "section_rewrite":
         return [f"Rewrite the section for {target_label}: {issue_text}"]
     return [f"Triage reviewer issue and define a repair path: {issue_text}"]
@@ -155,9 +184,7 @@ def _build_success_criteria(task: dict[str, Any], lane: str) -> list[str]:
             f"The revised claim for {target_label} is supported by explicitly linked evidence."
         )
     elif lane == "evidence_followup":
-        criteria.append(
-            f"New or clarified experiment evidence resolves: {issue_text}"
-        )
+        criteria.append(f"New or clarified experiment evidence resolves: {issue_text}")
     elif lane == "method_repair":
         criteria.append(
             f"Another team could reproduce the updated method/setup without guessing hidden details."
@@ -167,7 +194,9 @@ def _build_success_criteria(task: dict[str, Any], lane: str) -> list[str]:
             f"The updated section narrative explicitly closes the reviewer concern: {issue_text}"
         )
     else:
-        criteria.append("The issue has a concrete owner, target, and verification path.")
+        criteria.append(
+            "The issue has a concrete owner, target, and verification path."
+        )
     return _dedupe(criteria)
 
 
@@ -267,7 +296,9 @@ def _build_escalation_lane(task: dict[str, Any], lane: str) -> str:
 
 
 def _reflection_enabled_from_env() -> bool:
-    return str(os.environ.get("AI_SCIENTIST_REPAIR_REFLECTION") or "").strip().lower() in {
+    return str(
+        os.environ.get("AI_SCIENTIST_REPAIR_REFLECTION") or ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -305,7 +336,9 @@ def build_repair_plan(
         item for item in (state.get("repair_queue") or []) if isinstance(item, dict)
     ]
     role_summaries = (
-        state.get("role_summaries") if isinstance(state.get("role_summaries"), dict) else {}
+        state.get("role_summaries")
+        if isinstance(state.get("role_summaries"), dict)
+        else {}
     )
     tasks: list[dict[str, Any]] = []
     lane_counts: dict[str, int] = {}
@@ -400,7 +433,9 @@ def build_repair_plan(
         lane_rows.append(
             {
                 "lane": lane_name,
-                "label": LANE_LABELS.get(lane_name, lane_name.replace("_", " ").title()),
+                "label": LANE_LABELS.get(
+                    lane_name, lane_name.replace("_", " ").title()
+                ),
                 "task_count": count,
                 "ready_count": sum(
                     str(item.get("status") or "") == "ready" for item in lane_tasks
@@ -427,14 +462,18 @@ def build_repair_plan(
         and bool(str(item.get("close_condition") or "").strip())
         for item in tasks
     )
-    verifier_ready_count = sum(bool(str(item.get("verifier") or "").strip()) for item in tasks)
+    verifier_ready_count = sum(
+        bool(str(item.get("verifier") or "").strip()) for item in tasks
+    )
     targeted_count = sum(
         bool(str(item.get("primary_target_id") or "").strip())
         or str(item.get("primary_target_type") or "").strip() == "section"
         for item in tasks
     )
     escalation_counts = {
-        lane_name: sum(str(item.get("escalation_lane") or "") == lane_name for item in tasks)
+        lane_name: sum(
+            str(item.get("escalation_lane") or "") == lane_name for item in tasks
+        )
         for lane_name in sorted(
             {
                 str(item.get("escalation_lane") or "").strip()
@@ -480,30 +519,36 @@ def build_repair_plan(
         "escalation_counts": escalation_counts,
         "owner_counts": {
             owner: sum(str(item.get("owner") or "") == owner for item in tasks)
-            for owner in sorted({str(item.get("owner") or "") for item in tasks if str(item.get("owner") or "")})
+            for owner in sorted(
+                {
+                    str(item.get("owner") or "")
+                    for item in tasks
+                    if str(item.get("owner") or "")
+                }
+            )
         },
-        "ready_rate": round(ready_task_count / max(task_count, 1), 3)
-        if task_count
-        else 1.0,
-        "verification_ready_rate": round(
-            verification_ready_count / max(task_count, 1), 3
-        )
-        if task_count
-        else 1.0,
-        "verifier_ready_rate": round(verifier_ready_count / max(task_count, 1), 3)
-        if task_count
-        else 1.0,
-        "executable_ready_rate": round(executable_ready_count / max(task_count, 1), 3)
-        if task_count
-        else 1.0,
-        "targeted_rate": round(targeted_count / max(task_count, 1), 3)
-        if task_count
-        else 1.0,
+        "ready_rate": (
+            round(ready_task_count / max(task_count, 1), 3) if task_count else 1.0
+        ),
+        "verification_ready_rate": (
+            round(verification_ready_count / max(task_count, 1), 3)
+            if task_count
+            else 1.0
+        ),
+        "verifier_ready_rate": (
+            round(verifier_ready_count / max(task_count, 1), 3) if task_count else 1.0
+        ),
+        "executable_ready_rate": (
+            round(executable_ready_count / max(task_count, 1), 3) if task_count else 1.0
+        ),
+        "targeted_rate": (
+            round(targeted_count / max(task_count, 1), 3) if task_count else 1.0
+        ),
     }
     return {
         "schema_version": 1,
         "generated_at": _now_iso(),
-        "project_root": str(resolved_root),
+        "project_root": ".",
         "workflow_mode": manifest.get("workflow_mode"),
         "workflow_label": manifest.get("workflow_label"),
         "owner_aware_routing_disabled": _owner_aware_repair_disabled(),
@@ -511,7 +556,11 @@ def build_repair_plan(
             [item for item in (state.get("rounds") or []) if isinstance(item, dict)]
         ),
         "active_issue_count": len(
-            [item for item in (state.get("active_issue_records") or []) if isinstance(item, dict)]
+            [
+                item
+                for item in (state.get("active_issue_records") or [])
+                if isinstance(item, dict)
+            ]
         ),
         "role_count": len(role_summaries),
         "lanes": lane_rows,

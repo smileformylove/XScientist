@@ -31,6 +31,10 @@ from ai_scientist.utils.provider_registry import (  # noqa: E402
     provider_env_statuses,
     resolve_model_provider,
 )
+from ai_scientist.utils.privacy import (  # noqa: E402
+    portable_path,
+    redact_sensitive_text,
+)
 
 import yaml  # noqa: E402
 
@@ -106,6 +110,7 @@ def check_python_version() -> CheckResult:
 
 def check_output_dir() -> CheckResult:
     output_path = resolve_output_path()
+    display_path = portable_path(output_path, base=Path.cwd())
     try:
         output_path.mkdir(parents=True, exist_ok=True)
         probe = output_path / ".preflight_write_test"
@@ -115,20 +120,20 @@ def check_output_dir() -> CheckResult:
             label="Output directory",
             ok=True,
             severity="error",
-            detail=f"resolved to {output_path}",
+            detail=f"resolved to {display_path}",
         )
     except OSError as exc:
         return CheckResult(
             label="Output directory",
             ok=False,
             severity="error",
-            detail=f"cannot write to {output_path}: {exc}",
+            detail=redact_sensitive_text(f"cannot write to {display_path}: {exc}"),
         )
 
 
 def check_login_session() -> CheckResult:
     ok, reason, _session = validate_session()
-    auth_path = auth_file_path()
+    auth_path = portable_path(auth_file_path(), base=Path.cwd())
     detail = f"{reason}; session file={auth_path}"
     if ok:
         touch_session()
@@ -215,7 +220,7 @@ def check_configured_models(payload: dict) -> list[CheckResult]:
                     label=f"Configured model `{model}`",
                     ok=False,
                     severity="error",
-                    detail=str(exc),
+                    detail=redact_sensitive_text(str(exc)),
                 )
             )
             continue
@@ -286,7 +291,7 @@ def check_bfts_config(value: str) -> list[CheckResult]:
                 label="BFTS configuration",
                 ok=False,
                 severity="error",
-                detail=str(exc),
+                detail=redact_sensitive_text(str(exc)),
             )
         ]
 
@@ -295,7 +300,7 @@ def check_bfts_config(value: str) -> list[CheckResult]:
             label="BFTS configuration",
             ok=True,
             severity="error",
-            detail=f"loaded {path}",
+            detail=f"loaded {portable_path(path, base=Path.cwd())}",
         )
     ]
     results.extend(check_configured_models(payload))
@@ -392,7 +397,7 @@ def main(argv=None) -> int:
     print("XScientist preflight")
     print(f"- Python: {sys.version.split()[0]}")
     print(f"- Output env: {PRIMARY_OUTPUT_ENV_VAR} (legacy: {LEGACY_OUTPUT_ENV_VAR})")
-    print(f"- Auth session: {auth_file_path()}")
+    print("- Auth session: " f"{portable_path(auth_file_path(), base=Path.cwd())}")
 
     results = [check_python_version(), check_output_dir(), check_login_session()]
     results.extend(

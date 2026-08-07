@@ -20,7 +20,7 @@ XScientist 中也不存在 `ObservationCatalog`、temporal localization 实现�
 基线和数据的前提下执行本轮实验。
 
 同一工作区的另一个仓库
-`<private-machine>/Documents/startup/业务/江源雪亮工程/video_search` 包含上述全部文件，
+`<external-private-corpus>` 包含上述全部文件，
 但它不包含第 1 轮 `comparison.md`，其当前 HEAD 为
 `36f567670bbd0675866170c3371ad44b3a1c9033`，且存在未提交的用户修改。把该仓库或其
 当前 HEAD 自动替换成第 1 轮冻结基线，会违反“以第 1 轮最终保留版本作为唯一基线”

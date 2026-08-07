@@ -14,7 +14,7 @@ from rich import print
 from .utils.serialize import atomic_write_json, parse_markdown_to_dict
 from .utils.metric import WorstMetricValue
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
-
+from ai_scientist.utils.privacy import portable_path
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,9 @@ def _canonical_json(value: Any) -> str:
 
 
 def _sha256_json(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    return (
+        "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    )
 
 
 def _checkpoint_config_projection(cfg: Any) -> dict:
@@ -313,13 +315,11 @@ Your research idea:\n\n
         envelope = {
             "schema": CHECKPOINT_SCHEMA,
             "task_fingerprint": _sha256_json(self.task_desc),
-            "config_fingerprint": _sha256_json(
-                _checkpoint_config_projection(self.cfg)
-            ),
+            "config_fingerprint": _sha256_json(_checkpoint_config_projection(self.cfg)),
             "payload_hash": _sha256_json(checkpoint),
             "payload": checkpoint,
         }
-        print("Saving checkpoint to ", save_path)
+        print("Saving checkpoint to ", portable_path(save_path, base=Path.cwd()))
         atomic_write_json(
             save_path,
             envelope,
@@ -338,7 +338,9 @@ Your research idea:\n\n
     ) -> "AgentManager":
         checkpoint_path = Path(checkpoint_path).expanduser().resolve()
         if checkpoint_path.suffix != ".json":
-            raise ValueError("Unsafe legacy checkpoint format; JSON checkpoint required")
+            raise ValueError(
+                "Unsafe legacy checkpoint format; JSON checkpoint required"
+            )
         try:
             envelope = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -483,7 +485,9 @@ Your research idea:\n\n
                 raise ValueError(
                     "BFTS checkpoint current stage is not present in the stage list"
                 )
-            canonical_stage_payload = stages_payload[stage_names.index(current_stage_name)]
+            canonical_stage_payload = stages_payload[
+                stage_names.index(current_stage_name)
+            ]
             if current_stage_payload != canonical_stage_payload:
                 raise ValueError(
                     "BFTS checkpoint current stage does not match its stage definition"
@@ -493,12 +497,13 @@ Your research idea:\n\n
                     "BFTS checkpoint current stage number does not match current stage"
                 )
             if current_stage_payload.get("name") != stage_names[-1]:
-                raise ValueError("BFTS checkpoint current stage is not the latest stage")
+                raise ValueError(
+                    "BFTS checkpoint current stage is not the latest stage"
+                )
 
         completed_stages_payload = checkpoint.get("completed_stages")
         if not isinstance(completed_stages_payload, list) or any(
-            not isinstance(name, str) or not name
-            for name in completed_stages_payload
+            not isinstance(name, str) or not name for name in completed_stages_payload
         ):
             raise ValueError("BFTS checkpoint completed stages must be a list of names")
         if len(completed_stages_payload) != len(set(completed_stages_payload)):
@@ -521,7 +526,9 @@ Your research idea:\n\n
             workspace_dir=workspace_dir,
         )
         manager.journals = {
-            name: payload if isinstance(payload, Journal) else Journal.from_dict(payload)
+            name: (
+                payload if isinstance(payload, Journal) else Journal.from_dict(payload)
+            )
             for name, payload in journals_payload.items()
         }
         manager.stages = [
@@ -529,9 +536,11 @@ Your research idea:\n\n
             for stage in stages_payload
         ]
         manager.stage_history = [
-            transition
-            if isinstance(transition, StageTransition)
-            else StageTransition(**transition)
+            (
+                transition
+                if isinstance(transition, StageTransition)
+                else StageTransition(**transition)
+            )
             for transition in stage_history_payload
         ]
         manager.completed_stages = list(completed_stages_payload)
@@ -1110,21 +1119,39 @@ Your research idea:\n\n
 
                                     # Save a structured stage completion summary (progress, issues, and readiness).
                                     try:
-                                        journal = self.journals.get(current_substage.name)
+                                        journal = self.journals.get(
+                                            current_substage.name
+                                        )
                                         if journal is not None:
                                             current_results = {
-                                                "metrics": self._gather_stage_metrics(journal),
-                                                "issues": self._identify_issues(journal),
-                                                "progress": self._analyze_progress(journal),
+                                                "metrics": self._gather_stage_metrics(
+                                                    journal
+                                                ),
+                                                "issues": self._identify_issues(
+                                                    journal
+                                                ),
+                                                "progress": self._analyze_progress(
+                                                    journal
+                                                ),
                                             }
-                                            evaluation = self._evaluate_stage_progression(
-                                                current_substage, current_results
+                                            evaluation = (
+                                                self._evaluate_stage_progression(
+                                                    current_substage, current_results
+                                                )
                                             )
-                                            self._save_stage_summary(current_results, evaluation)
-                                            if not evaluation.get("ready_for_next_stage", False):
+                                            self._save_stage_summary(
+                                                current_results, evaluation
+                                            )
+                                            if not evaluation.get(
+                                                "ready_for_next_stage", False
+                                            ):
                                                 logger.info(
                                                     "Stage progression evaluation recommends extending focus: "
-                                                    + str(evaluation.get("suggested_focus"))
+                                                    + str(
+                                                        evaluation.get(
+                                                            "suggested_focus"
+                                                        )
+                                                    )
                                                 )
                                     except Exception as exc:
                                         if is_llm_budget_exception(exc):
@@ -1427,9 +1454,7 @@ Your research idea:\n\n
             try:
                 best_mean = float(best_node.metric.get_mean_value())
                 best_objective = (
-                    best_mean
-                    if best_node.metric._should_maximize()
-                    else -best_mean
+                    best_mean if best_node.metric._should_maximize() else -best_mean
                 )
             except Exception:
                 best_mean = None
@@ -1455,9 +1480,9 @@ Your research idea:\n\n
                 seed_eval = {
                     "count": len(seed_values),
                     "mean": statistics.mean(seed_values),
-                    "stdev": statistics.pstdev(seed_values)
-                    if len(seed_values) > 1
-                    else 0.0,
+                    "stdev": (
+                        statistics.pstdev(seed_values) if len(seed_values) > 1 else 0.0
+                    ),
                 }
 
             metrics["best_metric"] = {
@@ -1466,9 +1491,7 @@ Your research idea:\n\n
                 "mean": best_mean,
                 "objective": best_objective,
                 "dataset_names": [
-                    ds
-                    for ds in (best_node.datasets_successfully_tested or [])
-                    if ds
+                    ds for ds in (best_node.datasets_successfully_tested or []) if ds
                 ],
                 "seed_eval": seed_eval,
                 "name": (
@@ -1604,7 +1627,9 @@ Your research idea:\n\n
 
         # Analyze recent changes
         recent_nodes = (
-            good_non_seed_nodes[-3:] if len(good_non_seed_nodes) >= 3 else good_non_seed_nodes
+            good_non_seed_nodes[-3:]
+            if len(good_non_seed_nodes) >= 3
+            else good_non_seed_nodes
         )
         for node in recent_nodes:
             obj = objective_value(node)

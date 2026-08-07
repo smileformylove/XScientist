@@ -60,6 +60,9 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertNotIn("test-secret-value", stdout.getvalue())
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["credentials_written"], ["OPENAI_API_KEY"])
+            self.assertEqual(payload["workspace"], ".")
+            self.assertEqual(payload["env_file"], ".env")
+            self.assertNotIn(str(workspace), stdout.getvalue())
             env_file = workspace / ".env"
             self.assertEqual(
                 env_file.read_text(encoding="utf-8"),
@@ -354,6 +357,24 @@ class ProviderConfigTests(unittest.TestCase):
                 row for row in payload["providers"] if row["provider"] == "openai"
             )
             self.assertFalse(openai["ready"])
+
+    def test_provider_list_never_prints_the_absolute_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "private-workspace"
+            create_workspace(workspace)
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    cli_main(
+                        ["provider", "list", "--workspace", str(workspace), "--json"]
+                    ),
+                    0,
+                )
+            self.assertNotIn(str(workspace), stdout.getvalue())
+            self.assertEqual(json.loads(stdout.getvalue())["workspace"], ".")
 
 
 if __name__ == "__main__":

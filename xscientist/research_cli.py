@@ -9,6 +9,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.privacy import (
+    portable_path,
+    redact_sensitive_payload,
+    redact_sensitive_text,
+)
+
 from .research_git import (
     ResearchGitError,
     add_research_object,
@@ -27,7 +33,22 @@ from .research_git import (
 
 
 def _print_json(payload: Any) -> None:
-    print(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+    print(
+        json.dumps(
+            redact_sensitive_payload(payload),
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+
+
+def _display_path(value: Any) -> str:
+    return portable_path(str(value), base=Path.cwd())
+
+
+def _display_text(value: Any) -> str:
+    return redact_sensitive_text(str(value))
 
 
 def _read_question(args: argparse.Namespace) -> str | None:
@@ -177,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _human_status(payload: dict[str, Any]) -> None:
-    print(f"Repository:        {payload['repository']}")
+    print(f"Repository:        {_display_path(payload['repository'])}")
     print(f"Branch:            {payload['branch']}")
     print(f"HEAD:              {payload['head'] or '(no commit)'}")
     print(f"Checkpoint policy: {payload['checkpoint_policy']}")
@@ -215,7 +236,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(payload)
             else:
                 print(
-                    f"Initialized local research repository: {Path(args.path).expanduser().resolve()}"
+                    "Initialized local research repository: "
+                    f"{_display_path(args.path)}"
                 )
                 if result.commit:
                     print(
@@ -250,9 +272,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{checked['ara_manifests']} ARA manifests"
                 )
                 for warning in payload["warnings"]:
-                    print(f"warning: {warning}", file=sys.stderr)
+                    print(f"warning: {_display_text(warning)}", file=sys.stderr)
                 for error in payload["errors"]:
-                    print(f"error: {error}", file=sys.stderr)
+                    print(f"error: {_display_text(error)}", file=sys.stderr)
             return 0 if payload["ok"] else 1
 
         if args.command == "checkpoint":
@@ -281,7 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print(f"Stage: {args.stage}; files: {len(result.staged_paths)}")
             elif result.created:
-                print(f"Checkpoint written: {result.checkpoint_path}")
+                print(f"Checkpoint written: {_display_path(result.checkpoint_path)}")
             else:
                 print(f"Checkpoint skipped: {result.reason}")
             if result.excluded_paths and not args.as_json:
@@ -369,8 +391,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(result.to_dict())
             else:
                 print(f"Object:  {result.object_hash}")
-                print(f"Pointer: {result.pointer_path}")
-                print(f"Store:   {result.store_path}")
+                print(f"Pointer: {_display_path(result.pointer_path)}")
+                print(f"Store:   {_display_path(result.store_path)}")
                 print("Run `xscientist research checkpoint` to commit the pointer.")
             return 0
 
@@ -397,19 +419,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.as_json:
                 _print_json(payload)
             elif args.action == "verify":
-                print(f"Bundle:   {payload['bundle']}")
+                print(f"Bundle:   {_display_path(payload['bundle'])}")
                 print(f"Valid:    {payload['ok']}")
                 for warning in payload["warnings"]:
-                    print(f"warning: {warning}", file=sys.stderr)
+                    print(f"warning: {_display_text(warning)}", file=sys.stderr)
                 for error in payload["errors"]:
-                    print(f"error: {error}", file=sys.stderr)
+                    print(f"error: {_display_text(error)}", file=sys.stderr)
             elif args.action == "restore":
-                print(f"Bundle:     {payload['bundle']}")
-                print(f"Repository: {payload['repository']}")
+                print(f"Bundle:     {_display_path(payload['bundle'])}")
+                print(f"Repository: {_display_path(payload['repository'])}")
                 print(f"HEAD:       {payload['commit']}")
                 print(f"Objects:    {payload['objects_restored']}")
             else:
-                print(f"Bundle:   {payload['destination']}")
+                print(f"Bundle:   {_display_path(payload['destination'])}")
                 print(f"Profile:  {payload['profile']}")
                 print(f"Complete: {payload['complete']}")
                 print(f"HEAD:     {payload['repository_head']}")
@@ -433,7 +455,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Checkpoint:       {payload['checkpoint']['checkpoint_id']}")
                 print(f"Objects complete: {payload['objects_complete']}")
                 print(f"Environment:      {payload['environment']['matches']}")
-                print(f"Command:          {payload['command'] or '(not declared)'}")
+                print(
+                    "Command:          "
+                    f"{_display_text(payload['command'] or '(not declared)')}"
+                )
                 if (
                     args.environment_policy == "warn"
                     and payload["environment"]["mismatches"]
@@ -444,12 +469,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                             file=sys.stderr,
                         )
                 if payload.get("worktree"):
-                    print(f"Worktree:         {payload['worktree']}")
+                    print(f"Worktree:         {_display_path(payload['worktree'])}")
                 if payload.get("executed"):
                     print(f"Return code:      {payload['returncode']}")
             return int(payload.get("returncode") or 0) if args.execute else 0
     except ResearchGitError as exc:
-        print(f"research git error: {exc}", file=sys.stderr)
+        print(
+            f"research git error: {redact_sensitive_text(str(exc))}",
+            file=sys.stderr,
+        )
         return 2
     parser.error(f"unsupported command: {args.command}")
     return 2

@@ -36,6 +36,10 @@ class PipelineContractsTests(unittest.TestCase):
                 workflow_sequence=["program", "experiment", "review"],
             )
             self.assertEqual(manifest["project_name"], "demo_project")
+            self.assertEqual(manifest["project_root"], ".")
+            self.assertFalse(
+                Path(manifest["artifacts"]["idea_cards"]["path"]).is_absolute()
+            )
             self.assertEqual(manifest["template_profile"], "template_first")
             self.assertEqual(manifest["workflow_mode"], "program_driven")
 

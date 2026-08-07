@@ -132,11 +132,12 @@ def iter_project_roots(research_root: str | Path) -> list[Path]:
 def _default_artifact_entry(
     project_root: str | Path, artifact_name: str
 ) -> dict[str, Any]:
-    path = artifact_path(project_root, artifact_name)
+    resolved_root = Path(project_root).expanduser().resolve()
+    path = artifact_path(resolved_root, artifact_name)
     return {
         "name": artifact_name,
         "filename": path.name,
-        "path": str(path),
+        "path": path.relative_to(resolved_root).as_posix(),
         "status": ARTIFACT_DEFAULT_STATUS[artifact_name],
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "generated_at": None,
@@ -165,7 +166,7 @@ def build_pipeline_manifest(
     manifest = {
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "generated_at": _now_iso(),
-        "project_root": str(resolved_root),
+        "project_root": ".",
         "project_name": project_name or resolved_root.name,
         "pipeline_goal": pipeline_goal,
         "template_profile": template_profile,
@@ -327,7 +328,7 @@ def initialize_pipeline_contracts(
 ) -> dict[str, Any]:
     manifest = load_pipeline_manifest(project_root)
     manifest["schema_version"] = PIPELINE_SCHEMA_VERSION
-    manifest["project_root"] = str(Path(project_root).expanduser().resolve())
+    manifest["project_root"] = "."
     manifest["project_name"] = (
         project_name or manifest.get("project_name") or Path(project_root).name
     )
@@ -359,8 +360,10 @@ def initialize_pipeline_contracts(
             artifact_name,
             _default_artifact_entry(project_root, artifact_name),
         )
-        artifacts[artifact_name].setdefault(
-            "path", str(artifact_path(project_root, artifact_name))
+        artifacts[artifact_name]["path"] = (
+            artifact_path(project_root, artifact_name)
+            .relative_to(Path(project_root).expanduser().resolve())
+            .as_posix()
         )
         artifacts[artifact_name]["filename"] = artifact_path(
             project_root, artifact_name

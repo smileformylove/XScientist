@@ -41,6 +41,7 @@ from jsonschema import ValidationError, validate as validate_json
 
 from ai_scientist.protocol.hashing import content_hash, hash_manifest
 from ai_scientist.protocol.schemas import load_schema
+from ai_scientist.utils.privacy import format_privacy_findings, scan_paths
 
 REPOSITORY_SCHEMA = "xscientist.research-repository.v1"
 CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
@@ -1298,6 +1299,16 @@ def _create_checkpoint_locked(
             markdown_path.relative_to(root).as_posix(),
         }
     )
+
+    privacy_findings = scan_paths(root, stage_paths)
+    if privacy_findings:
+        for created_path in created_paths:
+            created_path.unlink(missing_ok=True)
+        _fsync_directory(checkpoint_path.parent)
+        raise ResearchGitError(
+            "privacy gate refused the checkpoint; matched values were not displayed:\n"
+            + format_privacy_findings(privacy_findings)
+        )
 
     if not commit:
         return CheckpointResult(

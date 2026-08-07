@@ -524,7 +524,7 @@ def build_self_evolution(
     return {
         "schema_version": 2,
         "generated_at": _now_iso(),
-        "project_root": str(resolved_root),
+        "project_root": ".",
         "workflow_mode": manifest.get("workflow_mode"),
         "workflow_label": manifest.get("workflow_label"),
         "summary": summary,

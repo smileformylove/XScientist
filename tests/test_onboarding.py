@@ -34,6 +34,8 @@ class OnboardingTests(unittest.TestCase):
             self.assertNotIn("sk-", env_text)
             self.assertIn(".env\n", (workspace / ".gitignore").read_text())
             self.assertIn(".env\n", (workspace / ".dockerignore").read_text())
+            self.assertIn(".env.*\n", (workspace / ".gitignore").read_text())
+            self.assertIn("!.env.example\n", (workspace / ".gitignore").read_text())
 
             provider_config_text = (
                 workspace / ".xscientist" / "providers.json"

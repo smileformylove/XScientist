@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from ai_scientist.apps import preflight as preflight_check
+from ai_scientist.utils.privacy import REDACTED_PATH
 
 
 def _write_session(path: Path, *, username: str = "smoke-user") -> None:
@@ -136,7 +137,8 @@ class PreflightCheckTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         output = stdout.getvalue()
-        self.assertIn(str(session_path), output)
+        self.assertNotIn(str(session_path), output)
+        self.assertIn(REDACTED_PATH, output)
         self.assertIn("[OK] Login session", output)
 
     def test_preflight_strict_should_fail_for_missing_login_session(self) -> None:
@@ -163,7 +165,8 @@ class PreflightCheckTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         output = stdout.getvalue()
-        self.assertIn(str(session_path), output)
+        self.assertNotIn(str(session_path), output)
+        self.assertIn(REDACTED_PATH, output)
         self.assertIn("[ERROR] Login session", output)
         self.assertIn("未检测到登录会话", output)
 

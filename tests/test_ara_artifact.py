@@ -16,6 +16,7 @@ from ai_scientist.utils.ara_artifact import (
     iter_ara_exports,
     update_manifest_claim_count,
 )
+from ai_scientist.utils.privacy import privacy_report
 from ai_scientist.utils.ara_graph import render_exploration_graph_html
 from ai_scientist.utils.claim_registry import (
     _CLAIM_RE,
@@ -65,7 +66,12 @@ class ARAExporterTest(unittest.TestCase):
                 "step": 0,
                 "code": "print('draft')",
                 "_term_out": ["hello\n"],
-                "metric": {"value": 0.1, "maximize": True, "name": "acc", "description": ""},
+                "metric": {
+                    "value": 0.1,
+                    "maximize": True,
+                    "name": "acc",
+                    "description": "",
+                },
                 "analysis": "baseline drafted",
                 "is_buggy": False,
                 "execution_backend": "docker",
@@ -120,6 +126,8 @@ class ARAExporterTest(unittest.TestCase):
         self.assertEqual(manifest["counts"]["nodes"], 2)
         self.assertEqual(manifest["counts"]["buggy_nodes"], 1)
         self.assertEqual(manifest["idea"]["name"], "abc_idea")
+        self.assertFalse(Path(manifest["source_exp_dir"]).is_absolute())
+        self.assertFalse(Path(manifest["project_dir"]).is_absolute())
         self.assertIn("env", manifest["references"])
         self.assertIn("exploration_graph_visualization", manifest["references"])
         self.assertTrue((result.root / "exploration_graph.html").exists())
@@ -129,7 +137,9 @@ class ARAExporterTest(unittest.TestCase):
         self.assertEqual(graph["dag"]["topological_order"], ["node_root", "node_child"])
         # Model fingerprint should hash the spec.
         fp = json.loads(
-            (result.root / manifest["references"]["env"]["model_fingerprint"]).read_text()
+            (
+                result.root / manifest["references"]["env"]["model_fingerprint"]
+            ).read_text()
         )
         self.assertIn("fingerprint", fp)
         # Repair history is aggregated.
@@ -140,18 +150,26 @@ class ARAExporterTest(unittest.TestCase):
             self.assertTrue((result.root / "nodes" / node_id / "term_out.log").exists())
             self.assertTrue((result.root / "nodes" / node_id / "metrics.json").exists())
 
+        node_env = json.loads(
+            (result.root / "nodes" / "node_root" / "env.json").read_text()
+        )
+        self.assertFalse(Path(node_env["python_executable"]).is_absolute())
+        self.assertFalse(Path(node_env["expected_cwd"]).is_absolute())
+        self.assertEqual(node_env["ara_root"], ".")
+        self.assertTrue(privacy_report(result.root)["ok"])
+
         root_metrics = json.loads(
             (result.root / "nodes" / "node_root" / "metrics.json").read_text()
         )
         self.assertEqual(root_metrics["execution_backend"], "docker")
         self.assertTrue(root_metrics["execution_isolation"]["isolated"])
-        root_graph_node = {
-            node["id"]: node for node in graph["nodes"]
-        }["node_root"]
+        root_graph_node = {node["id"]: node for node in graph["nodes"]}["node_root"]
         self.assertEqual(root_graph_node["execution_backend"], "docker")
 
         # ARA lives under `<project_dir>/ara/`.
-        self.assertTrue(str(result.root).startswith(str(ara_root_for_project(self.project_dir))))
+        self.assertTrue(
+            str(result.root).startswith(str(ara_root_for_project(self.project_dir)))
+        )
 
     def test_missing_journal_recorded_not_fatal(self) -> None:
         result = export_ara(
@@ -178,7 +196,9 @@ class ARAExporterTest(unittest.TestCase):
         self.assertTrue(manifests[0].name == "manifest.json")
 
     def test_ara_dir_for_idea_slug(self) -> None:
-        path = ara_dir_for_idea(self.project_dir, "Complex Idea/with weird chars!", timestamp="ts")
+        path = ara_dir_for_idea(
+            self.project_dir, "Complex Idea/with weird chars!", timestamp="ts"
+        )
         self.assertTrue(path.name.startswith("ts_"))
         self.assertNotIn("/", path.name)
         self.assertNotIn(" ", path.name)
@@ -243,7 +263,10 @@ class ARAExporterTest(unittest.TestCase):
         self.assertNotIn("parent_id", by_id["child"])
         self.assertNotIn("children", by_id["root"])
         self.assertEqual(graph["topology_encoding"], "edges")
-        self.assertEqual(graph["edges"], [{"parent": "root", "child": "child", "stage": "serialized-run"}])
+        self.assertEqual(
+            graph["edges"],
+            [{"parent": "root", "child": "child", "stage": "serialized-run"}],
+        )
         self.assertEqual(graph["dag"]["topological_order"], ["root", "child"])
 
     def test_export_dedupes_multistage_carryover_nodes_by_id_and_hash(self) -> None:
@@ -323,7 +346,12 @@ class ClaimRegistryTest(unittest.TestCase):
                     "step": 0,
                     "code": "pass",
                     "_term_out": ["ok\n"],
-                    "metric": {"value": 0.5, "maximize": True, "name": "f1", "description": ""},
+                    "metric": {
+                        "value": 0.5,
+                        "maximize": True,
+                        "name": "f1",
+                        "description": "",
+                    },
                     "is_buggy": False,
                     "parent_id": None,
                     "children": [],
@@ -369,15 +397,14 @@ class ClaimRegistryTest(unittest.TestCase):
             idea={"Name": "x"},
             timestamp="20260701",
         )
-        summary = write_claims_into_ara(
-            ara_dir=export.root, tex_files=[self.tex_path]
-        )
+        summary = write_claims_into_ara(ara_dir=export.root, tex_files=[self.tex_path])
         self.assertEqual(summary["claim_count"], 3)
         self.assertEqual(summary["resolved_count"], 2)
         self.assertIn("node_missing", summary["unresolved_node_ids"])
         self.assertTrue((export.root / "claims" / "_index.json").exists())
         claim_files = [
-            path for path in (export.root / "claims").glob("*.json")
+            path
+            for path in (export.root / "claims").glob("*.json")
             if not path.name.startswith("_")
         ]
         stored = [json.loads(path.read_text()) for path in claim_files]

@@ -538,7 +538,7 @@ def build_evolution_program(
         "generated_at": _now_iso(),
         "program_id": "evolution-program:"
         + _canonical_hash(program_seed).split(":", 1)[1][:16],
-        "project_root": str(Path(project_root).expanduser().resolve()),
+        "project_root": ".",
         "constitution_hash": constitution["constitution_hash"],
         "program_policy": deepcopy(CORE_PROGRAM_POLICY),
         "program_policy_hash": _canonical_hash(CORE_PROGRAM_POLICY),

@@ -44,7 +44,12 @@ def _minimal_project(tmp: Path, *, code: str = "print('ok')") -> Path:
                 "step": 0,
                 "code": code,
                 "_term_out": ["ok\n"],
-                "metric": {"value": 0.5, "maximize": True, "name": "acc", "description": ""},
+                "metric": {
+                    "value": 0.5,
+                    "maximize": True,
+                    "name": "acc",
+                    "description": "",
+                },
                 "is_buggy": False,
                 "parent_id": None,
                 "children": [],
@@ -72,8 +77,12 @@ class HashingTest(unittest.TestCase):
         self.assertTrue(a.startswith("sha256:"))
 
     def test_hash_ignores_unstable_metric_fields(self) -> None:
-        a = hash_node_payload(code="x = 1", metric={"value": 0.5, "name": "acc", "description": "run A"})
-        b = hash_node_payload(code="x = 1", metric={"value": 0.5, "name": "acc", "description": "run B"})
+        a = hash_node_payload(
+            code="x = 1", metric={"value": 0.5, "name": "acc", "description": "run A"}
+        )
+        b = hash_node_payload(
+            code="x = 1", metric={"value": 0.5, "name": "acc", "description": "run B"}
+        )
         self.assertEqual(a, b, msg="description should not affect the hash")
 
     def test_hash_changes_on_code_edit(self) -> None:
@@ -124,7 +133,8 @@ class MultiParentProvenanceTest(unittest.TestCase):
 
     def test_single_parent_shape_unchanged(self) -> None:
         prov = build_provenance(
-            parent_ara_root="/a", parent_node_id="n1",
+            parent_ara_root="/a",
+            parent_node_id="n1",
             parent_content_hash="sha256:aa",
         )
         self.assertEqual(prov["parent_ara_root"], "/a")
@@ -133,10 +143,18 @@ class MultiParentProvenanceTest(unittest.TestCase):
     def test_multi_parent_elects_code_role_into_top_level(self) -> None:
         prov = build_provenance(
             parents=[
-                {"role": "env", "parent_ara_root": "/b", "parent_node_id": "n2",
-                 "parent_content_hash": "sha256:bb"},
-                {"role": "code", "parent_ara_root": "/a", "parent_node_id": "n1",
-                 "parent_content_hash": "sha256:aa"},
+                {
+                    "role": "env",
+                    "parent_ara_root": "/b",
+                    "parent_node_id": "n2",
+                    "parent_content_hash": "sha256:bb",
+                },
+                {
+                    "role": "code",
+                    "parent_ara_root": "/a",
+                    "parent_node_id": "n1",
+                    "parent_content_hash": "sha256:aa",
+                },
             ],
         )
         # Elected the `code` role, not the first one.
@@ -144,21 +162,29 @@ class MultiParentProvenanceTest(unittest.TestCase):
         self.assertEqual(prov["parent_node_id"], "n1")
         # Still exposes the full array for consumers who understand it.
         self.assertEqual(len(prov["parents"]), 2)
-        self.assertIn({"role": "code", "parent_ara_root": "/a", "parent_node_id": "n1",
-                       "parent_content_hash": "sha256:aa"}, prov["parents"])
+        self.assertIn(
+            {
+                "role": "code",
+                "parent_ara_root": "/a",
+                "parent_node_id": "n1",
+                "parent_content_hash": "sha256:aa",
+            },
+            prov["parents"],
+        )
 
     def test_multi_parent_without_code_role_uses_first_entry(self) -> None:
         prov = build_provenance(
             parents=[
                 {"role": "data", "parent_content_hash": "sha256:dd"},
-                {"role": "env",  "parent_content_hash": "sha256:ee"},
+                {"role": "env", "parent_content_hash": "sha256:ee"},
             ],
         )
         self.assertEqual(prov["parent_content_hash"], "sha256:dd")
 
     def test_explicit_top_level_wins_over_election(self) -> None:
         prov = build_provenance(
-            parent_ara_root="/manual", parent_content_hash="sha256:manual",
+            parent_ara_root="/manual",
+            parent_content_hash="sha256:manual",
             parents=[
                 {"role": "code", "parent_content_hash": "sha256:auto"},
             ],
@@ -176,8 +202,16 @@ class MultiParentProvenanceTest(unittest.TestCase):
             "counts": {"nodes": 0},
             "provenance": build_provenance(
                 parents=[
-                    {"role": "code", "parent_ara_root": "/A", "parent_content_hash": "sha256:aa"},
-                    {"role": "env",  "parent_ara_root": "/B", "parent_content_hash": "sha256:bb"},
+                    {
+                        "role": "code",
+                        "parent_ara_root": "/A",
+                        "parent_content_hash": "sha256:aa",
+                    },
+                    {
+                        "role": "env",
+                        "parent_ara_root": "/B",
+                        "parent_content_hash": "sha256:bb",
+                    },
                 ],
             ),
         }
@@ -268,7 +302,16 @@ class ARARoundTripTest(unittest.TestCase):
                 provenance=provenance,
             )
             manifest = json.loads(result.manifest_path.read_text())
-            self.assertEqual(manifest.get("provenance"), provenance)
+            stored = manifest.get("provenance") or {}
+            self.assertFalse(Path(stored["parent_ara_root"]).is_absolute())
+            self.assertEqual(
+                (result.root / stored["parent_ara_root"]).resolve(),
+                Path(provenance["parent_ara_root"]).resolve(),
+            )
+            self.assertEqual(stored["parent_node_id"], provenance["parent_node_id"])
+            self.assertEqual(
+                stored["parent_content_hash"], provenance["parent_content_hash"]
+            )
             self.assertTrue(validate_ara(result.root).ok)
 
     def test_missing_top_level_files_fail_validation(self) -> None:

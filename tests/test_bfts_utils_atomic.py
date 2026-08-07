@@ -117,10 +117,10 @@ class BftsUtilsAtomicTests(unittest.TestCase):
 
             payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["goal"], "demo")
-            self.assertEqual(payload["workspace_dir"], str(idea_dir))
-            self.assertEqual(payload["desc_file"], str(idea_path))
-            self.assertEqual(payload["data_dir"], str(idea_dir / "data"))
-            self.assertEqual(payload["log_dir"], str(idea_dir / "logs"))
+            self.assertEqual(payload["workspace_dir"], "../..")
+            self.assertEqual(payload["desc_file"], "../../idea.json")
+            self.assertEqual(payload["data_dir"], "../../data")
+            self.assertEqual(payload["log_dir"], "../../logs")
             self.assertIsNone(payload["resume_from"])
 
 

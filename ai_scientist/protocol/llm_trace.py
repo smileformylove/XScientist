@@ -8,13 +8,13 @@ called from library consumers).
 
 Design points worth flagging for future readers:
 
-* The messages payload is stored **verbatim** in the CAS. Two calls with
+* The redacted messages payload is stored in the CAS. Two calls with
   the same system prompt + conversation history therefore hash to the same
   ``messages_ref`` and store a single blob — the ``calls.jsonl`` row is
   what ties one particular invocation to a wall-clock time and stage.
-* Redaction is opt-in (env var). If the tracer is enabled on a project that
-  stuffs secrets into prompts, we do NOT want to be the last mile that
-  irreversibly commits them to disk under CAS.
+* Redaction is mandatory. CAS is append-only, so an environment toggle must
+  never be able to persist a credential, email address, host path, or machine
+  identifier irreversibly.
 * :func:`_clean_params` only keeps knobs whose values are JSON-serialisable.
   It deliberately drops function references, model client objects, etc. —
   those routinely arrive in the params dict when a caller is lazy, and none
@@ -27,17 +27,23 @@ import contextlib
 import contextvars
 import json
 import os
-import re
 import time
 import uuid
 from typing import Any, Iterator
+
+from ai_scientist.utils.privacy import (
+    redact_sensitive_payload,
+    redact_sensitive_text,
+)
 
 from .objects import ObjectStore
 
 ENV_ACTIVE_ROOT = "AI_SCIENTIST_ARA_ACTIVE_ROOT"
 ENV_ENABLED = "AI_SCIENTIST_LLM_TRACE"
 ENV_STAGE = "AI_SCIENTIST_LLM_STAGE"
-ENV_REDACT = "AI_SCIENTIST_LLM_REDACT"  # "1" → run _redact() over messages before CAS
+# Deprecated compatibility name.  Redaction is now unconditional; setting the
+# variable to ``0`` has no effect because persistent traces must fail closed.
+ENV_REDACT = "AI_SCIENTIST_LLM_REDACT"
 
 CALLS_JSONL_RELPATH = os.path.join("llm", "calls.jsonl")
 
@@ -52,18 +58,18 @@ _capture_buffer: contextvars.ContextVar[list[str] | None] = contextvars.ContextV
 )
 
 # Params we consider "hash-worthy" — everything else is dropped as noise.
-_KEEP_PARAM_KEYS = frozenset({
-    "temperature", "max_tokens", "seed", "top_p", "top_k",
-    "response_format", "tool_choice", "stop", "reasoning_effort",
-})
-
-# Conservative secret patterns; false positives are cheaper than leaks.
-_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"sk-[A-Za-z0-9_\-]{16,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+"), "Bearer [REDACTED]"),
-    (re.compile(r"(?i)\b(api[_-]?key|password|secret|token)\b\s*[:=]\s*[^\s\"']+"),
-     lambda m: f"{m.group(1)}=[REDACTED]"),
-    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), "[REDACTED_EMAIL]"),
+_KEEP_PARAM_KEYS = frozenset(
+    {
+        "temperature",
+        "max_tokens",
+        "seed",
+        "top_p",
+        "top_k",
+        "response_format",
+        "tool_choice",
+        "stop",
+        "reasoning_effort",
+    }
 )
 
 
@@ -95,14 +101,13 @@ def _jsonable(v: Any) -> bool:
 def _clean_params(params: dict[str, Any] | None) -> dict[str, Any]:
     if not params:
         return {}
-    return {k: params[k] for k in _KEEP_PARAM_KEYS if k in params and _jsonable(params[k])}
+    return {
+        k: params[k] for k in _KEEP_PARAM_KEYS if k in params and _jsonable(params[k])
+    }
 
 
 def _redact_string(text: str) -> str:
-    out = text
-    for pattern, repl in _SECRET_PATTERNS:
-        out = pattern.sub(repl, out)
-    return out
+    return redact_sensitive_text(text)
 
 
 def _redact(payload: Any) -> Any:
@@ -111,17 +116,13 @@ def _redact(payload: Any) -> Any:
     We do this BEFORE the payload lands in CAS because CAS is append-only:
     a leaked prompt can't be un-hashed.
     """
-    if isinstance(payload, str):
-        return _redact_string(payload)
-    if isinstance(payload, dict):
-        return {k: _redact(v) for k, v in payload.items()}
-    if isinstance(payload, list):
-        return [_redact(v) for v in payload]
-    return payload
+    return redact_sensitive_payload(payload)
 
 
 def _redaction_enabled() -> bool:
-    return str(os.environ.get(ENV_REDACT, "1")).strip() != "0"
+    """Compatibility helper: persistent LLM trace redaction is always enabled."""
+
+    return True
 
 
 def record_llm_call(
@@ -151,30 +152,30 @@ def record_llm_call(
         store = ObjectStore(root)
         call_id = uuid.uuid4().hex
 
-        msg_payload = {"system": system_message, "messages": messages}
-        if _redaction_enabled():
-            msg_payload = _redact(msg_payload)
-            response_text = _redact_string(response_text or "")
+        msg_payload = _redact({"system": system_message, "messages": messages})
+        response_text = _redact_string(response_text or "")
 
         messages_ref = store.put_json(msg_payload).to_json()
         response_ref = store.put_text(response_text or "").to_json()
 
-        row = {
-            "schema_version": "ara.v1",
-            "protocol_kind": "llm_call",
-            "call_id": call_id,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "stage": stage if stage is not None else os.environ.get(ENV_STAGE),
-            "provider": provider,
-            "model": model,
-            "request_style": request_style,
-            "params": _clean_params(params),
-            "messages_ref": messages_ref,
-            "response_ref": response_ref,
-            "tokens": tokens or {},
-            "latency_ms": latency_ms,
-            "error": error,
-        }
+        row = _redact(
+            {
+                "schema_version": "ara.v1",
+                "protocol_kind": "llm_call",
+                "call_id": call_id,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "stage": stage if stage is not None else os.environ.get(ENV_STAGE),
+                "provider": provider,
+                "model": model,
+                "request_style": request_style,
+                "params": _clean_params(params),
+                "messages_ref": messages_ref,
+                "response_ref": response_ref,
+                "tokens": tokens or {},
+                "latency_ms": latency_ms,
+                "error": error,
+            }
+        )
 
         log_path = os.path.join(root, CALLS_JSONL_RELPATH)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)

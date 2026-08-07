@@ -1142,7 +1142,7 @@ def build_stage_standards(project_root: str | Path) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "generated_at": _now_iso(),
-        "project_root": str(resolved_root),
+        "project_root": ".",
         "overall_score": overall_score,
         "ready_stage_count": len(ready),
         "blocked_stage_count": len(blocked),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import socket
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from ai_scientist.utils.privacy import portable_path, redact_sensitive_text
 
 LOCK_DIR_NAME = ".xscientist-experiment.lock"
 OWNER_FILE_NAME = "owner.json"
@@ -86,9 +89,16 @@ def _sanitized_command(argv: list[str] | None = None) -> list[str]:
         if sensitive and separator:
             sanitized.append(f"{flag}=[REDACTED]")
         else:
-            sanitized.append(arg)
+            sanitized.append(redact_sensitive_text(arg))
             redact_next = sensitive
     return sanitized
+
+
+def _local_host_id() -> str:
+    """Stable local-lock identity without persisting the machine hostname."""
+
+    digest = hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 class ExperimentRunLocked(RuntimeError):
@@ -96,7 +106,9 @@ class ExperimentRunLocked(RuntimeError):
         self.lock_path = Path(lock_path)
         self.owner = dict(owner)
         pid = self.owner.get("pid", "unknown")
-        host = self.owner.get("hostname", "unknown")
+        host = self.owner.get("host_id") or (
+            "legacy-host" if self.owner.get("hostname") else "unknown"
+        )
         super().__init__(
             f"Experiment directory is already locked by pid {pid} on {host}"
         )
@@ -151,8 +163,9 @@ def _is_stale(
     *,
     lease_timeout_seconds: float = DEFAULT_LEASE_TIMEOUT_SECONDS,
 ) -> bool:
-    local_host = socket.gethostname()
-    if owner.get("hostname") == local_host and owner.get("pid") is not None:
+    local_owner = owner.get("host_id") == _local_host_id()
+    legacy_local_owner = owner.get("hostname") == socket.gethostname()
+    if (local_owner or legacy_local_owner) and owner.get("pid") is not None:
         return not _pid_is_alive(owner.get("pid"))
     lease_timeout = _lease_timeout(owner, lease_timeout_seconds)
     return _owner_age_seconds(lock_dir) > lease_timeout
@@ -186,12 +199,16 @@ class ExperimentRunLock:
             "schema": "xscientist.experiment-lock.v1",
             "token": self.token,
             "pid": os.getpid(),
-            "hostname": socket.gethostname(),
+            "host_id": _local_host_id(),
             "started_at": now,
             "heartbeat_at": now,
             "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
             "lease_timeout_seconds": self.lease_timeout_seconds,
-            "config_path": str(self.config_path) if self.config_path else None,
+            "config_path": (
+                portable_path(self.config_path, base=self.root)
+                if self.config_path
+                else None
+            ),
             "command": _sanitized_command(),
         }
 

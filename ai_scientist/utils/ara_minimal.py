@@ -46,6 +46,11 @@ from ai_scientist.utils.ara_graph import (
     write_exploration_graph_visualization,
 )
 from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
+from ai_scientist.utils.privacy import (
+    redact_sensitive_payload,
+    relativize_path_fields,
+    relative_path_reference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +62,12 @@ def _now_iso() -> str:
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        json.dumps(
+            redact_sensitive_payload(payload),
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        ),
         encoding="utf-8",
     )
 
@@ -99,15 +109,18 @@ def export_minimal_ara(
 
     # Synthetic node keyed by the manuscript content — gives us a
     # content-addressable id for the "code-less" case.
-    node_id = hash_node_payload(
-        code="",
-        metric=None,
-        extras={
-            "producer": producer,
-            "manuscript_bytes_len": len(manuscript_bytes),
-            "idea_name": idea_name,
-        },
-    ).split(":", 1)[-1][:12] or "manuscript"
+    node_id = (
+        hash_node_payload(
+            code="",
+            metric=None,
+            extras={
+                "producer": producer,
+                "manuscript_bytes_len": len(manuscript_bytes),
+                "idea_name": idea_name,
+            },
+        ).split(":", 1)[-1][:12]
+        or "manuscript"
+    )
     node_id = f"manuscript-{node_id}"
 
     nodes_dir = ara_dir / "nodes" / node_id
@@ -140,36 +153,40 @@ def export_minimal_ara(
     )
 
     now = _now_iso()
-    graph = graph_with_dag_metadata(
-        {
-            "schema_version": PROTOCOL_VERSION,
-            "protocol_kind": "exploration_graph",
-            "generated_at": now,
-            "nodes": [
-                {
-                    "id": node_id,
-                    "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
-                    "stage": "manuscript_only",
-                    "step": 0,
-                    "parent_id": None,
-                    "children": [],
-                    "is_buggy": False,
-                    "is_seed_node": True,
-                    "is_seed_agg_node": False,
-                    "metric": None,
-                    "plan_excerpt": (
-                        "Manuscript-only export: producer skipped BFTS and wrote "
-                        "the manuscript directly."
-                    ),
-                    "exp_results_dir": None,
-                    "ctime": None,
-                    "artifacts_dir": f"nodes/{node_id}",
-                }
-            ],
-            "edges": [],
-            "source_journals": [],
-            "counts": {"nodes": 1, "edges": 0, "buggy": 0},
-        }
+    graph = redact_sensitive_payload(
+        graph_with_dag_metadata(
+            {
+                "schema_version": PROTOCOL_VERSION,
+                "protocol_kind": "exploration_graph",
+                "generated_at": now,
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "content_hash": hash_node_payload(
+                            code="", metric=None, is_seed=True
+                        ),
+                        "stage": "manuscript_only",
+                        "step": 0,
+                        "parent_id": None,
+                        "children": [],
+                        "is_buggy": False,
+                        "is_seed_node": True,
+                        "is_seed_agg_node": False,
+                        "metric": None,
+                        "plan_excerpt": (
+                            "Manuscript-only export: producer skipped BFTS and wrote "
+                            "the manuscript directly."
+                        ),
+                        "exp_results_dir": None,
+                        "ctime": None,
+                        "artifacts_dir": f"nodes/{node_id}",
+                    }
+                ],
+                "edges": [],
+                "source_journals": [],
+                "counts": {"nodes": 1, "edges": 0, "buggy": 0},
+            }
+        )
     )
     _write_json(ara_dir / "exploration_graph.json", graph)
     graph_visualization_refs = write_exploration_graph_visualization(ara_dir, graph)
@@ -178,14 +195,20 @@ def export_minimal_ara(
         "schema_version": PROTOCOL_VERSION,
         "protocol_kind": "manifest",
         "created_at": now,
-        "source_exp_dir": str(project_dir_path),
-        "project_dir": str(project_dir_path),
+        "source_exp_dir": relative_path_reference(project_dir_path, base=ara_dir),
+        "project_dir": relative_path_reference(project_dir_path, base=ara_dir),
         "idea": {
             "name": idea_name,
             "title": idea.get("Title") or idea.get("title"),
             "raw": idea,
         },
-        "counts": {"nodes": 1, "edges": 0, "buggy_nodes": 0, "journals": 0, "claims": 0},
+        "counts": {
+            "nodes": 1,
+            "edges": 0,
+            "buggy_nodes": 0,
+            "journals": 0,
+            "claims": 0,
+        },
         "references": {
             "producer": producer,
             "writing_profile": writing_profile,
@@ -212,6 +235,8 @@ def export_minimal_ara(
     }
     if provenance:
         manifest_payload["provenance"] = dict(provenance)
+    manifest_payload = relativize_path_fields(manifest_payload, base=ara_dir)
+    manifest_payload = redact_sensitive_payload(manifest_payload)
 
     manifest_path = ara_dir / "manifest.json"
     _write_json(manifest_path, manifest_payload)

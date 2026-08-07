@@ -28,7 +28,16 @@ from typing import Any, Iterable
 
 from ai_scientist.protocol import ObjectStore
 from ai_scientist.utils.ara_artifact import ara_root_for_project
-from ai_scientist.utils.ara_metric_parser import compare_metrics, parse_metric_from_stdout
+from ai_scientist.utils.ara_metric_parser import (
+    compare_metrics,
+    parse_metric_from_stdout,
+)
+from ai_scientist.utils.privacy import (
+    redact_sensitive_payload,
+    redact_sensitive_text,
+    relative_path_reference,
+    resolve_portable_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +66,9 @@ def _load_json(path: Path) -> Any | None:
         return None
 
 
-def _select_candidate_nodes(ara_root: Path, *, limit: int, include_buggy: bool) -> list[str]:
+def _select_candidate_nodes(
+    ara_root: Path, *, limit: int, include_buggy: bool
+) -> list[str]:
     """Pick which nodes to re-execute.
 
     Heuristic: the *best-metric* good nodes first (they usually carry the
@@ -65,7 +76,9 @@ def _select_candidate_nodes(ara_root: Path, *, limit: int, include_buggy: bool) 
     caller asks — knowing "what didn't work" is half the value of ARA.
     """
     graph = _load_json(ara_root / "exploration_graph.json") or {}
-    entries: list[dict[str, Any]] = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
+    entries: list[dict[str, Any]] = [
+        n for n in (graph.get("nodes") or []) if isinstance(n, dict)
+    ]
     if not entries:
         return []
 
@@ -79,13 +92,23 @@ def _select_candidate_nodes(ara_root: Path, *, limit: int, include_buggy: bool) 
         return float("-inf")
 
     good = sorted(
-        (n for n in entries if not n.get("is_buggy") and (ara_root / "nodes" / str(n.get("id") or "") / "code.py").exists()),
+        (
+            n
+            for n in entries
+            if not n.get("is_buggy")
+            and (ara_root / "nodes" / str(n.get("id") or "") / "code.py").exists()
+        ),
         key=metric_value,
         reverse=True,
     )
     picks: list[str] = [str(n.get("id")) for n in good[:limit]]
     if include_buggy:
-        buggy = [n for n in entries if n.get("is_buggy") and (ara_root / "nodes" / str(n.get("id") or "") / "code.py").exists()]
+        buggy = [
+            n
+            for n in entries
+            if n.get("is_buggy")
+            and (ara_root / "nodes" / str(n.get("id") or "") / "code.py").exists()
+        ]
         for n in buggy[: max(0, limit // 2)]:
             nid = str(n.get("id"))
             if nid not in picks:
@@ -114,9 +137,9 @@ def reexec_node(
         return {"node_id": node_id, "status": "no_code", "error": "code.py missing"}
 
     manifest = _load_json(ara_root / "manifest.json") or {}
-    default_cwd = Path(manifest.get("source_exp_dir") or "").expanduser()
-    resolved_cwd = Path(cwd).expanduser() if cwd else default_cwd
-    if not resolved_cwd.exists():
+    default_cwd = resolve_portable_path(manifest.get("source_exp_dir"), base=ara_root)
+    resolved_cwd = Path(cwd).expanduser().resolve() if cwd else default_cwd
+    if resolved_cwd is None or not resolved_cwd.exists():
         resolved_cwd = node_dir
 
     python_bin = python or sys.executable
@@ -144,9 +167,9 @@ def reexec_node(
     verdict = {
         "schema": "ara.reexec.v1",
         "node_id": node_id,
-        "ara_root": str(ara_root),
-        "python": python_bin,
-        "cwd": str(resolved_cwd),
+        "ara_root": ".",
+        "python": Path(python_bin).name,
+        "cwd": relative_path_reference(resolved_cwd, base=ara_root),
         "started_at": started,
         "finished_at": _now_iso(),
         "returncode": returncode,
@@ -154,10 +177,10 @@ def reexec_node(
         "recorded_metric": recorded,
         "fresh_metric": fresh,
         "comparison": comparison,
-        "stdout_tail": stdout[-4000:],
-        "stderr_tail": stderr[-4000:],
+        "stdout_tail": redact_sensitive_text(stdout[-4000:]),
+        "stderr_tail": redact_sensitive_text(stderr[-4000:]),
     }
-    return verdict
+    return redact_sensitive_payload(verdict)
 
 
 def persist_reexec_verdict(
@@ -174,7 +197,7 @@ def persist_reexec_verdict(
 
     root = Path(ara_root).expanduser().resolve()
     store = ObjectStore(root)
-    compact = dict(verdict)
+    compact = redact_sensitive_payload(dict(verdict))
     stdout_tail = str(compact.pop("stdout_tail", "") or "")
     stderr_tail = str(compact.pop("stderr_tail", "") or "")
     if stdout_tail:
@@ -193,18 +216,29 @@ def _write_reexec_report(ara_root: Path, verdicts: list[dict[str, Any]]) -> Path
     passed = sum(
         1
         for v in verdicts
-        if v.get("comparison", {}).get("within_tolerance") is True and not v.get("timed_out")
+        if v.get("comparison", {}).get("within_tolerance") is True
+        and not v.get("timed_out")
     )
-    compact_verdicts = [persist_reexec_verdict(ara_root, verdict) for verdict in verdicts]
+    compact_verdicts = [
+        persist_reexec_verdict(ara_root, verdict) for verdict in verdicts
+    ]
     payload = {
         "schema": "ara.reexec.batch.v1",
         "generated_at": _now_iso(),
-        "ara_root": str(ara_root),
+        "ara_root": ".",
         "verdict_count": len(verdicts),
         "passed": passed,
         "verdicts": compact_verdicts,
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            redact_sensitive_payload(payload),
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -221,11 +255,13 @@ def reexec_ara(
     """Re-execute a small set of nodes and write a batch report into ``verify/``."""
     ara_root = Path(ara_root).expanduser().resolve()
     if node_ids is None:
-        picks = _select_candidate_nodes(ara_root, limit=limit, include_buggy=include_buggy)
+        picks = _select_candidate_nodes(
+            ara_root, limit=limit, include_buggy=include_buggy
+        )
     else:
         picks = [str(nid) for nid in node_ids]
     if not picks:
-        return {"status": "no_candidates", "ara_root": str(ara_root)}
+        return {"status": "no_candidates", "ara_root": "."}
 
     verdicts: list[dict[str, Any]] = []
     for nid in picks:
@@ -253,7 +289,7 @@ def reexec_ara(
                     str(item) for item in context_pack["blockers"]
                 )
         except Exception as exc:  # Legacy/minimal ARAs can still execute.
-            context_error = str(exc)
+            context_error = redact_sensitive_text(str(exc))
         verdict = reexec_node(
             ara_root, nid, python=python, timeout=timeout, tolerance=tolerance
         )
@@ -270,8 +306,8 @@ def reexec_ara(
         pass
     return {
         "status": "ok",
-        "ara_root": str(ara_root),
-        "report_path": str(report_path),
+        "ara_root": ".",
+        "report_path": report_path.relative_to(ara_root).as_posix(),
         "node_ids": picks,
         "verdict_count": len(verdicts),
     }

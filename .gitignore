@@ -124,6 +124,17 @@ celerybeat.pid
 # Environments
 .env
 .env.local
+.env.*
+!.env.example
+.secrets/
+.aws/
+.config/gcloud/
+.netrc
+*.pem
+*.key
+credentials.json
+secrets.json
+service-account*.json
 .venv
 .venv*/
 .venv_jax

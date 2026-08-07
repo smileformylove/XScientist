@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
+import io
 import json
 import os
 import subprocess
@@ -20,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ai_scientist.utils.auth_session import require_login  # noqa: E402
+from ai_scientist.utils.privacy import redact_sensitive_text  # noqa: E402
 
 IGNORED_PATH_PARTS = {
     ".git",
@@ -96,6 +99,23 @@ def run_py_compile() -> None:
     print(f"[OK] py_compile passed for {len(files)} Python files")
 
 
+def _run_with_privacy_filter(callback) -> None:
+    """Preserve validation diagnostics while removing host/private values."""
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            callback()
+    finally:
+        safe_stdout = redact_sensitive_text(stdout.getvalue())
+        safe_stderr = redact_sensitive_text(stderr.getvalue())
+        if safe_stdout:
+            print(safe_stdout, end="")
+        if safe_stderr:
+            print(safe_stderr, end="", file=sys.stderr)
+
+
 def run_installed_package_smoke() -> None:
     import xscientist
     from ai_scientist.resources import bfts_config_path, latex_template_dir
@@ -107,7 +127,7 @@ def run_installed_package_smoke() -> None:
         latex_template_dir("icbinb") / "template.tex",
         latex_template_dir("icml") / "template.tex",
     ]
-    missing = [str(path) for path in required if not path.is_file()]
+    missing = [path.name for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"Installed package resources are missing: {missing}")
     manifest_schema = load_schema("manifest")
@@ -128,7 +148,7 @@ def run_installed_package_smoke() -> None:
             {
                 "version": xscientist.__version__,
                 "resources": len(required) + 1,
-                "project_root": str(PROJECT_ROOT),
+                "project_root_disclosed": False,
             },
             ensure_ascii=False,
         ),
@@ -3233,7 +3253,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_py_compile()
     if is_source_checkout():
-        run_helper_smoke()
+        _run_with_privacy_filter(run_helper_smoke)
     else:
         run_installed_package_smoke()
 

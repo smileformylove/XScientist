@@ -168,6 +168,20 @@ def _build_parser() -> argparse.ArgumentParser:
     provider_remove.add_argument("name", choices=_PROVIDER_CHOICES)
     provider_remove.add_argument("--workspace", default=".")
     provider_remove.add_argument("--json", action="store_true", dest="as_json")
+    privacy_parser = subparsers.add_parser(
+        "privacy",
+        help="Audit files and Git history without displaying matched private values.",
+    )
+    privacy_subparsers = privacy_parser.add_subparsers(
+        dest="privacy_command", required=True
+    )
+    privacy_audit = privacy_subparsers.add_parser(
+        "audit", help="Scan publishable text for credentials and machine-local paths."
+    )
+    privacy_audit.add_argument("path", nargs="?", default=".")
+    privacy_audit.add_argument("--include-untracked", action="store_true")
+    privacy_audit.add_argument("--history", action="store_true")
+    privacy_audit.add_argument("--json", action="store_true", dest="as_json")
     evolution_parser = subparsers.add_parser(
         "evolution-gate",
         help="Evaluate a shadow self-evolution candidate against hidden benchmarks.",
@@ -192,7 +206,6 @@ def _installation_info() -> dict[str, object]:
     import os
 
     from ai_scientist.apps.preflight import CORE_PACKAGES
-    from ai_scientist.config.paths import resolve_output_path
     from ai_scientist.utils.auth_session import validate_session
 
     runtime_modules = sorted(CORE_PACKAGES)
@@ -223,8 +236,11 @@ def _installation_info() -> dict[str, object]:
         "missing_research_packages": missing_runtime,
         "missing_service_packages": missing_service,
         "python_version": sys.version.split()[0],
-        "python_executable": sys.executable,
-        "output_root": str(resolve_output_path()),
+        "python_executable": Path(sys.executable).name,
+        "output_root": (
+            "<configured>" if os.environ.get("RESEARCH_OUTPUT_DIR") else "<default>"
+        ),
+        "host_paths_disclosed": False,
         "authenticated": authenticated,
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
@@ -277,13 +293,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         if parsed.provider_command == "list":
             rows = provider_statuses(workspace)
             payload = {
-                "workspace": str(workspace),
+                "workspace": ".",
                 "providers": rows,
             }
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
-                print(f"Workspace: {workspace}")
+                print("Workspace: .")
                 for row in rows:
                     marker = "*" if row["active"] else " "
                     if row["ready"]:
@@ -396,11 +412,11 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
         payload = {
             "ok": True,
-            "workspace": str(workspace),
+            "workspace": ".",
             "provider": provider,
             "model": model,
             "active": saved.get("active_provider") == provider,
-            "env_file": str(env_path),
+            "env_file": env_path.relative_to(workspace).as_posix(),
             "credentials_written": sorted(updates),
             "bfts_updated": bfts_updated,
         }
@@ -410,7 +426,10 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             print(f"Configured provider: {provider}")
             print(f"Default model: {model}")
             if updates:
-                print(f"Credentials saved securely to: {env_path}")
+                print(
+                    "Credentials saved securely to: "
+                    f"{env_path.relative_to(workspace).as_posix()}"
+                )
             else:
                 print("Credentials: using existing environment or local env file")
             print(f"Active: {payload['active']}")
@@ -567,6 +586,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if parsed.command == "provider":
         return _run_provider(parsed)
+    if parsed.command == "privacy":
+        from ai_scientist.utils.privacy import (
+            PrivacyFinding,
+            format_privacy_findings,
+            privacy_report,
+        )
+
+        report = privacy_report(
+            parsed.path,
+            include_untracked=parsed.include_untracked,
+            history=parsed.history,
+        )
+        if parsed.as_json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        elif report["ok"]:
+            print("Privacy audit: clean (matched values were never displayed)")
+        else:
+            print(
+                format_privacy_findings(
+                    PrivacyFinding(**finding) for finding in report["findings"]
+                ),
+                file=sys.stderr,
+            )
+            print(
+                f"Privacy audit: {report['finding_count']} finding(s); "
+                "matched values were not displayed",
+                file=sys.stderr,
+            )
+        return 0 if report["ok"] else 1
     if parsed.command == "evolution-gate":
         return _run_evolution_gate(parsed)
     parser.error(f"Unsupported command: {parsed.command}")

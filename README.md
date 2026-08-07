@@ -291,6 +291,20 @@ Use `openai_compat/<model-id>` with `OPENAI_COMPAT_API_KEY` and
 `OPENAI_COMPAT_BASE_URL` for another OpenAI-compatible API. `provider remove`
 removes metadata only and deliberately leaves stored credentials untouched.
 
+Before committing, sharing an ARA, or opening a pull request, run the
+location-only privacy audit:
+
+```bash
+xscientist privacy audit .
+xscientist privacy audit . --history   # also checks reachable Git blobs
+```
+
+The audit never prints matched values. It reports only a rule name, scope, and
+relative file name. Persistent LLM traces always redact credentials, emails,
+machine identifiers, and host-local paths; the legacy
+`AI_SCIENTIST_LLM_REDACT=0` setting cannot disable this storage boundary.
+Research checkpoints apply the same gate before staging files.
+
 ### 3) Login (required)
 
 ```bash

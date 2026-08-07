@@ -293,6 +293,12 @@ class OpenSourceHygieneTests(unittest.TestCase):
             self.assertIn(runner, workflow_text)
         self.assertIn("python -m coverage run", workflow_text)
         self.assertIn("tools/engineering_checks.py", workflow_text)
+        self.assertIn(
+            "repository-privacy",
+            (self.repo_root / "tools" / "engineering_checks.py").read_text(
+                encoding="utf-8"
+            ),
+        )
         self.assertIn("tools/check_distribution.py", workflow_text)
 
     def test_pyproject_should_expose_public_package_and_entrypoints(self) -> None:

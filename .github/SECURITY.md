@@ -20,3 +20,12 @@ the isolated executor, keep network access disabled unless inputs must be
 fetched, pin container images by digest, and never mount credential or personal
 data directories into an experiment workspace. A valid ARA records provenance;
 it is not proof that its code or inputs are safe.
+
+## Credentials and privacy
+
+Use `xscientist provider add` for hidden credential input. It writes only to a
+Git-ignored, user-only `.env`; provider metadata contains environment-variable
+names, never values. Run `xscientist privacy audit . --history` before making a
+repository public. Findings contain locations and rule names only, not the
+matched secret or private value. If a real credential ever reached Git history,
+revoke it first and coordinate a history rewrite separately.

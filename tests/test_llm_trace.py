@@ -75,8 +75,12 @@ class LLMTraceTests(unittest.TestCase):
         os.environ[ENV_ACTIVE_ROOT] = str(self.root)
         os.environ[ENV_ENABLED] = "0"
         cid = record_llm_call(
-            provider="openai", model="gpt-x", request_style="openai_chat",
-            system_message="s", messages=[], response_text="",
+            provider="openai",
+            model="gpt-x",
+            request_style="openai_chat",
+            system_message="s",
+            messages=[],
+            response_text="",
         )
         self.assertIsNone(cid)
         self.assertIsNone(active_ara_root())
@@ -86,8 +90,12 @@ class LLMTraceTests(unittest.TestCase):
         os.environ[ENV_ENABLED] = "1"
         self.assertIsNone(active_ara_root())
         cid = record_llm_call(
-            provider="openai", model="gpt-x", request_style="openai_chat",
-            system_message="s", messages=[], response_text="",
+            provider="openai",
+            model="gpt-x",
+            request_style="openai_chat",
+            system_message="s",
+            messages=[],
+            response_text="",
         )
         self.assertIsNone(cid)
 
@@ -143,13 +151,19 @@ class LLMTraceTests(unittest.TestCase):
         self.assertNotEqual(c1, c2)  # unique call_ids
         rows = self._read_rows()
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["messages_ref"]["hash"], rows[1]["messages_ref"]["hash"])
+        self.assertEqual(
+            rows[0]["messages_ref"]["hash"], rows[1]["messages_ref"]["hash"]
+        )
 
     def test_stage_override_beats_env(self) -> None:
         self._enable(stage="fallback")
         record_llm_call(
-            provider="p", model="m", request_style="r",
-            system_message="s", messages=[], response_text="",
+            provider="p",
+            model="m",
+            request_style="r",
+            system_message="s",
+            messages=[],
+            response_text="",
             stage="review",
         )
         [row] = self._read_rows()
@@ -158,8 +172,11 @@ class LLMTraceTests(unittest.TestCase):
     def test_row_conforms_to_schema(self) -> None:
         self._enable(stage="planning")
         record_llm_call(
-            provider="anthropic", model="m", request_style="anthropic_messages",
-            system_message="s", messages=[{"role": "user", "content": "q"}],
+            provider="anthropic",
+            model="m",
+            request_style="anthropic_messages",
+            system_message="s",
+            messages=[{"role": "user", "content": "q"}],
             response_text="a",
         )
         [row] = self._read_rows()
@@ -194,7 +211,9 @@ class LLMTraceTests(unittest.TestCase):
     def test_redaction_actually_applied_before_cas(self) -> None:
         self._enable(redact=True)
         record_llm_call(
-            provider="p", model="m", request_style="r",
+            provider="p",
+            model="m",
+            request_style="r",
             system_message="sys",
             messages=[{"role": "user", "content": "please use sk-supersecretvalue123"}],
             response_text="also secret: alice@example.com",
@@ -206,10 +225,12 @@ class LLMTraceTests(unittest.TestCase):
         self.assertNotIn("sk-supersecretvalue123", msg_dump)
         self.assertNotIn("alice@example.com", resp_dump)
 
-    def test_redaction_can_be_disabled(self) -> None:
+    def test_redaction_cannot_be_disabled_for_persistent_traces(self) -> None:
         self._enable(redact=False)
         record_llm_call(
-            provider="p", model="m", request_style="r",
+            provider="p",
+            model="m",
+            request_style="r",
             system_message="sys",
             messages=[{"role": "user", "content": "sk-plainvalueXXXXXXXX"}],
             response_text="",
@@ -217,7 +238,27 @@ class LLMTraceTests(unittest.TestCase):
         [row] = self._read_rows()
         store = ObjectStore(self.root)
         msg = json.dumps(store.get_json(row["messages_ref"]["hash"]))
-        self.assertIn("sk-plainvalueXXXXXXXX", msg)
+        self.assertNotIn("sk-plainvalueXXXXXXXX", msg)
+
+    def test_redaction_covers_host_paths_and_error_rows(self) -> None:
+        self._enable(redact=False)
+        private_path = "/" + "Users/private-person/research/input.json"
+        record_llm_call(
+            provider="p",
+            model="m",
+            request_style="r",
+            system_message=private_path,
+            messages=[{"role": "user", "content": private_path}],
+            response_text=private_path,
+            error=f"request failed while reading {private_path}",
+        )
+        [row] = self._read_rows()
+        store = ObjectStore(self.root)
+        persisted = json.dumps(row)
+        persisted += json.dumps(store.get_json(row["messages_ref"]["hash"]))
+        persisted += store.get_text(row["response_ref"]["hash"])
+        self.assertNotIn("private-person", persisted)
+        self.assertIn("[REDACTED_PATH]", persisted)
 
     # ------------------------------------------------------------------
     # Robustness
@@ -226,7 +267,9 @@ class LLMTraceTests(unittest.TestCase):
         self._enable()
         # Non-serialisable object in messages — record should still not raise.
         cid = record_llm_call(
-            provider="p", model="m", request_style="r",
+            provider="p",
+            model="m",
+            request_style="r",
             system_message="s",
             messages=[{"role": "user", "content": "ok"}, {"weird": object()}],
             response_text="x",
@@ -241,7 +284,11 @@ class LLMTraceTests(unittest.TestCase):
         p = self.root / CALLS_JSONL_RELPATH
         if not p.exists():
             return []
-        return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line]
+        return [
+            json.loads(line)
+            for line in p.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
 
 
 if __name__ == "__main__":  # pragma: no cover

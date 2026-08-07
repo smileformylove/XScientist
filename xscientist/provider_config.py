@@ -134,7 +134,9 @@ def load_provider_config(
     if not path.is_file():
         if missing_ok:
             return empty_provider_config()
-        raise ProviderConfigError(f"provider configuration not found: {path}")
+        raise ProviderConfigError(
+            f"provider configuration not found: {CONFIG_RELATIVE_PATH.as_posix()}"
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -306,9 +308,12 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
     if env_file.is_file() and not _env_file_is_private(env_file):
         return {
             "loaded": False,
-            "workspace": str(workspace),
+            "workspace": ".",
             "loaded_names": [],
-            "error": f"refusing to load credentials with broad permissions: {env_file}",
+            "error": (
+                "refusing to load credentials with broad permissions: "
+                f"{env_file.relative_to(workspace).as_posix()}"
+            ),
         }
     loaded_names: list[str] = []
     for name, value in read_env_file(env_file).items():
@@ -325,7 +330,7 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
         os.environ.setdefault("ZHIPU_DEFAULT_MODEL", model)
     return {
         "loaded": True,
-        "workspace": str(workspace),
+        "workspace": ".",
         "active_provider": active or None,
         "model": model or None,
         "loaded_names": sorted(loaded_names),
@@ -463,7 +468,8 @@ def provider_statuses(root: str | Path) -> list[dict[str, Any]]:
         workspace, str(config.get("env_file") or DEFAULT_ENV_FILE)
     )
     env_error = (
-        f"credential file has broad permissions: {env_file}"
+        "credential file has broad permissions: "
+        f"{env_file.relative_to(workspace).as_posix()}"
         if env_file.is_file() and not _env_file_is_private(env_file)
         else ""
     )

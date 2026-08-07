@@ -83,13 +83,13 @@ def _resolve_ara_root(raw: str) -> Path:
         return path.parent
     if path.is_dir() and (path / "manifest.json").exists():
         return path
-    raise SystemExit(f"ARA not found or missing manifest.json at: {path}")
+    raise SystemExit("ARA not found or missing manifest.json at the provided path")
 
 
 def _load_node(ara_root: Path, node_id: str) -> tuple[dict[str, Any], Path]:
     node_dir = ara_root / "nodes" / node_id
     if not node_dir.exists():
-        raise SystemExit(f"Node {node_id} not found under {ara_root / 'nodes'}")
+        raise SystemExit(f"Node {node_id} not found under nodes/")
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     meta: dict[str, Any] = {}
     for node in graph.get("nodes") or []:
@@ -134,12 +134,16 @@ def _parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
     ``ai_scientist.utils.ara_metric_parser``.
     """
     from ai_scientist.utils.ara_metric_parser import parse_metric_from_stdout
+
     return parse_metric_from_stdout(stdout)
 
 
-def _compare_metrics(recorded: Any, fresh: dict[str, Any], tolerance: float) -> dict[str, Any]:
+def _compare_metrics(
+    recorded: Any, fresh: dict[str, Any], tolerance: float
+) -> dict[str, Any]:
     """CLI-side shim — see ``ai_scientist.utils.ara_metric_parser``."""
     from ai_scientist.utils.ara_metric_parser import compare_metrics
+
     return compare_metrics(recorded, fresh, tolerance)
 
 
@@ -176,8 +180,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     parents, _ = _node_relationships(graph, args.node_id)
     metrics = _load_json(node_dir / "metrics.json") or {}
     print(f"# Node {args.node_id}")
-    print(f"ARA root:      {ara_root}")
-    print(f"Node dir:      {node_dir}")
+    print("ARA root:      .")
+    print(f"Node dir:      {node_dir.relative_to(ara_root).as_posix()}")
     print(f"Step:          {meta.get('step')}")
     print(f"Stage:         {meta.get('stage')}")
     print(f"Buggy:         {meta.get('is_buggy')}")
@@ -192,6 +196,13 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
+    from ai_scientist.utils.privacy import (
+        redact_sensitive_payload,
+        redact_sensitive_text,
+        relative_path_reference,
+        resolve_portable_path,
+    )
+
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
     context_pack_ref = None
@@ -215,21 +226,29 @@ def cmd_exec(args: argparse.Namespace) -> int:
         )
         if context_pack.get("blockers"):
             context_error = "; ".join(str(item) for item in context_pack["blockers"])
-    except Exception as exc:  # Legacy ARAs remain executable; the report exposes the gap.
-        context_error = str(exc)
+    except (
+        Exception
+    ) as exc:  # Legacy ARAs remain executable; the report exposes the gap.
+        context_error = redact_sensitive_text(str(exc))
     code_path = node_dir / "code.py"
     if not code_path.exists():
-        print(f"Node {args.node_id} has no code.py — nothing to execute.", file=sys.stderr)
+        print(
+            f"Node {args.node_id} has no code.py — nothing to execute.", file=sys.stderr
+        )
         return 3
 
     manifest = _load_json(ara_root / "manifest.json") or {}
-    default_cwd = Path(manifest.get("source_exp_dir") or "").expanduser()
-    cwd = Path(args.cwd).expanduser() if args.cwd else default_cwd
-    if not cwd.exists():
+    default_cwd = resolve_portable_path(manifest.get("source_exp_dir"), base=ara_root)
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else default_cwd
+    if cwd is None or not cwd.exists():
         cwd = node_dir  # last-resort fallback so the subprocess starts somewhere valid
 
     python_bin = args.python or sys.executable
-    print(f"[ara-fork] exec node={args.node_id} cwd={cwd} python={python_bin}")
+    cwd_view = relative_path_reference(cwd, base=ara_root)
+    print(
+        f"[ara-fork] exec node={args.node_id} cwd={cwd_view} "
+        f"python={Path(python_bin).name}"
+    )
 
     started_at = _now_iso()
     try:
@@ -257,28 +276,34 @@ def cmd_exec(args: argparse.Namespace) -> int:
     metrics_recorded = (_load_json(node_dir / "metrics.json") or {}).get("metric")
     comparison = _compare_metrics(metrics_recorded, fresh_metric, args.tolerance)
 
-    report = {
-        "schema": "ara.verify.v1",
-        "node_id": args.node_id,
-        "ara_root": str(ara_root),
-        "started_at": started_at,
-        "finished_at": _now_iso(),
-        "python": python_bin,
-        "cwd": str(cwd),
-        "timeout_seconds": args.timeout,
-        "returncode": returncode,
-        "timed_out": timed_out,
-        "recorded_metric": metrics_recorded,
-        "fresh_metric": fresh_metric,
-        "comparison": comparison,
-        "context_pack_ref": context_pack_ref,
-        "context_error": context_error,
-        "stdout_tail": stdout_text[-4000:],
-        "stderr_tail": stderr_text[-4000:],
-    }
+    report = redact_sensitive_payload(
+        {
+            "schema": "ara.verify.v1",
+            "node_id": args.node_id,
+            "ara_root": ".",
+            "started_at": started_at,
+            "finished_at": _now_iso(),
+            "python": Path(python_bin).name,
+            "cwd": cwd_view,
+            "timeout_seconds": args.timeout,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "recorded_metric": metrics_recorded,
+            "fresh_metric": fresh_metric,
+            "comparison": comparison,
+            "context_pack_ref": context_pack_ref,
+            "context_error": context_error,
+            "stdout_tail": redact_sensitive_text(stdout_text[-4000:]),
+            "stderr_tail": redact_sensitive_text(stderr_text[-4000:]),
+        }
+    )
     report_path = _write_verify_report(ara_root, args.node_id, report)
-    print(f"[ara-fork] verify report: {report_path}")
-    print(f"[ara-fork] returncode={returncode} timed_out={timed_out} comparison={comparison}")
+    print(
+        "[ara-fork] verify report: " f"{report_path.relative_to(ara_root).as_posix()}"
+    )
+    print(
+        f"[ara-fork] returncode={returncode} timed_out={timed_out} comparison={comparison}"
+    )
     if timed_out:
         return 4
     if returncode != 0 and not args.allow_nonzero:
@@ -310,7 +335,9 @@ def cmd_fork(args: argparse.Namespace) -> int:
     meta, node_dir = _load_node(ara_root, args.node_id)
     dest = Path(args.dest).expanduser().resolve()
     if dest.exists() and any(dest.iterdir()) and not args.force:
-        print(f"Destination {dest} not empty (pass --force to overwrite)", file=sys.stderr)
+        print(
+            f"Destination {dest} not empty (pass --force to overwrite)", file=sys.stderr
+        )
         return 2
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -321,9 +348,17 @@ def cmd_fork(args: argparse.Namespace) -> int:
     # 2. Compute / re-use content hash. If the parent had one, keep it; else
     #    reconstruct from code+metric so the fork is still content-addressable.
     parent_metrics = _load_json(node_dir / "metrics.json") or {}
-    parent_hash = parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
-    parent_code = (node_dir / "code.py").read_text(encoding="utf-8") if (node_dir / "code.py").exists() else ""
-    parent_metric = parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
+    parent_hash = (
+        parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
+    )
+    parent_code = (
+        (node_dir / "code.py").read_text(encoding="utf-8")
+        if (node_dir / "code.py").exists()
+        else ""
+    )
+    parent_metric = (
+        parent_metrics.get("metric") if isinstance(parent_metrics, dict) else None
+    )
     evaluation_binding = evaluation_hash_binding(
         parent_metrics.get("evaluation_report")
         if isinstance(parent_metrics, dict)
@@ -334,7 +369,9 @@ def cmd_fork(args: argparse.Namespace) -> int:
             parent_hash = hash_node_payload(
                 code=parent_code,
                 metric=parent_metric,
-                extras={"evaluation": evaluation_binding} if evaluation_binding else None,
+                extras=(
+                    {"evaluation": evaluation_binding} if evaluation_binding else None
+                ),
             )
         except Exception:  # pragma: no cover - defensive
             parent_hash = None
@@ -388,62 +425,78 @@ def cmd_fork(args: argparse.Namespace) -> int:
     )
 
     now_iso = _now_iso()
-    graph_payload = graph_with_dag_metadata(
-        {
-            "schema_version": PROTOCOL_VERSION,
-            "protocol_kind": "exploration_graph",
-            "generated_at": now_iso,
-            "nodes": [
-                {
-                    "id": args.node_id,
-                    "content_hash": fork_hash,
-                    # Match the metrics.json declaration above so ara_diff's
-                    # category-flip logic can index the fork's inputs, and so the
-                    # fork's node entry matches the schema shape enforced by
-                    # export_ara. SEED nodes typically bypass the LLM entirely,
-                    # so llm_call_refs defaults to [] — the parent's refs are
-                    # part of the *parent's* identity, not the fork's. If a
-                    # future fork variant wants to inherit refs, it should add
-                    # 'llm_calls' back into content_hash_inputs at the same time.
-                    "content_hash_inputs": [
-                        "code",
-                        "metric",
-                        *(["evaluation"] if evaluation_binding else []),
-                        "seed",
-                    ],
-                    "llm_call_refs": [],
-                    "context_pack_refs": [],
-                    "stage": parent_node_entry.get("stage") or "forked",
-                    "step": 0,
-                    "parent_id": None,
-                    "children": [],
-                    "is_buggy": parent_node_entry.get("is_buggy"),
-                    "is_seed_node": True,
-                    "is_seed_agg_node": False,
-                    "metric": parent_node_entry.get("metric") or parent_metrics.get("metric"),
-                    "metric_provenance": parent_metrics.get("metric_provenance")
-                    or "unavailable",
-                    "evaluation_report": parent_metrics.get("evaluation_report"),
-                    "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[:400],
-                    "exp_results_dir": None,
-                    "ctime": parent_node_entry.get("ctime"),
-                    "artifacts_dir": f"nodes/{args.node_id}",
-                }
-            ],
-            "edges": [],
-            "source_journals": [],
-            "counts": {"nodes": 1, "edges": 0, "buggy": 1 if parent_node_entry.get("is_buggy") else 0},
-        }
+    from ai_scientist.utils.privacy import (
+        redact_sensitive_payload,
+        relative_path_reference,
+    )
+
+    graph_payload = redact_sensitive_payload(
+        graph_with_dag_metadata(
+            {
+                "schema_version": PROTOCOL_VERSION,
+                "protocol_kind": "exploration_graph",
+                "generated_at": now_iso,
+                "nodes": [
+                    {
+                        "id": args.node_id,
+                        "content_hash": fork_hash,
+                        # Match the metrics.json declaration above so ara_diff's
+                        # category-flip logic can index the fork's inputs, and so the
+                        # fork's node entry matches the schema shape enforced by
+                        # export_ara. SEED nodes typically bypass the LLM entirely,
+                        # so llm_call_refs defaults to [] — the parent's refs are
+                        # part of the *parent's* identity, not the fork's. If a
+                        # future fork variant wants to inherit refs, it should add
+                        # 'llm_calls' back into content_hash_inputs at the same time.
+                        "content_hash_inputs": [
+                            "code",
+                            "metric",
+                            *(["evaluation"] if evaluation_binding else []),
+                            "seed",
+                        ],
+                        "llm_call_refs": [],
+                        "context_pack_refs": [],
+                        "stage": parent_node_entry.get("stage") or "forked",
+                        "step": 0,
+                        "parent_id": None,
+                        "children": [],
+                        "is_buggy": parent_node_entry.get("is_buggy"),
+                        "is_seed_node": True,
+                        "is_seed_agg_node": False,
+                        "metric": parent_node_entry.get("metric")
+                        or parent_metrics.get("metric"),
+                        "metric_provenance": parent_metrics.get("metric_provenance")
+                        or "unavailable",
+                        "evaluation_report": parent_metrics.get("evaluation_report"),
+                        "plan_excerpt": (parent_node_entry.get("plan_excerpt") or "")[
+                            :400
+                        ],
+                        "exp_results_dir": None,
+                        "ctime": parent_node_entry.get("ctime"),
+                        "artifacts_dir": f"nodes/{args.node_id}",
+                    }
+                ],
+                "edges": [],
+                "source_journals": [],
+                "counts": {
+                    "nodes": 1,
+                    "edges": 0,
+                    "buggy": 1 if parent_node_entry.get("is_buggy") else 0,
+                },
+            }
+        )
     )
     (dest / "exploration_graph.json").write_text(
         json.dumps(graph_payload, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
-    graph_visualization_refs = write_exploration_graph_visualization(dest, graph_payload)
+    graph_visualization_refs = write_exploration_graph_visualization(
+        dest, graph_payload
+    )
 
     # 4. Emit the fork's own manifest — a fully conformant ARA manifest.
     provenance = {
-        "parent_ara_root": str(ara_root),
+        "parent_ara_root": relative_path_reference(ara_root, base=dest),
         "parent_node_id": args.node_id,
         "parent_content_hash": parent_hash,
     }
@@ -452,8 +505,8 @@ def cmd_fork(args: argparse.Namespace) -> int:
         "schema_version": PROTOCOL_VERSION,
         "protocol_kind": "manifest",
         "created_at": now_iso,
-        "source_exp_dir": str(node_dir),  # informational only
-        "project_dir": str(dest.parent),
+        "source_exp_dir": relative_path_reference(node_dir, base=dest),
+        "project_dir": "..",
         "idea": {
             "name": f"fork_of_{parent_idea.get('name') or 'unknown'}_at_{args.node_id}",
             "title": parent_idea.get("title"),
@@ -489,6 +542,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
         ],
         "provenance": provenance,
     }
+    fork_manifest = redact_sensitive_payload(fork_manifest)
     (dest / "manifest.json").write_text(
         json.dumps(fork_manifest, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
@@ -497,6 +551,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
     # Anchor the fork's manifest under the immutability layer (SPEC §7.2) —
     # forks are commit-like, so they need the same lock export_ara writes.
     from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
+
     write_manifest_lock(dest, fork_manifest)
 
     # 5. Small compat file — `ara_seed.py` still looks for `fork.json` to
@@ -505,7 +560,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
     fork_meta = {
         "schema": "ara.fork.v1",
         "created_at": now_iso,
-        "source_ara": str(ara_root),
+        "source_ara": relative_path_reference(ara_root, base=dest),
         "source_node_id": args.node_id,
         "source_content_hash": parent_hash,
         "provenance_hint": provenance,
@@ -517,14 +572,17 @@ def cmd_fork(args: argparse.Namespace) -> int:
         ),
     }
     (dest / "fork.json").write_text(
-        json.dumps(fork_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(redact_sensitive_payload(fork_meta), indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
     try:
         from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
 
         rebuild_semantic_catalog(dest)
     except Exception as exc:
-        print(f"[ara-fork] warning: semantic catalog unavailable: {exc}", file=sys.stderr)
+        print(
+            f"[ara-fork] warning: semantic catalog unavailable: {exc}", file=sys.stderr
+        )
     print(f"[ara-fork] forked node {args.node_id} into {dest}")
     return 0
 
@@ -567,8 +625,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
             return 3
 
     # Snapshot pre-truncation counts so the summary line stays honest.
-    summary_counts = {k: len(getattr(result, n))
-                      for k, n in zip(("added", "removed", "changed"), lists)}
+    summary_counts = {
+        k: len(getattr(result, n))
+        for k, n in zip(("added", "removed", "changed"), lists)
+    }
     truncated = {"added": 0, "removed": 0, "changed": 0}
     if args.limit_nodes is not None and args.limit_nodes >= 0:
         n = args.limit_nodes
@@ -588,7 +648,9 @@ def cmd_diff(args: argparse.Namespace) -> int:
     _render_diff(result, summary_counts=summary_counts, truncated=truncated)
     # Non-zero when there's any material difference — makes it usable in CI.
     if result.manifest.hash_equal and not (
-        summary_counts["added"] or summary_counts["removed"] or summary_counts["changed"]
+        summary_counts["added"]
+        or summary_counts["removed"]
+        or summary_counts["changed"]
         or result.references.seed_changed
         or result.references.pipeline_added
         or result.references.pipeline_removed
@@ -619,13 +681,21 @@ seed_ref_changed=(yes|no) pipeline_changed=N``
     p = result.prompts
 
     if args.json:
-        print(json.dumps({
-            "added": added, "removed": removed, "changed": changed,
-            "prompts_shared": p.shared,
-            "prompts_only_a": p.only_in_a, "prompts_only_b": p.only_in_b,
-            "seed_ref_changed": seed_ref_changed,
-            "pipeline_changed": pipeline_changed,
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "added": added,
+                    "removed": removed,
+                    "changed": changed,
+                    "prompts_shared": p.shared,
+                    "prompts_only_a": p.only_in_a,
+                    "prompts_only_b": p.only_in_b,
+                    "seed_ref_changed": seed_ref_changed,
+                    "pipeline_changed": pipeline_changed,
+                },
+                ensure_ascii=False,
+            )
+        )
     else:
         print(
             f"nodes: +{added} -{removed} ~{changed} "
@@ -652,8 +722,10 @@ def cmd_log(args: argparse.Namespace) -> int:
         try:
             chain = walk_node_ancestry(ara_root, args.node)
         except KeyError:
-            print(f"node {args.node} not present in exploration_graph.json",
-                  file=sys.stderr)
+            print(
+                f"node {args.node} not present in exploration_graph.json",
+                file=sys.stderr,
+            )
             return 3
         if args.json:
             print(json.dumps(chain, indent=2, ensure_ascii=False, default=str))
@@ -728,13 +800,15 @@ def _verify_lock_all(project_dir: Path, args: argparse.Namespace) -> int:
         for sub in sorted(ara_base.iterdir()):
             if sub.is_dir() and (sub / "manifest.json").exists():
                 r = verify_manifest_lock(sub)
-                entries.append({
-                    "ara_root": str(sub),
-                    "state": r.get("state"),
-                    "revision_count": r.get("revision_count"),
-                    "manifest_hash": r.get("base_hash"),
-                    "detail": r.get("detail"),
-                })
+                entries.append(
+                    {
+                        "ara_root": str(sub),
+                        "state": r.get("state"),
+                        "revision_count": r.get("revision_count"),
+                        "manifest_hash": r.get("base_hash"),
+                        "detail": r.get("detail"),
+                    }
+                )
     if not entries:
         if args.json:
             print("[]")
@@ -748,7 +822,9 @@ def _verify_lock_all(project_dir: Path, args: argparse.Namespace) -> int:
             locked = e["state"] in ("clean", "revised")
             revs = str(e["revision_count"]) if locked else "-"
             h = _short_hash(e["manifest_hash"]) if locked else "-"
-            print(f"{e['state'] or '?':<10} {revs:<5} {h:<24} {Path(e['ara_root']).name}")
+            print(
+                f"{e['state'] or '?':<10} {revs:<5} {h:<24} {Path(e['ara_root']).name}"
+            )
     if any(e["state"] == "tampered" for e in entries):
         return 2
     if any(e["state"] == "unlocked" for e in entries):
@@ -766,14 +842,17 @@ def cmd_history(args: argparse.Namespace) -> int:
     revisions), rc=3 when it doesn't.
     """
     from ai_scientist.utils.ara_manifest_lock import (
-        MANIFEST_HISTORY_NAME, MANIFEST_LOCK_NAME,
+        MANIFEST_HISTORY_NAME,
+        MANIFEST_LOCK_NAME,
     )
 
     ara_root = _resolve_ara_root(args.ara)
     lock_path = ara_root / MANIFEST_LOCK_NAME
     if not lock_path.exists():
-        print(f"[ara-history] {ara_root} is unlocked (no {MANIFEST_LOCK_NAME})",
-              file=sys.stderr)
+        print(
+            f"[ara-history] {ara_root} is unlocked (no {MANIFEST_LOCK_NAME})",
+            file=sys.stderr,
+        )
         return 3
 
     lock = _load_json(lock_path) or {}
@@ -793,27 +872,31 @@ def cmd_history(args: argparse.Namespace) -> int:
             revisions = []
 
     if args.limit is not None and args.limit >= 0:
-        revisions = revisions[-args.limit:] if args.limit else []
+        revisions = revisions[-args.limit :] if args.limit else []
 
-    rows: list[dict[str, Any]] = [{
-        "revision": 0,
-        "ts": lock.get("created_at"),
-        "base_hash": None,
-        "new_hash": lock.get("manifest_hash"),
-        "producer": None,
-        "reason": "(initial export)",
-        "changed_fields": [],
-    }]
+    rows: list[dict[str, Any]] = [
+        {
+            "revision": 0,
+            "ts": lock.get("created_at"),
+            "base_hash": None,
+            "new_hash": lock.get("manifest_hash"),
+            "producer": None,
+            "reason": "(initial export)",
+            "changed_fields": [],
+        }
+    ]
     for r in revisions:
-        rows.append({
-            "revision": r.get("revision"),
-            "ts": r.get("ts"),
-            "base_hash": r.get("base_hash"),
-            "new_hash": r.get("new_hash"),
-            "producer": r.get("producer"),
-            "reason": r.get("reason"),
-            "changed_fields": r.get("changed_fields") or [],
-        })
+        rows.append(
+            {
+                "revision": r.get("revision"),
+                "ts": r.get("ts"),
+                "base_hash": r.get("base_hash"),
+                "new_hash": r.get("new_hash"),
+                "producer": r.get("producer"),
+                "reason": r.get("reason"),
+                "changed_fields": r.get("changed_fields") or [],
+            }
+        )
 
     if args.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False, default=str))
@@ -842,8 +925,7 @@ def cmd_show(args: argparse.Namespace) -> int:
             break
     node_dir = ara_root / "nodes" / args.node
     if not meta and not node_dir.exists():
-        print(f"[ara-show] node {args.node} not found in {ara_root}",
-              file=sys.stderr)
+        print(f"[ara-show] node {args.node} not found in {ara_root}", file=sys.stderr)
         return 3
 
     metrics = _load_json(node_dir / "metrics.json") or {}
@@ -865,7 +947,11 @@ def cmd_show(args: argparse.Namespace) -> int:
         try:
             term_size = term_path.stat().st_size
             raw = term_path.read_bytes()
-            tail = raw if args.term_tail is None else raw[-args.term_tail:] if args.term_tail > 0 else b""
+            tail = (
+                raw
+                if args.term_tail is None
+                else raw[-args.term_tail :] if args.term_tail > 0 else b""
+            )
             term_tail = tail.decode("utf-8", errors="replace")
         except OSError:
             term_tail = None
@@ -875,9 +961,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         "id": args.node,
         "content_hash": meta.get("content_hash") or metrics.get("content_hash"),
         "content_hash_inputs": (
-            meta.get("content_hash_inputs")
-            or metrics.get("content_hash_inputs")
-            or []
+            meta.get("content_hash_inputs") or metrics.get("content_hash_inputs") or []
         ),
         "llm_call_refs": meta.get("llm_call_refs") or [],
         "is_buggy": meta.get("is_buggy"),
@@ -886,7 +970,11 @@ def cmd_show(args: argparse.Namespace) -> int:
         "parent_id": parents[0] if parents else None,
         "parent_ids": parents,
         "children": children,
-        "metric": metrics.get("metric") if metrics.get("metric") is not None else meta.get("metric"),
+        "metric": (
+            metrics.get("metric")
+            if metrics.get("metric") is not None
+            else meta.get("metric")
+        ),
         "analysis": metrics.get("analysis"),
         "exec_time": metrics.get("exec_time"),
         "exc_type": metrics.get("exc_type"),
@@ -999,27 +1087,37 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             try:
                 code_text = code_path.read_text(encoding="utf-8")
             except OSError as exc:
-                entries.append({
-                    "node_id": node_id, "state": "missing_code",
-                    "stored_hash": stored_hash, "computed_hash": None,
-                    "notes": f"code.py unreadable: {exc}",
-                })
+                entries.append(
+                    {
+                        "node_id": node_id,
+                        "state": "missing_code",
+                        "stored_hash": stored_hash,
+                        "computed_hash": None,
+                        "notes": f"code.py unreadable: {exc}",
+                    }
+                )
                 continue
 
         try:
             computed = hash_node_payload(
                 code=code_text,
                 metric=metric,
-                extras={"evaluation": evaluation_binding} if evaluation_binding else None,
+                extras=(
+                    {"evaluation": evaluation_binding} if evaluation_binding else None
+                ),
                 llm_call_hashes=llm_refs or None,
                 is_seed=is_seed,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            entries.append({
-                "node_id": node_id, "state": "drift",
-                "stored_hash": stored_hash, "computed_hash": None,
-                "notes": f"hash recompute failed: {exc}",
-            })
+            entries.append(
+                {
+                    "node_id": node_id,
+                    "state": "drift",
+                    "stored_hash": stored_hash,
+                    "computed_hash": None,
+                    "notes": f"hash recompute failed: {exc}",
+                }
+            )
             continue
 
         if not stored_hash:
@@ -1029,7 +1127,8 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             state = "no_code" if code_missing else "unhashed"
             note = "code.py absent (no stored hash either)" if code_missing else None
             entry = {
-                "node_id": node_id, "state": state,
+                "node_id": node_id,
+                "state": state,
                 "stored_hash": None,
                 "computed_hash": None if code_missing else computed,
             }
@@ -1039,21 +1138,29 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             continue
 
         if stored_hash == computed:
-            entries.append({
-                "node_id": node_id, "state": "clean",
-                "stored_hash": stored_hash, "computed_hash": computed,
-            })
+            entries.append(
+                {
+                    "node_id": node_id,
+                    "state": "clean",
+                    "stored_hash": stored_hash,
+                    "computed_hash": computed,
+                }
+            )
             continue
 
         # Recompute differs from stored. If code.py was absent and the
         # empty-code recompute did NOT match, the stored hash implies
         # non-empty code that's now gone from disk — genuine data loss.
         if code_missing:
-            entries.append({
-                "node_id": node_id, "state": "missing_code",
-                "stored_hash": stored_hash, "computed_hash": None,
-                "notes": "code.py absent; stored hash implies non-empty code",
-            })
+            entries.append(
+                {
+                    "node_id": node_id,
+                    "state": "missing_code",
+                    "stored_hash": stored_hash,
+                    "computed_hash": None,
+                    "notes": "code.py absent; stored hash implies non-empty code",
+                }
+            )
             continue
 
         # Drift — try to explain which category flipped. The graph entry
@@ -1070,11 +1177,15 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             note = "metric differs"
         else:
             note = "code differs"
-        entries.append({
-            "node_id": node_id, "state": "drift",
-            "stored_hash": stored_hash, "computed_hash": computed,
-            "notes": note,
-        })
+        entries.append(
+            {
+                "node_id": node_id,
+                "state": "drift",
+                "stored_hash": stored_hash,
+                "computed_hash": computed,
+                "notes": note,
+            }
+        )
 
     return entries
 
@@ -1083,18 +1194,21 @@ def _render_hash_check(entries: list[dict[str, Any]]) -> None:
     header = ("NODE", "STATE", "STORED", "COMPUTED", "NOTES")
     rows: list[tuple[str, str, str, str, str]] = []
     for e in entries:
-        rows.append((
-            e["node_id"],
-            e["state"],
-            _short_hash(e.get("stored_hash")),
-            _short_hash(e.get("computed_hash")),
-            e.get("notes") or "",
-        ))
+        rows.append(
+            (
+                e["node_id"],
+                e["state"],
+                _short_hash(e.get("stored_hash")),
+                _short_hash(e.get("computed_hash")),
+                e.get("notes") or "",
+            )
+        )
     if not rows:
         print("(no nodes to check)")
         return
-    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
-              for i in range(len(header))]
+    widths = [
+        max(len(header[i]), max(len(r[i]) for r in rows)) for i in range(len(header))
+    ]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*header))
     for r in rows:
@@ -1116,14 +1230,28 @@ def _hash_check_all(project_dir: Path, args: argparse.Namespace) -> int:
             if not (sub.is_dir() and (sub / "manifest.json").exists()):
                 continue
             entries = _hash_check_ara(sub)
-            counts = {"clean": 0, "drift": 0, "missing_code": 0,
-                      "unhashed": 0, "no_code": 0}
+            counts = {
+                "clean": 0,
+                "drift": 0,
+                "missing_code": 0,
+                "unhashed": 0,
+                "no_code": 0,
+            }
             for e in entries:
                 counts[e["state"]] = counts.get(e["state"], 0) + 1
-            state = ("drift" if counts["drift"] else
-                     "missing_code" if counts["missing_code"] else "clean")
-            aras.append({"ara_root": str(sub), "nodes": len(entries),
-                         "counts": counts, "state": state})
+            state = (
+                "drift"
+                if counts["drift"]
+                else "missing_code" if counts["missing_code"] else "clean"
+            )
+            aras.append(
+                {
+                    "ara_root": str(sub),
+                    "nodes": len(entries),
+                    "counts": counts,
+                    "state": state,
+                }
+            )
     totals = {
         "aras": len(aras),
         "nodes": sum(a["nodes"] for a in aras),
@@ -1136,23 +1264,40 @@ def _hash_check_all(project_dir: Path, args: argparse.Namespace) -> int:
         print(f"(no ARAs found under {ara_base})", file=sys.stderr)
         return 0
     if args.json:
-        print(json.dumps({"aras": aras, "totals": totals},
-                         indent=2, ensure_ascii=False, default=str))
+        print(
+            json.dumps(
+                {"aras": aras, "totals": totals},
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+        )
     else:
         header = ("ARA", "NODES", "CLEAN", "DRIFT", "MISSING", "UNHASHED", "STATE")
-        rows = [(Path(a["ara_root"]).name, str(a["nodes"]),
-                 str(a["counts"]["clean"]), str(a["counts"]["drift"]),
-                 str(a["counts"]["missing_code"]),
-                 str(a["counts"]["unhashed"] + a["counts"]["no_code"]),
-                 a["state"]) for a in aras]
-        widths = [max(len(header[i]), max(len(r[i]) for r in rows))
-                  for i in range(len(header))]
+        rows = [
+            (
+                Path(a["ara_root"]).name,
+                str(a["nodes"]),
+                str(a["counts"]["clean"]),
+                str(a["counts"]["drift"]),
+                str(a["counts"]["missing_code"]),
+                str(a["counts"]["unhashed"] + a["counts"]["no_code"]),
+                a["state"],
+            )
+            for a in aras
+        ]
+        widths = [
+            max(len(header[i]), max(len(r[i]) for r in rows))
+            for i in range(len(header))
+        ]
         fmt = "  ".join(f"{{:<{w}}}" for w in widths)
         print(fmt.format(*header))
         for r in rows:
             print(fmt.format(*r))
-        print(f"Total: {totals['aras']} ARAs, {totals['nodes']} nodes, "
-              f"{totals['drift']} drift, {totals['missing_code']} missing_code")
+        print(
+            f"Total: {totals['aras']} ARAs, {totals['nodes']} nodes, "
+            f"{totals['drift']} drift, {totals['missing_code']} missing_code"
+        )
     if totals["drift"]:
         return 1
     if totals["missing_code"]:
@@ -1203,8 +1348,9 @@ def cmd_describe(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
     manifest = _load_json(ara_root / "manifest.json")
     if not isinstance(manifest, dict):
-        print(f"[ara-describe] {ara_root} has no readable manifest.json",
-              file=sys.stderr)
+        print(
+            f"[ara-describe] {ara_root} has no readable manifest.json", file=sys.stderr
+        )
         return 3
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
@@ -1220,12 +1366,16 @@ def cmd_describe(args: argparse.Namespace) -> int:
     seed_count = sum(1 for n in nodes if n.get("is_seed_node"))
 
     top = _pick_top_metric_node(nodes)
-    top_payload = None if top is None else {
-        "id": str(top.get("id")),
-        "content_hash": top.get("content_hash"),
-        "metric": top.get("metric"),
-        "is_buggy": bool(top.get("is_buggy")),
-    }
+    top_payload = (
+        None
+        if top is None
+        else {
+            "id": str(top.get("id")),
+            "content_hash": top.get("content_hash"),
+            "metric": top.get("metric"),
+            "is_buggy": bool(top.get("is_buggy")),
+        }
+    )
 
     verify = verify_manifest_lock(ara_root)
     lock_payload = {
@@ -1258,8 +1408,14 @@ def cmd_describe(args: argparse.Namespace) -> int:
     # flagged as a failure.
     ancestors_payload = {
         "count": len(log.ancestors),
-        "all_reachable": all(a.reachable for a in log.ancestors) if log.ancestors else True,
-        "all_verified": all(a.hash_verified is not False for a in log.ancestors) if log.ancestors else True,
+        "all_reachable": (
+            all(a.reachable for a in log.ancestors) if log.ancestors else True
+        ),
+        "all_verified": (
+            all(a.hash_verified is not False for a in log.ancestors)
+            if log.ancestors
+            else True
+        ),
     }
     idea = manifest.get("idea") or {}
     if not isinstance(idea, dict):
@@ -1267,20 +1423,30 @@ def cmd_describe(args: argparse.Namespace) -> int:
     idea_payload = {"name": idea.get("name"), "title": idea.get("title")}
 
     if args.json:
-        print(json.dumps({
-            "ara_root": str(ara_root),
-            "idea": idea_payload,
-            "counts": {
-                "nodes": node_count, "buggy": buggy, "seeds": seed_count,
-                "edges": edge_count, "revisions": lock_payload["revision"],
-            },
-            "top_metric_node": top_payload,
-            "seed": seed_payload,
-            "lock": lock_payload,
-            "verify_state": verify.get("state"),
-            "manifest_hash_current": manifest_hash_current,
-            "ancestors": ancestors_payload,
-        }, indent=2, ensure_ascii=False, default=str))
+        print(
+            json.dumps(
+                {
+                    "ara_root": str(ara_root),
+                    "idea": idea_payload,
+                    "counts": {
+                        "nodes": node_count,
+                        "buggy": buggy,
+                        "seeds": seed_count,
+                        "edges": edge_count,
+                        "revisions": lock_payload["revision"],
+                    },
+                    "top_metric_node": top_payload,
+                    "seed": seed_payload,
+                    "lock": lock_payload,
+                    "verify_state": verify.get("state"),
+                    "manifest_hash_current": manifest_hash_current,
+                    "ancestors": ancestors_payload,
+                },
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+        )
         return 0
 
     # Human view.
@@ -1288,7 +1454,9 @@ def cmd_describe(args: argparse.Namespace) -> int:
     print(f"Idea:            {idea_payload['name'] or '(unknown)'}")
     if idea_payload.get("title"):
         print(f"Title:           {idea_payload['title']}")
-    print(f"Nodes:           {node_count}  (buggy: {buggy}, seeds: {seed_count}, edges: {edge_count})")
+    print(
+        f"Nodes:           {node_count}  (buggy: {buggy}, seeds: {seed_count}, edges: {edge_count})"
+    )
     if top_payload is None:
         print("Top metric:      (no scored nodes)")
     else:
@@ -1301,17 +1469,27 @@ def cmd_describe(args: argparse.Namespace) -> int:
     if seed_payload:
         parent_ara = seed_payload.get("parent_ara_root") or "(unknown)"
         parent_node = seed_payload.get("parent_node_id") or "(unknown)"
-        print(f"Seed:            {_short_hash(seed_payload.get('hash'))}  (parent: {parent_ara} / {parent_node})")
+        print(
+            f"Seed:            {_short_hash(seed_payload.get('hash'))}  (parent: {parent_ara} / {parent_node})"
+        )
     else:
         print("Seed:            (none — root ARA)")
-    print(f"Latest lock:     {_short_hash(lock_payload['manifest_hash'])}  (rev {lock_payload['revision']}, {lock_payload['state']})")
+    print(
+        f"Latest lock:     {_short_hash(lock_payload['manifest_hash'])}  (rev {lock_payload['revision']}, {lock_payload['state']})"
+    )
     print(f"Manifest hash:   {_short_hash(manifest_hash_current)}")
     print(f"Verify state:    {verify.get('state')}")
     if ancestors_payload["count"] == 0:
         print("Ancestors:       0 (root ARA — no provenance)")
     else:
-        reach = "all reachable" if ancestors_payload["all_reachable"] else "some unreachable"
-        verify_word = "hash verified" if ancestors_payload["all_verified"] else "hash mismatch"
+        reach = (
+            "all reachable"
+            if ancestors_payload["all_reachable"]
+            else "some unreachable"
+        )
+        verify_word = (
+            "hash verified" if ancestors_payload["all_verified"] else "hash mismatch"
+        )
         print(f"Ancestors:       {ancestors_payload['count']} ({reach}, {verify_word})")
     return 0
 
@@ -1342,11 +1520,18 @@ def cmd_list(args: argparse.Namespace) -> int:
                 continue  # not an ARA — skip _scratch/ / __pycache__/ / .hidden/ / etc.
             manifest = _load_json(sub / "manifest.json")
             if not isinstance(manifest, dict):
-                entries.append({
-                    "ara_root": str(sub), "idea": "?",
-                    "nodes": None, "buggy_nodes": None, "seed_present": None,
-                    "state": "error", "manifest_hash": None, "path": sub.name,
-                })
+                entries.append(
+                    {
+                        "ara_root": str(sub),
+                        "idea": "?",
+                        "nodes": None,
+                        "buggy_nodes": None,
+                        "seed_present": None,
+                        "state": "error",
+                        "manifest_hash": None,
+                        "path": sub.name,
+                    }
+                )
                 continue
             counts = manifest.get("counts") or {}
             if not isinstance(counts, dict):
@@ -1363,16 +1548,18 @@ def cmd_list(args: argparse.Namespace) -> int:
             if not isinstance(idea, dict):
                 idea = {}
             r = verify_manifest_lock(sub)
-            entries.append({
-                "ara_root": str(sub),
-                "idea": idea.get("name") or "?",
-                "nodes": counts.get("nodes"),
-                "buggy_nodes": counts.get("buggy_nodes"),
-                "seed_present": seed_present,
-                "state": r.get("state"),
-                "manifest_hash": r.get("base_hash"),
-                "path": sub.name,
-            })
+            entries.append(
+                {
+                    "ara_root": str(sub),
+                    "idea": idea.get("name") or "?",
+                    "nodes": counts.get("nodes"),
+                    "buggy_nodes": counts.get("buggy_nodes"),
+                    "seed_present": seed_present,
+                    "state": r.get("state"),
+                    "manifest_hash": r.get("base_hash"),
+                    "path": sub.name,
+                }
+            )
     if not entries:
         if args.json:
             print("[]")
@@ -1399,14 +1586,19 @@ def _render_list(entries: list[dict[str, Any]]) -> None:
 
     rows = [
         (
-            e["idea"] or "?", _fmt_count(e["nodes"]), _fmt_count(e["buggy_nodes"]),
-            _fmt_seed(e["seed_present"]), e["state"] or "?",
-            _fmt_lock(e["state"], e["manifest_hash"]), e["path"],
+            e["idea"] or "?",
+            _fmt_count(e["nodes"]),
+            _fmt_count(e["buggy_nodes"]),
+            _fmt_seed(e["seed_present"]),
+            e["state"] or "?",
+            _fmt_lock(e["state"], e["manifest_hash"]),
+            e["path"],
         )
         for e in entries
     ]
-    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
-              for i in range(len(header))]
+    widths = [
+        max(len(header[i]), max(len(r[i]) for r in rows)) for i in range(len(header))
+    ]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*header))
     for r in rows:
@@ -1492,25 +1684,26 @@ def cmd_claims(args: argparse.Namespace) -> int:
         else:
             content_hash = metric = is_buggy = None
 
-        rows.append({
-            "claim_id": claim_id,
-            "claim_hash": payload.get("claim_hash"),
-            "node_id": node_id,
-            "evidence_refs": payload.get("evidence_refs") or [],
-            "node_content_hash": content_hash,
-            "node_metric": metric,
-            "node_is_buggy": is_buggy,
-            "assertion": payload.get("context") or "",
-            "tex_file": payload.get("tex_file"),
-            "line": payload.get("line"),
-            "severity": severity,
-        })
+        rows.append(
+            {
+                "claim_id": claim_id,
+                "claim_hash": payload.get("claim_hash"),
+                "node_id": node_id,
+                "evidence_refs": payload.get("evidence_refs") or [],
+                "node_content_hash": content_hash,
+                "node_metric": metric,
+                "node_is_buggy": is_buggy,
+                "assertion": payload.get("context") or "",
+                "tex_file": payload.get("tex_file"),
+                "line": payload.get("line"),
+                "severity": severity,
+            }
+        )
 
     if args.node:
         rows = [r for r in rows if r["node_id"] == args.node]
         if not rows:
-            print(f"[ara-claims] no claims link to node {args.node}",
-                  file=sys.stderr)
+            print(f"[ara-claims] no claims link to node {args.node}", file=sys.stderr)
             return 3
 
     if args.json:
@@ -1548,18 +1741,22 @@ def _render_claims(rows: list[dict[str, Any]]) -> None:
         # column matches the null hash/metric/buggy neighbours. JSON keeps
         # the raw reference so a caller can still cross-check.
         linked = r["node_content_hash"] is not None
-        body.append((
-            r["claim_id"],
-            r["node_id"] if linked and r["node_id"] else "-",
-            _short_hash(r["node_content_hash"]),
-            _fmt_metric(r["node_metric"]),
-            _fmt_buggy(r["node_is_buggy"]),
-            _fmt_assertion(r["assertion"]),
-        ))
+        body.append(
+            (
+                r["claim_id"],
+                r["node_id"] if linked and r["node_id"] else "-",
+                _short_hash(r["node_content_hash"]),
+                _fmt_metric(r["node_metric"]),
+                _fmt_buggy(r["node_is_buggy"]),
+                _fmt_assertion(r["assertion"]),
+            )
+        )
     if not body:
         return
-    widths = [max(len(header[i]), max(len(row[i]) for row in body))
-              for i in range(len(header))]
+    widths = [
+        max(len(header[i]), max(len(row[i]) for row in body))
+        for i in range(len(header))
+    ]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*header))
     for row in body:
@@ -1604,23 +1801,34 @@ def cmd_provenance(args: argparse.Namespace) -> int:
     return 0
 
 
-def _provenance_scan_ara(ara_root: Path, target: str, list_refs) -> list[dict[str, Any]]:
+def _provenance_scan_ara(
+    ara_root: Path, target: str, list_refs
+) -> list[dict[str, Any]]:
     """Scan one ARA and return every hit dict where ``target`` is referenced."""
     out: list[dict[str, Any]] = []
 
     lock = _load_json(ara_root / "manifest.lock") or {}
     if isinstance(lock, dict) and lock.get("manifest_hash") == target:
-        out.append({"ara_root": str(ara_root), "kind": "manifest",
-                    "detail": {"revision": lock.get("revision")}})
+        out.append(
+            {
+                "ara_root": str(ara_root),
+                "kind": "manifest",
+                "detail": {"revision": lock.get("revision")},
+            }
+        )
 
     manifest = _load_json(ara_root / "manifest.json") or {}
     provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
     if isinstance(provenance, dict):
         for key in ("seed_hash", "parent_content_hash"):
             if provenance.get(key) == target:
-                out.append({"ara_root": str(ara_root),
-                            "kind": "seed" if key == "seed_hash" else "provenance",
-                            "detail": {"field": key}})
+                out.append(
+                    {
+                        "ara_root": str(ara_root),
+                        "kind": "seed" if key == "seed_hash" else "provenance",
+                        "detail": {"field": key},
+                    }
+                )
         # Multi-parent shape: provenance.parents[] carries one entry per role
         # (code/env/data/...). Only the code-role parent is echoed into the
         # top-level slots by build_provenance, so we must also scan the array
@@ -1631,21 +1839,41 @@ def _provenance_scan_ara(ara_root: Path, target: str, list_refs) -> list[dict[st
                 if not isinstance(p, dict):
                     continue
                 if p.get("parent_content_hash") == target:
-                    out.append({"ara_root": str(ara_root), "kind": "provenance",
-                                "detail": {"field": "parents[]", "index": i,
-                                           "role": p.get("role"),
-                                           "parent_node_id": p.get("parent_node_id")}})
+                    out.append(
+                        {
+                            "ara_root": str(ara_root),
+                            "kind": "provenance",
+                            "detail": {
+                                "field": "parents[]",
+                                "index": i,
+                                "role": p.get("role"),
+                                "parent_node_id": p.get("parent_node_id"),
+                            },
+                        }
+                    )
     references = manifest.get("references") if isinstance(manifest, dict) else None
     if isinstance(references, dict):
         seed_ref = references.get("seed")
         if isinstance(seed_ref, dict) and seed_ref.get("content_hash") == target:
-            out.append({"ara_root": str(ara_root), "kind": "seed",
-                        "detail": {"field": "references.seed"}})
+            out.append(
+                {
+                    "ara_root": str(ara_root),
+                    "kind": "seed",
+                    "detail": {"field": "references.seed"},
+                }
+            )
         for entry in references.get("pipeline_artifacts") or []:
             if isinstance(entry, dict) and entry.get("content_hash") == target:
-                out.append({"ara_root": str(ara_root), "kind": "pipeline_artifact",
-                            "detail": {"kind": entry.get("kind"),
-                                       "path": entry.get("path")}})
+                out.append(
+                    {
+                        "ara_root": str(ara_root),
+                        "kind": "pipeline_artifact",
+                        "detail": {
+                            "kind": entry.get("kind"),
+                            "path": entry.get("path"),
+                        },
+                    }
+                )
 
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     for node in graph.get("nodes") or []:
@@ -1653,18 +1881,33 @@ def _provenance_scan_ara(ara_root: Path, target: str, list_refs) -> list[dict[st
             continue
         node_id = node.get("id")
         if node.get("content_hash") == target:
-            out.append({"ara_root": str(ara_root), "kind": "node",
-                        "detail": {"node_id": node_id}})
+            out.append(
+                {
+                    "ara_root": str(ara_root),
+                    "kind": "node",
+                    "detail": {"node_id": node_id},
+                }
+            )
         for ref in node.get("llm_call_refs") or []:
             if ref == target:
-                out.append({"ara_root": str(ara_root), "kind": "llm_call",
-                            "detail": {"node_id": node_id}})
+                out.append(
+                    {
+                        "ara_root": str(ara_root),
+                        "kind": "llm_call",
+                        "detail": {"node_id": node_id},
+                    }
+                )
 
     try:
         for r in list_refs(ara_root):
             if r.target == target:
-                out.append({"ara_root": str(ara_root), "kind": "ref",
-                            "detail": {"ref_name": r.name}})
+                out.append(
+                    {
+                        "ara_root": str(ara_root),
+                        "kind": "ref",
+                        "detail": {"ref_name": r.name},
+                    }
+                )
     except Exception:  # pragma: no cover - defensive
         pass
 
@@ -1679,10 +1922,13 @@ def _render_provenance(hits: list[dict[str, Any]]) -> None:
             return "-"
         return ", ".join(f"{k}={v}" for k, v in d.items() if v is not None) or "-"
 
-    rows = [(h["kind"], _fmt_detail(h.get("detail")),
-             Path(h["ara_root"]).name) for h in hits]
-    widths = [max(len(header[i]), max(len(r[i]) for r in rows))
-              for i in range(len(header))]
+    rows = [
+        (h["kind"], _fmt_detail(h.get("detail")), Path(h["ara_root"]).name)
+        for h in hits
+    ]
+    widths = [
+        max(len(header[i]), max(len(r[i]) for r in rows)) for i in range(len(header))
+    ]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*header))
     for r in rows:
@@ -1691,7 +1937,11 @@ def _render_provenance(hits: list[dict[str, Any]]) -> None:
 
 def cmd_refs(args: argparse.Namespace) -> int:
     from ai_scientist.utils.ara_refs import (
-        RefError, delete_ref, get_ref, list_refs, set_ref,
+        RefError,
+        delete_ref,
+        get_ref,
+        list_refs,
+        set_ref,
     )
 
     ara_root = _resolve_ara_root(args.ara)
@@ -1725,8 +1975,13 @@ def cmd_refs(args: argparse.Namespace) -> int:
     if args.prefix is not None:
         refs = [r for r in refs if r.name.startswith(args.prefix)]
     if args.json:
-        print(json.dumps([{"name": r.name, "target": r.target} for r in refs],
-                         indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                [{"name": r.name, "target": r.target} for r in refs],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return 0
     if not refs:
         # When a prefix filter is in effect, stay silent so callers can pipe
@@ -1775,8 +2030,12 @@ def _render_diff(
             print(f"      b: {delta['b']}")
 
     r = result.references
-    if (r.seed_changed or r.pipeline_added or r.pipeline_removed
-            or r.pipeline_hash_changed):
+    if (
+        r.seed_changed
+        or r.pipeline_added
+        or r.pipeline_removed
+        or r.pipeline_hash_changed
+    ):
         print()
         print("## references")
         if r.seed_changed:
@@ -1786,13 +2045,17 @@ def _render_diff(
         for kind in r.pipeline_removed:
             print(f"  - pipeline/{kind}")
         for entry in r.pipeline_hash_changed:
-            print(f"  ~ pipeline/{entry['kind']}: {entry['hash_a']}  ->  {entry['hash_b']}")
+            print(
+                f"  ~ pipeline/{entry['kind']}: {entry['hash_a']}  ->  {entry['hash_b']}"
+            )
 
     print()
-    print(f"## nodes  (+{counts['added']} "
-          f"-{counts['removed']} "
-          f"~{counts['changed']} "
-          f"={result.nodes_unchanged})")
+    print(
+        f"## nodes  (+{counts['added']} "
+        f"-{counts['removed']} "
+        f"~{counts['changed']} "
+        f"={result.nodes_unchanged})"
+    )
     for n in result.nodes_added:
         print(f"  + {n.id}  {n.hash_b}")
     if trunc["added"]:
@@ -1809,26 +2072,34 @@ def _render_diff(
 
     p = result.prompts
     print()
-    print(f"## prompts  a={p.total_a} b={p.total_b} "
-          f"shared={p.shared} only_a={p.only_in_a} only_b={p.only_in_b}")
+    print(
+        f"## prompts  a={p.total_a} b={p.total_b} "
+        f"shared={p.shared} only_a={p.only_in_a} only_b={p.only_in_b}"
+    )
 
 
 def _render_log(log) -> None:  # ARALog
     print(f"# log  {log.ara_root}")
-    print(f"  verify: {log.verify.get('state')}  "
-          f"({log.verify.get('revision_count')} revisions)")
+    print(
+        f"  verify: {log.verify.get('state')}  "
+        f"({log.verify.get('revision_count')} revisions)"
+    )
     print()
     print("## revisions")
     if log.lock:
-        print(f"  rev 0 (lock)  {log.lock.get('manifest_hash')}  "
-              f"{log.lock.get('created_at')}")
+        print(
+            f"  rev 0 (lock)  {log.lock.get('manifest_hash')}  "
+            f"{log.lock.get('created_at')}"
+        )
     else:
         print("  (no manifest.lock — this ARA predates the immutability layer)")
     for r in log.revisions:
         fields = ",".join(r.changed_fields) or "-"
         reason = f"  # {r.reason}" if r.reason else ""
-        print(f"  rev {r.revision}       {r.new_hash}  "
-              f"{r.ts}  [{fields}] {r.producer or ''}{reason}")
+        print(
+            f"  rev {r.revision}       {r.new_hash}  "
+            f"{r.ts}  [{fields}] {r.producer or ''}{reason}"
+        )
 
     print()
     print("## ancestry")
@@ -1842,15 +2113,19 @@ def _render_log(log) -> None:  # ARALog
             verify = "  ✓ hash matches"
         elif a.hash_verified is False:
             verify = "  ✗ hash mismatch"
-        print(f"  ^{a.depth}  {a.ara_root or '(no path)'}  "
-              f"node={a.node_id}  hash={a.content_hash}  ({marker}){verify}")
+        print(
+            f"  ^{a.depth}  {a.ara_root or '(no path)'}  "
+            f"node={a.node_id}  hash={a.content_hash}  ({marker}){verify}"
+        )
         if a.seed_hash:
             print(f"       seed_hash={a.seed_hash}")
         if a.detail:
             print(f"       note: {a.detail}")
 
 
-def _render_node_ancestry(ara_root: Path, node_id: str, chain: list[dict[str, Any]]) -> None:
+def _render_node_ancestry(
+    ara_root: Path, node_id: str, chain: list[dict[str, Any]]
+) -> None:
     print(f"# log --node {node_id}  {ara_root}")
     if not chain:
         print("  (empty ancestry)")
@@ -1984,7 +2259,9 @@ def cmd_env(args: argparse.Namespace) -> int:
     # fall back to .json for older/hand-authored exports.
     bfts_yaml = env_dir / "bfts_config.yaml"
     bfts_json = env_dir / "bfts_config.json"
-    bfts_path = bfts_yaml if bfts_yaml.exists() else (bfts_json if bfts_json.exists() else None)
+    bfts_path = (
+        bfts_yaml if bfts_yaml.exists() else (bfts_json if bfts_json.exists() else None)
+    )
     if bfts_path is not None:
         try:
             size = bfts_path.stat().st_size
@@ -2008,7 +2285,9 @@ def cmd_env(args: argparse.Namespace) -> int:
             "present": True,
             "path": "env/model_fingerprint.json",
             "content_hash": _hash_file_bytes(fp_path),
-            "fingerprint": parsed.get("fingerprint") if isinstance(parsed, dict) else None,
+            "fingerprint": (
+                parsed.get("fingerprint") if isinstance(parsed, dict) else None
+            ),
             "models": spec.get("models") or {},
             "writing_profile": spec.get("writing_profile"),
         }
@@ -2074,7 +2353,10 @@ def cmd_graph(args: argparse.Namespace) -> int:
     ara_root = _resolve_ara_root(args.ara)
     graph = _load_json(ara_root / "exploration_graph.json")
     if not isinstance(graph, dict):
-        print(f"[ara-graph] no readable exploration_graph.json in {ara_root}", file=sys.stderr)
+        print(
+            f"[ara-graph] no readable exploration_graph.json in {ara_root}",
+            file=sys.stderr,
+        )
         return 3
 
     dag = analyze_exploration_graph(graph)
@@ -2105,7 +2387,10 @@ def cmd_graph(args: argparse.Namespace) -> int:
         import webbrowser
 
         if not html_path.exists():
-            print(f"[ara-graph] HTML visualization not found at {html_path}", file=sys.stderr)
+            print(
+                f"[ara-graph] HTML visualization not found at {html_path}",
+                file=sys.stderr,
+            )
             return 3
         webbrowser.open(html_path.as_uri())
 
@@ -2119,7 +2404,9 @@ def cmd_graph(args: argparse.Namespace) -> int:
     print(f"  edges:     {payload['edges']}")
     print(f"  roots:     {', '.join(payload['roots']) or '-'}")
     print(f"  leaves:    {', '.join(payload['leaves']) or '-'}")
-    print(f"  max_depth: {payload['max_depth'] if payload['max_depth'] is not None else '-'}")
+    print(
+        f"  max_depth: {payload['max_depth'] if payload['max_depth'] is not None else '-'}"
+    )
     print(f"  html:      {payload['html'] or '(not written; pass --write-html)'}")
     if payload["issues"]:
         print()
@@ -2194,8 +2481,10 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     except ValueError:
         pass
     else:
-        print(f"[ara-bundle] refusing: dest {dest} is inside ARA {ara_root}",
-              file=sys.stderr)
+        print(
+            f"[ara-bundle] refusing: dest {dest} is inside ARA {ara_root}",
+            file=sys.stderr,
+        )
         return 2
 
     if not args.no_verify:
@@ -2210,8 +2499,11 @@ def cmd_bundle(args: argparse.Namespace) -> int:
             return 2
 
     if dest.exists() and not args.force:
-        print(f"[ara-bundle] refusing: dest already exists at {dest} "
-              f"(pass --force to overwrite)", file=sys.stderr)
+        print(
+            f"[ara-bundle] refusing: dest already exists at {dest} "
+            f"(pass --force to overwrite)",
+            file=sys.stderr,
+        )
         return 2
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2288,7 +2580,9 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         size_bytes = dest.stat().st_size
     except OSError:
         size_bytes = 0
-    print(f"[ara-bundle] profile={selection['profile']} complete={bundle_manifest['complete']}")
+    print(
+        f"[ara-bundle] profile={selection['profile']} complete={bundle_manifest['complete']}"
+    )
     print(f"[ara-bundle] wrote {dest} ({size_bytes} bytes, {file_count} files)")
     return 0
 
@@ -2339,11 +2633,16 @@ def cmd_pin(args: argparse.Namespace) -> int:
     if args.list:
         rows = [r for r in list_refs(ara_root) if r.name.startswith("pins/")]
         if args.json:
-            print(json.dumps(
-                [{"name": r.name.removeprefix("pins/"), "target": r.target} for r in rows],
-                indent=2,
-                ensure_ascii=False,
-            ))
+            print(
+                json.dumps(
+                    [
+                        {"name": r.name.removeprefix("pins/"), "target": r.target}
+                        for r in rows
+                    ],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             for row in rows:
                 print(f"{row.name.removeprefix('pins/')}  {row.target}")
@@ -2504,32 +2803,43 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     inspect_p = sub.add_parser("inspect", help="Print a node's recorded metadata.")
-    inspect_p.add_argument("--ara", required=True, help="Path to the ARA directory or manifest.json")
+    inspect_p.add_argument(
+        "--ara", required=True, help="Path to the ARA directory or manifest.json"
+    )
     inspect_p.add_argument("--node-id", required=True)
     inspect_p.set_defaults(func=cmd_inspect)
 
     exec_p = sub.add_parser("exec", help="Re-execute a node and compare metrics.")
     exec_p.add_argument("--ara", required=True)
     exec_p.add_argument("--node-id", required=True)
-    exec_p.add_argument("--python", default=None, help="Python interpreter (default: current)")
+    exec_p.add_argument(
+        "--python", default=None, help="Python interpreter (default: current)"
+    )
     exec_p.add_argument("--cwd", default=None, help="Override the working directory")
     exec_p.add_argument("--timeout", type=int, default=1800)
     exec_p.add_argument("--tolerance", type=float, default=1e-3)
-    exec_p.add_argument("--allow-nonzero", action="store_true", help="Don't fail on non-zero exit")
     exec_p.add_argument(
-        "--allow-metric-drift", action="store_true",
+        "--allow-nonzero", action="store_true", help="Don't fail on non-zero exit"
+    )
+    exec_p.add_argument(
+        "--allow-metric-drift",
+        action="store_true",
         help="Don't fail when the fresh metric drifts beyond tolerance",
     )
     exec_p.set_defaults(func=cmd_exec)
 
-    fork_p = sub.add_parser("fork", help="Copy a node bundle to a new directory to seed further work.")
+    fork_p = sub.add_parser(
+        "fork", help="Copy a node bundle to a new directory to seed further work."
+    )
     fork_p.add_argument("--ara", required=True)
     fork_p.add_argument("--node-id", required=True)
     fork_p.add_argument("--dest", required=True)
     fork_p.add_argument("--force", action="store_true")
     fork_p.set_defaults(func=cmd_fork)
 
-    freeze_p = sub.add_parser("freeze", help="Snapshot the current interpreter's pip freeze into env/.")
+    freeze_p = sub.add_parser(
+        "freeze", help="Snapshot the current interpreter's pip freeze into env/."
+    )
     freeze_p.add_argument("--ara", required=True)
     freeze_p.set_defaults(func=cmd_freeze)
 
@@ -2540,9 +2850,13 @@ def build_parser() -> argparse.ArgumentParser:
     env_p.add_argument("--ara", required=True)
     env_p.set_defaults(func=cmd_env)
 
-    validate_p = sub.add_parser("validate", help="Check an ARA against the protocol schema.")
+    validate_p = sub.add_parser(
+        "validate", help="Check an ARA against the protocol schema."
+    )
     validate_p.add_argument("--ara", required=True)
-    validate_p.add_argument("--strict", action="store_true", help="Promote warnings to errors")
+    validate_p.add_argument(
+        "--strict", action="store_true", help="Promote warnings to errors"
+    )
     validate_p.set_defaults(func=cmd_validate)
 
     graph_p = sub.add_parser(
@@ -2569,16 +2883,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_p.add_argument("--ara", required=True)
     verify_p.add_argument(
-        "--node-ids", nargs="*", default=None,
+        "--node-ids",
+        nargs="*",
+        default=None,
         help="Specific node ids to verify. Omit for the top-metric picks.",
     )
-    verify_p.add_argument("--limit", type=int, default=3, help="Max nodes to pick automatically")
+    verify_p.add_argument(
+        "--limit", type=int, default=3, help="Max nodes to pick automatically"
+    )
     verify_p.add_argument("--include-buggy", action="store_true")
     verify_p.add_argument("--python", default=None)
     verify_p.add_argument("--timeout", type=int, default=900)
     verify_p.add_argument("--tolerance", type=float, default=1e-3)
     verify_p.add_argument(
-        "--allow-drift", action="store_true",
+        "--allow-drift",
+        action="store_true",
         help="Exit zero even when no fresh metric matches the recorded one within tolerance.",
     )
     verify_p.set_defaults(func=cmd_verify)
@@ -2589,27 +2908,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diff_p.add_argument("--ara", required=True, help="First ARA (a)")
     diff_p.add_argument("--other", required=True, help="Second ARA (b)")
-    diff_p.add_argument("--json", action="store_true",
-                        help="Machine-readable output")
+    diff_p.add_argument("--json", action="store_true", help="Machine-readable output")
     diff_p.add_argument(
-        "--exit-code-on-diff", action="store_true",
+        "--exit-code-on-diff",
+        action="store_true",
         help="Exit non-zero when any material difference is found (useful in CI)",
     )
     diff_p.add_argument(
-        "--only-node", metavar="ID", default=None,
+        "--only-node",
+        metavar="ID",
+        default=None,
         help="Filter node lists to entries with this id (exits rc=3 if absent).",
     )
     diff_p.add_argument(
-        "--limit-nodes", type=int, default=None, metavar="N",
+        "--limit-nodes",
+        type=int,
+        default=None,
+        metavar="N",
         help="Truncate each of added/removed/changed to N entries. Summary "
-             "counts remain accurate; JSON output gains a `truncated` field.",
+        "counts remain accurate; JSON output gains a `truncated` field.",
     )
     diff_p.add_argument(
-        "--stat", action="store_true",
+        "--stat",
+        action="store_true",
         help="Emit a one-line whole-ARA summary for scripts/CI dashboards "
-             "instead of the multi-section report. With --json, emit a single "
-             "JSON object of the same counts. --only-node and --limit-nodes "
-             "are silently ignored (this flag is a whole-ARA summary).",
+        "instead of the multi-section report. With --json, emit a single "
+        "JSON object of the same counts. --only-node and --limit-nodes "
+        "are silently ignored (this flag is a whole-ARA summary).",
     )
     diff_p.set_defaults(func=cmd_diff)
 
@@ -2620,9 +2945,11 @@ def build_parser() -> argparse.ArgumentParser:
     log_p.add_argument("--ara", required=True)
     log_p.add_argument("--json", action="store_true")
     log_p.add_argument(
-        "--node", metavar="ID", default=None,
+        "--node",
+        metavar="ID",
+        default=None,
         help="Focus on one node's in-ARA ancestry (parent_id chain, leaf → root). "
-             "Exits rc=3 when the id isn't in exploration_graph.json.",
+        "Exits rc=3 when the id isn't in exploration_graph.json.",
     )
     log_p.set_defaults(func=cmd_log)
 
@@ -2633,18 +2960,21 @@ def build_parser() -> argparse.ArgumentParser:
     # --ara (single) and --project (sweep) are mutually exclusive; argparse
     # itself emits a predictable SystemExit(2) when neither/both are given.
     verify_lock_target = verify_lock_p.add_mutually_exclusive_group(required=True)
-    verify_lock_target.add_argument("--ara",
-                                    help="Path to a single ARA directory or manifest.json.")
+    verify_lock_target.add_argument(
+        "--ara", help="Path to a single ARA directory or manifest.json."
+    )
     verify_lock_target.add_argument(
         "--project",
         help="Project directory whose ara/ subtree will be swept (requires --all).",
     )
     verify_lock_p.add_argument(
-        "--all", action="store_true",
+        "--all",
+        action="store_true",
         help="With --project, emit a per-ARA state summary across <project>/ara/.",
     )
-    verify_lock_p.add_argument("--json", action="store_true",
-                               help="Emit the raw report dict as JSON.")
+    verify_lock_p.add_argument(
+        "--json", action="store_true", help="Emit the raw report dict as JSON."
+    )
     verify_lock_p.set_defaults(func=cmd_verify_lock)
 
     history_p = sub.add_parser(
@@ -2652,10 +2982,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render the manifest revision chain (lock + manifest.history.jsonl).",
     )
     history_p.add_argument("--ara", required=True)
-    history_p.add_argument("--json", action="store_true",
-                           help="Emit rows as a JSON array (full hashes preserved).")
     history_p.add_argument(
-        "--limit", type=int, default=None, metavar="N",
+        "--json",
+        action="store_true",
+        help="Emit rows as a JSON array (full hashes preserved).",
+    )
+    history_p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
         help="Show only the last N revisions (row 0 / base is always shown).",
     )
     history_p.set_defaults(func=cmd_history)
@@ -2667,11 +3003,15 @@ def build_parser() -> argparse.ArgumentParser:
     show_p.add_argument("--ara", required=True)
     show_p.add_argument("--node", required=True, help="Node id to dump.")
     show_p.add_argument(
-        "--term-tail", type=int, default=4000, metavar="N",
+        "--term-tail",
+        type=int,
+        default=4000,
+        metavar="N",
         help="Limit term_out.log tail to N bytes (default 4000; 0 = empty).",
     )
     show_p.add_argument(
-        "--terse", action="store_true",
+        "--terse",
+        action="store_true",
         help="Omit large text blobs (code, term_out_tail) — shape-only view.",
     )
     show_p.set_defaults(func=cmd_show)
@@ -2681,18 +3021,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compact human overview of an ARA (idea, counts, top metric, lock, ancestors).",
     )
     describe_p.add_argument("--ara", required=True)
-    describe_p.add_argument("--json", action="store_true",
-                            help="Emit the overview as a JSON object.")
+    describe_p.add_argument(
+        "--json", action="store_true", help="Emit the overview as a JSON object."
+    )
     describe_p.set_defaults(func=cmd_describe)
 
     list_p = sub.add_parser(
         "list",
         help="Enumerate every ARA under <project>/ara/ with a one-line summary.",
     )
-    list_p.add_argument("--project", required=True,
-                        help="Project directory whose ara/ subtree will be enumerated.")
-    list_p.add_argument("--json", action="store_true",
-                        help="Emit entries as a JSON array (full hashes preserved).")
+    list_p.add_argument(
+        "--project",
+        required=True,
+        help="Project directory whose ara/ subtree will be enumerated.",
+    )
+    list_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit entries as a JSON array (full hashes preserved).",
+    )
     list_p.set_defaults(func=cmd_list)
 
     hash_check_p = sub.add_parser(
@@ -2706,11 +3053,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project directory whose ara/ subtree will be swept (requires --all).",
     )
     hash_check_p.add_argument(
-        "--all", action="store_true",
+        "--all",
+        action="store_true",
         help="With --project, walk every ARA and aggregate per-node states.",
     )
     hash_check_p.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="Emit entries as a JSON array (full hashes preserved).",
     )
     hash_check_p.set_defaults(func=cmd_hash_check)
@@ -2721,11 +3070,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     claims_p.add_argument("--ara", required=True)
     claims_p.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="Emit rows as a JSON array (full hashes + full assertion text).",
     )
     claims_p.add_argument(
-        "--node", metavar="ID", default=None,
+        "--node",
+        metavar="ID",
+        default=None,
         help="Filter to claims linked to this node id (rc=3 when none match).",
     )
     claims_p.set_defaults(func=cmd_claims)
@@ -2735,43 +3087,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="git-style local refs stored under <ara>/refs/.",
     )
     refs_p.add_argument("--ara", required=True)
-    refs_p.add_argument("--set", nargs=2, metavar=("NAME", "TARGET"),
-                        help="Create or update a ref pointing at TARGET (a content hash).")
-    refs_p.add_argument("--get", metavar="NAME",
-                        help="Print a ref's target and exit.")
-    refs_p.add_argument("--delete", metavar="NAME",
-                        help="Remove a ref.")
-    refs_p.add_argument("--json", action="store_true",
-                        help="Machine-readable listing.")
-    refs_p.add_argument("--prefix", metavar="PATH", default=None,
-                        help="Filter list mode to refs whose name starts with PATH "
-                             "(git-style; use trailing slash to scope a namespace).")
+    refs_p.add_argument(
+        "--set",
+        nargs=2,
+        metavar=("NAME", "TARGET"),
+        help="Create or update a ref pointing at TARGET (a content hash).",
+    )
+    refs_p.add_argument("--get", metavar="NAME", help="Print a ref's target and exit.")
+    refs_p.add_argument("--delete", metavar="NAME", help="Remove a ref.")
+    refs_p.add_argument("--json", action="store_true", help="Machine-readable listing.")
+    refs_p.add_argument(
+        "--prefix",
+        metavar="PATH",
+        default=None,
+        help="Filter list mode to refs whose name starts with PATH "
+        "(git-style; use trailing slash to scope a namespace).",
+    )
     refs_p.set_defaults(func=cmd_refs)
 
     provenance_p = sub.add_parser(
         "provenance",
         help="Reverse-lookup: find every ARA under <project>/ara/ that references a hash.",
     )
-    provenance_p.add_argument("--hash", required=True,
-                              help="Full content hash string, e.g. sha256:<hex>.")
-    provenance_p.add_argument("--project", required=True,
-                              help="Project directory whose ara/ subtree will be swept.")
-    provenance_p.add_argument("--json", action="store_true",
-                              help="Emit hits as a JSON array (full hashes preserved).")
+    provenance_p.add_argument(
+        "--hash", required=True, help="Full content hash string, e.g. sha256:<hex>."
+    )
+    provenance_p.add_argument(
+        "--project",
+        required=True,
+        help="Project directory whose ara/ subtree will be swept.",
+    )
+    provenance_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit hits as a JSON array (full hashes preserved).",
+    )
     provenance_p.set_defaults(func=cmd_provenance)
 
     bundle_p = sub.add_parser(
         "bundle",
         help="Package an ARA into a portable gzip tarball (git-bundle analog).",
     )
-    bundle_p.add_argument("--ara", required=True,
-                          help="Path to the ARA directory or manifest.json.")
-    bundle_p.add_argument("--dest", required=True,
-                          help="Output tarball path (e.g. out.tar.gz).")
-    bundle_p.add_argument("--force", action="store_true",
-                          help="Overwrite --dest if it already exists.")
     bundle_p.add_argument(
-        "--no-verify", action="store_true",
+        "--ara", required=True, help="Path to the ARA directory or manifest.json."
+    )
+    bundle_p.add_argument(
+        "--dest", required=True, help="Output tarball path (e.g. out.tar.gz)."
+    )
+    bundle_p.add_argument(
+        "--force", action="store_true", help="Overwrite --dest if it already exists."
+    )
+    bundle_p.add_argument(
+        "--no-verify",
+        action="store_true",
         help="Skip the pre-flight verify_manifest_lock check.",
     )
     bundle_p.add_argument(
@@ -2815,7 +3183,9 @@ def build_parser() -> argparse.ArgumentParser:
     pin_p.add_argument("--name", default=None, help="Pin name below refs/pins/.")
     pin_action = pin_p.add_mutually_exclusive_group(required=True)
     pin_action.add_argument("--set", metavar="HASH", help="Pin a content hash.")
-    pin_action.add_argument("--delete", action="store_true", help="Delete the named pin.")
+    pin_action.add_argument(
+        "--delete", action="store_true", help="Delete the named pin."
+    )
     pin_action.add_argument("--list", action="store_true", help="List all pins.")
     pin_p.add_argument("--json", action="store_true")
     pin_p.set_defaults(func=cmd_pin)
@@ -2826,9 +3196,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gc_action = gc_p.add_mutually_exclusive_group(required=True)
     gc_action.add_argument("--ara", help="Create a GC plan for this ARA.")
-    gc_action.add_argument("--apply", metavar="PLAN", help="Move a plan's objects to quarantine.")
-    gc_action.add_argument("--restore", metavar="RECEIPT", help="Restore quarantined objects.")
-    gc_action.add_argument("--purge", metavar="RECEIPT", help="Permanently purge a quarantine.")
+    gc_action.add_argument(
+        "--apply", metavar="PLAN", help="Move a plan's objects to quarantine."
+    )
+    gc_action.add_argument(
+        "--restore", metavar="RECEIPT", help="Restore quarantined objects."
+    )
+    gc_action.add_argument(
+        "--purge", metavar="RECEIPT", help="Permanently purge a quarantine."
+    )
     gc_p.add_argument(
         "--grace-seconds",
         type=int,
@@ -2862,7 +3238,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hydrate_p.add_argument("--ara", required=True)
     hydrate_p.add_argument(
-        "--hash", action="append", default=None,
+        "--hash",
+        action="append",
+        default=None,
         help="Specific object hash to restore; repeatable. Defaults to all referenced hashes.",
     )
     hydrate_p.add_argument("--allow-missing", action="store_true")

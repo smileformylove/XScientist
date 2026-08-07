@@ -154,7 +154,11 @@ def require_login(operation: str = "当前操作") -> Dict[str, Any]:
         touch_session()
         return session
 
-    auth_file = auth_file_path()
+    # Authentication state is intentionally described without its absolute
+    # host path.  CI logs and copied diagnostics must not identify a user home.
+    from ai_scientist.utils.privacy import portable_path
+
+    auth_file = portable_path(auth_file_path(), base=".")
     print("❌ 操作被拒绝：请先登录")
     print(f"   操作: {operation}")
     print(f"   原因: {reason}")

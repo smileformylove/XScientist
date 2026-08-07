@@ -763,9 +763,13 @@ def render_context_pack_for_prompt(pack: dict[str, Any]) -> str:
 
 
 def _shared_root_for(root: Path) -> Path | None:
+    from ai_scientist.utils.privacy import resolve_portable_path
+
     manifest = _read_json(root / "manifest.json")
     if isinstance(manifest, dict) and manifest.get("project_dir"):
-        return Path(str(manifest["project_dir"])).expanduser().resolve() / ".ara-store"
+        project_dir = resolve_portable_path(manifest["project_dir"], base=root)
+        if project_dir is not None:
+            return project_dir / ".ara-store"
     if root.parent.name == "ara":
         return root.parent.parent / ".ara-store"
     return None

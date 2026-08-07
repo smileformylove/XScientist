@@ -18,6 +18,7 @@ from ai_scientist.protocol import content_hash, hash_manifest, validate_ara
 from ai_scientist.utils.ara_manifest_lock import write_manifest_lock
 from ai_scientist.utils.ara_reexec import persist_reexec_verdict
 from ai_scientist.utils.ara_storage import ARAStorageError, storage_report
+from ai_scientist.utils.privacy import relative_path_reference
 
 
 def _now_iso() -> str:
@@ -208,7 +209,7 @@ def compact_ara(
         "schema": "ara.compaction.v1",
         "compacted_at": _now_iso(),
         "source_manifest_hash": source_hash,
-        "source_ara": str(src),
+        "source_ara": relative_path_reference(src, base=dest),
         "transformations": [
             "canonical_edges",
             "claim_refs_without_node_snapshots",

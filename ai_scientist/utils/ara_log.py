@@ -25,12 +25,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.privacy import resolve_portable_path
+
 from .ara_manifest_lock import (
     MANIFEST_HISTORY_NAME,
     MANIFEST_LOCK_NAME,
     verify_manifest_lock,
 )
-
 
 # Max ancestors we'll walk before giving up. Deep chains are legal but
 # a runaway loop (broken symlinks, adversarial parent_ara_root) shouldn't
@@ -52,6 +53,7 @@ class RevisionEntry:
 @dataclass
 class AncestorEntry:
     """One step up the provenance chain."""
+
     depth: int
     ara_root: str | None
     node_id: str | None
@@ -118,15 +120,17 @@ def _read_revisions(root: Path) -> list[RevisionEntry]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            entries.append(RevisionEntry(
-                revision=int(row.get("revision") or 0),
-                ts=row.get("ts"),
-                base_hash=row.get("base_hash"),
-                new_hash=row.get("new_hash"),
-                changed_fields=list(row.get("changed_fields") or []),
-                reason=row.get("reason"),
-                producer=row.get("producer"),
-            ))
+            entries.append(
+                RevisionEntry(
+                    revision=int(row.get("revision") or 0),
+                    ts=row.get("ts"),
+                    base_hash=row.get("base_hash"),
+                    new_hash=row.get("new_hash"),
+                    changed_fields=list(row.get("changed_fields") or []),
+                    reason=row.get("reason"),
+                    producer=row.get("producer"),
+                )
+            )
     except (OSError, json.JSONDecodeError):
         return entries
     return entries
@@ -145,6 +149,7 @@ def _walk_ancestors(root: Path) -> list[AncestorEntry]:
     ancestors: list[AncestorEntry] = []
     seen_hashes: set[str] = set()
     current_prov = manifest.get("provenance") or {}
+    current_root = root
     for depth in range(1, _MAX_ANCESTORS + 1):
         if not isinstance(current_prov, dict) or not current_prov:
             break
@@ -166,24 +171,34 @@ def _walk_ancestors(root: Path) -> list[AncestorEntry]:
         )
         parent_manifest = None
         if parent_root:
-            parent_manifest_path = Path(parent_root) / "manifest.json"
-            parent_manifest = _load_json(parent_manifest_path)
+            resolved_parent = resolve_portable_path(parent_root, base=current_root)
+            parent_manifest_path = (
+                resolved_parent / "manifest.json"
+                if resolved_parent is not None
+                else None
+            )
+            parent_manifest = (
+                _load_json(parent_manifest_path)
+                if parent_manifest_path is not None
+                else None
+            )
             if isinstance(parent_manifest, dict):
                 entry.reachable = True
                 try:
                     from ai_scientist.protocol import hash_manifest
+
                     entry.resolved_manifest_hash = hash_manifest(parent_manifest)
                 except Exception:  # pragma: no cover - defensive
                     entry.resolved_manifest_hash = None
                 # Verify the recorded parent_content_hash against the parent
                 # node's own content_hash if we can resolve it.
-                node_hash = _lookup_node_hash(Path(parent_root), parent_node)
+                node_hash = _lookup_node_hash(resolved_parent, parent_node)
                 if parent_hash and node_hash:
-                    entry.hash_verified = (parent_hash == node_hash)
+                    entry.hash_verified = parent_hash == node_hash
                     entry.detail = (
                         "parent node hash matches provenance"
-                        if entry.hash_verified else
-                        "parent node hash differs from provenance — path may have drifted"
+                        if entry.hash_verified
+                        else "parent node hash differs from provenance — path may have drifted"
                     )
             else:
                 entry.detail = "parent_ara_root not readable — using content_hash only"
@@ -196,6 +211,7 @@ def _walk_ancestors(root: Path) -> list[AncestorEntry]:
         # could read it; otherwise stop (we can't crawl what we can't reach).
         if not (isinstance(parent_manifest, dict) and parent_manifest):
             break
+        current_root = resolved_parent
         current_prov = parent_manifest.get("provenance") or {}
         # Cycle guard: if we've seen this manifest hash before, bail.
         if entry.resolved_manifest_hash:
@@ -211,7 +227,7 @@ def _lookup_node_hash(ara_root: Path, node_id: str | None) -> str | None:
     graph = _load_json(ara_root / "exploration_graph.json")
     if not isinstance(graph, dict):
         return None
-    for n in (graph.get("nodes") or []):
+    for n in graph.get("nodes") or []:
         if isinstance(n, dict) and str(n.get("id")) == node_id:
             h = n.get("content_hash")
             return h if isinstance(h, str) else None
@@ -255,7 +271,7 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
     if not isinstance(graph, dict):
         raise KeyError(node_id)
     by_id: dict[str, dict[str, Any]] = {}
-    for n in (graph.get("nodes") or []):
+    for n in graph.get("nodes") or []:
         if isinstance(n, dict) and n.get("id") is not None:
             by_id[str(n["id"])] = n
     if node_id not in by_id:
@@ -293,14 +309,16 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
         seen.add(current)
         parents = parent_map.get(current, [])
         parent = parents[0] if parents else None
-        chain.append({
-            "id": str(node.get("id")),
-            "content_hash": node.get("content_hash"),
-            "is_buggy": bool(node.get("is_buggy")),
-            "is_seed_node": bool(node.get("is_seed_node")),
-            "parent_id": (str(parent) if parent is not None else None),
-            "metric": node.get("metric"),
-        })
+        chain.append(
+            {
+                "id": str(node.get("id")),
+                "content_hash": node.get("content_hash"),
+                "is_buggy": bool(node.get("is_buggy")),
+                "is_seed_node": bool(node.get("is_seed_node")),
+                "parent_id": (str(parent) if parent is not None else None),
+                "metric": node.get("metric"),
+            }
+        )
         if len(parents) > 1:
             chain[-1]["note"] = (
                 "multiple parents; ancestry follows the first edge and also has "
@@ -311,5 +329,9 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
 
 
 __all__ = [
-    "ARALog", "AncestorEntry", "RevisionEntry", "ara_log", "walk_node_ancestry",
+    "ARALog",
+    "AncestorEntry",
+    "RevisionEntry",
+    "ara_log",
+    "walk_node_ancestry",
 ]

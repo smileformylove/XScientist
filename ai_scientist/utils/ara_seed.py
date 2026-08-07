@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_scientist.protocol import PROTOCOL_VERSION
+from ai_scientist.utils.privacy import relativize_path_fields, resolve_portable_path
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +96,12 @@ def build_seed_manifest_from_fork(fork_dir: str | Path) -> dict[str, Any]:
     if not isinstance(metrics, dict):
         metrics = {}
 
+    parent_ara = resolve_portable_path(fork_meta.get("source_ara"), base=fork_dir)
     provenance = {
-        "parent_ara_root": fork_meta.get("source_ara"),
+        "parent_ara_root": str(parent_ara) if parent_ara is not None else None,
         "parent_node_id": fork_meta.get("source_node_id"),
         "parent_content_hash": (
-            fork_meta.get("source_content_hash")
-            or metrics.get("content_hash")
+            fork_meta.get("source_content_hash") or metrics.get("content_hash")
         ),
     }
     plan = (
@@ -160,9 +161,7 @@ def build_seed_manifest_from_ara_node(
     return payload
 
 
-def stage_seed_manifest(
-    manifest: dict[str, Any], *, workspace_dir: str | Path
-) -> Path:
+def stage_seed_manifest(manifest: dict[str, Any], *, workspace_dir: str | Path) -> Path:
     """Write the seed manifest to disk and return its path.
 
     Callers set ``AI_SCIENTIST_ARA_SEED_PATH=<returned path>`` before invoking
@@ -171,8 +170,9 @@ def stage_seed_manifest(
     workspace = Path(workspace_dir).expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     dest = workspace / SEED_MANIFEST_NAME
+    portable_manifest = relativize_path_fields(manifest, base=workspace)
     dest.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False, default=str),
+        json.dumps(portable_manifest, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
     return dest
@@ -206,7 +206,8 @@ def load_active_seed(*, current_idea_name: str | None = None) -> dict[str, Any] 
     if consumed_marker.exists():
         logger.info(
             "ARA seed at %s already consumed (marker: %s); falling back to normal drafting",
-            path, consumed_marker,
+            path,
+            consumed_marker,
         )
         return None
     try:
@@ -222,7 +223,9 @@ def load_active_seed(*, current_idea_name: str | None = None) -> dict[str, Any] 
     if applies_to and current_idea_name and str(applies_to) != str(current_idea_name):
         logger.info(
             "ARA seed at %s is bound to idea %r; current idea is %r — skipping",
-            path, applies_to, current_idea_name,
+            path,
+            applies_to,
+            current_idea_name,
         )
         return None
 

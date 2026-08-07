@@ -20,7 +20,6 @@ from ai_scientist.utils.ara_reexec import (
     reexec_node,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FORK_COMMAND = [sys.executable, "-m", "ai_scientist.apps.ara"]
 
@@ -42,13 +41,11 @@ def _seed_project(tmp: Path, *, metric_value: float = 0.42) -> tuple[Path, Path,
     project = tmp / "project"
     exp = project / "02_experiments" / "20260701_idea"
     (exp / "logs" / "0-run").mkdir(parents=True)
-    code = textwrap.dedent(
-        f"""
+    code = textwrap.dedent(f"""
         import json
         result = {{"name": "acc", "value": {metric_value}}}
         print("ARA_METRIC=" + json.dumps(result))
-        """
-    ).strip()
+        """).strip()
     _write_journal(
         exp / "logs",
         "0-run",
@@ -57,8 +54,15 @@ def _seed_project(tmp: Path, *, metric_value: float = 0.42) -> tuple[Path, Path,
                 "id": "n1",
                 "step": 0,
                 "code": code,
-                "_term_out": [f"ARA_METRIC={{\"name\": \"acc\", \"value\": {metric_value}}}\n"],
-                "metric": {"value": metric_value, "maximize": True, "name": "acc", "description": ""},
+                "_term_out": [
+                    f'ARA_METRIC={{"name": "acc", "value": {metric_value}}}\n'
+                ],
+                "metric": {
+                    "value": metric_value,
+                    "maximize": True,
+                    "name": "acc",
+                    "description": "",
+                },
                 "is_buggy": False,
                 "parent_id": None,
                 "children": [],
@@ -102,16 +106,33 @@ class ForkCLITest(unittest.TestCase):
 
     def test_inspect_prints_key_fields(self) -> None:
         completed = subprocess.run(
-            [*FORK_COMMAND, "inspect", "--ara", str(self.ara_root), "--node-id", self.node_id],
-            capture_output=True, text=True, check=True,
+            [
+                *FORK_COMMAND,
+                "inspect",
+                "--ara",
+                str(self.ara_root),
+                "--node-id",
+                self.node_id,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.assertIn("Node " + self.node_id, completed.stdout)
         self.assertIn("Metric:", completed.stdout)
 
     def test_exec_re_runs_and_writes_verify_report(self) -> None:
         completed = subprocess.run(
-            [*FORK_COMMAND, "exec", "--ara", str(self.ara_root), "--node-id", self.node_id],
-            capture_output=True, text=True,
+            [
+                *FORK_COMMAND,
+                "exec",
+                "--ara",
+                str(self.ara_root),
+                "--node-id",
+                self.node_id,
+            ],
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         verify_dir = self.ara_root / "verify"
@@ -125,9 +146,19 @@ class ForkCLITest(unittest.TestCase):
     def test_fork_copies_node_bundle(self) -> None:
         dest = self.tmp / "forked"
         completed = subprocess.run(
-            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
-             "--node-id", self.node_id, "--dest", str(dest)],
-            capture_output=True, text=True, check=True,
+            [
+                *FORK_COMMAND,
+                "fork",
+                "--ara",
+                str(self.ara_root),
+                "--node-id",
+                self.node_id,
+                "--dest",
+                str(dest),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.assertIn("forked node", completed.stdout)
         # New (O6) layout: fork is itself a conformant ARA, with the node
@@ -143,9 +174,19 @@ class ForkCLITest(unittest.TestCase):
 
         dest = self.tmp / "forked_conformant"
         subprocess.run(
-            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
-             "--node-id", self.node_id, "--dest", str(dest)],
-            capture_output=True, text=True, check=True,
+            [
+                *FORK_COMMAND,
+                "fork",
+                "--ara",
+                str(self.ara_root),
+                "--node-id",
+                self.node_id,
+                "--dest",
+                str(dest),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         report = validate_ara(dest)
         self.assertTrue(report.ok, msg=[e.__dict__ for e in report.errors])
@@ -156,21 +197,41 @@ class ForkCLITest(unittest.TestCase):
 
         intermediate = self.tmp / "fork_1"
         subprocess.run(
-            [*FORK_COMMAND, "fork", "--ara", str(self.ara_root),
-             "--node-id", self.node_id, "--dest", str(intermediate)],
-            capture_output=True, text=True, check=True,
+            [
+                *FORK_COMMAND,
+                "fork",
+                "--ara",
+                str(self.ara_root),
+                "--node-id",
+                self.node_id,
+                "--dest",
+                str(intermediate),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         # Second fork uses the same node_id (only node in the intermediate ARA).
         grand = self.tmp / "fork_2"
         subprocess.run(
-            [*FORK_COMMAND, "fork", "--ara", str(intermediate),
-             "--node-id", self.node_id, "--dest", str(grand)],
-            capture_output=True, text=True, check=True,
+            [
+                *FORK_COMMAND,
+                "fork",
+                "--ara",
+                str(intermediate),
+                "--node-id",
+                self.node_id,
+                "--dest",
+                str(grand),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         grand_manifest = _json.loads((grand / "manifest.json").read_text())
         # macOS /private path resolution: compare via realpath.
         self.assertEqual(
-            os.path.realpath(grand_manifest["provenance"]["parent_ara_root"]),
+            os.path.realpath(grand / grand_manifest["provenance"]["parent_ara_root"]),
             os.path.realpath(str(intermediate)),
         )
         # Grand's provenance.parent_content_hash points at the INTERMEDIATE
@@ -201,9 +262,9 @@ class VerifyCLITest(unittest.TestCase):
 
     def test_verify_batch_reports_and_zero_exit(self) -> None:
         completed = subprocess.run(
-            [*FORK_COMMAND, "verify",
-             "--ara", str(self.ara_root), "--limit", "1"],
-            capture_output=True, text=True,
+            [*FORK_COMMAND, "verify", "--ara", str(self.ara_root), "--limit", "1"],
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         # Batch report lands under verify/.
@@ -215,9 +276,16 @@ class VerifyCLITest(unittest.TestCase):
 
     def test_verify_explicit_node_ids(self) -> None:
         completed = subprocess.run(
-            [*FORK_COMMAND, "verify",
-             "--ara", str(self.ara_root), "--node-ids", self.node_id],
-            capture_output=True, text=True,
+            [
+                *FORK_COMMAND,
+                "verify",
+                "--ara",
+                str(self.ara_root),
+                "--node-ids",
+                self.node_id,
+            ],
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         parsed = json.loads(completed.stdout)
@@ -228,7 +296,7 @@ class VerifyCLITest(unittest.TestCase):
 class ParseMetricTest(unittest.TestCase):
     def test_json_marker_wins(self) -> None:
         mod = _load_fork_module()
-        stdout = "chatter\nARA_METRIC={\"name\": \"acc\", \"value\": 0.9}\nmore output\n"
+        stdout = 'chatter\nARA_METRIC={"name": "acc", "value": 0.9}\nmore output\n'
         result = mod._parse_metric_from_stdout(stdout)
         self.assertTrue(result["available"])
         self.assertAlmostEqual(result["value"], 0.9)
@@ -242,7 +310,9 @@ class ParseMetricTest(unittest.TestCase):
 
     def test_no_metric_returns_unavailable(self) -> None:
         mod = _load_fork_module()
-        self.assertFalse(_load_fork_module()._parse_metric_from_stdout("nothing here")["available"])
+        self.assertFalse(
+            _load_fork_module()._parse_metric_from_stdout("nothing here")["available"]
+        )
 
 
 class ReexecHelperTest(unittest.TestCase):
@@ -263,8 +333,9 @@ class ReexecHelperTest(unittest.TestCase):
     def test_reexec_ara_writes_batch_report(self) -> None:
         result = reexec_ara(self.ara_root, limit=2)
         self.assertEqual(result["status"], "ok")
-        self.assertTrue(Path(result["report_path"]).exists())
-        payload = json.loads(Path(result["report_path"]).read_text())
+        report_path = self.ara_root / result["report_path"]
+        self.assertTrue(report_path.exists())
+        payload = json.loads(report_path.read_text())
         self.assertGreaterEqual(payload["verdict_count"], 1)
 
     def test_reexec_enabled_respects_env(self) -> None:

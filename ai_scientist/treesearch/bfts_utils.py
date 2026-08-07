@@ -1,6 +1,8 @@
 import os
 import os.path as osp
 import uuid
+from pathlib import Path
+
 import yaml
 
 from ai_scientist.resources import resolve_bfts_config_path
@@ -74,19 +76,26 @@ def edit_bfts_config_file(
     resolved_config_path = resolve_bfts_config_path(config_path)
     with open(resolved_config_path, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
-    config["desc_file"] = idea_path
-    config["workspace_dir"] = idea_dir
+    config_base = Path(config_dir).resolve()
+
+    def portable_reference(value: str | os.PathLike[str]) -> str:
+        return Path(
+            os.path.relpath(Path(value).expanduser().resolve(), config_base)
+        ).as_posix()
+
+    config["desc_file"] = portable_reference(idea_path)
+    config["workspace_dir"] = portable_reference(idea_dir)
 
     # make an empty data directory
     data_dir = osp.join(idea_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
-    config["data_dir"] = data_dir
+    config["data_dir"] = portable_reference(data_dir)
 
     # make an empty log directory
     log_dir = osp.join(idea_dir, "logs")
     os.makedirs(log_dir, exist_ok=True)
-    config["log_dir"] = log_dir
-    config["resume_from"] = resume_from
+    config["log_dir"] = portable_reference(log_dir)
+    config["resume_from"] = portable_reference(resume_from) if resume_from else None
 
     atomic_write_text(run_config_path, yaml.dump(config))
     return run_config_path

@@ -18,6 +18,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in the 3.10 CI lane
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from ai_scientist.utils.privacy import scan_repository
+
 REQUIRED_REPOSITORY_FILES = (
     "CHANGELOG.md",
     "CITATION.cff",
@@ -208,6 +213,15 @@ def check_action_pinning(root: Path) -> list[str]:
     return errors
 
 
+def check_repository_privacy(root: Path) -> list[str]:
+    """Block publishable credentials and machine-local paths without echoing them."""
+
+    return [
+        f"privacy finding ({finding.rule}) in {finding.path}; matched value omitted"
+        for finding in scan_repository(root)
+    ]
+
+
 CHECKS: tuple[tuple[str, Callable[[Path], list[str]]], ...] = (
     ("required-files", check_required_files),
     ("version-metadata", check_version_metadata),
@@ -216,6 +230,7 @@ CHECKS: tuple[tuple[str, Callable[[Path], list[str]]], ...] = (
     ("python-compatibility", check_python_compatibility),
     ("markdown-links", check_markdown_links),
     ("action-pinning", check_action_pinning),
+    ("repository-privacy", check_repository_privacy),
 )
 
 
