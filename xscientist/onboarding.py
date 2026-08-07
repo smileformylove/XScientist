@@ -189,6 +189,7 @@ Edit `topic.md`, then run:
 
 ```bash
 xscientist project first-study \\
+  --output-root ./outputs \\
   --topic topic.md \\
   --bfts-config bfts_config.yaml \\
   --num-ideas 1
@@ -197,7 +198,7 @@ xscientist project first-study \\
 Inspect the outputs without starting another model call:
 
 ```bash
-xscientist manager list-papers
+xscientist manager --research-dir ./outputs list-papers
 xscientist research status --repo outputs/projects/first-study
 xscientist research objects --repo outputs/projects/first-study
 ```
