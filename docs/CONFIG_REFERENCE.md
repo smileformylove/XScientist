@@ -1,9 +1,44 @@
 # Config Reference
 
-This document describes the two main operator-facing configuration files used by the long-running daemon workflow:
+This document describes workspace provider configuration and the two main
+operator-facing configuration files used by the long-running daemon workflow:
 
+- `.xscientist/providers.json` plus the private `.env`
 - `daemon_control.json`
 - `source_queue.toml` / `source_priority.json`
+
+## Workspace providers
+
+Create the metadata file with `xscientist init`, then manage credentials and
+the active model through `xscientist provider`:
+
+```bash
+xscientist provider add openai --model "openai/your-model-id"
+xscientist provider list
+xscientist provider activate openai
+```
+
+`.xscientist/providers.json` is safe to commit: it records only the active
+provider, model IDs, the relative env-file location, and credential variable
+names. Secret values live in `.env`, which the generated `.gitignore` and
+`.dockerignore` both exclude. On POSIX, XScientist refuses to auto-load a
+credential file readable or writable by group/other users.
+
+The active model is exported internally as `AI_SCIENTIST_DEFAULT_MODEL` and is
+used by every project/batch model role. The following optional environment
+variables override individual roles:
+
+- `AI_SCIENTIST_MODEL_IDEATION`
+- `AI_SCIENTIST_MODEL_AGG_PLOTS`
+- `AI_SCIENTIST_MODEL_WRITEUP`
+- `AI_SCIENTIST_MODEL_WRITEUP_SMALL`
+- `AI_SCIENTIST_MODEL_CITATION`
+- `AI_SCIENTIST_MODEL_REVIEW`
+
+Explicit CLI arguments such as `--model-review` have the highest precedence.
+Process environment credentials also take precedence over `.env` and are not
+copied to disk. Use `--non-interactive` in CI after setting the required
+environment variables.
 
 ## `daemon_control.json`
 

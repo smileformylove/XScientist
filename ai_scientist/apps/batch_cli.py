@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Sequence
+
+
+def _model_default(role: str, fallback: str) -> str:
+    role_name = f"AI_SCIENTIST_MODEL_{role.upper()}"
+    return (
+        os.environ.get(role_name)
+        or os.environ.get("AI_SCIENTIST_DEFAULT_MODEL")
+        or fallback
+    )
 
 
 def build_parser(
@@ -261,12 +271,36 @@ def build_parser(
         help="禁用默认的严格兜底拦截（高质量/投稿/程序驱动/评审模式下默认禁止 fallback）。",
     )
 
-    parser.add_argument("--model-ideation", type=str, default="glm-4-flash")
-    parser.add_argument("--model-agg-plots", type=str, default="glm-4-flash")
-    parser.add_argument("--model-writeup", type=str, default="glm-4-plus")
-    parser.add_argument("--model-writeup-small", type=str, default="glm-4-air")
-    parser.add_argument("--model-citation", type=str, default="glm-4-air")
-    parser.add_argument("--model-review", type=str, default="glm-4-plus")
+    parser.add_argument(
+        "--model-ideation",
+        type=str,
+        default=_model_default("IDEATION", "glm-4-flash"),
+    )
+    parser.add_argument(
+        "--model-agg-plots",
+        type=str,
+        default=_model_default("AGG_PLOTS", "glm-4-flash"),
+    )
+    parser.add_argument(
+        "--model-writeup",
+        type=str,
+        default=_model_default("WRITEUP", "glm-4-plus"),
+    )
+    parser.add_argument(
+        "--model-writeup-small",
+        type=str,
+        default=_model_default("WRITEUP_SMALL", "glm-4-air"),
+    )
+    parser.add_argument(
+        "--model-citation",
+        type=str,
+        default=_model_default("CITATION", "glm-4-air"),
+    )
+    parser.add_argument(
+        "--model-review",
+        type=str,
+        default=_model_default("REVIEW", "glm-4-plus"),
+    )
 
     parser.add_argument("--num-cite-rounds", type=int, default=15)
     parser.add_argument("--writeup-retries", type=int, default=3)

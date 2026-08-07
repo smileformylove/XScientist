@@ -37,6 +37,20 @@ _DELEGATES = {
     "research": research_main,
 }
 
+_PROVIDER_CHOICES = [
+    "zhipu",
+    "openai",
+    "anthropic",
+    "deepseek",
+    "gemini",
+    "openrouter",
+    "huggingface",
+    "ollama",
+    "openai_compat",
+    "bedrock",
+    "vertex_ai",
+]
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -96,19 +110,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "--provider",
-        choices=[
-            "zhipu",
-            "openai",
-            "anthropic",
-            "deepseek",
-            "gemini",
-            "openrouter",
-            "huggingface",
-            "ollama",
-            "openai_compat",
-            "bedrock",
-            "vertex_ai",
-        ],
+        choices=_PROVIDER_CHOICES,
         default="zhipu",
         help="credential template and model provider",
     )
@@ -123,6 +125,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replace only files managed by this command",
     )
     init_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    provider_parser = subparsers.add_parser(
+        "provider",
+        help="Add, inspect, and switch model providers without exposing API keys.",
+    )
+    provider_subparsers = provider_parser.add_subparsers(
+        dest="provider_command", required=True
+    )
+    provider_list = provider_subparsers.add_parser(
+        "list", help="Show provider readiness."
+    )
+    provider_list.add_argument("--workspace", default=".")
+    provider_list.add_argument("--json", action="store_true", dest="as_json")
+    provider_add = provider_subparsers.add_parser(
+        "add",
+        help="Configure a provider; secrets are prompted with hidden input.",
+    )
+    provider_add.add_argument("name", choices=_PROVIDER_CHOICES)
+    provider_add.add_argument("--workspace", default=".")
+    provider_add.add_argument("--model", default=None)
+    provider_add.add_argument("--no-activate", action="store_true")
+    provider_add.add_argument("--no-update-bfts", action="store_true")
+    provider_add.add_argument("--json", action="store_true", dest="as_json")
+    provider_add.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; require credentials to already exist in env or the env file",
+    )
+    provider_activate = provider_subparsers.add_parser(
+        "activate",
+        help="Switch the active provider and default model.",
+    )
+    provider_activate.add_argument("name", choices=_PROVIDER_CHOICES)
+    provider_activate.add_argument("--workspace", default=".")
+    provider_activate.add_argument("--no-update-bfts", action="store_true")
+    provider_activate.add_argument("--json", action="store_true", dest="as_json")
+    provider_remove = provider_subparsers.add_parser(
+        "remove",
+        help="Remove provider metadata; stored credentials are left untouched.",
+    )
+    provider_remove.add_argument("name", choices=_PROVIDER_CHOICES)
+    provider_remove.add_argument("--workspace", default=".")
+    provider_remove.add_argument("--json", action="store_true", dest="as_json")
     evolution_parser = subparsers.add_parser(
         "evolution-gate",
         help="Evaluate a shadow self-evolution candidate against hidden benchmarks.",
@@ -144,6 +189,7 @@ def _load_json_file(path: str) -> object:
 
 def _installation_info() -> dict[str, object]:
     import importlib.util
+    import os
 
     from ai_scientist.apps.preflight import CORE_PACKAGES
     from ai_scientist.config.paths import resolve_output_path
@@ -184,7 +230,195 @@ def _installation_info() -> dict[str, object]:
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
         "quickstart": "xscientist init my-research",
+        "active_provider": os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER"),
+        "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
+
+
+def _bootstrap_workspace_environment() -> dict[str, object]:
+    import os
+
+    explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    candidate = Path(explicit).expanduser() if explicit else Path.cwd()
+    if not (candidate / ".xscientist" / "providers.json").is_file():
+        return {"loaded": False}
+    from .provider_config import ProviderConfigError, load_workspace_environment
+
+    try:
+        return load_workspace_environment(candidate)
+    except ProviderConfigError as exc:
+        return {"loaded": False, "error": str(exc)}
+
+
+def _run_provider(parsed: argparse.Namespace) -> int:
+    import getpass
+    import os
+
+    from .provider_config import (
+        DEFAULT_ENV_FILE,
+        DEFAULT_MODELS,
+        PROVIDER_FIELDS,
+        ProviderConfigError,
+        activate_provider,
+        configured_field_value,
+        load_provider_config,
+        provider_statuses,
+        read_env_file,
+        remove_provider,
+        resolve_env_file,
+        save_provider,
+        update_bfts_models,
+        update_env_file,
+        validate_provider_model,
+    )
+
+    workspace = Path(parsed.workspace).expanduser().resolve()
+    try:
+        if parsed.provider_command == "list":
+            rows = provider_statuses(workspace)
+            payload = {
+                "workspace": str(workspace),
+                "providers": rows,
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Workspace: {workspace}")
+                for row in rows:
+                    marker = "*" if row["active"] else " "
+                    if row["ready"]:
+                        state = "ready"
+                    elif row["configured"]:
+                        state = "configured, not ready"
+                    else:
+                        state = "not configured"
+                    model = row["model"] or "-"
+                    missing = ", ".join(row["missing"])
+                    suffix = f"; missing: {missing}" if missing else ""
+                    if row["error"]:
+                        suffix += f"; error: {row['error']}"
+                    print(
+                        f"{marker} {row['provider']}: {state}; model: {model}{suffix}"
+                    )
+            return 0
+
+        if parsed.provider_command == "remove":
+            config = remove_provider(workspace, parsed.name)
+            active_provider = config.get("active_provider")
+            bfts_updated = False
+            if active_provider:
+                active_entry = config["providers"][active_provider]
+                bfts_updated = update_bfts_models(
+                    workspace / "bfts_config.yaml", str(active_entry["model"])
+                )
+            payload = {
+                "ok": True,
+                "removed": parsed.name,
+                "active_provider": active_provider,
+                "credentials_removed": False,
+                "bfts_updated": bfts_updated,
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Removed provider metadata: {parsed.name}")
+                print("Stored credentials were left untouched.")
+            return 0
+
+        if parsed.provider_command == "activate":
+            config = activate_provider(workspace, parsed.name)
+            entry = config["providers"][parsed.name]
+            model = str(entry["model"])
+            bfts_updated = False
+            if not parsed.no_update_bfts:
+                bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
+            payload = {
+                "ok": True,
+                "active_provider": parsed.name,
+                "model": model,
+                "bfts_updated": bfts_updated,
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Active provider: {parsed.name}")
+                print(f"Default model: {model}")
+                print(f"BFTS config updated: {bfts_updated}")
+            return 0
+
+        config = load_provider_config(workspace, missing_ok=False)
+        existing = config.get("providers", {}).get(parsed.name, {})
+        existing_model = (
+            str(existing.get("model") or "") if isinstance(existing, dict) else ""
+        )
+        model = parsed.model or existing_model or DEFAULT_MODELS.get(parsed.name)
+        if not model:
+            if parsed.non_interactive or not sys.stdin.isatty():
+                raise ProviderConfigError(
+                    f"--model is required for provider {parsed.name!r} in non-interactive mode"
+                )
+            model = input(f"Model ID for {parsed.name}: ").strip()
+        provider, model = validate_provider_model(parsed.name, model)
+        env_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
+        env_path = resolve_env_file(workspace, env_name)
+        stored = read_env_file(env_path)
+        updates: dict[str, str] = {}
+        for field in PROVIDER_FIELDS[provider]:
+            current = configured_field_value(field, stored, os.environ)
+            if current:
+                continue
+            if field.default is not None:
+                updates[field.name] = field.default
+                continue
+            if not field.required:
+                continue
+            if parsed.non_interactive or not sys.stdin.isatty():
+                raise ProviderConfigError(
+                    f"missing {field.name}; set it in the environment or rerun interactively"
+                )
+            prompt = f"{field.name}: "
+            value = getpass.getpass(prompt) if field.secret else input(prompt)
+            value = value.strip()
+            if not value:
+                raise ProviderConfigError(f"{field.name} is required")
+            updates[field.name] = value
+        if updates or env_path.is_file():
+            update_env_file(env_path, updates)
+        saved = save_provider(
+            workspace,
+            provider=provider,
+            model=model,
+            env_file=env_name,
+            activate=not parsed.no_activate,
+        )
+        bfts_updated = False
+        if not parsed.no_update_bfts and saved.get("active_provider") == provider:
+            bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
+        payload = {
+            "ok": True,
+            "workspace": str(workspace),
+            "provider": provider,
+            "model": model,
+            "active": saved.get("active_provider") == provider,
+            "env_file": str(env_path),
+            "credentials_written": sorted(updates),
+            "bfts_updated": bfts_updated,
+        }
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Configured provider: {provider}")
+            print(f"Default model: {model}")
+            if updates:
+                print(f"Credentials saved securely to: {env_path}")
+            else:
+                print("Credentials: using existing environment or local env file")
+            print(f"Active: {payload['active']}")
+            print(f"BFTS config updated: {bfts_updated}")
+        return 0
+    except (OSError, ProviderConfigError) as exc:
+        print(f"xscientist provider: {exc}", file=sys.stderr)
+        return 2
 
 
 def _run_evolution_gate(parsed: argparse.Namespace) -> int:
@@ -264,6 +498,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if raw_argv and raw_argv[0] in _DELEGATES:
         return _DELEGATES[raw_argv[0]](raw_argv[1:])
 
+    workspace_state = (
+        {"loaded": False}
+        if raw_argv and raw_argv[0] in {"provider", "init"}
+        else _bootstrap_workspace_environment()
+    )
+    if workspace_state.get("error") and (
+        not raw_argv or raw_argv[0] not in {"provider", "info", "init"}
+    ):
+        print(
+            f"XScientist workspace configuration error: {workspace_state['error']}",
+            file=sys.stderr,
+        )
+        return 2
+
     parser = _build_parser()
     parsed = parser.parse_args(raw_argv)
     if parsed.command == "serve":
@@ -317,6 +565,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for index, step in enumerate(payload["next_steps"], start=1):
                 print(f"  {index}. {step}")
         return 0
+    if parsed.command == "provider":
+        return _run_provider(parsed)
     if parsed.command == "evolution-gate":
         return _run_evolution_gate(parsed)
     parser.error(f"Unsupported command: {parsed.command}")

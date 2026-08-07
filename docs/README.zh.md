@@ -129,6 +129,7 @@ flowchart LR
 
 - `xscientist`：PyPI wheel 与源码 checkout 都可直接使用的统一 CLI
 - `xscientist init`：面向已安装包的工作区与快速配置脚手架
+- `xscientist provider`：安全添加、检查和切换模型供应商
 - `xscientist research`：无需服务器的本地科研 Git 历史与离线备份
 - `from xscientist import XScientist, ProjectRequest`：稳定 Python SDK
 - `from xscientist import create_app`：可选 FastAPI 应用工厂
@@ -136,6 +137,7 @@ flowchart LR
 | 使用场景 | 推荐接口 |
 |---|---|
 | 创建已配置的科研工作区 | `xscientist init` |
+| 添加或切换模型供应商 | `xscientist provider` |
 | 单项目端到端运行 | `xscientist project` |
 | 批量生成论文 | `xscientist batch` |
 | 长期自治运行 | `xscientist daemon` |
@@ -245,27 +247,58 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```bash
 xscientist init my-research
 cd my-research
+xscientist provider add zhipu
+xscientist provider list
 ```
 
-脚手架包含科研问题模板、`.env.example`、随 wheel 分发的 BFTS 配置，以及
-固定到当前 XScientist 版本的隔离执行 Dockerfile。它不会写入 API Key；除非
-显式使用 `--force`，也不会覆盖已有文件。使用 `xscientist init --help` 可选择
-其他 provider、model 或 deep profile。
+`provider add` 会隐藏输入缺失的密钥，并将其写入 Git 忽略、仅当前用户可读写的
+`.env`。供应商元数据只保存模型 ID 和环境变量名，不保存密钥。激活的模型会自动
+应用到构思、绘图、写作、引用、审稿和 BFTS；显式传入的分角色模型参数仍优先。
+
+脚手架还包含科研问题模板、`.env.example`、随 wheel 分发的 BFTS 配置，以及
+固定到当前 XScientist 版本的隔离执行 Dockerfile。它不会在 `init` 时写入 API
+Key；除非显式使用 `--force`，也不会覆盖已有文件。使用 `xscientist init
+--help` 可选择其他 provider、model 或 deep profile。例如：
+
+```bash
+xscientist init my-openai-study \
+  --provider openai \
+  --model "openai/your-model-id"
+cd my-openai-study
+xscientist provider add openai
+```
 
 ### 2) 配置 API Key（按需）
 
-按你使用的提供商设置环境变量（不需要全部设置）：
+引导命令支持智谱、OpenAI、Anthropic、DeepSeek、Gemini、OpenRouter、
+Hugging Face、Ollama、通用 OpenAI-compatible API、Amazon Bedrock 和 Vertex
+AI。可以添加多个供应商，再快速切换：
 
 ```bash
-# 仅源码 checkout 使用此模板；PyPI 用户可使用 `xscientist init` 生成的模板。
-cp configs/environment/example.env .env
-# 编辑 .env，再通过 shell 或进程管理器加载其中的变量。
+xscientist provider add openai \
+  --model "openai/your-model-id" \
+  --no-activate
+xscientist provider activate openai
+xscientist provider list
+```
 
+自动化环境可先设置环境变量，再使用 `--non-interactive`；进程环境变量优先，且
+不会被隐式复制到磁盘。原有的手工环境变量方式仍受支持：
+
+```bash
 export OPENAI_API_KEY="..."
 export ZHIPU_API_KEY="..."
 export GEMINI_API_KEY="..."
 export S2_API_KEY="..."
+
+xscientist provider add openai \
+  --model "openai/your-model-id" \
+  --non-interactive
 ```
+
+其他 OpenAI-compatible API 使用 `openai_compat/<model-id>`，并设置
+`OPENAI_COMPAT_API_KEY` 与 `OPENAI_COMPAT_BASE_URL`。`provider remove` 只删除
+供应商元数据，会刻意保留已经存储的凭证。
 
 ### 3) 登录（必需）
 

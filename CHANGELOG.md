@@ -24,6 +24,15 @@ for its Python package; the ARA protocol has its own version in
   packages, Docker daemon, and exact isolated-executor image.
 - Read-only `xscientist info` installation profiles covering runtime/service
   readiness, missing packages, output resolution, and local login status.
+- Secure `xscientist provider` setup and switching for all supported model
+  backends, with hidden credential prompts, private workspace env files,
+  secret-free metadata, readiness inspection, and OpenAI-compatible endpoints.
+
+### Changed
+
+- Project, batch, direct console, daemon, and preflight entrypoints now inherit
+  the active workspace provider and default model while preserving explicit
+  per-role model overrides.
 
 ### Fixed
 

@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Sequence
+
+
+def _model_default(role: str, fallback: str) -> str:
+    role_name = f"AI_SCIENTIST_MODEL_{role.upper()}"
+    return (
+        os.environ.get(role_name)
+        or os.environ.get("AI_SCIENTIST_DEFAULT_MODEL")
+        or fallback
+    )
 
 
 def build_parser(
@@ -44,7 +54,11 @@ def build_parser(
 
     parser.add_argument("--topic", type=str, help="主题描述文件")
     parser.add_argument("--ideas", type=str, help="已有想法JSON文件")
-    parser.add_argument("--model-ideation", type=str, default="glm-4-flash")
+    parser.add_argument(
+        "--model-ideation",
+        type=str,
+        default=_model_default("IDEATION", "glm-4-flash"),
+    )
     parser.add_argument("--num-ideas", type=int, default=3, help="生成的想法数量")
     parser.add_argument("--num-reflections", type=int, default=5)
 
@@ -124,11 +138,31 @@ def build_parser(
         help="BFTS实验配置文件路径 (控制搜索深度、seed、并行度、超时等)",
     )
 
-    parser.add_argument("--model-agg-plots", type=str, default="glm-4-flash")
-    parser.add_argument("--model-writeup", type=str, default="glm-4-plus")
-    parser.add_argument("--model-writeup-small", type=str, default="glm-4-air")
-    parser.add_argument("--model-citation", type=str, default="glm-4-air")
-    parser.add_argument("--model-review", type=str, default="glm-4-plus")
+    parser.add_argument(
+        "--model-agg-plots",
+        type=str,
+        default=_model_default("AGG_PLOTS", "glm-4-flash"),
+    )
+    parser.add_argument(
+        "--model-writeup",
+        type=str,
+        default=_model_default("WRITEUP", "glm-4-plus"),
+    )
+    parser.add_argument(
+        "--model-writeup-small",
+        type=str,
+        default=_model_default("WRITEUP_SMALL", "glm-4-air"),
+    )
+    parser.add_argument(
+        "--model-citation",
+        type=str,
+        default=_model_default("CITATION", "glm-4-air"),
+    )
+    parser.add_argument(
+        "--model-review",
+        type=str,
+        default=_model_default("REVIEW", "glm-4-plus"),
+    )
 
     parser.add_argument("--num-cite-rounds", type=int, default=15)
     parser.add_argument("--writeup-retries", type=int, default=3)

@@ -112,6 +112,7 @@ flowchart LR
 
 - `xscientist`: unified CLI available from the PyPI wheel or a source checkout
 - `xscientist init`: installed-package-first workspace and configuration scaffold
+- `xscientist provider`: secure provider setup, readiness inspection, and switching
 - `xscientist research`: serverless local scientific Git history and offline backup
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
@@ -119,6 +120,7 @@ flowchart LR
 | Use case | Recommended interface |
 |---|---|
 | Create a configured workspace | `xscientist init` |
+| Add or switch an LLM provider | `xscientist provider` |
 | Run one project | `xscientist project` |
 | Batch paper generation | `xscientist batch` |
 | Long-running research | `xscientist daemon` |
@@ -230,28 +232,64 @@ Create a self-contained starter workspace without cloning this repository:
 ```bash
 xscientist init my-research
 cd my-research
+xscientist provider add zhipu
+xscientist provider list
 ```
 
-The scaffold contains a research-question template, `.env.example`, a packaged
-BFTS profile, and a Dockerfile pinned to the installed XScientist version. It
-does not write API keys, does not overwrite existing files unless `--force` is
-explicitly passed, and keeps AI-generated experiment code isolated by default.
-Use `xscientist init --help` to select another provider, model, or deep profile.
+`provider add` prompts for missing secrets without echoing them and stores them
+in a Git-ignored `.env` with user-only permissions. Provider metadata contains
+only model IDs and environment-variable names. The selected model automatically
+becomes the default for ideation, plots, writing, citations, review, and BFTS;
+explicit per-role CLI arguments still take precedence.
+
+The scaffold also contains a research-question template, `.env.example`, a
+packaged BFTS profile, and a Dockerfile pinned to the installed XScientist
+version. It does not write API keys, does not overwrite existing files unless
+`--force` is explicitly passed, and keeps AI-generated experiment code isolated
+by default. Use `xscientist init --help` to select another provider, model, or
+deep profile. For example:
+
+```bash
+xscientist init my-openai-study \
+  --provider openai \
+  --model "openai/your-model-id"
+cd my-openai-study
+xscientist provider add openai
+```
 
 ### 2) Configure API keys (as needed)
 
-Set the env vars for your provider(s) (you do not need all of them):
+The guided command supports Zhipu, OpenAI, Anthropic, DeepSeek, Gemini,
+OpenRouter, Hugging Face, Ollama, generic OpenAI-compatible endpoints, Amazon
+Bedrock, and Vertex AI. Add more than one provider and switch without retyping
+model arguments:
 
 ```bash
-# Source checkout only. PyPI users can use the template from `xscientist init`.
-cp configs/environment/example.env .env
-# Edit .env, then export/source the values for your shell or process manager.
+xscientist provider add openai \
+  --model "openai/your-model-id" \
+  --no-activate
+xscientist provider activate openai
+xscientist provider list
+```
 
+For automation, set credentials in the process environment and use
+`--non-interactive`; environment values take precedence and are never copied to
+disk implicitly. Manual environment configuration remains supported:
+
+```bash
 export OPENAI_API_KEY="..."
 export ZHIPU_API_KEY="..."
 export GEMINI_API_KEY="..."
 export S2_API_KEY="..."
+
+xscientist provider add openai \
+  --model "openai/your-model-id" \
+  --non-interactive
 ```
+
+Use `openai_compat/<model-id>` with `OPENAI_COMPAT_API_KEY` and
+`OPENAI_COMPAT_BASE_URL` for another OpenAI-compatible API. `provider remove`
+removes metadata only and deliberately leaves stored credentials untouched.
 
 ### 3) Login (required)
 

@@ -56,6 +56,32 @@ class BatchCliTests(unittest.TestCase):
         require_login.assert_not_called()
         initialize_runtime.assert_not_called()
 
+    def test_workspace_default_model_applies_to_every_role_and_can_be_overridden(
+        self,
+    ) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "AI_SCIENTIST_DEFAULT_MODEL": "openrouter/research-model",
+                "AI_SCIENTIST_MODEL_WRITEUP": "openai/writeup-model",
+            },
+            clear=False,
+        ):
+            parser = build_parser(
+                default_research_dir="/tmp/research",
+                default_writing_profile="default",
+                writing_profiles=["default"],
+                workflow_modes=["adaptive"],
+            )
+            args = parser.parse_args(["--model-review", "anthropic/review-model"])
+
+        self.assertEqual(args.model_ideation, "openrouter/research-model")
+        self.assertEqual(args.model_agg_plots, "openrouter/research-model")
+        self.assertEqual(args.model_writeup, "openai/writeup-model")
+        self.assertEqual(args.model_writeup_small, "openrouter/research-model")
+        self.assertEqual(args.model_citation, "openrouter/research-model")
+        self.assertEqual(args.model_review, "anthropic/review-model")
+
 
 if __name__ == "__main__":
     unittest.main()

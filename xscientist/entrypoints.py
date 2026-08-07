@@ -1,8 +1,24 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
+
+
+def _bootstrap_workspace_environment() -> str | None:
+    explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    candidate = Path(explicit).expanduser() if explicit else Path.cwd()
+    if not (candidate / ".xscientist" / "providers.json").is_file():
+        return None
+    from .provider_config import ProviderConfigError, load_workspace_environment
+
+    try:
+        state = load_workspace_environment(candidate)
+    except ProviderConfigError as exc:
+        return str(exc)
+    return str(state.get("error") or "") or None
 
 
 def _workflow_help_main(
@@ -53,7 +69,20 @@ def _workflow_help_main(
     return 0
 
 
-def _call_main(module_name: str, argv: Sequence[str] | None = None) -> int:
+def _call_main(
+    module_name: str,
+    argv: Sequence[str] | None = None,
+    *,
+    bootstrap_workspace: bool = True,
+) -> int:
+    if bootstrap_workspace:
+        workspace_error = _bootstrap_workspace_environment()
+        if workspace_error:
+            print(
+                f"XScientist workspace configuration error: {workspace_error}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
@@ -79,17 +108,31 @@ def _call_main(module_name: str, argv: Sequence[str] | None = None) -> int:
 
 
 def project_main(argv: Sequence[str] | None = None) -> int:
+    workspace_error = _bootstrap_workspace_environment()
+    if workspace_error:
+        print(
+            f"XScientist workspace configuration error: {workspace_error}",
+            file=sys.stderr,
+        )
+        return 2
     help_result = _workflow_help_main("project", argv)
     if help_result is not None:
         return help_result
-    return _call_main("ai_scientist.apps.project", argv)
+    return _call_main("ai_scientist.apps.project", argv, bootstrap_workspace=False)
 
 
 def batch_main(argv: Sequence[str] | None = None) -> int:
+    workspace_error = _bootstrap_workspace_environment()
+    if workspace_error:
+        print(
+            f"XScientist workspace configuration error: {workspace_error}",
+            file=sys.stderr,
+        )
+        return 2
     help_result = _workflow_help_main("batch", argv)
     if help_result is not None:
         return help_result
-    return _call_main("ai_scientist.apps.batch", argv)
+    return _call_main("ai_scientist.apps.batch", argv, bootstrap_workspace=False)
 
 
 def daemon_main(argv: Sequence[str] | None = None) -> int:

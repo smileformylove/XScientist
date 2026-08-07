@@ -33,6 +33,17 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("ZHIPU_API_KEY=replace-me", env_text)
             self.assertNotIn("sk-", env_text)
             self.assertIn(".env\n", (workspace / ".gitignore").read_text())
+            self.assertIn(".env\n", (workspace / ".dockerignore").read_text())
+
+            provider_config_text = (
+                workspace / ".xscientist" / "providers.json"
+            ).read_text(encoding="utf-8")
+            provider_config = json.loads(provider_config_text)
+            self.assertEqual(provider_config["active_provider"], "zhipu")
+            self.assertEqual(
+                provider_config["providers"]["zhipu"]["model"], "glm-4-flash"
+            )
+            self.assertNotIn("replace-me", provider_config_text)
 
             config = yaml.safe_load(
                 (workspace / "bfts_config.yaml").read_text(encoding="utf-8")
@@ -49,6 +60,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("xscientist[full]==${XSCIENTIST_VERSION}", dockerfile)
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
+            self.assertIn("xscientist provider add zhipu", readme)
             self.assertNotIn("\n+  --model", readme)
 
     def test_non_default_provider_requires_matching_explicit_model(self) -> None:

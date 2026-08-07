@@ -94,6 +94,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/__init__.py",
                 "xscientist/cli.py",
                 "xscientist/onboarding.py",
+                "xscientist/provider_config.py",
                 "xscientist/service.py",
                 "xscientist/service_jobs.py",
                 "xscientist/research_git.py",
