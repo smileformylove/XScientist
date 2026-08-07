@@ -122,15 +122,21 @@ def _parse_relations(values: Sequence[str]) -> list[dict[str, str]]:
     return relations
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="xscientist research",
+        prog=prog,
         description=(
             "Version scientific questions, hypotheses, evidence, evaluations, and "
             "manuscripts locally. No server is required and no command pushes automatically."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check the local version-control backend and required capabilities.",
+    )
+    doctor_parser.add_argument("--json", action="store_true", dest="as_json")
 
     init_parser = subparsers.add_parser(
         "init", help="Initialize a local research repository."
@@ -224,6 +230,14 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_parser.add_argument("--all", action="store_true", dest="all_changes")
     stage_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    add_parser = subparsers.add_parser(
+        "add", help="Git-style alias for selecting exact research changes."
+    )
+    add_parser.add_argument("paths", nargs="*")
+    add_parser.add_argument("--repo", default=".")
+    add_parser.add_argument("-A", "--all", action="store_true", dest="all_changes")
+    add_parser.add_argument("--json", action="store_true", dest="as_json")
+
     unstage_parser = subparsers.add_parser(
         "unstage", help="Remove paths from research staging without changing files."
     )
@@ -231,6 +245,24 @@ def _build_parser() -> argparse.ArgumentParser:
     unstage_parser.add_argument("--repo", default=".")
     unstage_parser.add_argument("--all", action="store_true", dest="all_paths")
     unstage_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    commit_parser = subparsers.add_parser(
+        "commit", help="Create a checkpoint from the native research stage."
+    )
+    commit_parser.add_argument("--repo", default=".")
+    commit_parser.add_argument("-m", "--message", required=True)
+    commit_parser.add_argument("--stage", default="research")
+    commit_parser.add_argument("--summary", default="")
+    commit_parser.add_argument("--status", default="completed")
+    commit_parser.add_argument("--actor")
+    commit_parser.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        dest="all_changes",
+        help="Select all eligible research changes before committing.",
+    )
+    commit_parser.add_argument("--json", action="store_true", dest="as_json")
 
     branch_parser = subparsers.add_parser(
         "branch", help="List or fork independent research lines."
@@ -366,10 +398,32 @@ def _human_status(payload: dict[str, Any]) -> None:
         )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_parser()
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    prog: str = "xscientist research",
+) -> int:
+    parser = _build_parser(prog=prog)
     args = parser.parse_args(argv)
     try:
+        if args.command == "doctor":
+            from .git_support import inspect_git_backend
+
+            payload = inspect_git_backend()
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Research VCS backend: {payload['backend']}")
+                print(f"Available:            {payload['available']}")
+                print(f"Version:              {payload['version'] or 'N/A'}")
+                for name, ready in payload["capabilities"].items():
+                    print(f"{name.replace('_', ' ').title():<22} {ready}")
+                for error in payload["errors"]:
+                    print(f"error: {_display_text(error)}", file=sys.stderr)
+                if payload.get("install_hint"):
+                    print(_display_text(payload["install_hint"]), file=sys.stderr)
+            return 0 if payload["ok"] else 1
+
         if args.command == "init":
             result = init_repository(
                 args.path,
@@ -509,7 +563,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             return 0
 
-        if args.command == "stage":
+        if args.command in {"stage", "add"}:
             result = research_stage(
                 args.repo,
                 args.paths,
@@ -523,6 +577,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"  {path}")
                 for item in result.excluded:
                     print(f"excluded: {_display_text(item)}", file=sys.stderr)
+            return 0
+
+        if args.command == "commit":
+            if args.all_changes:
+                research_stage(args.repo, all_changes=True)
+            result = commit_research_stage(
+                args.repo,
+                stage=args.stage,
+                subject=args.message,
+                summary=args.summary,
+                status=args.status,
+                actor=args.actor,
+            )
+            if args.as_json:
+                _print_json(result.to_dict())
+            elif result.committed:
+                print(
+                    f"Research checkpoint: {result.checkpoint_id} "
+                    f"files={len(result.staged_paths)}"
+                )
+            else:
+                print(f"Research checkpoint skipped: {result.reason}")
             return 0
 
         if args.command == "unstage":

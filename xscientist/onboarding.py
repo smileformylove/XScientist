@@ -147,7 +147,16 @@ provider metadata never contain the secret value.
 python -m pip install "xscientist[full]=={__version__}"
 ```
 
-## 2. Add the provider
+## 2. Check local research version control
+
+```bash
+xscientist git doctor
+```
+
+This verifies the local persistence backend and the branch/safe-merge
+capabilities used by Research VCS. It does not contact a remote.
+
+## 3. Add the provider
 
 ```bash
 xscientist provider add {provider}
@@ -159,13 +168,13 @@ missing secrets with hidden input. It also keeps `bfts_config.yaml` aligned
 with the active provider. Existing process environment variables take
 precedence and are never copied to disk implicitly.
 
-## 3. Create a local login
+## 4. Create a local login
 
 ```bash
 xscientist auth login --user <your-name>
 ```
 
-## 4. Build the isolated experiment image
+## 5. Build the isolated experiment image
 
 ```bash
 docker build -f Dockerfile.executor -t {image} .
@@ -174,7 +183,7 @@ docker build -f Dockerfile.executor -t {image} .
 The generated BFTS config fails closed if this image is unavailable. It does
 not silently execute AI-generated experiment code in the host Python process.
 
-## 5. Check the exact runtime configuration
+## 6. Check the exact runtime configuration
 
 ```bash
 xscientist preflight --strict --bfts-config bfts_config.yaml
@@ -183,7 +192,7 @@ xscientist preflight --strict --bfts-config bfts_config.yaml
 This checks the selected model credentials and client package as well as the
 Docker daemon and exact image tag before any paid model call starts.
 
-## 6. Run one traceable study
+## 7. Run one traceable study
 
 Edit `topic.md`, then run:
 
@@ -298,6 +307,7 @@ def create_workspace(
         "secrets_written": False,
         "next_steps": [
             f"cd {workspace_view}",
+            "xscientist git doctor",
             f"xscientist provider add {normalized_provider}",
             "xscientist provider list",
             "xscientist auth login --user <your-name>",

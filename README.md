@@ -160,7 +160,8 @@ operations entrypoints.
 ### 0) Prerequisites
 
 - Python: 3.10+ (3.11 recommended)
-- Git: required for direct installation from the GitHub repository
+- Git: required by the current local Research VCS adapter; run
+  `xscientist git doctor` after installation to verify the exact capabilities
 - System deps (recommended):
   - LaTeX toolchain (to compile paper PDFs, e.g., TeX Live / MacTeX)
   - `poppler` (PDF processing/extraction)
@@ -224,6 +225,7 @@ Verify the installation:
 xscientist --version
 xscientist info --json
 xscientist --help
+xscientist git doctor
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 
@@ -520,6 +522,10 @@ operate Git or connect a GitHub repository. Initialize a standalone repository
 and record only scientifically meaningful progress:
 
 ```bash
+xscientist git doctor
+```
+
+```bash
 xscientist research init ./my-research \
   --question "Does retrieval-guided reflection improve factual accuracy?"
 
@@ -540,6 +546,16 @@ xscientist research log
 xscientist research diff HEAD~1 HEAD --deep
 xscientist research blame <research-object-id>
 xscientist research fsck
+```
+
+The equivalent Git-style interface uses the same Research VCS safety rules and
+does not pass arbitrary commands through to Git:
+
+```bash
+xscientist git add -A
+xscientist git commit --stage ideation -m "record H1 and its falsifier"
+xscientist git branch challenge/h1 --switch
+xscientist git log
 ```
 
 The same semantics are available as a stable Python API:

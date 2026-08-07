@@ -172,4 +172,14 @@ def preflight_main(argv: Sequence[str] | None = None) -> int:
 
 
 def research_main(argv: Sequence[str] | None = None) -> int:
-    return _call_main("xscientist.research_cli", argv)
+    from .research_cli import main
+
+    return main(argv, prog="xscientist research")
+
+
+def git_main(argv: Sequence[str] | None = None) -> int:
+    """Expose Research VCS with familiar Git-like command names."""
+
+    from .research_cli import main
+
+    return main(argv, prog="xscientist git")

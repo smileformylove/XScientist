@@ -8,6 +8,8 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Native `xscientist git doctor/add/commit` commands for backend capability
+  probing and familiar Research VCS workflows without raw Git passthrough.
 - Native Research VCS objects and public Python APIs for semantic staging,
   research lines, immutable tags, typed diff, provenance blame, safe
   multi-parent merge, and integrity-aware repository verification.

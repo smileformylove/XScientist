@@ -63,6 +63,7 @@ class OnboardingTests(unittest.TestCase):
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
             self.assertIn("xscientist provider add zhipu", readme)
+            self.assertIn("xscientist git doctor", readme)
             self.assertIn("--output-root ./outputs", readme)
             self.assertIn(
                 "xscientist manager --research-dir ./outputs list-papers", readme
@@ -70,6 +71,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("xscientist research objects", readme)
             self.assertNotIn("--research-git", readme)
             self.assertNotIn("\n+  --model", readme)
+            self.assertEqual(payload["next_steps"][1], "xscientist git doctor")
 
     def test_non_default_provider_requires_matching_explicit_model(self) -> None:
         with tempfile.TemporaryDirectory() as td:
