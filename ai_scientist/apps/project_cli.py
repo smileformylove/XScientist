@@ -276,7 +276,10 @@ def build_parser(
         dest="git_checkpoint_policy",
         choices=["manual", "stage", "milestone"],
         default="milestone",
-        help="科研 checkpoint 策略。milestone 记录关键状态，stage 额外记录 ideation。",
+        help=(
+            "科研 checkpoint 策略。milestone 记录构思、实验、证据和论文等关键状态；"
+            "stage 记录每个请求的阶段。"
+        ),
     )
     parser.add_argument(
         "--research-vcs-strict",

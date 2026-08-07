@@ -111,6 +111,9 @@ flowchart LR
 ## Public Interfaces
 
 - `xscientist`: unified CLI available from the PyPI wheel or a source checkout
+- `xscientist setup`: one guided workspace, provider, and readiness flow
+- `xscientist doctor`: unified workspace, capability, provider, auth, and runtime diagnosis
+- `xscientist capability`: task-to-module resolution with exact opt-in install commands
 - `xscientist init`: installed-package-first workspace and configuration scaffold
 - `xscientist provider`: secure provider setup, readiness inspection, and switching
 - `xscientist research`: native scientific version control and offline backup
@@ -119,7 +122,9 @@ flowchart LR
 
 | Use case | Recommended interface |
 |---|---|
-| Create a configured workspace | `xscientist init` |
+| Create a configured workspace | `xscientist setup` |
+| Diagnose one task end to end | `xscientist doctor` |
+| Resolve optional modules by task | `xscientist capability` |
 | Add or switch an LLM provider | `xscientist provider` |
 | Run one project | `xscientist project` |
 | Batch paper generation | `xscientist batch` |
@@ -238,15 +243,17 @@ xscientist git doctor
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 
-Create a self-contained starter workspace without cloning this repository:
+Create and diagnose a self-contained workspace without cloning this repository:
 
 ```bash
-xscientist init my-research
+xscientist setup my-research --task research
 cd my-research
-xscientist provider add zhipu
-xscientist provider list
+xscientist doctor --task research
 ```
 
+`setup` creates the workspace, reuses existing environment credentials, and
+prompts only for missing required values. It never installs packages by itself;
+the capability resolver prints one exact install command for the selected task.
 `provider add` prompts for missing secrets without echoing them and stores them
 in a Git-ignored `.env` with user-only permissions. Provider metadata contains
 only model IDs and environment-variable names. The selected model automatically
@@ -257,15 +264,23 @@ The scaffold also contains a research-question template, `.env.example`, a
 packaged BFTS profile, and a Dockerfile pinned to the installed XScientist
 version. It does not write API keys, does not overwrite existing files unless
 `--force` is explicitly passed, and keeps AI-generated experiment code isolated
-by default. Use `xscientist init --help` to select another provider, model, or
-deep profile. For example:
+by default. Use `--skip-credentials` for a metadata-only setup or
+`--non-interactive` in automation. `xscientist init` remains the non-guided,
+scaffold-only compatibility command. For example:
 
 ```bash
-xscientist init my-openai-study \
+xscientist setup my-openai-study --task paper \
   --provider openai \
   --model "openai/your-model-id"
 cd my-openai-study
-xscientist provider add openai
+xscientist doctor --task paper --deep
+```
+
+Probe capabilities without changing the environment:
+
+```bash
+xscientist capability list
+xscientist capability check ml-study --provider openai
 ```
 
 ### 2) Configure API keys (as needed)
@@ -590,6 +605,12 @@ xscientist research checkpoint --staged \
 xscientist research branch challenge/h1 --switch
 xscientist research branch
 
+# Ask the deterministic policy before changing history, then inspect the
+# payload-free long-term research technology tree.
+xscientist research decide contradiction \
+  --name alternate-mechanism --contradictory-evidence
+xscientist research tree
+
 xscientist research log
 xscientist research diff HEAD~1 HEAD --deep
 xscientist research blame <research-object-id>
@@ -625,6 +646,21 @@ lifecycle.experiment_attempt(
 on `evolve/*` lines and require hash-bound independent evaluation, canary work,
 human approval, and a verified rollback receipt before entering `main` or
 `stable`.
+
+`research decide` is read-only: material state changes produce a checkpoint
+recommendation; independent hypotheses, methods, interpretations,
+replications, and agent candidates produce a fork recommendation; merge is
+recommended only after a clean backend and semantic preflight. Each decision
+has a stable ID and explicit reasons, so an internal agent can retain the trace
+without silently mutating history. `research tree` exposes object hashes,
+relations, research lines, frontier status, cycles, and missing references but
+never object payloads.
+
+Opposing evidence remains blocking by default. An explicit
+`research merge <line> --preserve-conflicts` retains both sides and writes a
+rejected `hold` gate bound to the conflict ID; it never promotes the contested
+claim. Locked preregistration, metric-definition, backend, and ungated-agent
+conflicts cannot use this escape hatch.
 
 Large datasets, models, and binary evidence stay in the local content-addressed
 store; Git receives only a small immutable pointer:

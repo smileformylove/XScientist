@@ -6,11 +6,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import yaml
 
 from xscientist._version import __version__
 from xscientist.cli import main as cli_main
+from xscientist.diagnostics import diagnose
 from xscientist.onboarding import WORKSPACE_FILES, create_workspace
 
 
@@ -132,6 +135,75 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(replaced, 0)
             self.assertIn("# XScientist workspace", readme.read_text())
             self.assertEqual(unrelated.read_text(), "keep me\n")
+
+    def test_setup_creates_and_diagnoses_without_requiring_a_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(
+                    [
+                        "setup",
+                        str(workspace),
+                        "--task",
+                        "protocol",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["workspace_created"])
+            self.assertEqual(payload["task"], "protocol")
+            self.assertEqual(payload["doctor"]["schema"], "xscientist.doctor.v1")
+            self.assertIsNone(payload["doctor"]["checks"]["capabilities"]["provider"])
+            self.assertTrue(payload["doctor"]["checks"]["capabilities"]["ready"])
+            self.assertFalse(payload["host_paths_disclosed"])
+            self.assertFalse((workspace / ".env").exists())
+            dockerfile = (workspace / "Dockerfile.executor").read_text()
+            self.assertIn(f"xscientist==${{XSCIENTIST_VERSION}}", dockerfile)
+            self.assertNotIn("torch --index-url", dockerfile)
+            self.assertNotIn("xscientist[research", dockerfile)
+            generated_readme = (workspace / "README.md").read_text()
+            self.assertIn("provider-neutral", generated_readme)
+            self.assertNotIn("xscientist provider add zhipu", generated_readme)
+            serialized = json.dumps(payload)
+            self.assertNotIn(str(Path(td).resolve()), serialized)
+
+    def test_deep_doctor_redacts_paths_from_runtime_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            leaked_path = str(workspace / "private" / "executor.log")
+            with (
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch(
+                    "ai_scientist.apps.preflight.check_bfts_config",
+                    return_value=[
+                        SimpleNamespace(
+                            label="Executor image",
+                            ok=False,
+                            severity="error",
+                            detail=f"runtime failed at {leaked_path}",
+                        )
+                    ],
+                ),
+            ):
+                payload = diagnose(
+                    workspace,
+                    task="research",
+                    provider="zhipu",
+                    deep=True,
+                )
+
+            serialized = json.dumps(payload)
+            self.assertNotIn(str(Path(td).resolve()), serialized)
+            self.assertIn("[REDACTED", serialized)
+            self.assertFalse(payload["host_paths_disclosed"])
 
 
 if __name__ == "__main__":

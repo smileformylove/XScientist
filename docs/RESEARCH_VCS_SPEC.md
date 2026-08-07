@@ -153,6 +153,18 @@ A merge MUST stop for an unresolved conflict when, at minimum:
 Conflict resolution is itself a durable object and commit. It cannot silently
 choose one file version.
 
+The `preserve_as_contested` resolution MAY be used only when the complete
+blocking set consists of opposed evidence. It MUST retain both evidence sets,
+write a deterministic `hold` gate with promotion disabled, bind that gate to a
+stable conflict identifier, and keep the target on the contested frontier.
+Backend conflicts, incompatible locked preregistrations, metric-definition
+conflicts, and ungated agent candidates MUST NOT use this resolution.
+
+A long-term technology-tree view MUST union immutable objects reachable from
+all local research-line heads by content identity. Shared ancestry is de-duped,
+line membership is retained, and missing targets or relation cycles are
+reported. A privacy-preserving tree view MUST NOT emit object payloads.
+
 ## 9. Authority model
 
 | Actor | Authority |
@@ -177,6 +189,15 @@ manuscript -> release`.
 Exploratory work may proceed without a locked preregistration, but its claims
 remain candidate claims. Confirmatory and submission-grade promotion fails
 closed without the required locked state and independent evidence.
+
+Before mutating history, an autonomous agent SHOULD create a deterministic,
+read-only version-control decision trace. Material terminal or milestone state
+requires a checkpoint; a competing hypothesis, incompatible method,
+contradictory interpretation, independent replication, or agent candidate
+requires a separate research line; a merge requires a clean working state and
+semantic preflight. The trace records policy version, inputs, current head,
+reasons, recommended operations, and a stable decision identifier. Producing
+the trace itself MUST NOT mutate the repository.
 
 ## 11. Agent self-evolution
 

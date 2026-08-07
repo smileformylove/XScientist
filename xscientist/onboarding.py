@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,11 @@ from ai_scientist.resources import bfts_config_path
 from ai_scientist.utils.atomic_io import atomic_write_text
 from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ._version import __version__
-from .dependency_profiles import installation_command, installation_spec
+from .dependency_profiles import (
+    capability_installation_command,
+    capability_installation_spec,
+    installation_command,
+)
 from .provider_config import (
     DEFAULT_MODELS,
     PROVIDER_FIELDS,
@@ -83,11 +88,24 @@ def _render_env(provider: str) -> str:
     )
 
 
-def _render_dockerfile(provider: str) -> str:
-    runtime_spec = installation_spec(
-        provider,
-        capabilities=("research", "ml", "pdf-layout"),
+def _render_dockerfile(
+    provider: str,
+    *,
+    capabilities: tuple[str, ...] | None = None,
+    provider_required: bool = True,
+) -> str:
+    selected = (
+        capabilities if capabilities is not None else ("research", "ml", "pdf-layout")
+    )
+    runtime_spec = capability_installation_spec(
+        selected,
+        provider=provider if provider_required else None,
         version="${XSCIENTIST_VERSION}",
+    )
+    torch_install = (
+        "RUN python -m pip install --no-cache-dir \\\n    torch --index-url https://download.pytorch.org/whl/cpu\n"
+        if "ml" in selected
+        else ""
     )
     return f"""FROM python:3.11-slim
 
@@ -99,8 +117,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \\
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends build-essential git \\
     && rm -rf /var/lib/apt/lists/*
-RUN python -m pip install --no-cache-dir \\
-    torch --index-url https://download.pytorch.org/whl/cpu
+{torch_install}
 RUN python -m pip install --no-cache-dir "{runtime_spec}"
 
 RUN useradd --create-home --uid 10001 scientist
@@ -136,9 +153,42 @@ Describe the primary hypothesis and the observation that would falsify it.
 """
 
 
-def _render_readme(*, profile: str, provider: str, model: str) -> str:
+def _render_readme(
+    *,
+    profile: str,
+    provider: str,
+    model: str,
+    task: str = "research",
+    capabilities: tuple[str, ...] | None = None,
+    provider_required: bool = True,
+) -> str:
     image = f"xscientist-exec:{__version__}"
-    install = installation_command(provider, version=__version__)
+    install = (
+        installation_command(provider, version=__version__)
+        if capabilities is None
+        else capability_installation_command(
+            capabilities,
+            provider=provider if provider_required else None,
+            version=__version__,
+        )
+    )
+    install_note = (
+        f"This installs the selected capabilities and only the `{provider}` client."
+        if provider_required
+        else "This task is provider-neutral, so no model client is installed."
+    )
+    provider_note = (
+        f"""```bash
+xscientist provider add {provider}
+xscientist provider list
+```
+
+The command reuses the model `{model}` selected during setup and prompts for
+missing secrets with hidden input. Existing process environment variables take
+precedence and are never copied to disk implicitly."""
+        if provider_required
+        else "This task does not require an LLM provider. Add one later only when a selected task requests it."
+    )
     return f"""# XScientist workspace
 
 Generated for XScientist {__version__} with provider `{provider}`, model
@@ -154,31 +204,24 @@ provider metadata never contain the secret value.
 {install}
 ```
 
-This installs the common research runtime and only the `{provider}` client.
+{install_note}
 Specialist stacks remain opt-in: add `ml`, `pdf-layout`, or `service` to the
 bracketed extras when the study actually needs them. The legacy `full` extra
 remains available for an all-provider environment.
 
-## 2. Check local research version control
+## 2. Run the unified doctor
 
 ```bash
-xscientist git doctor
+xscientist doctor --task {task}
 ```
 
-This verifies the local persistence backend and the branch/safe-merge
-capabilities used by Research VCS. It does not contact a remote.
+This verifies task modules, the provider, login, and the local persistence
+backend with the branch/safe-merge capabilities used by Research VCS. It does
+not contact a remote. Use `xscientist git doctor` for the backend-only view.
 
-## 3. Add the provider
+## 3. Add the provider when required
 
-```bash
-xscientist provider add {provider}
-xscientist provider list
-```
-
-The command reuses the model `{model}` selected during `init` and prompts for
-missing secrets with hidden input. It also keeps `bfts_config.yaml` aligned
-with the active provider. Existing process environment variables take
-precedence and are never copied to disk implicitly.
+{provider_note}
 
 ## 4. Create a local login
 
@@ -198,11 +241,13 @@ not silently execute AI-generated experiment code in the host Python process.
 ## 6. Check the exact runtime configuration
 
 ```bash
-xscientist preflight --strict --bfts-config bfts_config.yaml
+xscientist doctor --task {task} --deep
 ```
 
 This checks the selected model credentials and client package as well as the
-Docker daemon and exact image tag before any paid model call starts.
+Docker daemon and exact image tag before any paid model call starts. The legacy
+low-level equivalent remains `xscientist preflight --strict --bfts-config
+bfts_config.yaml`.
 
 ## 7. Run one traceable study
 
@@ -230,7 +275,15 @@ options. API calls can incur cost; set explicit limits under `llm_budget` in
 """
 
 
-def _render_files(*, profile: str, provider: str, model: str) -> dict[str, str]:
+def _render_files(
+    *,
+    profile: str,
+    provider: str,
+    model: str,
+    task: str = "research",
+    capabilities: tuple[str, ...] | None = None,
+    provider_required: bool = True,
+) -> dict[str, str]:
     secret_ignores = (
         ".env\n"
         ".env.*\n"
@@ -251,11 +304,18 @@ def _render_files(*, profile: str, provider: str, model: str) -> dict[str, str]:
             ensure_ascii=False,
         )
         + "\n",
-        "Dockerfile.executor": _render_dockerfile(provider),
+        "Dockerfile.executor": _render_dockerfile(
+            provider,
+            capabilities=capabilities,
+            provider_required=provider_required,
+        ),
         "README.md": _render_readme(
             profile=profile,
             provider=provider,
             model=model,
+            task=task,
+            capabilities=capabilities,
+            provider_required=provider_required,
         ),
         "bfts_config.yaml": _render_bfts_config(profile, model),
         "topic.md": _render_topic(),
@@ -269,6 +329,9 @@ def create_workspace(
     provider: str = "zhipu",
     model: str | None = None,
     force: bool = False,
+    task: str = "research",
+    capabilities: Iterable[str] | None = None,
+    provider_required: bool = True,
 ) -> dict[str, Any]:
     """Create a safe, installed-package-first XScientist workspace."""
     normalized_profile = str(profile or "default").strip().lower()
@@ -279,10 +342,18 @@ def create_workspace(
             f"unknown provider {provider!r}; expected one of: {choices}"
         )
     selected_model = _resolve_model(normalized_provider, model)
+    selected_capabilities = (
+        tuple(dict.fromkeys(str(item) for item in capabilities))
+        if capabilities is not None
+        else None
+    )
     files = _render_files(
         profile=normalized_profile,
         provider=normalized_provider,
         model=selected_model,
+        task=str(task or "research"),
+        capabilities=selected_capabilities,
+        provider_required=provider_required,
     )
 
     root = Path(directory).expanduser().resolve()
@@ -319,7 +390,15 @@ def create_workspace(
         "secrets_written": False,
         "next_steps": [
             f"cd {workspace_view}",
-            installation_command(normalized_provider, version=__version__),
+            (
+                installation_command(normalized_provider, version=__version__)
+                if selected_capabilities is None
+                else capability_installation_command(
+                    selected_capabilities,
+                    provider=(normalized_provider if provider_required else None),
+                    version=__version__,
+                )
+            ),
             "xscientist git doctor",
             f"xscientist provider add {normalized_provider}",
             "xscientist auth login --user <your-name>",

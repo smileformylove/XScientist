@@ -10,7 +10,9 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 
 from xscientist.dependency_profiles import (
     PROVIDER_EXTRA_BY_NAME,
+    capability_installation_spec,
     installation_spec,
+    resolve_task_capabilities,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +84,42 @@ class DependencyProfileTests(unittest.TestCase):
                     installation_spec(provider),
                     f"xscientist[research,{extra}]",
                 )
+
+    def test_task_resolver_keeps_provider_neutral_workflows_small(self) -> None:
+        available = {"jsonschema", "yaml"}
+        resolved = resolve_task_capabilities(
+            "protocol",
+            find_spec=lambda name: object() if name in available else None,
+        )
+
+        self.assertTrue(resolved["ready"])
+        self.assertFalse(resolved["provider_required"])
+        self.assertFalse(resolved["auth_required"])
+        self.assertEqual(resolved["capabilities"], [])
+        self.assertEqual(
+            resolved["install_command"], 'python -m pip install "xscientist"'
+        )
+
+    def test_task_resolver_combines_capability_and_provider_extras(self) -> None:
+        resolved = resolve_task_capabilities(
+            "ml-study",
+            provider="openai",
+            find_spec=lambda _name: None,
+        )
+
+        self.assertFalse(resolved["ready"])
+        self.assertEqual(
+            capability_installation_spec(
+                ("research", "plot", "pdf", "ml"), provider="openai"
+            ),
+            "xscientist[research,plot,pdf,ml,openai]",
+        )
+        self.assertEqual(
+            resolved["install_command"],
+            'python -m pip install "xscientist[research,plot,pdf,ml,openai]"',
+        )
+        self.assertIn("transformers", resolved["missing_modules"])
+        self.assertIn("openai", resolved["missing_provider_modules"])
 
 
 if __name__ == "__main__":

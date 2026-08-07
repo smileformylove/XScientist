@@ -307,8 +307,135 @@ class ResearchRepositoryTests(unittest.TestCase):
                 "opposed_evidence",
                 {item["type"] for item in preview["conflicts"]},
             )
+            opposed = next(
+                item
+                for item in preview["conflicts"]
+                if item["type"] == "opposed_evidence"
+            )
+            self.assertTrue(opposed["conflict_id"].startswith("rvc-"))
+            self.assertEqual(opposed["severity"], "blocking")
+            self.assertGreaterEqual(len(opposed["resolution"]), 2)
             with self.assertRaisesRegex(ResearchGitError, "conflict resolution"):
                 repository.merge("challenge")
+
+            merged = repository.merge("challenge", preserve_conflicts=True)
+            self.assertEqual(len(merged.resolution_objects), 1)
+            resolution = repository.get(merged.resolution_objects[0])
+            self.assertEqual(resolution["kind"], "gate_decision")
+            self.assertEqual(resolution["state"], "rejected")
+            self.assertEqual(resolution["payload"]["decision"], "hold")
+            self.assertFalse(resolution["payload"]["claim_promotion_allowed"])
+            self.assertEqual(
+                resolution["payload"]["merge_conflict_id"],
+                opposed["conflict_id"],
+            )
+            self.assertTrue(repository.fsck()["ok"])
+
+    def test_decision_policy_checkpoints_before_fork_without_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            initial_head = repository.status()["head"]
+            repository.record("hypothesis", {"statement": "H2"})
+
+            decision = repository.decide(
+                event="hypothesis",
+                name="competing mechanism",
+                competing_hypothesis=True,
+            )
+
+            self.assertEqual(
+                [item["action"] for item in decision["actions"]],
+                ["checkpoint", "fork"],
+            )
+            self.assertEqual(
+                decision["actions"][1]["branch"],
+                "hypothesis/competing-mechanism",
+            )
+            self.assertFalse(decision["mutates_repository"])
+            self.assertTrue(decision["trace_required"])
+            self.assertEqual(repository.status()["head"], initial_head)
+            self.assertEqual(repository.status()["branch"], "main")
+
+    def test_first_hypothesis_checkpoints_without_unnecessary_fork(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.record("hypothesis", {"statement": "H1"})
+
+            decision = repository.decide(event="hypothesis", name="primary")
+
+            self.assertEqual(
+                [item["action"] for item in decision["actions"]],
+                ["checkpoint"],
+            )
+
+    def test_technology_tree_preserves_relations_without_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            supported = repository.record("hypothesis", {"statement": "H1"})
+            open_hypothesis = repository.record("hypothesis", {"statement": "H2"})
+            evidence = repository.record(
+                "evidence",
+                {"result": "positive"},
+                state="verified",
+                relations=[{"type": "supports", "target": supported.object_id}],
+            )
+
+            tree = repository.technology_tree()
+
+            self.assertTrue(tree["integrity"]["ok"])
+            self.assertFalse(tree["payloads_disclosed"])
+            self.assertEqual(tree["counts"]["nodes"], 3)
+            self.assertEqual(tree["counts"]["edges"], 1)
+            self.assertTrue(all("payload" not in node for node in tree["nodes"]))
+            self.assertEqual(
+                tree["edges"][0],
+                {
+                    "source": evidence.object_id,
+                    "target": supported.object_id,
+                    "type": "supports",
+                    "role": "",
+                },
+            )
+            self.assertEqual(
+                tree["frontier"],
+                [
+                    {
+                        "object_id": open_hypothesis.object_id,
+                        "kind": "hypothesis",
+                        "classification": "open",
+                    }
+                ],
+            )
+            self.assertLess(
+                tree["topological_order"].index(supported.object_id),
+                tree["topological_order"].index(evidence.object_id),
+            )
+
+    def test_technology_tree_unifies_all_research_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            shared = repository.record("hypothesis", {"statement": "shared"})
+            repository.commit(stage="ideation", subject="record shared hypothesis")
+            repository.fork("hypothesis/alternative")
+            alternative = repository.record("hypothesis", {"statement": "alternative"})
+            repository.commit(stage="ideation", subject="record alternative")
+            repository.switch("main")
+
+            tree = repository.technology_tree()
+            nodes = {item["object_id"]: item for item in tree["nodes"]}
+
+            self.assertEqual(
+                nodes[shared.object_id]["research_lines"],
+                ["hypothesis/alternative", "main"],
+            )
+            self.assertEqual(
+                nodes[alternative.object_id]["research_lines"],
+                ["hypothesis/alternative"],
+            )
 
     def test_cli_runs_native_record_stage_commit_and_branch_flow(self) -> None:
         with tempfile.TemporaryDirectory() as td:

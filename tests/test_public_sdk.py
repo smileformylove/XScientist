@@ -234,7 +234,10 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIn(payload["output_root"], {"<configured>", "<default>"})
         self.assertFalse(Path(payload["python_executable"]).is_absolute())
         self.assertFalse(payload["host_paths_disclosed"])
-        self.assertEqual(payload["quickstart"], "xscientist init my-research")
+        self.assertEqual(
+            payload["quickstart"],
+            "xscientist setup my-research --task research",
+        )
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
         project = mock.Mock(return_value=0)

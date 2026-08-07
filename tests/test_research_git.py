@@ -19,6 +19,7 @@ from xscientist.research_cli import main as research_main
 from xscientist.research_git import (
     ResearchGitError,
     add_research_object,
+    auto_checkpoint,
     create_checkpoint,
     create_research_bundle,
     init_repository,
@@ -167,6 +168,22 @@ class LocalResearchGitTests(unittest.TestCase):
 
             self.assertFalse(result.created)
             self.assertIn("no material research change", result.reason or "")
+
+    def test_default_milestone_policy_checkpoints_ideation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            hypothesis = root / "hypotheses" / "h1.json"
+            hypothesis.write_text('{"hypothesis":"H1"}\n', encoding="utf-8")
+
+            result = auto_checkpoint(
+                root,
+                stage="ideation",
+                subject="record candidate hypothesis",
+            )
+
+            self.assertTrue(result.committed)
+            self.assertEqual(show_checkpoint(root)["checkpoint"]["stage"], "ideation")
 
     def test_object_pointer_bundle_and_reproduction_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as td:

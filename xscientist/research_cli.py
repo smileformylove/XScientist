@@ -343,6 +343,48 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     status_parser.add_argument("--repo", default=".")
     status_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    decide_parser = subparsers.add_parser(
+        "decide",
+        help="Explain whether the next research transition should checkpoint, fork, or merge.",
+    )
+    decide_parser.add_argument(
+        "event",
+        choices=[
+            "observation",
+            "hypothesis",
+            "preregistration",
+            "experiment-started",
+            "experiment-completed",
+            "experiment-failed",
+            "evidence",
+            "review",
+            "gate",
+            "manuscript",
+            "release",
+            "method-change",
+            "contradiction",
+            "replication",
+            "agent-candidate",
+            "merge-candidate",
+        ],
+    )
+    decide_parser.add_argument("--repo", default=".")
+    decide_parser.add_argument("--name", default="")
+    decide_parser.add_argument("--state", default="")
+    decide_parser.add_argument("--source-branch")
+    decide_parser.add_argument("--competing-hypothesis", action="store_true")
+    decide_parser.add_argument("--contradictory-evidence", action="store_true")
+    decide_parser.add_argument("--protocol-change", action="store_true")
+    decide_parser.add_argument("--independent-replication", action="store_true")
+    decide_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    tree_parser = subparsers.add_parser(
+        "tree",
+        help="Show the payload-free semantic technology tree and open frontier.",
+    )
+    tree_parser.add_argument("--repo", default=".")
+    tree_parser.add_argument("--json", action="store_true", dest="as_json")
+
     fsck_parser = subparsers.add_parser(
         "fsck", help="Verify checkpoints, ARA bindings, pointers, and CAS objects."
     )
@@ -486,6 +528,14 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     merge_parser.add_argument("--subject")
     merge_parser.add_argument("--summary", default="")
     merge_parser.add_argument("--actor")
+    merge_parser.add_argument(
+        "--preserve-conflicts",
+        action="store_true",
+        help=(
+            "preserve opposed evidence and add a rejected hold gate; other conflict "
+            "types remain blocked"
+        ),
+    )
     merge_parser.add_argument("--json", action="store_true", dest="as_json")
 
     log_parser = subparsers.add_parser("log", help="Show scientific history.")
@@ -739,6 +789,54 @@ def main(
             _print_json(payload) if args.as_json else _human_status(payload)
             return 0
 
+        if args.command == "decide":
+            from .research_policy import decide_research_transition
+
+            payload = decide_research_transition(
+                args.repo,
+                event=args.event,
+                name=args.name,
+                state=args.state,
+                source_branch=args.source_branch,
+                competing_hypothesis=args.competing_hypothesis,
+                contradictory_evidence=args.contradictory_evidence,
+                protocol_change=args.protocol_change,
+                independent_replication=args.independent_replication,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Decision: {payload['decision_id']}")
+                print(f"Event:    {payload['event']}")
+                print(f"Branch:   {payload['branch']}")
+                for action in payload["actions"]:
+                    print(f"{action['action']}: {_display_text(action['reason'])}")
+                    for command in action["commands"]:
+                        print(f"  {command}")
+            return 0
+
+        if args.command == "tree":
+            from .research_policy import build_research_technology_tree
+
+            payload = build_research_technology_tree(args.repo)
+            if args.as_json:
+                _print_json(payload)
+            else:
+                counts = payload["counts"]
+                print(
+                    "Technology tree: "
+                    f"{counts['nodes']} objects, {counts['edges']} relations, "
+                    f"{counts['branches']} research lines"
+                )
+                print(f"Integrity:       {payload['integrity']['ok']}")
+                print(f"Open frontier:   {len(payload['frontier'])}")
+                for item in payload["frontier"]:
+                    print(
+                        f"  {item['object_id']} {item['kind']} "
+                        f"[{item['classification']}]"
+                    )
+            return 0 if payload["integrity"]["ok"] else 1
+
         if args.command == "fsck":
             payload = verify_research_repository(
                 args.repo,
@@ -984,6 +1082,7 @@ def main(
                     subject=args.subject,
                     summary=args.summary,
                     actor=args.actor,
+                    preserve_conflicts=args.preserve_conflicts,
                 ).to_dict()
             if args.as_json:
                 _print_json(payload)
@@ -998,6 +1097,8 @@ def main(
                 )
                 print(f"Checkpoint:           {payload['checkpoint_id']}")
                 print(f"Commit:               {payload['commit']}")
+                for object_id in payload.get("resolution_objects", []):
+                    print(f"Contested hold gate:  {object_id}")
             return 0
 
         if args.command == "log":

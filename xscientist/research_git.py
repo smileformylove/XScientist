@@ -168,7 +168,20 @@ SECRET_DENY_PATTERNS = (
 )
 
 MILESTONE_STAGES = frozenset(
-    {"init", "preregister", "experiment", "evidence", "review", "paper", "release"}
+    {
+        "init",
+        "ideation",
+        "planning",
+        "preregister",
+        "experiment",
+        "evidence",
+        "review",
+        "claim",
+        "paper",
+        "evolve",
+        "merge",
+        "release",
+    }
 )
 
 _RESEARCH_GITIGNORE = """# XScientist local research repository
@@ -361,6 +374,7 @@ class ResearchMergeResult:
     commit: str
     checkpoint_id: str
     content_hash: str
+    resolution_objects: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -370,6 +384,7 @@ class ResearchMergeResult:
             "commit": self.commit,
             "checkpoint_id": self.checkpoint_id,
             "content_hash": self.content_hash,
+            "resolution_objects": list(self.resolution_objects),
         }
 
 
@@ -812,6 +827,66 @@ def _refuse_private_research_object(payload: dict[str, Any]) -> None:
         )
 
 
+def _record_research_object_locked(
+    root: Path,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    state: str = "draft",
+    relations: Sequence[dict[str, Any]] = (),
+    actor: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+) -> ResearchObjectResult:
+    try:
+        research_object = build_research_object(
+            kind=kind,
+            payload=payload,
+            state=state,
+            relations=relations,
+            actor=actor,
+            provenance=provenance,
+        )
+    except ResearchObjectError as exc:
+        raise ResearchGitError(str(exc)) from exc
+    _refuse_private_research_object(research_object)
+    target = _research_object_path(root, research_object)
+    if target.exists():
+        try:
+            existing = validate_research_object(
+                json.loads(target.read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
+            raise ResearchGitError(
+                f"existing research object is damaged: {target.relative_to(root)}"
+            ) from exc
+        if existing["content_hash"] != research_object["content_hash"]:
+            raise ResearchGitError(
+                f"research object identifier collision: {research_object['object_id']}"
+            )
+        persisted = existing
+        created = False
+    else:
+        _atomic_write_json(target, research_object)
+        findings = scan_paths(root, [target.relative_to(root)])
+        if findings:
+            target.unlink(missing_ok=True)
+            _fsync_directory(target.parent)
+            raise ResearchGitError(
+                "privacy gate refused the research object; matched values were not displayed:\n"
+                + format_privacy_findings(findings)
+            )
+        persisted = research_object
+        created = True
+    return ResearchObjectResult(
+        created=created,
+        path=target,
+        object_id=str(persisted["object_id"]),
+        object_hash=str(persisted["content_hash"]),
+        kind=str(persisted["kind"]),
+        state=str(persisted["state"]),
+    )
+
+
 def record_research_object(
     repo: str | Path,
     *,
@@ -830,8 +905,9 @@ def record_research_object(
     """
 
     root = _repository_root(repo)
-    try:
-        research_object = build_research_object(
+    with _repository_lock(root):
+        return _record_research_object_locked(
+            root,
             kind=kind,
             payload=payload,
             state=state,
@@ -839,46 +915,6 @@ def record_research_object(
             actor=actor,
             provenance=provenance,
         )
-    except ResearchObjectError as exc:
-        raise ResearchGitError(str(exc)) from exc
-    _refuse_private_research_object(research_object)
-    target = _research_object_path(root, research_object)
-    with _repository_lock(root):
-        if target.exists():
-            try:
-                existing = validate_research_object(
-                    json.loads(target.read_text(encoding="utf-8"))
-                )
-            except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
-                raise ResearchGitError(
-                    f"existing research object is damaged: {target.relative_to(root)}"
-                ) from exc
-            if existing["content_hash"] != research_object["content_hash"]:
-                raise ResearchGitError(
-                    f"research object identifier collision: {research_object['object_id']}"
-                )
-            persisted = existing
-            created = False
-        else:
-            _atomic_write_json(target, research_object)
-            findings = scan_paths(root, [target.relative_to(root)])
-            if findings:
-                target.unlink(missing_ok=True)
-                _fsync_directory(target.parent)
-                raise ResearchGitError(
-                    "privacy gate refused the research object; matched values were not displayed:\n"
-                    + format_privacy_findings(findings)
-                )
-            persisted = research_object
-            created = True
-    return ResearchObjectResult(
-        created=created,
-        path=target,
-        object_id=str(persisted["object_id"]),
-        object_hash=str(persisted["content_hash"]),
-        kind=str(persisted["kind"]),
-        state=str(persisted["state"]),
-    )
 
 
 def load_research_object(repo: str | Path, object_id: str) -> dict[str, Any]:
@@ -2280,6 +2316,25 @@ def _research_objects_at_commit(
     return objects
 
 
+def list_research_objects_at_ref(
+    repo: str | Path,
+    ref: str = "HEAD",
+) -> list[dict[str, Any]]:
+    """List immutable scientific objects at one committed research ref."""
+
+    root = _repository_root(repo)
+    resolved = _run_git(root, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    objects = _research_objects_at_commit(root, resolved.stdout.strip())
+    return [
+        {
+            key: value
+            for key, value in objects[object_id].items()
+            if key != "repository_path"
+        }
+        for object_id in sorted(objects)
+    ]
+
+
 def verify_research_repository(
     repo: str | Path,
     *,
@@ -2890,28 +2945,38 @@ def _semantic_merge_conflicts(
     theirs_new = _new_objects_since(base, theirs)
     conflicts: list[dict[str, Any]] = []
 
-    def relation_types(
+    def relation_objects(
         values: Sequence[dict[str, Any]],
-    ) -> dict[str, set[str]]:
-        result: dict[str, set[str]] = {}
+    ) -> dict[str, dict[str, set[str]]]:
+        result: dict[str, dict[str, set[str]]] = {}
         for payload in values:
             for relation in payload.get("relations") or []:
                 relation_type = str(relation.get("type") or "")
                 if relation_type in {"supports", "refutes"}:
-                    result.setdefault(str(relation.get("target") or ""), set()).add(
-                        relation_type
-                    )
+                    result.setdefault(str(relation.get("target") or ""), {}).setdefault(
+                        relation_type, set()
+                    ).add(str(payload["object_id"]))
         return result
 
-    ours_relations = relation_types(ours_new)
-    theirs_relations = relation_types(theirs_new)
+    ours_relations = relation_objects(ours_new)
+    theirs_relations = relation_objects(theirs_new)
     for target in sorted(set(ours_relations) & set(theirs_relations)):
-        combined = ours_relations[target] | theirs_relations[target]
-        if combined == {"supports", "refutes"}:
+        combined_types = set(ours_relations[target]) | set(theirs_relations[target])
+        if combined_types == {"supports", "refutes"}:
+            supporting = sorted(
+                ours_relations[target].get("supports", set())
+                | theirs_relations[target].get("supports", set())
+            )
+            refuting = sorted(
+                ours_relations[target].get("refutes", set())
+                | theirs_relations[target].get("refutes", set())
+            )
             conflicts.append(
                 {
                     "type": "opposed_evidence",
                     "target": target,
+                    "supporting_evidence": supporting,
+                    "refuting_evidence": refuting,
                     "message": "the same research object is supported and refuted",
                 }
             )
@@ -3047,6 +3112,52 @@ def _stable_evolution_conflicts(
     ]
 
 
+def _decorate_merge_conflicts(
+    conflicts: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    guidance = {
+        "opposed_evidence": [
+            "preserve both evidence objects on a reconciliation research line",
+            "record an independent review and explicit gate decision",
+        ],
+        "locked_preregistration": [
+            "keep incompatible preregistrations as separate confirmatory studies",
+            "record a superseding preregistration before any new experiment runs",
+        ],
+        "metric_definition": [
+            "assign distinct metric identifiers or preregister one common definition",
+        ],
+        "working_state": [
+            "resolve file conflicts on a dedicated reconciliation research line",
+            "checkpoint the resolution before retrying merge preflight",
+        ],
+        "ungated_agent_candidate": [
+            "complete independent evaluation, canary approval, and promotion gate",
+        ],
+    }
+    decorated: list[dict[str, Any]] = []
+    for conflict in conflicts:
+        base = dict(conflict)
+        conflict_type = str(base.get("type") or "unknown")
+        identity = {
+            key: value
+            for key, value in sorted(base.items())
+            if key not in {"message", "resolution", "conflict_id"}
+        }
+        decorated.append(
+            {
+                **base,
+                "conflict_id": "rvc-" + content_hash(identity).split(":", 1)[-1][:16],
+                "severity": "blocking",
+                "resolution": guidance.get(
+                    conflict_type,
+                    ["record an explicit scientific resolution before merging"],
+                ),
+            }
+        )
+    return decorated
+
+
 def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
     """Perform a read-only backend and scientific conflict preflight."""
 
@@ -3105,6 +3216,7 @@ def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
                 "message": "backend merge has unresolved file conflicts",
             }
         )
+    conflicts = _decorate_merge_conflicts(conflicts)
     return {
         "source": normalized,
         "target": _branch(root),
@@ -3127,14 +3239,18 @@ def merge_research_branch(
     subject: str | None = None,
     summary: str = "",
     actor: str | None = None,
+    preserve_conflicts: bool = False,
 ) -> ResearchMergeResult:
-    """Merge a conflict-free research line and retain both scientific parents."""
+    """Merge a clean line, or explicitly retain opposed evidence under a hold gate."""
 
     root = _repository_root(repo)
     with _repository_lock(root):
         _require_clean_research_switch(root)
         preview = preview_research_merge(root, source)
-        if not preview["clean"]:
+        preservable = all(
+            item.get("type") == "opposed_evidence" for item in preview["conflicts"]
+        )
+        if not preview["clean"] and not (preserve_conflicts and preservable):
             conflict_types = ", ".join(
                 sorted({str(item["type"]) for item in preview["conflicts"]})
             )
@@ -3151,7 +3267,45 @@ def merge_research_branch(
             raise ResearchGitError(
                 "research merge backend failed after clean preflight"
             )
+        resolution_objects: list[str] = []
+        resolution_paths: list[Path] = []
         try:
+            if preview["conflicts"]:
+                for conflict in preview["conflicts"]:
+                    evaluated = list(
+                        dict.fromkeys(
+                            [
+                                str(conflict["target"]),
+                                *conflict.get("supporting_evidence", []),
+                                *conflict.get("refuting_evidence", []),
+                            ]
+                        )
+                    )
+                    resolution = _record_research_object_locked(
+                        root,
+                        kind="gate_decision",
+                        payload={
+                            "decision": "hold",
+                            "claim_promotion_allowed": False,
+                            "required_failures": [
+                                "opposed evidence requires independent reconciliation"
+                            ],
+                            "merge_conflict_id": conflict["conflict_id"],
+                            "resolution": "preserve_as_contested",
+                        },
+                        state="rejected",
+                        relations=[
+                            {"type": "evaluates", "target": object_id}
+                            for object_id in evaluated
+                        ],
+                        actor={
+                            "actor_id": "research-conflict-gate",
+                            "authority": "deterministic_gate",
+                        },
+                    )
+                    resolution_objects.append(resolution.object_id)
+                    if resolution.created:
+                        resolution_paths.append(resolution.path)
             checkpoint = _create_checkpoint_locked(
                 root,
                 stage="merge",
@@ -3164,6 +3318,9 @@ def merge_research_branch(
             )
         except BaseException:
             _run_git(root, ["merge", "--abort"], check=False)
+            for path in resolution_paths:
+                path.unlink(missing_ok=True)
+                _fsync_directory(path.parent)
             raise
         if not checkpoint.committed or not checkpoint.commit:
             _run_git(root, ["merge", "--abort"], check=False)
@@ -3175,6 +3332,7 @@ def merge_research_branch(
             commit=checkpoint.commit,
             checkpoint_id=str(checkpoint.checkpoint_id),
             content_hash=str(checkpoint.content_hash),
+            resolution_objects=tuple(resolution_objects),
         )
 
 
@@ -3840,6 +3998,7 @@ __all__ = [
     "load_repository_config",
     "load_research_object",
     "list_research_objects",
+    "list_research_objects_at_ref",
     "list_research_branches",
     "list_research_tags",
     "merge_research_branch",

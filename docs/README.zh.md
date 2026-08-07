@@ -128,6 +128,9 @@ flowchart LR
 ## 公共接口
 
 - `xscientist`：PyPI wheel 与源码 checkout 都可直接使用的统一 CLI
+- `xscientist setup`：一次完成工作区、Provider 与就绪诊断
+- `xscientist doctor`：统一检查能力、Provider、登录、Research VCS 与运行环境
+- `xscientist capability`：按科研任务解析缺失模块并给出精确安装命令
 - `xscientist init`：面向已安装包的工作区与快速配置脚手架
 - `xscientist provider`：安全添加、检查和切换模型供应商
 - `xscientist research`：原生科研版本控制与离线备份
@@ -136,7 +139,9 @@ flowchart LR
 
 | 使用场景 | 推荐接口 |
 |---|---|
-| 创建已配置的科研工作区 | `xscientist init` |
+| 创建已配置的科研工作区 | `xscientist setup` |
+| 检查具体科研任务是否就绪 | `xscientist doctor` |
+| 按任务解析可选能力 | `xscientist capability` |
 | 添加或切换模型供应商 | `xscientist provider` |
 | 单项目端到端运行 | `xscientist project` |
 | 批量生成论文 | `xscientist batch` |
@@ -255,27 +260,34 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 无需 clone 仓库，直接生成一个自包含的起步工作区：
 
 ```bash
-xscientist init my-research
+xscientist setup my-research --task research
 cd my-research
-xscientist provider add zhipu
-xscientist provider list
+xscientist doctor --task research
 ```
 
 `provider add` 会隐藏输入缺失的密钥，并将其写入 Git 忽略、仅当前用户可读写的
 `.env`。供应商元数据只保存模型 ID 和环境变量名，不保存密钥。激活的模型会自动
 应用到构思、绘图、写作、引用、审稿和 BFTS；显式传入的分角色模型参数仍优先。
 
-脚手架还包含科研问题模板、`.env.example`、随 wheel 分发的 BFTS 配置，以及
-固定到当前 XScientist 版本的隔离执行 Dockerfile。它不会在 `init` 时写入 API
-Key；除非显式使用 `--force`，也不会覆盖已有文件。使用 `xscientist init
---help` 可选择其他 provider、model 或 deep profile。例如：
+`setup` 会复用已有环境变量，只对缺失的必要字段进行隐藏输入；它不会擅自安装
+依赖，而是由能力解析器给出当前任务唯一、精确的安装命令。使用
+`--skip-credentials` 可只生成元数据，自动化环境可用 `--non-interactive`。
+`xscientist init` 继续作为只生成脚手架的兼容命令。工作区还包含科研问题模板、
+`.env.example`、随 wheel 分发的 BFTS 配置和隔离执行 Dockerfile。例如：
 
 ```bash
-xscientist init my-openai-study \
+xscientist setup my-openai-study --task paper \
   --provider openai \
   --model "openai/your-model-id"
 cd my-openai-study
-xscientist provider add openai
+xscientist doctor --task paper --deep
+```
+
+只检查能力、不改变环境：
+
+```bash
+xscientist capability list
+xscientist capability check ml-study --provider openai
 ```
 
 ### 2) 配置 API Key（按需）
@@ -539,6 +551,11 @@ xscientist research review \
   "独立复验和数据泄漏检查均通过" \
   --evaluates <证据对象ID> --verifier independent-reviewer \
   --decision pass
+
+# 在改变历史前先获得可解释、只读的 checkpoint / fork / merge 建议
+xscientist research decide contradiction \
+  --name alternate-mechanism --contradictory-evidence
+xscientist research tree
 ```
 
 这些高层命令默认自动完成记录、精确选择和 checkpoint；失败与超时实验同样进入
@@ -594,6 +611,9 @@ xscientist project my_project \
 并通过 schema 强制 `auto_push: false`；它排除密钥和大文件，验证对象、关系与
 checkpoint 哈希，保存失败和负面结果，并阻止未通过门禁的结论与智能体候选进入
 稳定线。`xscientist research reproduce` 可以物化指定科研 checkpoint。
+对立证据默认阻止合并；只有显式使用 `--preserve-conflicts` 时才会同时保留两侧，
+并自动写入 rejected/hold 门禁，保证争议结论不会被误晋级。科技树输出只包含对象
+标识、哈希、关系、复线和开放前沿，不显示科研对象正文。
 完整说明见 [`docs/LOCAL_RESEARCH_GIT.md`](LOCAL_RESEARCH_GIT.md)。
 
 ---

@@ -53,6 +53,16 @@ _PROVIDER_CHOICES = [
     "vertex_ai",
 ]
 
+_TASK_CHOICES = [
+    "protocol",
+    "manage",
+    "research",
+    "paper",
+    "pdf-review",
+    "ml-study",
+    "service",
+]
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -128,6 +138,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replace only files managed by this command",
     )
     init_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    for name, help_text in (
+        ("setup", "Create, configure, and diagnose a first research workspace."),
+        (
+            "doctor",
+            "Check workspace, Research VCS, provider, auth, and task capabilities.",
+        ),
+        ("capability", "Resolve optional modules for a concrete research task."),
+    ):
+        subparser = subparsers.add_parser(name, help=help_text, add_help=False)
+        subparser.add_argument("args", nargs=argparse.REMAINDER)
 
     provider_parser = subparsers.add_parser(
         "provider",
@@ -215,6 +236,84 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_setup_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xscientist setup",
+        description="Create, configure, and diagnose a first research workspace.",
+    )
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="workspace directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--task",
+        choices=_TASK_CHOICES,
+        default="research",
+        help="research intent used to resolve optional capabilities",
+    )
+    parser.add_argument("--profile", choices=["default", "deep"], default="default")
+    parser.add_argument("--provider", choices=_PROVIDER_CHOICES, default="zhipu")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--skip-credentials",
+        action="store_true",
+        help="create metadata but do not prompt for or write provider credentials",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; reuse existing environment or local env values only",
+    )
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="also probe the Docker daemon and exact experiment image",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _build_doctor_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xscientist doctor",
+        description=(
+            "Check workspace, Research VCS, provider, auth, and task capabilities."
+        ),
+    )
+    parser.add_argument("--workspace", default=None)
+    parser.add_argument("--task", choices=_TASK_CHOICES, default="research")
+    parser.add_argument("--provider", choices=_PROVIDER_CHOICES, default=None)
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="also probe the configured models, Docker daemon, and exact image",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _build_capability_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xscientist capability",
+        description="Resolve optional modules for a concrete research task.",
+    )
+    subparsers = parser.add_subparsers(dest="capability_command", required=True)
+    list_parser = subparsers.add_parser(
+        "list", help="List supported tasks and composable capabilities."
+    )
+    list_parser.add_argument("--json", action="store_true", dest="as_json")
+    check_parser = subparsers.add_parser(
+        "check", help="Probe requirements for one research task."
+    )
+    check_parser.add_argument("task", choices=_TASK_CHOICES)
+    check_parser.add_argument("--provider", choices=_PROVIDER_CHOICES, default=None)
+    check_parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
 def _load_json_file(path: str) -> object:
     with open(Path(path).expanduser().resolve(), "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -278,7 +377,7 @@ def _installation_info() -> dict[str, object]:
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
-        "quickstart": "xscientist init my-research",
+        "quickstart": "xscientist setup my-research --task research",
         "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
@@ -313,7 +412,15 @@ def _bootstrap_workspace_environment() -> dict[str, object]:
         return {"loaded": False, "error": str(exc)}
 
 
-def _run_provider(parsed: argparse.Namespace) -> int:
+def _configure_provider(
+    workspace: Path,
+    *,
+    name: str,
+    model_value: str | None = None,
+    activate: bool = True,
+    update_bfts: bool = True,
+    non_interactive: bool = False,
+) -> dict[str, object]:
     import getpass
     import os
 
@@ -322,18 +429,98 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         DEFAULT_MODELS,
         PROVIDER_FIELDS,
         ProviderConfigError,
-        activate_provider,
         configured_field_value,
-        discover_workspace_root,
         load_provider_config,
         provider_statuses,
         read_env_file,
-        remove_provider,
         resolve_env_file,
         save_provider,
         update_bfts_models,
         update_env_file,
         validate_provider_model,
+    )
+
+    config = load_provider_config(workspace, missing_ok=False)
+    existing = config.get("providers", {}).get(name, {})
+    existing_model = (
+        str(existing.get("model") or "") if isinstance(existing, dict) else ""
+    )
+    model = model_value or existing_model or DEFAULT_MODELS.get(name)
+    if not model:
+        if non_interactive or not sys.stdin.isatty():
+            raise ProviderConfigError(
+                f"--model is required for provider {name!r} in non-interactive mode"
+            )
+        model = input(f"Model ID for {name}: ").strip()
+    provider, model = validate_provider_model(name, model)
+    env_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
+    env_path = resolve_env_file(workspace, env_name)
+    stored = read_env_file(env_path)
+    updates: dict[str, str] = {}
+    for field in PROVIDER_FIELDS[provider]:
+        current = configured_field_value(field, stored, os.environ)
+        if current:
+            continue
+        if field.default is not None:
+            updates[field.name] = field.default
+            continue
+        if not field.required:
+            continue
+        if non_interactive or not sys.stdin.isatty():
+            raise ProviderConfigError(
+                f"missing {field.name}; set it in the environment or rerun interactively"
+            )
+        prompt = f"{field.name}: "
+        value = getpass.getpass(prompt) if field.secret else input(prompt)
+        value = value.strip()
+        if not value:
+            raise ProviderConfigError(f"{field.name} is required")
+        updates[field.name] = value
+    if updates or env_path.is_file():
+        update_env_file(env_path, updates)
+    saved = save_provider(
+        workspace,
+        provider=provider,
+        model=model,
+        env_file=env_name,
+        activate=activate,
+    )
+    bfts_updated = False
+    if update_bfts and saved.get("active_provider") == provider:
+        bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
+    payload: dict[str, object] = {
+        "ok": True,
+        "workspace": ".",
+        "provider": provider,
+        "model": model,
+        "active": saved.get("active_provider") == provider,
+        "env_file": env_path.relative_to(workspace).as_posix(),
+        "credentials_written": sorted(updates),
+        "bfts_updated": bfts_updated,
+    }
+    status = next(
+        row for row in provider_statuses(workspace) if row["provider"] == provider
+    )
+    payload.update(
+        {
+            "client_available": status["client_available"],
+            "missing_client_modules": status["missing_client_modules"],
+            "ready": status["ready"],
+            "install_command": status["install_command"],
+        }
+    )
+    return payload
+
+
+def _run_provider(parsed: argparse.Namespace) -> int:
+    from .provider_config import (
+        ProviderConfigError,
+        activate_provider,
+        discover_workspace_root,
+        load_provider_config,
+        provider_statuses,
+        remove_provider,
+        update_bfts_models,
     )
 
     try:
@@ -423,89 +610,25 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"BFTS config updated: {bfts_updated}")
             return 0
 
-        config = load_provider_config(workspace, missing_ok=False)
-        existing = config.get("providers", {}).get(parsed.name, {})
-        existing_model = (
-            str(existing.get("model") or "") if isinstance(existing, dict) else ""
-        )
-        model = parsed.model or existing_model or DEFAULT_MODELS.get(parsed.name)
-        if not model:
-            if parsed.non_interactive or not sys.stdin.isatty():
-                raise ProviderConfigError(
-                    f"--model is required for provider {parsed.name!r} in non-interactive mode"
-                )
-            model = input(f"Model ID for {parsed.name}: ").strip()
-        provider, model = validate_provider_model(parsed.name, model)
-        env_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
-        env_path = resolve_env_file(workspace, env_name)
-        stored = read_env_file(env_path)
-        updates: dict[str, str] = {}
-        for field in PROVIDER_FIELDS[provider]:
-            current = configured_field_value(field, stored, os.environ)
-            if current:
-                continue
-            if field.default is not None:
-                updates[field.name] = field.default
-                continue
-            if not field.required:
-                continue
-            if parsed.non_interactive or not sys.stdin.isatty():
-                raise ProviderConfigError(
-                    f"missing {field.name}; set it in the environment or rerun interactively"
-                )
-            prompt = f"{field.name}: "
-            value = getpass.getpass(prompt) if field.secret else input(prompt)
-            value = value.strip()
-            if not value:
-                raise ProviderConfigError(f"{field.name} is required")
-            updates[field.name] = value
-        if updates or env_path.is_file():
-            update_env_file(env_path, updates)
-        saved = save_provider(
+        payload = _configure_provider(
             workspace,
-            provider=provider,
-            model=model,
-            env_file=env_name,
+            name=parsed.name,
+            model_value=parsed.model,
             activate=not parsed.no_activate,
-        )
-        bfts_updated = False
-        if not parsed.no_update_bfts and saved.get("active_provider") == provider:
-            bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
-        payload = {
-            "ok": True,
-            "workspace": ".",
-            "provider": provider,
-            "model": model,
-            "active": saved.get("active_provider") == provider,
-            "env_file": env_path.relative_to(workspace).as_posix(),
-            "credentials_written": sorted(updates),
-            "bfts_updated": bfts_updated,
-        }
-        status = next(
-            row for row in provider_statuses(workspace) if row["provider"] == provider
-        )
-        payload.update(
-            {
-                "client_available": status["client_available"],
-                "missing_client_modules": status["missing_client_modules"],
-                "ready": status["ready"],
-                "install_command": status["install_command"],
-            }
+            update_bfts=not parsed.no_update_bfts,
+            non_interactive=parsed.non_interactive,
         )
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
-            print(f"Configured provider: {provider}")
-            print(f"Default model: {model}")
-            if updates:
-                print(
-                    "Credentials saved securely to: "
-                    f"{env_path.relative_to(workspace).as_posix()}"
-                )
+            print(f"Configured provider: {payload['provider']}")
+            print(f"Default model: {payload['model']}")
+            if payload["credentials_written"]:
+                print("Credentials saved securely to: " f"{payload['env_file']}")
             else:
                 print("Credentials: using existing environment or local env file")
             print(f"Active: {payload['active']}")
-            print(f"BFTS config updated: {bfts_updated}")
+            print(f"BFTS config updated: {payload['bfts_updated']}")
             if not payload["client_available"]:
                 print(
                     "Provider client missing: "
@@ -597,11 +720,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     workspace_state = (
         {"loaded": False}
-        if raw_argv and raw_argv[0] in {"provider", "init"}
+        if raw_argv
+        and raw_argv[0] in {"provider", "init", "setup", "doctor", "capability"}
         else _bootstrap_workspace_environment()
     )
     if workspace_state.get("error") and (
-        not raw_argv or raw_argv[0] not in {"provider", "info", "init"}
+        not raw_argv
+        or raw_argv[0]
+        not in {"provider", "info", "init", "setup", "doctor", "capability"}
     ):
         print(
             f"XScientist workspace configuration error: {workspace_state['error']}",
@@ -609,8 +735,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    parser = _build_parser()
-    parsed = parser.parse_args(raw_argv)
+    lazy_parser_builders = {
+        "setup": _build_setup_parser,
+        "doctor": _build_doctor_parser,
+        "capability": _build_capability_parser,
+    }
+    lazy_builder = lazy_parser_builders.get(raw_argv[0]) if raw_argv else None
+    if lazy_builder is not None:
+        parsed = lazy_builder().parse_args(raw_argv[1:])
+        parsed.command = raw_argv[0]
+    else:
+        parser = _build_parser()
+        parsed = parser.parse_args(raw_argv)
     if parsed.command == "serve":
         from .service import run_server
 
@@ -662,6 +798,173 @@ def main(argv: Sequence[str] | None = None) -> int:
             for index, step in enumerate(payload["next_steps"], start=1):
                 print(f"  {index}. {step}")
         return 0
+    if parsed.command == "setup":
+        from .diagnostics import diagnose
+        from .dependency_profiles import TASK_PROFILES
+        from .onboarding import WorkspaceInitError, create_workspace
+        from .provider_config import DEFAULT_MODELS, ProviderConfigError
+
+        try:
+            selected_model = parsed.model
+            task_profile = TASK_PROFILES[parsed.task]
+            if not selected_model and not DEFAULT_MODELS.get(parsed.provider):
+                if parsed.non_interactive or not sys.stdin.isatty():
+                    raise ProviderConfigError(
+                        f"--model is required for provider {parsed.provider!r} "
+                        "in non-interactive mode"
+                    )
+                selected_model = input(f"Model ID for {parsed.provider}: ").strip()
+                if not selected_model:
+                    raise ProviderConfigError("model ID is required")
+            onboarding = create_workspace(
+                parsed.directory,
+                profile=parsed.profile,
+                provider=parsed.provider,
+                model=selected_model,
+                force=parsed.force,
+                task=parsed.task,
+                capabilities=task_profile["capabilities"],
+                provider_required=bool(task_profile["provider_required"]),
+            )
+            workspace = Path(parsed.directory).expanduser().resolve()
+            provider_setup: dict[str, object] = {
+                "ok": False,
+                "skipped": True,
+                "reason": "credentials explicitly skipped",
+            }
+            if not parsed.skip_credentials and task_profile["provider_required"]:
+                try:
+                    provider_setup = _configure_provider(
+                        workspace,
+                        name=parsed.provider,
+                        model_value=selected_model,
+                        non_interactive=parsed.non_interactive,
+                    )
+                except ProviderConfigError as exc:
+                    provider_setup = {
+                        "ok": False,
+                        "skipped": True,
+                        "reason": str(exc),
+                    }
+            elif not task_profile["provider_required"]:
+                provider_setup = {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "provider is not required for the selected task",
+                }
+            report = diagnose(
+                workspace,
+                task=parsed.task,
+                provider=(
+                    parsed.provider if task_profile["provider_required"] else None
+                ),
+                deep=parsed.deep,
+            )
+        except (OSError, WorkspaceInitError, ProviderConfigError, ValueError) as exc:
+            if parsed.as_json:
+                print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+            else:
+                print(f"xscientist setup: {exc}", file=sys.stderr)
+            return 2
+        payload = {
+            "ok": report["ok"],
+            "workspace_created": True,
+            "workspace": onboarding["workspace"],
+            "task": parsed.task,
+            "provider_configuration": provider_setup,
+            "doctor": report,
+            "next_actions": report["next_actions"],
+            "host_paths_disclosed": False,
+        }
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Created XScientist workspace: {payload['workspace']}")
+            print(f"Task profile: {parsed.task}")
+            print(f"Configuration ready: {report['configuration_ready']}")
+            print(f"Runtime ready: {report['runtime_ready']}")
+            if provider_setup.get("reason"):
+                print(f"Provider setup: {provider_setup['reason']}")
+            if payload["next_actions"]:
+                print("Next actions:")
+                for index, action in enumerate(payload["next_actions"], start=1):
+                    print(f"  {index}. {action}")
+        return 0
+    if parsed.command == "doctor":
+        from .diagnostics import diagnose
+        from .provider_config import ProviderConfigError
+
+        try:
+            payload = diagnose(
+                parsed.workspace,
+                task=parsed.task,
+                provider=parsed.provider,
+                deep=parsed.deep,
+            )
+        except (OSError, ProviderConfigError, ValueError) as exc:
+            print(f"xscientist doctor: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"XScientist configuration ready for {payload['task']}: "
+                f"{payload['configuration_ready']}"
+            )
+            print(f"Deep runtime ready: {payload['runtime_ready']}")
+            for name, check in payload["checks"].items():
+                print(f"{name:<14} {check['ok']}")
+            if payload["next_actions"]:
+                print("Next actions:")
+                for action in payload["next_actions"]:
+                    print(f"  {action}")
+        return 0 if payload["ok"] else 1
+    if parsed.command == "capability":
+        from .dependency_profiles import (
+            CAPABILITY_MODULES,
+            TASK_PROFILES,
+            resolve_task_capabilities,
+        )
+
+        if parsed.capability_command == "list":
+            payload = {
+                "schema": "xscientist.capability-catalog.v1",
+                "tasks": {
+                    name: {
+                        "description": profile["description"],
+                        "capabilities": list(profile["capabilities"]),
+                        "provider_required": profile["provider_required"],
+                        "auth_required": profile["auth_required"],
+                        "runtime_preflight": profile["runtime_preflight"],
+                    }
+                    for name, profile in TASK_PROFILES.items()
+                },
+                "capabilities": {
+                    name: {"extra": name, "modules": list(modules)}
+                    for name, modules in CAPABILITY_MODULES.items()
+                },
+            }
+        else:
+            payload = resolve_task_capabilities(
+                parsed.task,
+                provider=parsed.provider,
+            )
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif parsed.capability_command == "list":
+            for name, profile in payload["tasks"].items():
+                capabilities = ", ".join(profile["capabilities"]) or "core"
+                provider = " + provider" if profile["provider_required"] else ""
+                print(f"{name:<12} {capabilities}{provider}")
+        else:
+            print(f"Task: {payload['task']}")
+            print(f"Ready: {payload['ready']}")
+            if payload["missing_modules"]:
+                print("Missing modules: " + ", ".join(payload["missing_modules"]))
+                print("Install: " + payload["install_command"])
+            elif payload["provider_required"] and not payload["provider"]:
+                print("Select a provider with --provider.")
+        return 0 if parsed.capability_command == "list" or payload["ready"] else 1
     if parsed.command == "provider":
         return _run_provider(parsed)
     if parsed.command == "privacy":

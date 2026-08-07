@@ -173,9 +173,11 @@ xscientist project my_project \
 
 Research VCS is enabled by default; use `--research-vcs off` only for an
 explicitly history-free run. The project directory gets a local adapter. The
-`milestone` policy records initialization, experiment outcomes, and final
-paper/shortlist state. `stage` additionally records ideation. `manual` creates
-only the initialization commit; later checkpoints are operator-controlled.
+`milestone` records initialization, ideation/planning, preregistration,
+experiment outcomes, evidence/review/claim transitions, paper state,
+self-evolution, merges, and releases. `stage` checkpoints every requested
+stage. `manual` creates only the initialization commit; later checkpoints are
+operator-controlled.
 
 Use `--research-vcs-strict` when checkpoint failure must fail the research
 command. Without it, expensive research outputs are preserved and adapter errors
@@ -192,6 +194,9 @@ xscientist research branch challenge/graph-rag
 xscientist research switch challenge/graph-rag
 xscientist research merge hypothesis/retrieval-reflection --preview
 xscientist research merge hypothesis/retrieval-reflection
+xscientist research decide contradiction \
+  --name alternate-mechanism --contradictory-evidence
+xscientist research tree
 xscientist research blame <research-object-id>
 ```
 
@@ -205,7 +210,20 @@ files and this attempt's staged entries, preserving user research files.
 The native merge preflight blocks file conflicts, opposing support/refutation,
 incompatible locked preregistrations, differing metric definitions, and
 ungated agent candidates entering `main`/`stable`. A successful merge retains
-both scientific parents.
+both scientific parents. Every conflict has a stable ID and resolution guidance.
+Opposing evidence alone may be explicitly retained with
+`--preserve-conflicts`; this writes a rejected deterministic `hold` gate that
+binds the target and both evidence sets. All other conflict classes remain
+blocked. No side is overwritten and no contested claim is promoted.
+
+`research decide` is the read-only policy boundary used by autonomous agents:
+it recommends checkpoints for material terminal/milestone state, forks for an
+independent hypothesis, incompatible method, contradictory interpretation,
+replication, or agent candidate, and merges only after a clean preflight. Its
+stable decision ID, inputs, reasons, and commands form the decision trace.
+`research tree` derives a payload-free long-term technology tree from immutable
+objects and relations, including open/contested frontier nodes, branch heads,
+topological order, cycles, and missing relation targets.
 
 ## Optional Git interoperability
 

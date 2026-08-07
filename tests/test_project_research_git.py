@@ -37,7 +37,7 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
             git_user_email="research@example.invalid",
         )
 
-    def test_milestone_policy_records_experiment_but_not_ideation(self) -> None:
+    def test_milestone_policy_records_ideation_and_experiment(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             root = base / "project"
@@ -70,8 +70,10 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
                 (entry["trailers"].get("Research-Stage") or [None])[0]
                 for entry in research_log(root)
             ]
-            self.assertEqual(stages, ["experiment", "init"])
-            self.assertTrue(ideas.exists(), "skipped ideation output must be preserved")
+            self.assertEqual(stages, ["experiment", "ideation", "init"])
+            self.assertTrue(
+                ideas.exists(), "checkpointed ideation output must be preserved"
+            )
 
     def test_stage_policy_records_ideation(self) -> None:
         with tempfile.TemporaryDirectory() as td:

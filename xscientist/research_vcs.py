@@ -198,6 +198,37 @@ class ResearchRepository:
     def merge_preview(self, source: str) -> dict[str, Any]:
         return preview_research_merge(self.path, source)
 
+    def decide(
+        self,
+        *,
+        event: str,
+        name: str = "",
+        state: str = "",
+        source_branch: str | None = None,
+        competing_hypothesis: bool = False,
+        contradictory_evidence: bool = False,
+        protocol_change: bool = False,
+        independent_replication: bool = False,
+    ) -> dict[str, Any]:
+        from .research_policy import decide_research_transition
+
+        return decide_research_transition(
+            self.path,
+            event=event,
+            name=name,
+            state=state,
+            source_branch=source_branch,
+            competing_hypothesis=competing_hypothesis,
+            contradictory_evidence=contradictory_evidence,
+            protocol_change=protocol_change,
+            independent_replication=independent_replication,
+        )
+
+    def technology_tree(self) -> dict[str, Any]:
+        from .research_policy import build_research_technology_tree
+
+        return build_research_technology_tree(self.path)
+
     def merge(
         self,
         source: str,
@@ -205,6 +236,7 @@ class ResearchRepository:
         subject: str | None = None,
         summary: str = "",
         actor: str | None = None,
+        preserve_conflicts: bool = False,
     ) -> ResearchMergeResult:
         return merge_research_branch(
             self.path,
@@ -212,6 +244,7 @@ class ResearchRepository:
             subject=subject,
             summary=summary,
             actor=actor,
+            preserve_conflicts=preserve_conflicts,
         )
 
     def fsck(
