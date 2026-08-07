@@ -205,6 +205,15 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(printer.call_args.args[0])
         self.assertEqual(payload["name"], "xscientist")
+        self.assertIn(
+            payload["installation_profile"],
+            {"core", "core+service", "full", "full+service"},
+        )
+        self.assertIsInstance(payload["research_runtime_ready"], bool)
+        self.assertIsInstance(payload["service_ready"], bool)
+        self.assertIsInstance(payload["missing_research_packages"], list)
+        self.assertTrue(Path(payload["output_root"]).is_absolute())
+        self.assertEqual(payload["quickstart"], "xscientist init my-research")
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
         project = mock.Mock(return_value=0)

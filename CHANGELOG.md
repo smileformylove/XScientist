@@ -22,6 +22,8 @@ for its Python package; the ARA protocol has its own version in
   Dockerfiles, packaged BFTS profiles, and overwrite protection.
 - Config-aware preflight checks for the selected models, credentials, client
   packages, Docker daemon, and exact isolated-executor image.
+- Read-only `xscientist info` installation profiles covering runtime/service
+  readiness, missing packages, output resolution, and local login status.
 
 ### Fixed
 

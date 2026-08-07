@@ -142,6 +142,51 @@ def _load_json_file(path: str) -> object:
         return json.load(handle)
 
 
+def _installation_info() -> dict[str, object]:
+    import importlib.util
+
+    from ai_scientist.apps.preflight import CORE_PACKAGES
+    from ai_scientist.config.paths import resolve_output_path
+    from ai_scientist.utils.auth_session import validate_session
+
+    runtime_modules = sorted(CORE_PACKAGES)
+    service_modules = ["fastapi", "pydantic", "uvicorn"]
+    missing_runtime = [
+        name for name in runtime_modules if importlib.util.find_spec(name) is None
+    ]
+    missing_service = [
+        name for name in service_modules if importlib.util.find_spec(name) is None
+    ]
+    runtime_ready = not missing_runtime
+    service_ready = not missing_service
+    if runtime_ready and service_ready:
+        profile = "full+service"
+    elif runtime_ready:
+        profile = "full"
+    elif service_ready:
+        profile = "core+service"
+    else:
+        profile = "core"
+    authenticated, auth_status, _session = validate_session()
+    return {
+        "name": "xscientist",
+        "version": __version__,
+        "installation_profile": profile,
+        "research_runtime_ready": runtime_ready,
+        "service_ready": service_ready,
+        "missing_research_packages": missing_runtime,
+        "missing_service_packages": missing_service,
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "output_root": str(resolve_output_path()),
+        "authenticated": authenticated,
+        "auth_status": auth_status,
+        "python_api": "from xscientist import XScientist, ProjectRequest",
+        "http_factory": "from xscientist import create_app",
+        "quickstart": "xscientist init my-research",
+    }
+
+
 def _run_evolution_gate(parsed: argparse.Namespace) -> int:
     from ai_scientist.utils.evolution_gate import (
         approve_production_promotion,
@@ -236,12 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if parsed.command == "info":
-        payload = {
-            "name": "xscientist",
-            "version": __version__,
-            "python_api": "from xscientist import XScientist, ProjectRequest",
-            "http_factory": "from xscientist import create_app",
-        }
+        payload = _installation_info()
         if parsed.as_json:
             print(json.dumps(payload, indent=2))
         else:
