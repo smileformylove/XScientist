@@ -17,6 +17,14 @@ for its Python package; the ARA protocol has its own version in
   bundle restore, branch-aware multi-parent checkpoints, repository mutation
   locks, failure-safe checkpoint transactions, environment receipts, strict
   reproduction compatibility checks, and structured scientific diffs.
+- Installed-package-first `xscientist init` workspaces with provider/model
+  validation, secret-free environment templates, pinned isolated-executor
+  Dockerfiles, packaged BFTS profiles, and overwrite protection.
+
+### Fixed
+
+- `xscientist project --help` and `xscientist batch --help` now work from the
+  lightweight core install without importing optional scientific dependencies.
 
 ## [0.1.0] - 2026-08-06
 

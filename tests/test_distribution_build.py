@@ -93,6 +93,7 @@ class DistributionBuildTests(unittest.TestCase):
             required = {
                 "xscientist/__init__.py",
                 "xscientist/cli.py",
+                "xscientist/onboarding.py",
                 "xscientist/service.py",
                 "xscientist/service_jobs.py",
                 "xscientist/research_git.py",

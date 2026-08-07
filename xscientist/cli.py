@@ -78,6 +78,51 @@ def _build_parser() -> argparse.ArgumentParser:
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Create a ready-to-configure research workspace.",
+    )
+    init_parser.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="workspace directory (default: current directory)",
+    )
+    init_parser.add_argument(
+        "--profile",
+        choices=["default", "deep"],
+        default="default",
+        help="packaged BFTS profile to copy",
+    )
+    init_parser.add_argument(
+        "--provider",
+        choices=[
+            "zhipu",
+            "openai",
+            "anthropic",
+            "deepseek",
+            "gemini",
+            "openrouter",
+            "huggingface",
+            "ollama",
+            "openai_compat",
+            "bedrock",
+            "vertex_ai",
+        ],
+        default="zhipu",
+        help="credential template and model provider",
+    )
+    init_parser.add_argument(
+        "--model",
+        default=None,
+        help="provider-compatible model ID (required except for the Zhipu default)",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only files managed by this command",
+    )
+    init_parser.add_argument("--json", action="store_true", dest="as_json")
     evolution_parser = subparsers.add_parser(
         "evolution-gate",
         help="Evaluate a shadow self-evolution candidate against hidden benchmarks.",
@@ -202,6 +247,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             for key, value in payload.items():
                 print(f"{key}: {value}")
+        return 0
+    if parsed.command == "init":
+        from .onboarding import WorkspaceInitError, create_workspace
+
+        try:
+            payload = create_workspace(
+                parsed.directory,
+                profile=parsed.profile,
+                provider=parsed.provider,
+                model=parsed.model,
+                force=parsed.force,
+            )
+        except (OSError, WorkspaceInitError) as exc:
+            if parsed.as_json:
+                print(
+                    json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"xscientist init: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Created XScientist workspace: {payload['workspace']}")
+            print("No secrets were written.")
+            print("Next steps:")
+            for index, step in enumerate(payload["next_steps"], start=1):
+                print(f"  {index}. {step}")
         return 0
     if parsed.command == "evolution-gate":
         return _run_evolution_gate(parsed)

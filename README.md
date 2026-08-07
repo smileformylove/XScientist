@@ -110,13 +110,15 @@ flowchart LR
 
 ## Public Interfaces
 
-- `xscientist`: unified CLI available after a GitHub or source installation
+- `xscientist`: unified CLI available from the PyPI wheel or a source checkout
+- `xscientist init`: installed-package-first workspace and configuration scaffold
 - `xscientist research`: serverless local scientific Git history and offline backup
 - `from xscientist import XScientist, ProjectRequest`: stable Python SDK
 - `from xscientist import create_app`: optional FastAPI application factory
 
 | Use case | Recommended interface |
 |---|---|
+| Create a configured workspace | `xscientist init` |
 | Run one project | `xscientist project` |
 | Batch paper generation | `xscientist batch` |
 | Long-running research | `xscientist daemon` |
@@ -223,12 +225,25 @@ xscientist --help
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 
+Create a self-contained starter workspace without cloning this repository:
+
+```bash
+xscientist init my-research
+cd my-research
+```
+
+The scaffold contains a research-question template, `.env.example`, a packaged
+BFTS profile, and a Dockerfile pinned to the installed XScientist version. It
+does not write API keys, does not overwrite existing files unless `--force` is
+explicitly passed, and keeps AI-generated experiment code isolated by default.
+Use `xscientist init --help` to select another provider, model, or deep profile.
+
 ### 2) Configure API keys (as needed)
 
 Set the env vars for your provider(s) (you do not need all of them):
 
 ```bash
-# Source checkout only; installed users can set the variables directly.
+# Source checkout only. PyPI users can use the template from `xscientist init`.
 cp configs/environment/example.env .env
 # Edit .env, then export/source the values for your shell or process manager.
 
