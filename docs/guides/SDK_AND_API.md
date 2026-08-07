@@ -12,16 +12,22 @@ be installed from the branch that contains them until the next release:
 
 ```bash
 pip install xscientist
-pip install "xscientist[full]"
-pip install "xscientist[full,service]"
+pip install "xscientist[research,openai]"
+pip install "xscientist[research,openai,service]"
 
 pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
-pip install "xscientist[full] @ git+https://github.com/smileformylove/XScientist.git@main"
-pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[research,openai,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 
 # From a local clone:
-pip install -e ".[full,service,dev]"
+pip install -e ".[research,openai,service,dev]"
 ```
+
+Replace `openai` with `anthropic`, `zhipu`, `bedrock`, `vertex`, or
+`openai-compatible` to install only the selected provider client. Add `ml`,
+`pdf-layout`, or `service` only when the application needs that capability.
+The `full` extra remains available as a backwards-compatible all-in-one
+profile.
 
 Run `xscientist git doctor` after installation to verify the local Research VCS
 adapter and its safe-merge capabilities.
@@ -276,7 +282,7 @@ The wheel includes runtime assets previously available only from a Git clone:
 For a small internal deployment:
 
 ```bash
-pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+pip install "xscientist[research,openai,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 export XSCIENTIST_API_KEY="replace-with-a-secret"
 xscientist serve --host 0.0.0.0 --port 8000 --output-root /srv/xscientist
 ```

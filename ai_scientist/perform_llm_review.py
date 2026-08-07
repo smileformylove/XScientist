@@ -1,9 +1,9 @@
 import os
 import json
+import importlib
 import numpy as np
 from pypdf import PdfReader
 import pymupdf
-import pymupdf4llm
 from ai_scientist.llm import (
     get_response_from_llm,
     get_batch_responses_from_llm,
@@ -61,8 +61,7 @@ For the "Decision" field, don't use Weak Accept, Borderline Accept, Borderline R
 This JSON will be automatically parsed, so ensure the format is precise.
 """
 
-neurips_form = (
-    """
+neurips_form = """
 ## Review Form
 Below is a description of the questions you will be asked on the review form for each paper and some guidelines on what to consider when answering these questions.
 When writing your review, please keep in mind that after decisions have been made, reviews and meta-reviews of accepted papers and opted-in rejected papers will be made public.
@@ -117,9 +116,7 @@ In general, authors should be rewarded rather than punished for being up front a
   3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
   2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
   1: Your assessment is an educated guess. The submission is not in your area or the submission was difficult to understand. Math/other details were not carefully checked.
-"""
-    + template_instructions
-)
+""" + template_instructions
 
 
 def perform_review(
@@ -254,14 +251,29 @@ If there is nothing to improve, simply repeat the previous JSON EXACTLY after th
 ONLY INCLUDE "I am done" IF YOU ARE MAKING NO MORE CHANGES."""
 
 
+def _load_pdf_layout_module():
+    try:
+        return importlib.import_module("pymupdf4llm")
+    except ModuleNotFoundError as exc:
+        if exc.name != "pymupdf4llm":
+            raise
+        return None
+
+
 def load_paper(pdf_path, num_pages=None, min_size=100):
     try:
+        layout_module = _load_pdf_layout_module()
+        if layout_module is None:
+            raise RuntimeError(
+                "optional PDF layout support is not installed; "
+                "install xscientist[pdf-layout] to enable it"
+            )
         if num_pages is None:
-            text = pymupdf4llm.to_markdown(pdf_path)
+            text = layout_module.to_markdown(pdf_path)
         else:
             reader = PdfReader(pdf_path)
             min_pages = min(len(reader.pages), num_pages)
-            text = pymupdf4llm.to_markdown(pdf_path, pages=list(range(min_pages)))
+            text = layout_module.to_markdown(pdf_path, pages=list(range(min_pages)))
         if len(text) < min_size:
             raise Exception("Text too short")
     except Exception as e:

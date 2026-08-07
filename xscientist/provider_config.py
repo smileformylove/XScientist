@@ -11,6 +11,11 @@ import yaml
 
 from ai_scientist.utils.atomic_io import atomic_write_json, atomic_write_text
 from ai_scientist.utils.provider_registry import resolve_model_provider
+from .dependency_profiles import (
+    installation_command,
+    missing_provider_modules,
+    provider_client_modules,
+)
 
 CONFIG_SCHEMA_VERSION = 1
 CONFIG_RELATIVE_PATH = Path(".xscientist") / "providers.json"
@@ -112,8 +117,14 @@ def resolve_env_file(root: str | Path, env_file: str) -> Path:
 
 def discover_workspace_root() -> Path | None:
     explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
-    candidate = Path(explicit).expanduser().resolve() if explicit else Path.cwd()
-    return candidate if workspace_config_path(candidate).is_file() else None
+    if explicit:
+        candidate = Path(explicit).expanduser().resolve()
+        return candidate if workspace_config_path(candidate).is_file() else None
+    candidate = Path.cwd().resolve()
+    for directory in (candidate, *candidate.parents):
+        if workspace_config_path(directory).is_file():
+            return directory
+    return None
 
 
 def empty_provider_config() -> dict[str, Any]:
@@ -461,7 +472,11 @@ def update_bfts_models(path: str | Path, model: str) -> bool:
     return True
 
 
-def provider_statuses(root: str | Path) -> list[dict[str, Any]]:
+def provider_statuses(
+    root: str | Path,
+    *,
+    find_spec: Any = None,
+) -> list[dict[str, Any]]:
     workspace = Path(root).expanduser().resolve()
     config = load_provider_config(workspace, missing_ok=False)
     env_file = resolve_env_file(
@@ -480,6 +495,10 @@ def provider_statuses(root: str | Path) -> list[dict[str, Any]]:
     for provider in PROVIDER_NAMES:
         entry = configured_entries.get(provider, {})
         fields = PROVIDER_FIELDS[provider]
+        missing_clients = missing_provider_modules(
+            provider,
+            **({"find_spec": find_spec} if find_spec is not None else {}),
+        )
         missing = [
             " | ".join((field.name, *field.aliases))
             for field in fields
@@ -492,10 +511,15 @@ def provider_statuses(root: str | Path) -> list[dict[str, Any]]:
                 "active": provider == active,
                 "configured": isinstance(entry, dict) and bool(entry),
                 "credentials_available": not missing,
+                "client_available": not missing_clients,
+                "client_modules": list(provider_client_modules(provider)),
+                "missing_client_modules": missing_clients,
+                "install_command": installation_command(provider),
                 "ready": (
                     isinstance(entry, dict)
                     and bool(entry)
                     and not missing
+                    and not missing_clients
                     and not env_error
                 ),
                 "model": (

@@ -8,6 +8,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Provider-specific (`openai`, `anthropic`, `zhipu`, `openai-compatible`,
+  `bedrock`, `vertex`) and capability-specific (`research`, `plot`, `pdf`,
+  `pdf-layout`, `ml`, `service`) package extras; the legacy `full` profile is
+  unchanged.
 - Native `xscientist git doctor/add/commit` commands for backend capability
   probing and familiar Research VCS workflows without raw Git passthrough.
 - One-command `hypothesis`, `preregister`, `experiment`, `evidence`, `review`,
@@ -44,6 +48,13 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- Provider readiness now distinguishes credentials from installed client
+  packages, prints a path-safe installation command, and discovers workspace
+  configuration from nested directories.
+- Generated workspaces and executor images install only the selected provider
+  plus the requested research capabilities instead of every provider SDK.
+- Preflight's common runtime gate is provider-neutral; configured models retain
+  exact client and credential checks.
 - End-to-end project runs now enable local Research VCS milestone history by
   default; `--research-vcs off` remains the explicit opt-out and all legacy
   `--research-git*` spellings remain accepted.
@@ -55,6 +66,8 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- PDF layout extraction is loaded only when used, so the basic PDF fallback
+  remains available without the large `pymupdf4llm` dependency stack.
 - `xscientist project --help` and `xscientist batch --help` now work from the
   lightweight core install without importing optional scientific dependencies.
 

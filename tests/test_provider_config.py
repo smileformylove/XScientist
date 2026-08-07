@@ -15,10 +15,16 @@ import yaml
 from xscientist.cli import main as cli_main
 from xscientist.cli import _PROVIDER_CHOICES
 from xscientist.entrypoints import project_main
+from xscientist.dependency_profiles import (
+    installation_command,
+    provider_client_modules,
+    provider_extra,
+)
 from xscientist.onboarding import create_workspace
 from xscientist.provider_config import (
     ProviderConfigError,
     PROVIDER_NAMES,
+    discover_workspace_root,
     load_provider_config,
     load_workspace_environment,
     provider_statuses,
@@ -29,6 +35,101 @@ from xscientist.provider_config import (
 class ProviderConfigTests(unittest.TestCase):
     def test_cli_provider_choices_match_registry(self) -> None:
         self.assertEqual(tuple(_PROVIDER_CHOICES), PROVIDER_NAMES)
+
+    def test_each_provider_has_a_path_free_install_profile(self) -> None:
+        for provider in PROVIDER_NAMES:
+            self.assertTrue(provider_extra(provider))
+            self.assertTrue(provider_client_modules(provider))
+            command = installation_command(provider)
+            self.assertEqual(
+                command,
+                f'python -m pip install "xscientist[research,{provider_extra(provider)}]"',
+            )
+            self.assertNotIn(str(Path.home()), command)
+
+    def test_provider_readiness_requires_credentials_and_client_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "process-only-secret"},
+                clear=True,
+            ):
+                missing_row = next(
+                    row
+                    for row in provider_statuses(
+                        workspace, find_spec=lambda _name: None
+                    )
+                    if row["provider"] == "openai"
+                )
+                ready_row = next(
+                    row
+                    for row in provider_statuses(
+                        workspace, find_spec=lambda _name: object()
+                    )
+                    if row["provider"] == "openai"
+                )
+
+            self.assertTrue(missing_row["credentials_available"])
+            self.assertFalse(missing_row["client_available"])
+            self.assertFalse(missing_row["ready"])
+            self.assertEqual(missing_row["missing_client_modules"], ["openai"])
+            self.assertEqual(
+                missing_row["install_command"],
+                'python -m pip install "xscientist[research,openai]"',
+            )
+            self.assertTrue(ready_row["client_available"])
+            self.assertTrue(ready_row["ready"])
+
+    def test_workspace_is_discovered_from_nested_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            nested = workspace / "notes" / "drafts"
+            create_workspace(workspace)
+            nested.mkdir(parents=True)
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("xscientist.provider_config.Path.cwd", return_value=nested),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(discover_workspace_root(), workspace.resolve())
+                self.assertEqual(cli_main(["provider", "list", "--json"]), 0)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["workspace"], ".")
+            self.assertEqual(len(payload["providers"]), len(PROVIDER_NAMES))
+            self.assertNotIn(str(workspace), stdout.getvalue())
+
+    def test_workflow_entrypoint_loads_parent_workspace_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            nested = workspace / "experiments" / "trial-a"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            nested.mkdir(parents=True)
+            env_file = workspace / ".env"
+            env_file.write_text("OPENAI_API_KEY=parent-secret\n", encoding="utf-8")
+            env_file.chmod(0o600)
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("xscientist.entrypoints.Path.cwd", return_value=nested),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(project_main(["--help"]), 0)
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "parent-secret")
+                self.assertEqual(
+                    os.environ["AI_SCIENTIST_DEFAULT_MODEL"],
+                    "openai/research-model",
+                )
 
     def test_provider_add_hides_secret_and_updates_active_models(self) -> None:
         with tempfile.TemporaryDirectory() as td:

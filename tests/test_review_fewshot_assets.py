@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from unittest import mock
 
+from ai_scientist import perform_llm_review
 from ai_scientist.perform_llm_review import get_review_fewshot_examples
 
 EXPECTED_PROMPT_HASHES = {
@@ -13,6 +15,16 @@ EXPECTED_PROMPT_HASHES = {
 
 
 class ReviewFewshotAssetTests(unittest.TestCase):
+    def test_pdf_layout_dependency_is_optional_at_import_time(self) -> None:
+        missing = ModuleNotFoundError("No module named 'pymupdf4llm'")
+        missing.name = "pymupdf4llm"
+        with mock.patch.object(
+            perform_llm_review.importlib,
+            "import_module",
+            side_effect=missing,
+        ):
+            self.assertIsNone(perform_llm_review._load_pdf_layout_module())
+
     def test_text_assets_preserve_exact_review_prompts(self) -> None:
         for count, (expected_size, expected_hash) in EXPECTED_PROMPT_HASHES.items():
             with self.subTest(count=count):

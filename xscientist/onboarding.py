@@ -10,6 +10,7 @@ from ai_scientist.resources import bfts_config_path
 from ai_scientist.utils.atomic_io import atomic_write_text
 from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ._version import __version__
+from .dependency_profiles import installation_command, installation_spec
 from .provider_config import (
     DEFAULT_MODELS,
     PROVIDER_FIELDS,
@@ -82,7 +83,12 @@ def _render_env(provider: str) -> str:
     )
 
 
-def _render_dockerfile() -> str:
+def _render_dockerfile(provider: str) -> str:
+    runtime_spec = installation_spec(
+        provider,
+        capabilities=("research", "ml", "pdf-layout"),
+        version="${XSCIENTIST_VERSION}",
+    )
     return f"""FROM python:3.11-slim
 
 ARG XSCIENTIST_VERSION={__version__}
@@ -95,7 +101,7 @@ RUN apt-get update \\
     && rm -rf /var/lib/apt/lists/*
 RUN python -m pip install --no-cache-dir \\
     torch --index-url https://download.pytorch.org/whl/cpu
-RUN python -m pip install --no-cache-dir "xscientist[full]==${{XSCIENTIST_VERSION}}"
+RUN python -m pip install --no-cache-dir "{runtime_spec}"
 
 RUN useradd --create-home --uid 10001 scientist
 USER scientist
@@ -132,6 +138,7 @@ Describe the primary hypothesis and the observation that would falsify it.
 
 def _render_readme(*, profile: str, provider: str, model: str) -> str:
     image = f"xscientist-exec:{__version__}"
+    install = installation_command(provider, version=__version__)
     return f"""# XScientist workspace
 
 Generated for XScientist {__version__} with provider `{provider}`, model
@@ -144,8 +151,13 @@ provider metadata never contain the secret value.
 ## 1. Install
 
 ```bash
-python -m pip install "xscientist[full]=={__version__}"
+{install}
 ```
+
+This installs the common research runtime and only the `{provider}` client.
+Specialist stacks remain opt-in: add `ml`, `pdf-layout`, or `service` to the
+bracketed extras when the study actually needs them. The legacy `full` extra
+remains available for an all-provider environment.
 
 ## 2. Check local research version control
 
@@ -239,7 +251,7 @@ def _render_files(*, profile: str, provider: str, model: str) -> dict[str, str]:
             ensure_ascii=False,
         )
         + "\n",
-        "Dockerfile.executor": _render_dockerfile(),
+        "Dockerfile.executor": _render_dockerfile(provider),
         "README.md": _render_readme(
             profile=profile,
             provider=provider,
@@ -307,9 +319,9 @@ def create_workspace(
         "secrets_written": False,
         "next_steps": [
             f"cd {workspace_view}",
+            installation_command(normalized_provider, version=__version__),
             "xscientist git doctor",
             f"xscientist provider add {normalized_provider}",
-            "xscientist provider list",
             "xscientist auth login --user <your-name>",
             f"docker build -f Dockerfile.executor -t xscientist-exec:{__version__} .",
             "xscientist preflight --strict --bfts-config bfts_config.yaml",

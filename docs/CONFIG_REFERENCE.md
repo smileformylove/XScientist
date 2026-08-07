@@ -18,6 +18,25 @@ xscientist provider list
 xscientist provider activate openai
 ```
 
+`provider list` checks credentials and the required client packages separately.
+If the selected client is absent, it prints the exact provider-specific command
+without displaying credential values. Commands started below the workspace root
+discover `.xscientist/providers.json` through parent directories, so nested
+notebooks and experiment folders do not need repeated `--workspace` flags.
+
+Provider installation profiles:
+
+| Workspace provider | Package extra |
+|---|---|
+| OpenAI | `openai` |
+| Anthropic | `anthropic` |
+| Zhipu | `zhipu` |
+| DeepSeek, Gemini, OpenRouter, Hugging Face, Ollama, generic compatible API | `openai-compatible` |
+| Amazon Bedrock | `bedrock` |
+| Vertex AI | `vertex` |
+
+For example: `python -m pip install "xscientist[research,openai-compatible]"`.
+
 `.xscientist/providers.json` is safe to commit: it records only the active
 provider, model IDs, the relative env-file location, and credential variable
 names. Secret values live in `.env`, which the generated `.gitignore` and

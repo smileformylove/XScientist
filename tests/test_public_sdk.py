@@ -223,11 +223,14 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(payload["name"], "xscientist")
         self.assertIn(
             payload["installation_profile"],
-            {"core", "core+service", "full", "full+service"},
+            {"core", "core+service", "research", "research+service"},
         )
         self.assertIsInstance(payload["research_runtime_ready"], bool)
         self.assertIsInstance(payload["service_ready"], bool)
         self.assertIsInstance(payload["missing_research_packages"], list)
+        self.assertIsInstance(payload["provider_client_ready"], bool)
+        self.assertIsInstance(payload["missing_provider_clients"], list)
+        self.assertIn("xscientist[research", payload["recommended_install"])
         self.assertIn(payload["output_root"], {"<configured>", "<default>"})
         self.assertFalse(Path(payload["python_executable"]).is_absolute())
         self.assertFalse(payload["host_paths_disclosed"])
@@ -299,7 +302,7 @@ class PublicSdkTests(unittest.TestCase):
         output = "".join(
             str(call.args[0]) for call in stderr.write.call_args_list if call.args
         )
-        self.assertIn("xscientist[full]", output)
+        self.assertIn("xscientist[research]", output)
 
     def test_service_settings_validate_workers(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_workers"):

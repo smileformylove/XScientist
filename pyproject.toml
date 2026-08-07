@@ -35,6 +35,98 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Recommended end-to-end research runtime without committing users to every
+# model provider or the largest specialist stacks. Pair this with exactly one
+# provider extra, for example: xscientist[research,openai].
+research = [
+  "backoff>=2.0",
+  "black>=24.0",
+  "matplotlib>=3.8",
+  "pillow>=10",
+  "pandas>=2",
+  "pypdf>=4",
+  "pymupdf>=1.24",
+  "seaborn>=0.13",
+  "numpy>=1.26",
+  "psutil>=5.9",
+  "requests>=2.31",
+  "scikit-learn>=1.4",
+  "tiktoken>=0.7",
+  "tqdm>=4.66",
+  "rich>=13",
+  "humanize>=4",
+  "dataclasses-json>=0.6",
+  "genson>=1.2",
+  "shutup>=0.2",
+  "python-igraph>=0.11",
+  "coolname>=2",
+  "omegaconf>=2.3",
+  "huggingface-hub>=0.23",
+]
+
+# Provider clients. OpenAI-compatible services intentionally share one client
+# extra; credentials and provider routing remain separate at runtime.
+openai = [
+  "openai>=1.40",
+  "backoff>=2.0",
+  "tiktoken>=0.7",
+]
+anthropic = [
+  "anthropic>=0.25",
+  "backoff>=2.0",
+  "tiktoken>=0.7",
+]
+zhipu = [
+  "zhipuai>=2.0",
+  "openai>=1.40",
+  "backoff>=2.0",
+  "tiktoken>=0.7",
+]
+openai-compatible = [
+  "openai>=1.40",
+  "backoff>=2.0",
+  "requests>=2.31",
+  "tiktoken>=0.7",
+]
+bedrock = [
+  "anthropic[bedrock]>=0.25",
+  "backoff>=2.0",
+  "tiktoken>=0.7",
+]
+vertex = [
+  "anthropic[vertex]>=0.25",
+  "backoff>=2.0",
+  "tiktoken>=0.7",
+]
+
+# Specialist capabilities can be added only when a study needs them.
+plot = [
+  "matplotlib>=3.8",
+  "pillow>=10",
+  "pandas>=2",
+  "seaborn>=0.13",
+  "numpy>=1.26",
+  "python-igraph>=0.11",
+]
+pdf = [
+  "pypdf>=4",
+  "pymupdf>=1.24",
+]
+pdf-layout = [
+  "pymupdf>=1.24",
+  "pymupdf4llm>=0.0.20",
+]
+ml = [
+  "numpy>=1.26",
+  "pandas>=2",
+  "scikit-learn>=1.4",
+  "transformers>=4.40",
+  "datasets>=2.19",
+  "huggingface-hub>=0.23",
+]
+
+# Backwards-compatible all-in-one profile. Keep this list explicit so existing
+# xscientist[full] installations resolve exactly the same direct dependencies.
 full = [
   "anthropic>=0.25",
   "backoff>=2.0",

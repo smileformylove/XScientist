@@ -139,14 +139,22 @@ def _build_parser() -> argparse.ArgumentParser:
     provider_list = provider_subparsers.add_parser(
         "list", help="Show provider readiness."
     )
-    provider_list.add_argument("--workspace", default=".")
+    provider_list.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
     provider_list.add_argument("--json", action="store_true", dest="as_json")
     provider_add = provider_subparsers.add_parser(
         "add",
         help="Configure a provider; secrets are prompted with hidden input.",
     )
     provider_add.add_argument("name", choices=_PROVIDER_CHOICES)
-    provider_add.add_argument("--workspace", default=".")
+    provider_add.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
     provider_add.add_argument("--model", default=None)
     provider_add.add_argument("--no-activate", action="store_true")
     provider_add.add_argument("--no-update-bfts", action="store_true")
@@ -161,7 +169,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Switch the active provider and default model.",
     )
     provider_activate.add_argument("name", choices=_PROVIDER_CHOICES)
-    provider_activate.add_argument("--workspace", default=".")
+    provider_activate.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
     provider_activate.add_argument("--no-update-bfts", action="store_true")
     provider_activate.add_argument("--json", action="store_true", dest="as_json")
     provider_remove = provider_subparsers.add_parser(
@@ -169,7 +181,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Remove provider metadata; stored credentials are left untouched.",
     )
     provider_remove.add_argument("name", choices=_PROVIDER_CHOICES)
-    provider_remove.add_argument("--workspace", default=".")
+    provider_remove.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
     provider_remove.add_argument("--json", action="store_true", dest="as_json")
     privacy_parser = subparsers.add_parser(
         "privacy",
@@ -210,6 +226,7 @@ def _installation_info() -> dict[str, object]:
 
     from ai_scientist.apps.preflight import CORE_PACKAGES
     from ai_scientist.utils.auth_session import validate_session
+    from .dependency_profiles import installation_command, missing_provider_modules
 
     runtime_modules = sorted(CORE_PACKAGES)
     service_modules = ["fastapi", "pydantic", "uvicorn"]
@@ -222,14 +239,24 @@ def _installation_info() -> dict[str, object]:
     runtime_ready = not missing_runtime
     service_ready = not missing_service
     if runtime_ready and service_ready:
-        profile = "full+service"
+        profile = "research+service"
     elif runtime_ready:
-        profile = "full"
+        profile = "research"
     elif service_ready:
         profile = "core+service"
     else:
         profile = "core"
     authenticated, auth_status, _session = validate_session()
+    active_provider = str(os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or "").strip()
+    missing_provider_clients = (
+        missing_provider_modules(active_provider) if active_provider else []
+    )
+    provider_client_ready = bool(active_provider) and not missing_provider_clients
+    recommended_install = (
+        installation_command(active_provider)
+        if active_provider
+        else 'python -m pip install "xscientist[research,<provider-extra>]"'
+    )
     return {
         "name": "xscientist",
         "version": __version__,
@@ -238,6 +265,9 @@ def _installation_info() -> dict[str, object]:
         "service_ready": service_ready,
         "missing_research_packages": missing_runtime,
         "missing_service_packages": missing_service,
+        "provider_client_ready": provider_client_ready,
+        "missing_provider_clients": missing_provider_clients,
+        "recommended_install": recommended_install,
         "python_version": sys.version.split()[0],
         "python_executable": Path(sys.executable).name,
         "output_root": (
@@ -249,7 +279,7 @@ def _installation_info() -> dict[str, object]:
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
         "quickstart": "xscientist init my-research",
-        "active_provider": os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER"),
+        "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
 
@@ -258,8 +288,22 @@ def _bootstrap_workspace_environment() -> dict[str, object]:
     import os
 
     explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
-    candidate = Path(explicit).expanduser() if explicit else Path.cwd()
-    if not (candidate / ".xscientist" / "providers.json").is_file():
+    if explicit:
+        candidate = Path(explicit).expanduser()
+    else:
+        current = Path.cwd().resolve()
+        candidate = next(
+            (
+                directory
+                for directory in (current, *current.parents)
+                if (directory / ".xscientist" / "providers.json").is_file()
+            ),
+            None,
+        )
+    if (
+        candidate is None
+        or not (candidate / ".xscientist" / "providers.json").is_file()
+    ):
         return {"loaded": False}
     from .provider_config import ProviderConfigError, load_workspace_environment
 
@@ -280,6 +324,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         ProviderConfigError,
         activate_provider,
         configured_field_value,
+        discover_workspace_root,
         load_provider_config,
         provider_statuses,
         read_env_file,
@@ -291,8 +336,16 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         validate_provider_model,
     )
 
-    workspace = Path(parsed.workspace).expanduser().resolve()
     try:
+        if parsed.workspace is None:
+            workspace = discover_workspace_root()
+            if workspace is None:
+                raise ProviderConfigError(
+                    "provider configuration not found in the current directory or its parents; "
+                    "run `xscientist init` first or pass --workspace"
+                )
+        else:
+            workspace = Path(parsed.workspace).expanduser().resolve()
         if parsed.provider_command == "list":
             rows = provider_statuses(workspace)
             payload = {
@@ -314,11 +367,16 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     model = row["model"] or "-"
                     missing = ", ".join(row["missing"])
                     suffix = f"; missing: {missing}" if missing else ""
+                    missing_clients = ", ".join(row["missing_client_modules"])
+                    if missing_clients:
+                        suffix += f"; missing clients: {missing_clients}"
                     if row["error"]:
                         suffix += f"; error: {row['error']}"
                     print(
                         f"{marker} {row['provider']}: {state}; model: {model}{suffix}"
                     )
+                    if row["configured"] and missing_clients:
+                        print(f"    Install: {row['install_command']}")
             return 0
 
         if parsed.provider_command == "remove":
@@ -423,6 +481,17 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             "credentials_written": sorted(updates),
             "bfts_updated": bfts_updated,
         }
+        status = next(
+            row for row in provider_statuses(workspace) if row["provider"] == provider
+        )
+        payload.update(
+            {
+                "client_available": status["client_available"],
+                "missing_client_modules": status["missing_client_modules"],
+                "ready": status["ready"],
+                "install_command": status["install_command"],
+            }
+        )
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
@@ -437,6 +506,12 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print("Credentials: using existing environment or local env file")
             print(f"Active: {payload['active']}")
             print(f"BFTS config updated: {bfts_updated}")
+            if not payload["client_available"]:
+                print(
+                    "Provider client missing: "
+                    + ", ".join(payload["missing_client_modules"])
+                )
+                print(f"Install: {payload['install_command']}")
         return 0
     except (OSError, ProviderConfigError) as exc:
         print(f"xscientist provider: {exc}", file=sys.stderr)

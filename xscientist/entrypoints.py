@@ -9,8 +9,22 @@ from pathlib import Path
 
 def _bootstrap_workspace_environment() -> str | None:
     explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
-    candidate = Path(explicit).expanduser() if explicit else Path.cwd()
-    if not (candidate / ".xscientist" / "providers.json").is_file():
+    if explicit:
+        candidate = Path(explicit).expanduser()
+    else:
+        current = Path.cwd().resolve()
+        candidate = next(
+            (
+                directory
+                for directory in (current, *current.parents)
+                if (directory / ".xscientist" / "providers.json").is_file()
+            ),
+            None,
+        )
+    if (
+        candidate is None
+        or not (candidate / ".xscientist" / "providers.json").is_file()
+    ):
         return None
     from .provider_config import ProviderConfigError, load_workspace_environment
 
@@ -87,9 +101,18 @@ def _call_main(
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
         missing = exc.name or "an optional runtime dependency"
+        active_provider = str(
+            os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or ""
+        ).strip()
+        if active_provider:
+            from .dependency_profiles import installation_command
+
+            install_hint = installation_command(active_provider)
+        else:
+            install_hint = 'python -m pip install "xscientist[research]"'
         print(
             f"XScientist workflow dependency {missing!r} is not installed. "
-            'Install the full runtime with `pip install "xscientist[full]"`.',
+            f"Install the selected runtime with `{install_hint}`.",
             file=sys.stderr,
         )
         return 2

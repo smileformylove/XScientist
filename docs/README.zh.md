@@ -8,7 +8,7 @@
 
 English README: [README.md](../README.md)
 
-**安装：** `python -m pip install "xscientist[full]"` ·
+**安装：** `python -m pip install xscientist`，再添加一个 Provider 档位 ·
 [PyPI 包](https://pypi.org/project/xscientist/) ·
 [最新 Release](https://github.com/smileformylove/XScientist/releases/latest) ·
 [完整文档](./)
@@ -175,7 +175,8 @@ tools/                   仅供仓库使用的验证工具
 ### 0) 依赖说明
 
 - Python: 3.10+（推荐 3.11）
-- Git：从 GitHub 仓库直接安装时需要
+- Git：当前本地 Research VCS 适配器需要；安装后运行 `xscientist git doctor`
+  检查所需能力
 - 系统依赖（建议安装）：
   - LaTeX 工具链（用于编译论文 PDF，例如 TeX Live / MacTeX）
   - `poppler`（用于 PDF 处理/抽取）
@@ -190,21 +191,29 @@ tools/                   仅供仓库使用的验证工具
 | 安装目标 | 命令 | 包含内容 |
 |---|---|---|
 | SDK 与 ARA 协议工具 | `python -m pip install xscientist` | 公共 Python API、CLI、Schema 与工件工具 |
-| 科研运行环境 | `python -m pip install "xscientist[full]"` | 大模型提供商、数据/科学计算依赖与端到端工作流 |
-| 运行环境与 HTTP 服务 | `python -m pip install "xscientist[full,service]"` | 完整运行环境以及 FastAPI、Uvicorn |
+| OpenAI 科研运行环境 | `python -m pip install "xscientist[research,openai]"` | 通用科研能力与 OpenAI 客户端 |
+| 智谱科研运行环境 | `python -m pip install "xscientist[research,zhipu]"` | 通用科研能力与智谱调用链 |
+| Anthropic 科研运行环境 | `python -m pip install "xscientist[research,anthropic]"` | 通用科研能力与 Anthropic 客户端 |
+| 全量兼容档位 | `python -m pip install "xscientist[full]"` | 所有 Provider 与重型能力；供已有部署继续使用 |
 
 ```bash
 # 轻量 SDK 与协议接口
 python -m pip install xscientist
 
-# 完整科研运行环境（运行项目时推荐）
-python -m pip install "xscientist[full]"
+# 常见项目：通用科研能力 + 恰好一个 Provider
+python -m pip install "xscientist[research,openai]"
 
-# 完整运行环境与 FastAPI/Uvicorn 服务
-python -m pip install "xscientist[full,service]"
+# 只添加当前研究真正需要的重型能力
+python -m pip install "xscientist[research,openai,ml,pdf-layout,service]"
 ```
 
-需要固定完全相同的环境时，可锁定当前版本：
+Provider 档位包括 `openai`、`anthropic`、`zhipu`、`bedrock`、`vertex`
+和 `openai-compatible`。最后一个档位用于 DeepSeek、Gemini、OpenRouter、
+Hugging Face 推理、Ollama 与通用 OpenAI-compatible 端点。能力档位包括
+`plot`、`pdf`、`pdf-layout`、`ml` 和 `service`。`research` 是推荐的通用
+端到端档位；`full` 继续作为一次安装全部内容的兼容入口。
+
+需要固定完全相同的环境时，可锁定已发布版本：
 
 ```bash
 python -m pip install "xscientist[full]==0.1.0"
@@ -213,7 +222,7 @@ python -m pip install "xscientist[full]==0.1.0"
 如需测试尚未发布的开发改动，可安装当前 `main` 分支：
 
 ```bash
-python -m pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+python -m pip install "xscientist[research,openai,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
 本地 clone 或仓库开发环境：
@@ -224,7 +233,7 @@ cd XScientist
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
-python -m pip install -e ".[full,service,dev]"
+python -m pip install -e ".[research,openai,service,dev]"
 ```
 
 更稳定的"CI 风格"安装（可选）：
@@ -239,6 +248,7 @@ python -m pip install -r requirements.txt
 xscientist --version
 xscientist info --json
 xscientist --help
+xscientist git doctor
 python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 ```
 

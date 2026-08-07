@@ -48,23 +48,21 @@ class CheckResult:
 
 
 CORE_PACKAGES = {
-    "openai": "OpenAI client",
-    "anthropic": "Anthropic client",
     "backoff": "retry support",
+    "black": "generated-code formatting",
     "numpy": "numeric utilities",
     "omegaconf": "BFTS config loading",
+    "pandas": "data preview",
     "rich": "CLI progress display",
+    "sklearn": "adaptive learning similarity",
 }
 
 PIPELINE_PACKAGES = {
     "requests": "Semantic Scholar / HTTP fallbacks",
     "yaml": "YAML config editing",
     "psutil": "process cleanup",
-    "pandas": "data preview",
-    "sklearn": "adaptive learning similarity",
     "PIL": "vision review",
     "huggingface_hub": "dataset/model bootstrap",
-    "zhipuai": "Zhipu backend",
 }
 
 COMMANDS = {
@@ -431,9 +429,14 @@ def main(argv=None) -> int:
             not result.ok and result.label.startswith("Python package")
             for result in results
         ):
-            print(
-                '  - Install the research runtime: python -m pip install "xscientist[full]"'
-            )
+            provider = str(os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or "").strip()
+            if provider:
+                from xscientist.dependency_profiles import installation_command
+
+                command = installation_command(provider)
+            else:
+                command = 'python -m pip install "xscientist[research]"'
+            print(f"  - Install the selected research runtime: {command}")
         if any(not result.ok and result.label == "Login session" for result in results):
             print("  - Create a login: xscientist auth login --user <your-name>")
         if any(

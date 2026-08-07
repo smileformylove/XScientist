@@ -8,7 +8,7 @@
 
 Chinese README: [docs/README.zh.md](docs/README.zh.md)
 
-**Install:** `python -m pip install "xscientist[full]"` ·
+**Install:** `python -m pip install xscientist`, then add one provider profile ·
 [PyPI package](https://pypi.org/project/xscientist/) ·
 [Latest release](https://github.com/smileformylove/XScientist/releases/latest) ·
 [Documentation](docs/)
@@ -176,21 +176,30 @@ Install the stable release from PyPI:
 | Install target | Command | What it includes |
 |---|---|---|
 | SDK and ARA protocol tools | `python -m pip install xscientist` | Public Python API, CLI, schemas, and artifact tooling |
-| Research runtime | `python -m pip install "xscientist[full]"` | LLM providers, data/science libraries, and end-to-end workflows |
-| Runtime and HTTP service | `python -m pip install "xscientist[full,service]"` | Full runtime plus FastAPI and Uvicorn |
+| OpenAI research runtime | `python -m pip install "xscientist[research,openai]"` | Common research capabilities plus only the OpenAI client |
+| Zhipu research runtime | `python -m pip install "xscientist[research,zhipu]"` | Common research capabilities plus only the Zhipu route |
+| Anthropic research runtime | `python -m pip install "xscientist[research,anthropic]"` | Common research capabilities plus only the Anthropic client |
+| All-in-one compatibility profile | `python -m pip install "xscientist[full]"` | Every provider and specialist capability; retained for existing deployments |
 
 ```bash
 # Lightweight SDK and protocol surface
 python -m pip install xscientist
 
-# Complete research runtime (recommended for running projects)
-python -m pip install "xscientist[full]"
+# Typical project: common research tools plus exactly one provider
+python -m pip install "xscientist[research,openai]"
 
-# Complete runtime plus the FastAPI/Uvicorn service
-python -m pip install "xscientist[full,service]"
+# Add only capabilities this study needs
+python -m pip install "xscientist[research,openai,ml,pdf-layout,service]"
 ```
 
-Pin the current release when you need an identical environment:
+Provider extras are `openai`, `anthropic`, `zhipu`, `bedrock`, `vertex`, and
+`openai-compatible`. The last profile covers DeepSeek, Gemini, OpenRouter,
+Hugging Face inference, Ollama, and generic OpenAI-compatible endpoints.
+Capability extras are `plot`, `pdf`, `pdf-layout`, `ml`, and `service`.
+`research` is the recommended common end-to-end profile; `full` remains a
+backwards-compatible way to install everything.
+
+Pin a published release when you need an identical environment:
 
 ```bash
 python -m pip install "xscientist[full]==0.1.0"
@@ -199,7 +208,7 @@ python -m pip install "xscientist[full]==0.1.0"
 To test unreleased development changes, install the current `main` branch:
 
 ```bash
-python -m pip install "xscientist[full,service] @ git+https://github.com/smileformylove/XScientist.git@main"
+python -m pip install "xscientist[research,openai,service] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
 For a local clone or repository development:
@@ -210,7 +219,7 @@ cd XScientist
 conda create -n xscientist python=3.11 -y
 conda activate xscientist
 
-python -m pip install -e ".[full,service,dev]"
+python -m pip install -e ".[research,openai,service,dev]"
 ```
 
 More reproducible (CI-style) install (optional):

@@ -94,6 +94,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/__init__.py",
                 "xscientist/cli.py",
                 "xscientist/onboarding.py",
+                "xscientist/dependency_profiles.py",
                 "xscientist/provider_config.py",
                 "xscientist/service.py",
                 "xscientist/service_jobs.py",
@@ -155,6 +156,35 @@ class DistributionBuildTests(unittest.TestCase):
                 'Requires-Dist: tomli>=2.0; python_version < "3.11"',
                 metadata,
             )
+            for extra in (
+                "research",
+                "openai",
+                "anthropic",
+                "zhipu",
+                "openai-compatible",
+                "bedrock",
+                "vertex",
+                "plot",
+                "pdf",
+                "pdf-layout",
+                "ml",
+                "full",
+                "service",
+                "dev",
+            ):
+                self.assertIn(f"Provides-Extra: {extra}", metadata)
+            for requirement in (
+                'Requires-Dist: openai>=1.40; extra == "openai"',
+                'Requires-Dist: anthropic>=0.25; extra == "anthropic"',
+                'Requires-Dist: zhipuai>=2.0; extra == "zhipu"',
+                'Requires-Dist: openai>=1.40; extra == "openai-compatible"',
+                'Requires-Dist: anthropic[bedrock]>=0.25; extra == "bedrock"',
+                'Requires-Dist: anthropic[vertex]>=0.25; extra == "vertex"',
+                'Requires-Dist: pymupdf4llm>=0.0.20; extra == "pdf-layout"',
+                'Requires-Dist: transformers>=4.40; extra == "ml"',
+                'Requires-Dist: transformers>=4.40; extra == "full"',
+            ):
+                self.assertIn(requirement, metadata)
             self.assertFalse(
                 any(name.startswith("tests/") for name in names),
                 "wheel should not include the repository test suite",
