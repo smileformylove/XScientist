@@ -260,21 +260,30 @@ def build_parser(
         help="基准 ablation: 关闭 owner-aware reviewer repair routing。",
     )
     parser.add_argument(
+        "--research-vcs",
         "--research-git",
+        dest="research_git",
         choices=["off", "local"],
-        default="off",
-        help="为项目启用无需服务器的本地科研 Git 历史；默认关闭且永不自动 push。",
+        default="local",
+        help=(
+            "启用 XScientist 原生科研版本库（Git 仅作为可替换存储后端）；"
+            "默认本地启用、无需服务器且永不自动 push。"
+        ),
     )
     parser.add_argument(
+        "--checkpoint-policy",
         "--git-checkpoint-policy",
+        dest="git_checkpoint_policy",
         choices=["manual", "stage", "milestone"],
         default="milestone",
-        help="本地科研 Git checkpoint 策略。milestone 记录关键科研状态，stage 额外记录 ideation。",
+        help="科研 checkpoint 策略。milestone 记录关键状态，stage 额外记录 ideation。",
     )
     parser.add_argument(
+        "--research-vcs-strict",
         "--research-git-strict",
+        dest="research_git_strict",
         action="store_true",
-        help="本地科研 Git 初始化或 checkpoint 失败时终止流程；默认只警告并保留研究产物。",
+        help="科研版本库初始化或 checkpoint 失败时终止；默认警告并保留研究产物。",
     )
     parser.add_argument("--git-user-name", default=None)
     parser.add_argument("--git-user-email", default=None)

@@ -116,6 +116,22 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--git-checkpoint-policy") + 1], "stage")
         self.assertIn("--research-git-strict", argv)
 
+    def test_project_request_exposes_native_research_vcs_spelling(self) -> None:
+        request = ProjectRequest(
+            project="demo",
+            topic="topic.md",
+            research_git="off",
+            research_vcs="local",
+            git_checkpoint_policy="stage",
+            research_git_strict=True,
+        )
+
+        argv = request.to_argv()
+
+        self.assertEqual(argv[argv.index("--research-vcs") + 1], "local")
+        self.assertEqual(argv[argv.index("--checkpoint-policy") + 1], "stage")
+        self.assertIn("--research-vcs-strict", argv)
+
     def test_project_request_requires_an_input_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "topic or ideas"):
             ProjectRequest(project="demo").to_argv()

@@ -28,7 +28,9 @@ class ProjectRequest:
     breakthrough_mode: bool = False
     high_quality_mode: bool = False
     bfts_config: str | Path | None = None
-    research_git: str = "off"
+    # ``research_git`` remains a compatibility spelling for releases <=0.1.
+    research_git: str = "local"
+    research_vcs: str | None = None
     git_checkpoint_policy: str = "milestone"
     research_git_strict: bool = False
     extra_args: Sequence[str] = field(default_factory=tuple)
@@ -42,8 +44,9 @@ class ProjectRequest:
             raise ValueError("num_ideas must be at least 1")
         if self.num_workers < 1:
             raise ValueError("num_workers must be at least 1")
-        if self.research_git not in {"off", "local"}:
-            raise ValueError("research_git must be off or local")
+        research_vcs = self.research_vcs or self.research_git
+        if research_vcs not in {"off", "local"}:
+            raise ValueError("research_vcs must be off or local")
         if self.git_checkpoint_policy not in {"manual", "stage", "milestone"}:
             raise ValueError(
                 "git_checkpoint_policy must be manual, stage, or milestone"
@@ -71,11 +74,23 @@ class ProjectRequest:
             argv.append("--high-quality-mode")
         if self.bfts_config is not None:
             argv.extend(["--bfts-config", _path_text(self.bfts_config) or ""])
-        if self.research_git != "off":
-            argv.extend(["--research-git", self.research_git])
-            argv.extend(["--git-checkpoint-policy", self.git_checkpoint_policy])
+        if research_vcs != "off":
+            vcs_flag = (
+                "--research-vcs" if self.research_vcs is not None else "--research-git"
+            )
+            policy_flag = (
+                "--checkpoint-policy"
+                if self.research_vcs is not None
+                else "--git-checkpoint-policy"
+            )
+            argv.extend([vcs_flag, research_vcs])
+            argv.extend([policy_flag, self.git_checkpoint_policy])
         if self.research_git_strict:
-            argv.append("--research-git-strict")
+            argv.append(
+                "--research-vcs-strict"
+                if self.research_vcs is not None
+                else "--research-git-strict"
+            )
         argv.extend(str(arg) for arg in self.extra_args)
         return argv
 
@@ -95,6 +110,7 @@ class ProjectRequest:
             "high_quality_mode": self.high_quality_mode,
             "bfts_config": _path_text(self.bfts_config),
             "research_git": self.research_git,
+            "research_vcs": self.research_vcs,
             "git_checkpoint_policy": self.git_checkpoint_policy,
             "research_git_strict": self.research_git_strict,
             "extra_args": list(self.extra_args),

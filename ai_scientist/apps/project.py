@@ -321,21 +321,21 @@ def _initialize_local_research_git(args: argparse.Namespace) -> bool:
                 git_user_email=args.git_user_email,
             )
             print(
-                "🧭 本地科研 Git 已初始化: "
+                "🧭 XScientist 科研版本库已初始化: "
                 f"commit={(result.commit or '')[:12]} policy={args.git_checkpoint_policy}"
             )
         else:
             from xscientist.research_git import load_repository_config
 
             load_repository_config(project_root)
-            print("🧭 使用已有本地科研 Git 仓库；不会配置 remote 或自动 push。")
+            print("🧭 使用已有 XScientist 科研版本库；不会配置 remote 或自动 push。")
         return True
     except ResearchGitError as exc:
         if args.research_git_strict:
             raise RuntimeError(
-                f"local research Git initialization failed: {exc}"
+                f"native Research VCS initialization failed: {exc}"
             ) from exc
-        print(f"⚠️  本地科研 Git 初始化失败，研究流程继续但不会自动 checkpoint: {exc}")
+        print(f"⚠️  科研版本库初始化失败，研究流程继续但不会自动 checkpoint: {exc}")
         return False
 
 
@@ -379,8 +379,183 @@ def _record_local_research_checkpoint(
             print(f"🧭 科研 checkpoint 跳过: {result.reason}")
     except ResearchGitError as exc:
         if args.research_git_strict:
-            raise RuntimeError(f"local research Git checkpoint failed: {exc}") from exc
-        print(f"⚠️  本地科研 Git checkpoint 失败，研究产物已保留: {exc}")
+            raise RuntimeError(f"native Research VCS checkpoint failed: {exc}") from exc
+        print(f"⚠️  科研版本库 checkpoint 失败，研究产物已保留: {exc}")
+
+
+def _research_vcs_failure(
+    args: argparse.Namespace, action: str, exc: Exception
+) -> None:
+    if getattr(args, "research_git_strict", False):
+        raise RuntimeError(f"native Research VCS {action} failed: {exc}") from exc
+    print(f"⚠️  Research VCS {action} 失败，研究产物已保留: {exc}")
+
+
+def _record_local_research_planning_objects(
+    args: argparse.Namespace,
+    *,
+    idea_cards: list[dict],
+) -> None:
+    if not getattr(args, "_research_git_active", False) or not idea_cards:
+        return
+    from xscientist.research_git import ResearchGitError
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    project_root = Path(args.project_dir).expanduser().resolve()
+    try:
+        lifecycle = ResearchLifecycle(project_root)
+        lead_plan = load_contract_artifact(project_root, "research_plan", default={})
+        preregistration = load_contract_artifact(
+            project_root, "preregistration", default={}
+        )
+        planning = lifecycle.planning(
+            hypothesis=idea_cards[0],
+            plan=lead_plan if isinstance(lead_plan, dict) else {},
+            preregistration=(
+                preregistration if isinstance(preregistration, dict) else None
+            ),
+            commit=False,
+        )
+        object_ids = {
+            "hypotheses": {0: planning["hypothesis"].object_id},
+            "plans": {0: planning["plan"].object_id},
+            "attempts": {},
+            "gates": {},
+        }
+        if planning["preregistration"] is not None:
+            object_ids["preregistration"] = planning["preregistration"].object_id
+        for index, idea_card in enumerate(idea_cards[1:], start=1):
+            candidate = lifecycle.repository.record(
+                "hypothesis",
+                idea_card,
+                state="draft",
+            )
+            object_ids["hypotheses"][index] = candidate.object_id
+        args._research_vcs_ids = object_ids
+        print(
+            "🧬 Research VCS 已记录 "
+            f"{len(object_ids['hypotheses'])} 个假设及其规划/预注册关系"
+        )
+    except (ResearchGitError, OSError, ValueError) as exc:
+        _research_vcs_failure(args, "planning record", exc)
+
+
+def _compact_research_result(result: dict) -> dict:
+    scalar_keys = (
+        "idea_idx",
+        "status",
+        "failure_stage",
+        "quality_score",
+        "rigor_score",
+        "claim_support_score",
+        "quality_gate_passed",
+        "submission_priority_score",
+        "submission_priority_tier",
+        "submission_acceptance_passed",
+        "guardrail_blocking",
+        "ara_node_count",
+        "ara_claim_coverage_score",
+        "ara_claim_coverage_severity",
+        "workflow_mode",
+        "template_profile",
+        "template_capability",
+        "execution_policy",
+    )
+    return {
+        key: result.get(key)
+        for key in scalar_keys
+        if isinstance(result.get(key), (str, int, float, bool))
+        or result.get(key) is None
+    }
+
+
+def _record_local_research_attempt_objects(
+    args: argparse.Namespace,
+    *,
+    results: list[dict],
+) -> None:
+    if not getattr(args, "_research_git_active", False):
+        return
+    from xscientist.research_git import ResearchGitError
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    try:
+        lifecycle = ResearchLifecycle(args.project_dir)
+        object_ids = getattr(args, "_research_vcs_ids", {})
+        for fallback_index, result in enumerate(results):
+            idea_index = int(result.get("idea_idx", fallback_index))
+            payload = _compact_research_result(result)
+            payload["status"] = str(result.get("status") or "failed")
+            recorded = lifecycle.experiment_attempt(
+                payload,
+                plan_id=(object_ids.get("plans") or {}).get(idea_index),
+                commit=False,
+            )
+            object_ids.setdefault("attempts", {})[idea_index] = recorded[
+                "attempt"
+            ].object_id
+        args._research_vcs_ids = object_ids
+        print(f"🧬 Research VCS 已记录 {len(results)} 个实验尝试（含失败结果）")
+    except (ResearchGitError, OSError, ValueError) as exc:
+        _research_vcs_failure(args, "experiment record", exc)
+
+
+def _record_local_research_handoff_objects(
+    args: argparse.Namespace,
+    *,
+    results: list[dict],
+) -> None:
+    if not getattr(args, "_research_git_active", False):
+        return
+    from xscientist.research_git import ResearchGitError
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    try:
+        lifecycle = ResearchLifecycle(args.project_dir)
+        object_ids = getattr(args, "_research_vcs_ids", {})
+        for fallback_index, result in enumerate(results):
+            idea_index = int(result.get("idea_idx", fallback_index))
+            attempt_id = (object_ids.get("attempts") or {}).get(idea_index)
+            if not attempt_id:
+                continue
+            gate = lifecycle.repository.record(
+                "gate_decision",
+                {
+                    "decision": "hold",
+                    "claim_promotion_allowed": False,
+                    "required_failures": ["independent_verification_missing"],
+                    "quality_gate_passed": result.get("quality_gate_passed"),
+                    "submission_acceptance_passed": result.get(
+                        "submission_acceptance_passed"
+                    ),
+                },
+                state="rejected",
+                relations=[{"type": "evaluates", "target": attempt_id}],
+                actor={
+                    "actor_id": "research-handoff-gate",
+                    "authority": "deterministic_gate",
+                },
+            )
+            lifecycle.repository.record(
+                "manuscript",
+                {
+                    "idea_idx": idea_index,
+                    "status": result.get("status"),
+                    "quality_score": result.get("quality_score"),
+                    "rigor_score": result.get("rigor_score"),
+                    "final": False,
+                    "blocker": "independent_verification_missing",
+                },
+                state="draft",
+                relations=[
+                    {"type": "depends_on", "target": gate.object_id, "role": "gate"}
+                ],
+            )
+            object_ids.setdefault("gates", {})[idea_index] = gate.object_id
+        args._research_vcs_ids = object_ids
+        print("🧬 Research VCS 已记录论文交接门禁；未通过独立验证的稿件保持 draft")
+    except (ResearchGitError, OSError, ValueError) as exc:
+        _research_vcs_failure(args, "paper handoff record", exc)
 
 
 def _safe_load_json(path: str | Path, *, default=None):
@@ -505,6 +680,19 @@ def _write_project_pipeline_seed_artifacts(
         if lead_idea
         else {}
     )
+    if lead_plan:
+        save_contract_artifact(
+            project_root,
+            "research_plan",
+            lead_plan,
+            producer="run_project.project_planning",
+            depends_on=["idea_cards"],
+        )
+        save_preregistration(
+            project_root,
+            build_preregistration(lead_idea, lead_plan),
+            producer="run_project.project_planning",
+        )
     research_program = render_research_program_markdown(
         project_name=project_root.name,
         target_venue=target_venue,
@@ -2600,6 +2788,10 @@ def main(argv=None):
         print(
             "🧭 已生成结构化 idea cards / research_program，用于后续 planning、实验追踪和看板消费"
         )
+        _record_local_research_planning_objects(
+            args,
+            idea_cards=project_idea_cards,
+        )
     _record_local_research_checkpoint(
         args,
         stage="ideation",
@@ -2788,6 +2980,7 @@ def main(argv=None):
         successful_experiments = sum(
             1 for result in results if result.get("status") == "success"
         )
+        _record_local_research_attempt_objects(args, results=results)
         _record_local_research_checkpoint(
             args,
             stage="experiment",
@@ -2804,6 +2997,7 @@ def main(argv=None):
         summary_file, shortlist_file, summary_payload = save_project_summary(
             args.project_dir, results
         )
+        _record_local_research_handoff_objects(args, results=results)
         save_contract_artifact(
             args.project_dir,
             "pipeline_manifest",

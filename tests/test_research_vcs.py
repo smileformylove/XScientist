@@ -13,7 +13,11 @@ from ai_scientist.protocol.research_vcs import (
     build_research_object,
     validate_research_object,
 )
-from xscientist import ResearchRepository
+from ai_scientist.utils.research_integrity import (
+    build_preregistration,
+    lock_preregistration,
+)
+from xscientist import ResearchLifecycle, ResearchRepository
 from xscientist.research_cli import main as research_main
 from xscientist.research_git import ResearchGitError
 from xscientist.research_git import add_research_object
@@ -352,6 +356,142 @@ class ResearchRepositoryTests(unittest.TestCase):
             self.assertEqual(
                 [item["name"] for item in repository.branches()],
                 ["alternative", "main"],
+            )
+
+    def test_evidence_gated_lifecycle_reaches_final_manuscript(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            lifecycle = ResearchLifecycle(repository)
+            hypothesis_payload = {
+                "idea_id": "idea-1",
+                "title": "Reliability study",
+                "core_hypothesis": "The intervention improves accuracy.",
+                "failure_criteria": ["Accuracy does not improve."],
+            }
+            plan_payload = {
+                "plan_id": "plan-1",
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "dataset": "benchmark-v1",
+                        "metric": "accuracy",
+                        "baseline": "baseline-a",
+                    }
+                ],
+            }
+            registration = lock_preregistration(
+                build_preregistration(hypothesis_payload, plan_payload),
+                split_hashes={"task-1": "sha256:" + "a" * 64},
+                registered_by="planner",
+            )
+
+            planning = lifecycle.planning(
+                hypothesis=hypothesis_payload,
+                plan=plan_payload,
+                preregistration=registration,
+            )
+            attempt = lifecycle.experiment_attempt(
+                {
+                    "record_id": "run-1",
+                    "status": "success",
+                    "study_phase": "confirmatory",
+                    "dataset_split_hash": "sha256:" + "a" * 64,
+                    "seed": 11,
+                },
+                preregistration_id=planning["preregistration"].object_id,
+                plan_id=planning["plan"].object_id,
+            )
+            evidence = lifecycle.evidence(
+                {"effect": 0.04, "metric": "accuracy"},
+                attempt_ids=[attempt["attempt"].object_id],
+                supports=[planning["hypothesis"].object_id],
+                verified=True,
+            )
+            evaluation = lifecycle.evaluation(
+                {
+                    "status": "verified",
+                    "claim_promotion_allowed": True,
+                    "required_failures": [],
+                    "report_hash": "sha256:" + "b" * 64,
+                },
+                evaluates=[evidence["evidence"].object_id],
+                verifier_id="independent-verifier",
+            )
+            claim = lifecycle.claim(
+                {"statement": "The intervention improves accuracy."},
+                evidence_ids=[evidence["evidence"].object_id],
+                gate_id=evaluation["gate"].object_id,
+                verified=True,
+            )
+            manuscript = lifecycle.manuscript(
+                {"title": "A Confirmatory Reliability Study", "version": 1},
+                claim_ids=[claim["claim"].object_id],
+                gate_id=evaluation["gate"].object_id,
+                final=True,
+            )
+
+            self.assertEqual(manuscript["manuscript"].state, "completed")
+            self.assertTrue(repository.fsck()["ok"])
+            self.assertEqual(
+                {item["kind"] for item in repository.objects()},
+                {
+                    "claim",
+                    "evidence",
+                    "experiment_attempt",
+                    "gate_decision",
+                    "hypothesis",
+                    "manuscript",
+                    "preregistration",
+                    "research_plan",
+                    "review",
+                },
+            )
+
+    def test_confirmatory_attempt_requires_locked_registration_and_failures_persist(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            lifecycle = ResearchLifecycle(self._init(root))
+            hypothesis = {
+                "title": "H1",
+                "core_hypothesis": "H1",
+                "failure_criteria": ["H1 fails"],
+            }
+            plan = {
+                "plan_id": "p1",
+                "tasks": [
+                    {
+                        "task_id": "t1",
+                        "dataset": "d1",
+                        "metric": "accuracy",
+                        "baseline": "b1",
+                    }
+                ],
+            }
+            draft = build_preregistration(hypothesis, plan)
+            planning = lifecycle.planning(
+                hypothesis=hypothesis,
+                plan=plan,
+                preregistration=draft,
+            )
+
+            with self.assertRaisesRegex(ResearchGitError, "locked preregistration"):
+                lifecycle.experiment_attempt(
+                    {"status": "success", "study_phase": "confirmatory"},
+                    preregistration_id=planning["preregistration"].object_id,
+                    commit=False,
+                )
+
+            timed_out = lifecycle.experiment_attempt(
+                {"status": "timeout", "error_class": "deadline"},
+                plan_id=planning["plan"].object_id,
+            )
+            self.assertEqual(timed_out["attempt"].state, "timed_out")
+            self.assertEqual(
+                lifecycle.repository.get(timed_out["attempt"].object_id)["state"],
+                "timed_out",
             )
 
     def test_damaged_object_is_never_returned_as_valid(self) -> None:
