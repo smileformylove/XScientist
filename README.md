@@ -266,8 +266,12 @@ Login guard doc: `docs/LOGIN_GUARDRAIL.md`
 
 ```bash
 xscientist preflight --strict
+xscientist preflight --strict --bfts-config ./bfts_config.yaml
 xscientist validate
 ```
+
+The config-aware form also checks the selected model credentials/client and
+the exact Docker isolation image before the first paid call.
 
 From a source checkout, contributors can additionally run `make smoke`.
 

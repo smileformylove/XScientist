@@ -207,11 +207,10 @@ $env:RESEARCH_OUTPUT_DIR = "$PWD/outputs"
 XScientist deliberately does not auto-load `.env`: secrets are only made
 available when you explicitly export them.
 
-## 3. Create a local login and check the runtime
+## 3. Create a local login
 
 ```bash
 xscientist auth login --user <your-name>
-xscientist preflight --strict
 ```
 
 ## 4. Build the isolated experiment image
@@ -223,7 +222,16 @@ docker build -f Dockerfile.executor -t {image} .
 The generated BFTS config fails closed if this image is unavailable. It does
 not silently execute AI-generated experiment code in the host Python process.
 
-## 5. Run one traceable study
+## 5. Check the exact runtime configuration
+
+```bash
+xscientist preflight --strict --bfts-config bfts_config.yaml
+```
+
+This checks the selected model credentials and client package as well as the
+Docker daemon and exact image tag before any paid model call starts.
+
+## 6. Run one traceable study
 
 Edit `topic.md`, then run:
 
@@ -320,8 +328,8 @@ def create_workspace(
             f"cd {shlex.quote(str(root))}",
             "copy .env.example to .env, replace placeholders, and export it",
             "xscientist auth login --user <your-name>",
-            "xscientist preflight --strict",
             f"docker build -f Dockerfile.executor -t xscientist-exec:{__version__} .",
+            "xscientist preflight --strict --bfts-config bfts_config.yaml",
             "edit topic.md, then follow README.md",
         ],
     }

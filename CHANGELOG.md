@@ -20,6 +20,8 @@ for its Python package; the ARA protocol has its own version in
 - Installed-package-first `xscientist init` workspaces with provider/model
   validation, secret-free environment templates, pinned isolated-executor
   Dockerfiles, packaged BFTS profiles, and overwrite protection.
+- Config-aware preflight checks for the selected models, credentials, client
+  packages, Docker daemon, and exact isolated-executor image.
 
 ### Fixed
 

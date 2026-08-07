@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import time
 import tempfile
@@ -237,8 +238,9 @@ class PublicSdkTests(unittest.TestCase):
                 raise error
             return real_import(name, package)
 
+        stdout = io.StringIO()
         with (
-            mock.patch.object(sys, "stdout"),
+            mock.patch.object(sys, "stdout", stdout),
             mock.patch(
                 "xscientist.entrypoints.importlib.import_module",
                 side_effect=fail_full_workflows,
@@ -249,6 +251,8 @@ class PublicSdkTests(unittest.TestCase):
 
         self.assertEqual(project_exit_code, 0)
         self.assertEqual(batch_exit_code, 0)
+        self.assertIn("usage: xscientist project", stdout.getvalue())
+        self.assertIn("usage: xscientist batch", stdout.getvalue())
 
     def test_workflow_entrypoint_reports_missing_full_dependencies_cleanly(
         self,

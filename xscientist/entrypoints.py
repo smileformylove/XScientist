@@ -45,6 +45,7 @@ def _workflow_help_main(
             default_research_dir=str(resolve_output_path()),
             **common,
         )
+    parser.prog = f"xscientist {workflow}"
     try:
         parser.parse_args(args)  # type: ignore[attr-defined]
     except SystemExit as exc:
@@ -68,7 +69,8 @@ def _call_main(module_name: str, argv: Sequence[str] | None = None) -> int:
         result = main_fn()
     else:
         original = sys.argv
-        sys.argv = [module_name, *argv]
+        command = module_name.rsplit(".", 1)[-1].removesuffix("_cli")
+        sys.argv = [f"xscientist {command}", *argv]
         try:
             result = main_fn()
         finally:

@@ -280,8 +280,12 @@ xscientist auth status
 
 ```bash
 xscientist preflight --strict
+xscientist preflight --strict --bfts-config ./bfts_config.yaml
 xscientist validate
 ```
+
+带配置的预检还会在首次付费调用前检查所选模型的凭证/客户端，以及确切的
+Docker 隔离镜像。
 
 在源码 checkout 中，贡献者还可以运行 `make smoke`。
 
