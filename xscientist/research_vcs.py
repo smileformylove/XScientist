@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 from .research_git import (
     CheckpointResult,
     ResearchObjectResult,
+    ResearchMergeResult,
     ResearchStageResult,
     commit_research_stage,
     create_checkpoint,
@@ -17,13 +18,16 @@ from .research_git import (
     list_research_objects,
     list_research_branches,
     list_research_tags,
+    merge_research_branch,
     load_research_object,
     record_research_object,
     repository_status,
     research_diff,
+    research_blame,
     research_log,
     research_stage,
     research_unstage,
+    preview_research_merge,
     show_checkpoint,
     switch_research_branch,
     verify_research_repository,
@@ -187,6 +191,28 @@ class ResearchRepository:
         deep: bool = False,
     ) -> dict[str, Any]:
         return research_diff(self.path, before, after, deep=deep)
+
+    def blame(self, object_id: str, *, commit: str = "HEAD") -> dict[str, Any]:
+        return research_blame(self.path, object_id, commit=commit)
+
+    def merge_preview(self, source: str) -> dict[str, Any]:
+        return preview_research_merge(self.path, source)
+
+    def merge(
+        self,
+        source: str,
+        *,
+        subject: str | None = None,
+        summary: str = "",
+        actor: str | None = None,
+    ) -> ResearchMergeResult:
+        return merge_research_branch(
+            self.path,
+            source,
+            subject=subject,
+            summary=summary,
+            actor=actor,
+        )
 
     def fsck(
         self, *, commit: str = "HEAD", verify_objects: bool = True

@@ -113,6 +113,14 @@ class ResearchRepositoryTests(unittest.TestCase):
                 str(question.path.relative_to(repository.path)),
                 checkpoint.staged_paths,
             )
+            semantic = repository.diff("HEAD~1", "HEAD")["semantic"]
+            self.assertEqual(
+                {item["object_id"] for item in semantic["research_objects"]["added"]},
+                {question.object_id, hypothesis.object_id},
+            )
+            blame = repository.blame(hypothesis.object_id)
+            self.assertEqual(blame["object"]["content_hash"], hypothesis.object_hash)
+            self.assertEqual(blame["origin"]["checkpoint_id"], checkpoint.checkpoint_id)
 
     def test_privacy_gate_rejects_secret_without_persisting_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -240,6 +248,62 @@ class ResearchRepositoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ResearchGitError, "clean working state"):
                 repository.switch("alternative")
+
+    def test_clean_research_merge_retains_both_scientific_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.fork("alternative")
+            hypothesis = repository.record("hypothesis", {"statement": "H-alt"})
+            branch_checkpoint = repository.commit(
+                stage="ideation", subject="explore alternative"
+            )
+            repository.switch("main")
+
+            preview = repository.merge_preview("alternative")
+            merged = repository.merge("alternative")
+            checkpoint = repository.show()["checkpoint"]
+            verification = repository.fsck()
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
+            self.assertEqual(merged.target, "main")
+            self.assertEqual(len(checkpoint["parent_checkpoint_hashes"]), 2)
+            self.assertIn(
+                branch_checkpoint.content_hash, checkpoint["parent_checkpoint_hashes"]
+            )
+            self.assertEqual(repository.get(hypothesis.object_id)["kind"], "hypothesis")
+            self.assertTrue(verification["ok"], verification["errors"])
+
+    def test_merge_preflight_blocks_opposed_scientific_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            repository.commit(stage="ideation", subject="record H1")
+            repository.fork("challenge")
+            repository.record(
+                "evidence",
+                {"result": "negative"},
+                relations=[{"type": "refutes", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="challenge H1")
+            repository.switch("main")
+            repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "supports", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="support H1")
+
+            preview = repository.merge_preview("challenge")
+
+            self.assertFalse(preview["clean"])
+            self.assertIn(
+                "opposed_evidence",
+                {item["type"] for item in preview["conflicts"]},
+            )
+            with self.assertRaisesRegex(ResearchGitError, "conflict resolution"):
+                repository.merge("challenge")
 
     def test_cli_runs_native_record_stage_commit_and_branch_flow(self) -> None:
         with tempfile.TemporaryDirectory() as td:

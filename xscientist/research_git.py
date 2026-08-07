@@ -351,6 +351,28 @@ class ResearchStageResult:
         }
 
 
+@dataclass(frozen=True)
+class ResearchMergeResult:
+    """A completed scientific merge with its multi-parent checkpoint."""
+
+    source: str
+    target: str
+    source_commit: str
+    commit: str
+    checkpoint_id: str
+    content_hash: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "target": self.target,
+            "source_commit": self.source_commit,
+            "commit": self.commit,
+            "checkpoint_id": self.checkpoint_id,
+            "content_hash": self.content_hash,
+        }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1231,6 +1253,29 @@ def _checkpoint_parent_records(
     return records
 
 
+def _append_checkpoint_parent_records(
+    repo: Path,
+    records: list[tuple[str, str, dict[str, Any]]],
+    refs: Sequence[str],
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Add explicit scientific parents while preserving content-hash uniqueness."""
+
+    output = list(records)
+    seen = {str(record[2].get("content_hash") or "") for record in records}
+    for ref in refs:
+        record = _latest_checkpoint_record(repo, ref)
+        if record is None:
+            raise ResearchGitError(f"research parent has no checkpoint: {ref}")
+        _validate_checkpoint_payload(
+            record[2], checkpoint_path=f"{record[0]}:{record[1]}"
+        )
+        checkpoint_hash = str(record[2].get("content_hash") or "")
+        if checkpoint_hash and checkpoint_hash not in seen:
+            output.append(record)
+            seen.add(checkpoint_hash)
+    return output
+
+
 def _previous_checkpoint(repo: Path) -> dict[str, Any] | None:
     record = _latest_checkpoint_record(repo)
     if record is not None:
@@ -1517,6 +1562,8 @@ def _create_checkpoint_locked(
     reproduce_command: str | None = None,
     include: Sequence[str] = (),
     only_paths: Sequence[str] | None = None,
+    additional_parent_refs: Sequence[str] = (),
+    allow_backend_stage: bool = False,
     commit: bool = True,
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
@@ -1528,11 +1575,13 @@ def _create_checkpoint_locked(
     if reproduce_command and any(char in reproduce_command for char in "\r\n"):
         raise ResearchGitError("reproduction command must be a single line")
     staged_before, changed = _changed_paths(root)
-    if staged_before:
+    if staged_before and not allow_backend_stage:
         raise ResearchGitError(
             "checkpoint refused because the Git index already contains staged changes: "
             + ", ".join(sorted(staged_before))
         )
+    if allow_backend_stage:
+        changed |= staged_before
     candidates = changed
     if only_paths is not None:
         normalized_only = {_normalise_relative(path) for path in only_paths}
@@ -1552,7 +1601,11 @@ def _create_checkpoint_locked(
             reason="no material research change matched the checkpoint policy",
         )
 
-    parent_records = _checkpoint_parent_records(root)
+    parent_records = _append_checkpoint_parent_records(
+        root,
+        _checkpoint_parent_records(root),
+        additional_parent_refs,
+    )
     previous = parent_records[0][2] if parent_records else None
     sequence = (
         max(
@@ -2199,6 +2252,34 @@ def show_checkpoint(repo: str | Path, commit: str = "HEAD") -> dict[str, Any]:
     }
 
 
+def _research_objects_at_commit(
+    repo: Path,
+    commit: str,
+) -> dict[str, dict[str, Any]]:
+    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
+    objects: dict[str, dict[str, Any]] = {}
+    for path in sorted(
+        item
+        for item in tree
+        if item.startswith(".xscientist/objects/") and item.endswith(".json")
+    ):
+        try:
+            payload = validate_research_object(
+                json.loads(_run_git(repo, ["show", f"{commit}:{path}"]).stdout)
+            )
+        except (json.JSONDecodeError, ResearchObjectError) as exc:
+            raise ResearchGitError(
+                f"invalid typed research object at {commit}:{path}"
+            ) from exc
+        object_id = str(payload["object_id"])
+        if object_id in objects:
+            raise ResearchGitError(
+                f"duplicate typed research object at {commit}: {object_id}"
+            )
+        objects[object_id] = {**payload, "repository_path": path}
+    return objects
+
+
 def verify_research_repository(
     repo: str | Path,
     *,
@@ -2221,8 +2302,23 @@ def verify_research_repository(
         "checkpoints": 0,
         "pointers": 0,
         "objects": 0,
+        "research_objects": 0,
         "ara_manifests": 0,
     }
+
+    typed_objects: dict[str, dict[str, Any]] = {}
+    try:
+        typed_objects = _research_objects_at_commit(root, resolved)
+        checked["research_objects"] = len(typed_objects)
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+    for object_id, payload in typed_objects.items():
+        for relation in payload.get("relations") or []:
+            target = str(relation.get("target") or "")
+            if target.startswith("rso-") and target not in typed_objects:
+                errors.append(
+                    f"typed research object {object_id} references missing object: {target}"
+                )
 
     for checkpoint_path in sorted(
         path
@@ -2436,6 +2532,81 @@ def _manifest_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, An
         for item in before
         if isinstance(item, dict)
     }
+
+
+def _typed_object_delta(
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    before_ids = set(before)
+    after_ids = set(after)
+    added_ids = sorted(after_ids - before_ids)
+    removed_ids = sorted(before_ids - after_ids)
+    common_ids = sorted(before_ids & after_ids)
+    changed = [
+        object_id
+        for object_id in common_ids
+        if before[object_id].get("content_hash") != after[object_id].get("content_hash")
+    ]
+
+    def summaries(
+        source: dict[str, dict[str, Any]], identifiers: Sequence[str]
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "object_id": object_id,
+                "kind": str(source[object_id].get("kind") or ""),
+                "state": str(source[object_id].get("state") or ""),
+                "content_hash": str(source[object_id].get("content_hash") or ""),
+            }
+            for object_id in identifiers
+        ]
+
+    before_relations = {
+        (
+            object_id,
+            str(relation.get("type") or ""),
+            str(relation.get("target") or ""),
+            str(relation.get("role") or ""),
+        )
+        for object_id, payload in before.items()
+        for relation in payload.get("relations") or []
+    }
+    after_relations = {
+        (
+            object_id,
+            str(relation.get("type") or ""),
+            str(relation.get("target") or ""),
+            str(relation.get("role") or ""),
+        )
+        for object_id, payload in after.items()
+        for relation in payload.get("relations") or []
+    }
+
+    def relation_rows(values: set[tuple[str, str, str, str]]) -> list[dict[str, str]]:
+        return [
+            {"source": source, "type": kind, "target": target, "role": role}
+            for source, kind, target, role in sorted(values)
+        ]
+
+    by_kind: dict[str, dict[str, int]] = {}
+    for object_id in added_ids:
+        kind = str(after[object_id].get("kind") or "unknown")
+        by_kind.setdefault(kind, {"added": 0, "removed": 0})["added"] += 1
+    for object_id in removed_ids:
+        kind = str(before[object_id].get("kind") or "unknown")
+        by_kind.setdefault(kind, {"added": 0, "removed": 0})["removed"] += 1
+    return {
+        "added": summaries(after, added_ids),
+        "removed": summaries(before, removed_ids),
+        "unchanged": common_ids,
+        "integrity_conflicts": changed,
+        "by_kind": {key: by_kind[key] for key in sorted(by_kind)},
+        "relations": {
+            "added": relation_rows(after_relations - before_relations),
+            "removed": relation_rows(before_relations - after_relations),
+        },
+    }
     after_map = {
         str(item.get("path")): str(item.get("manifest_hash"))
         for item in after
@@ -2532,6 +2703,8 @@ def research_diff(
     ).stdout.rstrip()
     before_path, before_checkpoint = _checkpoint_at_commit(root, resolved_before)
     after_path, after_checkpoint = _checkpoint_at_commit(root, resolved_after)
+    before_typed_objects = _research_objects_at_commit(root, resolved_before)
+    after_typed_objects = _research_objects_at_commit(root, resolved_after)
     fields = {
         field: {
             "before": before_checkpoint.get(field),
@@ -2565,6 +2738,10 @@ def research_diff(
         "objects": _set_delta(
             before_checkpoint.get("object_refs") or [],
             after_checkpoint.get("object_refs") or [],
+        ),
+        "research_objects": _typed_object_delta(
+            before_typed_objects,
+            after_typed_objects,
         ),
         "ara_manifests": _manifest_delta(
             before_checkpoint.get("ara_manifests") or [],
@@ -2622,6 +2799,295 @@ def research_diff(
         "stat": stat,
         "semantic": semantic,
     }
+
+
+def research_blame(
+    repo: str | Path,
+    object_id: str,
+    *,
+    commit: str = "HEAD",
+) -> dict[str, Any]:
+    """Trace one immutable scientific object to its originating transition."""
+
+    root = _repository_root(repo)
+    resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
+    objects = _research_objects_at_commit(root, resolved.stdout.strip())
+    payload = objects.get(object_id)
+    if payload is None:
+        raise ResearchGitError(f"research object not found at {commit}: {object_id}")
+    path = str(payload["repository_path"])
+    raw = _run_git(
+        root,
+        [
+            "log",
+            "--reverse",
+            "--diff-filter=A",
+            "--format=%H%x00%aI%x00%an%x00%s",
+            commit,
+            "--",
+            path,
+        ],
+    ).stdout.splitlines()
+    if not raw:
+        raise ResearchGitError(f"cannot locate research object origin: {object_id}")
+    fields = raw[0].split("\0", 3)
+    if len(fields) != 4:
+        raise ResearchGitError(f"cannot parse research object origin: {object_id}")
+    origin_commit, authored_at, author, subject = fields
+    checkpoint = _latest_checkpoint_record(root, origin_commit)
+    related_by = [
+        {
+            "object_id": source_id,
+            "type": str(relation.get("type") or ""),
+            "role": str(relation.get("role") or ""),
+        }
+        for source_id, source in sorted(objects.items())
+        for relation in source.get("relations") or []
+        if relation.get("target") == object_id
+    ]
+    return {
+        "object": {
+            "object_id": object_id,
+            "kind": payload["kind"],
+            "state": payload["state"],
+            "content_hash": payload["content_hash"],
+            "path": path,
+        },
+        "origin": {
+            "commit": origin_commit,
+            "authored_at": authored_at,
+            "author": author,
+            "subject": subject,
+            "checkpoint_id": checkpoint[2].get("checkpoint_id") if checkpoint else None,
+            "checkpoint_hash": (
+                checkpoint[2].get("content_hash") if checkpoint else None
+            ),
+        },
+        "relations": list(payload.get("relations") or []),
+        "related_by": related_by,
+    }
+
+
+def _new_objects_since(
+    base: dict[str, dict[str, Any]],
+    side: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [side[object_id] for object_id in sorted(set(side) - set(base))]
+
+
+def _semantic_merge_conflicts(
+    base: dict[str, dict[str, Any]],
+    ours: dict[str, dict[str, Any]],
+    theirs: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ours_new = _new_objects_since(base, ours)
+    theirs_new = _new_objects_since(base, theirs)
+    conflicts: list[dict[str, Any]] = []
+
+    def relation_types(
+        values: Sequence[dict[str, Any]],
+    ) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for payload in values:
+            for relation in payload.get("relations") or []:
+                relation_type = str(relation.get("type") or "")
+                if relation_type in {"supports", "refutes"}:
+                    result.setdefault(str(relation.get("target") or ""), set()).add(
+                        relation_type
+                    )
+        return result
+
+    ours_relations = relation_types(ours_new)
+    theirs_relations = relation_types(theirs_new)
+    for target in sorted(set(ours_relations) & set(theirs_relations)):
+        combined = ours_relations[target] | theirs_relations[target]
+        if combined == {"supports", "refutes"}:
+            conflicts.append(
+                {
+                    "type": "opposed_evidence",
+                    "target": target,
+                    "message": "the same research object is supported and refuted",
+                }
+            )
+
+    ours_locked = [
+        item
+        for item in ours_new
+        if item.get("kind") == "preregistration" and item.get("state") == "locked"
+    ]
+    theirs_locked = [
+        item
+        for item in theirs_new
+        if item.get("kind") == "preregistration" and item.get("state") == "locked"
+    ]
+    for ours_item in ours_locked:
+        for theirs_item in theirs_locked:
+            if ours_item.get("payload") != theirs_item.get("payload"):
+                conflicts.append(
+                    {
+                        "type": "locked_preregistration",
+                        "ours": ours_item["object_id"],
+                        "theirs": theirs_item["object_id"],
+                        "message": "branches contain incompatible locked preregistrations",
+                    }
+                )
+
+    def metrics(values: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for item in values:
+            if item.get("kind") != "metric":
+                continue
+            payload = item.get("payload") or {}
+            key = str(
+                payload.get("metric_id")
+                or payload.get("name")
+                or payload.get("metric")
+                or ""
+            )
+            if key:
+                result[key] = item
+        return result
+
+    ours_metrics = metrics(ours_new)
+    theirs_metrics = metrics(theirs_new)
+    for key in sorted(set(ours_metrics) & set(theirs_metrics)):
+        if ours_metrics[key].get("payload") != theirs_metrics[key].get("payload"):
+            conflicts.append(
+                {
+                    "type": "metric_definition",
+                    "metric": key,
+                    "ours": ours_metrics[key]["object_id"],
+                    "theirs": theirs_metrics[key]["object_id"],
+                    "message": "primary metric definitions differ",
+                }
+            )
+    return conflicts
+
+
+def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
+    """Perform a read-only backend and scientific conflict preflight."""
+
+    root = _repository_root(repo)
+    normalized = _validate_research_ref_name(source, kind="branch")
+    source_ref = f"refs/heads/{normalized}"
+    source_commit = _run_git(
+        root, ["rev-parse", "--verify", f"{source_ref}^{{commit}}"]
+    ).stdout.strip()
+    target_commit = _head(root)
+    if target_commit is None:
+        raise ResearchGitError("research merge requires an existing checkpoint")
+    if source_commit == target_commit:
+        raise ResearchGitError("research branch is already at the current checkpoint")
+    base_commit = _run_git(
+        root, ["merge-base", target_commit, source_commit]
+    ).stdout.strip()
+    backend = _run_git(
+        root,
+        [
+            "merge-tree",
+            "--write-tree",
+            "--messages",
+            "--name-only",
+            target_commit,
+            source_commit,
+        ],
+        check=False,
+    )
+    ours_changed = set(
+        _run_git(root, ["diff", "--name-only", base_commit, target_commit])
+        .stdout.strip()
+        .splitlines()
+    )
+    theirs_changed = set(
+        _run_git(root, ["diff", "--name-only", base_commit, source_commit])
+        .stdout.strip()
+        .splitlines()
+    )
+    conflicts = _semantic_merge_conflicts(
+        _research_objects_at_commit(root, base_commit),
+        _research_objects_at_commit(root, target_commit),
+        _research_objects_at_commit(root, source_commit),
+    )
+    if backend.returncode:
+        paths = sorted(ours_changed & theirs_changed)
+        conflicts.append(
+            {
+                "type": "working_state",
+                "paths": paths,
+                "message": "backend merge has unresolved file conflicts",
+            }
+        )
+    return {
+        "source": normalized,
+        "target": _branch(root),
+        "source_commit": source_commit,
+        "target_commit": target_commit,
+        "base_commit": base_commit,
+        "clean": not conflicts,
+        "conflicts": conflicts,
+        "changed_paths": {
+            "ours": sorted(ours_changed),
+            "theirs": sorted(theirs_changed),
+        },
+    }
+
+
+def merge_research_branch(
+    repo: str | Path,
+    source: str,
+    *,
+    subject: str | None = None,
+    summary: str = "",
+    actor: str | None = None,
+) -> ResearchMergeResult:
+    """Merge a conflict-free research line and retain both scientific parents."""
+
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        _require_clean_research_switch(root)
+        preview = preview_research_merge(root, source)
+        if not preview["clean"]:
+            conflict_types = ", ".join(
+                sorted({str(item["type"]) for item in preview["conflicts"]})
+            )
+            raise ResearchGitError(
+                f"research merge requires explicit conflict resolution: {conflict_types}"
+            )
+        merge = _run_git(
+            root,
+            ["merge", "--no-ff", "--no-commit", "--no-edit", preview["source_commit"]],
+            check=False,
+        )
+        if merge.returncode:
+            _run_git(root, ["merge", "--abort"], check=False)
+            raise ResearchGitError(
+                "research merge backend failed after clean preflight"
+            )
+        try:
+            checkpoint = _create_checkpoint_locked(
+                root,
+                stage="merge",
+                subject=subject or f"merge research line {preview['source']}",
+                summary=summary,
+                actor=actor,
+                additional_parent_refs=(preview["source_commit"],),
+                allow_backend_stage=True,
+                allow_checkpoint_only=True,
+            )
+        except BaseException:
+            _run_git(root, ["merge", "--abort"], check=False)
+            raise
+        if not checkpoint.committed or not checkpoint.commit:
+            _run_git(root, ["merge", "--abort"], check=False)
+            raise ResearchGitError("research merge did not create a durable checkpoint")
+        return ResearchMergeResult(
+            source=str(preview["source"]),
+            target=str(preview["target"]),
+            source_commit=str(preview["source_commit"]),
+            commit=checkpoint.commit,
+            checkpoint_id=str(checkpoint.checkpoint_id),
+            content_hash=str(checkpoint.content_hash),
+        )
 
 
 def _create_research_bundle_locked(
@@ -3272,6 +3738,7 @@ __all__ = [
     "CheckpointResult",
     "ObjectPointerResult",
     "ResearchObjectResult",
+    "ResearchMergeResult",
     "ResearchStageResult",
     "ResearchGitError",
     "add_research_object",
@@ -3287,14 +3754,17 @@ __all__ = [
     "list_research_objects",
     "list_research_branches",
     "list_research_tags",
+    "merge_research_branch",
     "record_research_object",
     "repository_status",
     "reproduce_checkpoint",
     "restore_research_bundle",
     "research_diff",
+    "research_blame",
     "research_log",
     "research_stage",
     "research_unstage",
+    "preview_research_merge",
     "show_checkpoint",
     "switch_research_branch",
     "verify_research_bundle",

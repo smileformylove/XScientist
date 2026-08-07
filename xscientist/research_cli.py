@@ -33,7 +33,10 @@ from .research_git import (
     list_research_objects,
     list_research_tags,
     load_research_object,
+    merge_research_branch,
+    preview_research_merge,
     record_research_object,
+    research_blame,
     repository_status,
     reproduce_checkpoint,
     restore_research_bundle,
@@ -253,6 +256,25 @@ def _build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--commit", default="HEAD")
     tag_parser.add_argument("--annotation", default="")
     tag_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    blame_parser = subparsers.add_parser(
+        "blame", help="Trace a scientific object to its originating checkpoint."
+    )
+    blame_parser.add_argument("object_id")
+    blame_parser.add_argument("--repo", default=".")
+    blame_parser.add_argument("--commit", default="HEAD")
+    blame_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    merge_parser = subparsers.add_parser(
+        "merge", help="Preflight or merge a scientifically compatible research line."
+    )
+    merge_parser.add_argument("source")
+    merge_parser.add_argument("--repo", default=".")
+    merge_parser.add_argument("--preview", action="store_true")
+    merge_parser.add_argument("--subject")
+    merge_parser.add_argument("--summary", default="")
+    merge_parser.add_argument("--actor")
+    merge_parser.add_argument("--json", action="store_true", dest="as_json")
 
     log_parser = subparsers.add_parser("log", help="Show scientific history.")
     log_parser.add_argument("--repo", default=".")
@@ -571,6 +593,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"{item['name']} {item['checkpoint_id'] or '-'}")
             return 0
 
+        if args.command == "blame":
+            payload = research_blame(
+                args.repo,
+                args.object_id,
+                commit=args.commit,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                origin = payload["origin"]
+                research_object = payload["object"]
+                print(
+                    f"{research_object['object_id']} "
+                    f"{research_object['kind']} [{research_object['state']}]"
+                )
+                print(f"Origin checkpoint: {origin['checkpoint_id'] or '-'}")
+                print(f"Origin commit:     {origin['commit']}")
+                print(f"Subject:           {origin['subject']}")
+                print(f"Outgoing links:    {len(payload['relations'])}")
+                print(f"Incoming links:    {len(payload['related_by'])}")
+            return 0
+
+        if args.command == "merge":
+            if args.preview:
+                payload = preview_research_merge(args.repo, args.source)
+            else:
+                payload = merge_research_branch(
+                    args.repo,
+                    args.source,
+                    subject=args.subject,
+                    summary=args.summary,
+                    actor=args.actor,
+                ).to_dict()
+            if args.as_json:
+                _print_json(payload)
+            elif args.preview:
+                verdict = "clean" if payload["clean"] else "blocked"
+                print(f"Merge preflight: {verdict}")
+                for conflict in payload["conflicts"]:
+                    print(f"  {conflict['type']}: {_display_text(conflict['message'])}")
+            else:
+                print(
+                    f"Merged research line: {payload['source']} -> {payload['target']}"
+                )
+                print(f"Checkpoint:           {payload['checkpoint_id']}")
+                print(f"Commit:               {payload['commit']}")
+            return 0
+
         if args.command == "log":
             payload = research_log(args.repo, limit=args.limit)
             if args.as_json:
@@ -631,6 +701,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "objects: "
                     f"+{len(semantic['objects']['added'])} "
                     f"-{len(semantic['objects']['removed'])}"
+                )
+                typed = semantic["research_objects"]
+                print(
+                    "Typed research objects: "
+                    f"+{len(typed['added'])} "
+                    f"-{len(typed['removed'])}; "
+                    f"relations +{len(typed['relations']['added'])} "
+                    f"-{len(typed['relations']['removed'])}"
                 )
                 if args.deep:
                     print(
