@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from .research_evolution import ResearchEvolution
     from .research_lifecycle import ResearchLifecycle
     from .research_closure import audit_research_closure
+    from .research_dag import build_research_dag, export_research_dag
+    from .research_journey import build_research_guide, start_guided_research
+    from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
 
 _MODEL_EXPORTS = {"CommandResult", "ProjectRequest", "ServiceSettings"}
@@ -42,6 +45,18 @@ def __getattr__(name: str) -> Any:
         from .research_closure import audit_research_closure
 
         value = audit_research_closure
+    elif name in {"build_research_dag", "export_research_dag"}:
+        from . import research_dag
+
+        value = getattr(research_dag, name)
+    elif name in {"build_research_guide", "start_guided_research"}:
+        from . import research_journey
+
+        value = getattr(research_journey, name)
+    elif name == "ingest_tool_evidence":
+        from .research_tools import ingest_tool_evidence
+
+        value = ingest_tool_evidence
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals()[name] = value
@@ -71,6 +86,11 @@ __all__ = [
     "ServiceSettings",
     "XScientist",
     "audit_research_closure",
+    "build_research_dag",
+    "build_research_guide",
+    "export_research_dag",
+    "start_guided_research",
+    "ingest_tool_evidence",
     "__version__",
     "create_app",
 ]

@@ -888,6 +888,31 @@ and measurement identities, and `verify` for a passing gate plus verified
 reproduction. The closure is derived and content-addressed; it does not replace
 ARA, Research VCS objects, or CAS payloads.
 
+`research_dag.schema.json` defines a committed, content-addressed projection of
+Research VCS objects and optional ARA exploration nodes. Producers MUST retain
+support, refutation, contradiction, evaluation, reproduction, supersession,
+and promotion as typed edges. A proof level MUST be derived from its individual
+trace/replay/verify checks; `verified` MUST NOT be used as a generic truth
+score. Any target of refuting or contradictory evidence MUST remain visibly
+`contested`. A missing relation target or directed cycle makes DAG integrity
+false. Metadata-only consumers set `content_disclosed: false` and MUST NOT emit
+question, hypothesis, evidence, or claim summaries.
+
+External platform publication uses
+`research_adapter_receipt.schema.json`. The adapter receives a completed,
+hash-bound interop export rather than mutable repository internals. The receipt
+binds the adapter API and implementation versions, committed ref, export hash,
+payload disclosure decision, platform result, and publication time. Adapter
+discovery MUST NOT import third-party code; loading and publication require an
+explicit adapter name. An adapter receipt never changes claim state or
+scientific closure.
+
+Inbound tool results use `tool_evidence.schema.json`. A consumer MUST bind the
+receipt to at least one existing experiment attempt, content-address the whole
+receipt, and record the source tool and run identity without persisting the
+host input path. Imported tool evidence has recorder authority and MUST NOT be
+marked verified solely because it came from an external platform.
+
 The current Git commit SHA MUST NOT be embedded in its own tree. Producers put
 the checkpoint/event/manifest hashes in commit trailers instead:
 

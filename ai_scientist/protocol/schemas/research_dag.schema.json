@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_dag.schema.json",
+  "title": "XScientist Unified Scientific Evidence DAG",
+  "type": "object",
+  "required": ["schema_version", "ref", "commit", "content_disclosed", "sources", "nodes", "edges", "proof_summary", "scientific_closure", "integrity", "generated_at", "graph_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.research-dag.v1"},
+    "ref": {"type": "string", "minLength": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "content_disclosed": {"type": "boolean"},
+    "sources": {"type": "array", "items": {"type": "object"}},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "kind", "state", "phase", "summary", "content_hash", "actor", "created_at", "proof", "source_ref"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "source": {"enum": ["research_vcs", "ara"]},
+          "kind": {"type": "string", "minLength": 1},
+          "state": {"type": "string", "minLength": 1},
+          "phase": {"type": "integer", "minimum": 0},
+          "summary": {"type": "string"},
+          "content_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "actor": {"type": ["object", "null"]},
+          "created_at": {"type": ["string", "null"]},
+          "source_ref": {"type": "string"},
+          "proof": {
+            "type": "object",
+            "required": ["level", "checks", "blockers", "warnings", "contested"],
+            "properties": {
+              "level": {"enum": ["recorded", "traceable", "replayable", "verified", "contested"]},
+              "checks": {"type": "array", "items": {"type": "object", "required": ["code", "label", "passed", "layer"]}},
+              "blockers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "warnings": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "contested": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "type", "role", "category"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "target": {"type": "string", "minLength": 1},
+          "type": {"type": "string", "minLength": 1},
+          "role": {"type": "string"},
+          "category": {"enum": ["lineage", "support", "challenge", "verification", "evolution"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "proof_summary": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "scientific_closure": {"type": "object"},
+    "integrity": {"type": "object"},
+    "generated_at": {"type": "string"},
+    "graph_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -249,6 +249,105 @@ class ResearchRepository:
 
         return build_research_technology_tree(self.path)
 
+    def guide(self, *, language: str = "auto") -> dict[str, Any]:
+        """Return a beginner-friendly progress explanation and next actions."""
+
+        from .research_journey import build_research_guide
+
+        return build_research_guide(self.path, language=language)
+
+    def dag(
+        self,
+        *,
+        ref: str = "HEAD",
+        ara_roots: Sequence[str | Path] = (),
+        disclose_summaries: bool = True,
+    ) -> dict[str, Any]:
+        """Build a unified evidence, verification, and evolution DAG."""
+
+        from .research_dag import build_research_dag
+
+        return build_research_dag(
+            self.path,
+            ref=ref,
+            ara_roots=ara_roots,
+            disclose_summaries=disclose_summaries,
+        )
+
+    def export_dag(
+        self,
+        destination: str | Path,
+        *,
+        ref: str = "HEAD",
+        ara_roots: Sequence[str | Path] = (),
+        disclose_summaries: bool = True,
+    ) -> dict[str, Any]:
+        """Write deterministic DAG JSON and a self-contained offline browser."""
+
+        from .research_dag import export_research_dag
+
+        return export_research_dag(
+            self.path,
+            destination,
+            ref=ref,
+            ara_roots=ara_roots,
+            disclose_summaries=disclose_summaries,
+        )
+
+    def sync(
+        self,
+        *,
+        adapter: str,
+        destination: str,
+        ref: str = "HEAD",
+        formats: Sequence[str] = (
+            "ro-crate",
+            "prov-json",
+            "cwl",
+            "dvc",
+            "mlflow",
+        ),
+        include_payloads: bool = False,
+        options: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish a committed exchange package through an explicit adapter."""
+
+        from .research_adapters import sync_research_repository
+
+        return sync_research_repository(
+            self.path,
+            adapter_name=adapter,
+            destination=destination,
+            ref=ref,
+            formats=formats,
+            include_payloads=include_payloads,
+            options=options,
+        )
+
+    def ingest_tool_evidence(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        attempt_ids: Sequence[str],
+        supports: Sequence[str] = (),
+        refutes: Sequence[str] = (),
+        message: str | None = None,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Import external tool output without granting it verified status."""
+
+        from .research_tools import ingest_tool_evidence
+
+        return ingest_tool_evidence(
+            self.path,
+            receipt,
+            attempt_ids=attempt_ids,
+            supports=supports,
+            refutes=refutes,
+            message=message,
+            commit=commit,
+        )
+
     def merge(
         self,
         source: str,

@@ -1,10 +1,10 @@
 # XScientist 当前科研能力横纵评估
 
-> 研究时间：2026-08-08 | 评估基线：XScientist main@0ef61fe | 类型：本地代码、协议、用户旅程与两轮优化验证
+> 研究时间：2026-08-08 | 评估基线：XScientist main@0ef61fe | 类型：本地代码、协议、用户旅程与三轮优化验证
 
 ## 一、结论先行
 
-XScientist 已经跨过了“论文生成 Demo”阶段，形成了一套可运行的计算科研工作台：它能从选题、文献检索、想法生成、实验代码搜索与执行，一直走到写作、审稿、修复、归档和本地科研版本控制。它也能把失败、超时、反证和未完成验证保留下来，而不是只展示最好看的成功结果。本报告先保留审计基线的缺口判断，再在第十三、十四节记录针对这些缺口完成的两轮实现；下表同时给出优化前后评分。
+XScientist 已经跨过了“论文生成 Demo”阶段，形成了一套可运行的计算科研工作台：它能从选题、文献检索、想法生成、实验代码搜索与执行，一直走到写作、审稿、修复、归档和本地科研版本控制。它也能把失败、超时、反证和未完成验证保留下来，而不是只展示最好看的成功结果。本报告先保留审计基线的缺口判断，再在第十三至十五节记录针对这些缺口完成的三轮实现；下表同时给出优化前后评分。
 
 但它还不是一个能够独立产出可信科学结论的通用“自主科学家”。更准确的定位是：
 
@@ -14,11 +14,11 @@ XScientist 已经跨过了“论文生成 Demo”阶段，形成了一套可运�
 
 | 维度 | 审计基线 | 优化后 | 当前判断 |
 |---|---:|---:|---|
-| 自科研能力 | 3.4 / 5 | 4.0 / 5 | 研究计划已进入 BFTS 执行合约，高层命令自动采集复现 provenance；最终科学验证仍需独立主体 |
-| 自进化能力 | 2.6 / 5 | 4.0 / 5 | 已有真实候选、成对 benchmark、canary、签名发布和精确回滚；云平台与物理隔离 evaluator 尚待适配 |
-| 科研透明度 | 3.2 / 5 | 4.0 / 5 | 对象、运行、失败、部署与回滚均可寻址和验证；还缺外部不可变时间与公开透明日志 |
-| 科研协议可行性 | 2.8 / 5 | 4.1 / 5 | 33 份 schema、跨语言 canonical JSON 和五类互操作导出已落地；仍需第二个独立完整实现验证生态兼容性 |
-| 用户“科研 Git”体验 | 3.2 / 5 | 4.1 / 5 | 已补选择器、恢复/回退、分支维护、结构化错误、完整旅程和标准导出；TUI、bisect 与远程协作仍可继续打磨 |
+| 自科研能力 | 3.4 / 5 | 4.2 / 5 | 研究计划已进入 BFTS 执行合约，高层命令自动采集复现 provenance，完整证据链可视化；最终科学验证仍需独立主体 |
+| 自进化能力 | 2.6 / 5 | 4.2 / 5 | 已有真实候选、成对 benchmark、canary、签名发布和精确回滚，且演化谱系进入统一 DAG；云平台与物理隔离 evaluator 尚待适配 |
+| 科研透明度 | 3.2 / 5 | 4.4 / 5 | 对象、运行、失败、反证、部署与回滚均可寻址并在同一 DAG 查看；还缺外部不可变时间与公开透明日志 |
+| 科研协议可行性 | 2.8 / 5 | 4.3 / 5 | 协议 schema、跨语言 canonical JSON、五类互操作导出和版本化平台 adapter 已落地；仍需第二个独立完整实现验证生态兼容性 |
+| 用户“科研 Git”体验 | 3.2 / 5 | 4.4 / 5 | 已补中英新手引导、选择器、恢复/回退、分支维护、结构化错误、完整旅程与离线 DAG 浏览器；TUI、bisect 与远程协作仍可继续打磨 |
 
 一句话概括：优化后的系统已从“功能很强的 Alpha 原型”进入“可用于受监督真实项目的本地 Beta”——执行闭环、透明留痕和科研 Git 日常操作已经成立，但独立第三方信任、外部时间锚与具体生产平台权限仍不能由本地代码自行证明。
 
@@ -380,7 +380,7 @@ XScientist 收敛为一套小而清晰的“research commit protocol”，用完
 本报告基于以下证据：
 
 - 优化基线 `main@0ef61fe`、本轮实现后的代码、协议、文档与 Git 历史；
-- 最终全量测试：1125 passed、3 skipped、47 subtests passed；
+- 最终全量测试：1139 passed、3 skipped、47 subtests passed；
 - 自进化、Research VCS、closure、bundle、onboarding 等定向测试；
 - 临时科研仓库的真实 CLI 用户旅程；
 - DVC、MLflow、The AI Scientist、AI co-scientist、RO-Crate、W3C PROV 与 CWL 的官方文档或原始论文。
@@ -406,3 +406,13 @@ XScientist 收敛为一套小而清晰的“research commit protocol”，用完
 生产执行不再只依赖形式合格的 JSON。新 `xscientist.canonical-json.v1` 规范化配置由 Python 和 Node.js conformance consumer 共用测试向量；attestation 支持核心 HMAC-SHA256 与可选 Ed25519。生产 apply 要同时通过原有 promotion 语义校验，以及候选生成者、独立 benchmark、canary executor 和独立人类批准的签名验证。production rollback 也需要单独的签名授权。默认命令只产生 plan，只有显式 `--apply` 才会在限定 deployment root 内做可恢复目录交换。
 
 科研 Git 的生态交换也已补齐：`xscientist research export` 对一个已提交 ref 生成 hash-bound export manifest、RO-Crate、W3C PROV-JSON、CWL、DVC 和 MLflow 文件；默认只含 ID、关系、状态与 hash，只有 `--include-payloads` 才输出科研 payload。由此，上一轮列出的 candidate builder、benchmark runner、本地 canary/deploy/rollback、签名身份、五类 adapter 和非 Python conformance consumer 已从路线图转为有自动测试覆盖的实现。仍然不能由本地代码替代的是物理 benchmark 保管、远程独立评估、外部不可变时间、硬件密钥和具体生产平台授权。
+
+## 十五、第三轮优化实施更新
+
+第三轮把重点从“底层能力是否存在”转向“非领域用户是否会用、其他平台是否接得住、证据是否一眼可审”。`xscientist research start` 现在只要求用户写出研究问题、候选假设和证伪条件，就会原子建立第一条 typed lineage；`research guide --lang en|zh` 根据仓库真实状态解释当前进度、下一步为什么重要，并给出使用 `@latest:<kind>` 的可复制命令。它还会在已有证据但没有任何 refute/contradict 关系时提示主动检验替代解释。
+
+新增统一科研 DAG 把 Research VCS 的问题、假设、计划、预注册、实验、证据、反证、claim、独立 review、确定性 gate、reproduction，以及 agent candidate/evaluation/promotion/deployment/rollback 投影到同一个有向无环图。可选 ARA 根会按 `manifest.lock` 与 `ara_manifest_hash` 建立锚定边，把详细实验搜索父子树接入科学论证。每个节点单独显示 trace、replay、verify 检查，并区分 recorded、traceable、replayable、verified、contested；“绿色”不再是模糊真值评分，任何反证目标都会保持可见争议状态。输出同时包含 schema-valid、content-addressed JSON 和无需服务/CDN 的可搜索离线 HTML。
+
+平台扩展从固定格式列表升级为 `xscientist.research_adapters` entry-point 协议。枚举适配器时不会导入第三方代码，只有用户显式执行 doctor/sync 才加载指定插件；发布对象始终是已经提交且 hash-bound 的 RO-Crate/PROV/CWL/DVC/MLflow exchange package。内置 filesystem adapter 支持本地目录、挂载云盘与网络卷的原子发布，第三方平台通过统一 descriptor、probe、publish 契约接入。每次成功同步生成独立 schema 和 canonical hash 约束的 adapter receipt，但绝不会因此修改 claim 的验证状态。
+
+工具集成同时支持反向进入科研账本：外部运行器只需产生 `xscientist.tool-evidence.v1` JSON，`research ingest` 就能把 run、metrics 和 artifact hashes 绑定到既有 experiment attempt 与支持/反驳关系。导入对象固定保持 `completed` 和 `recorder` 权限，不能借同步或导入自封为 verified；只有后续独立 review、gate 与 reproduction 能提升证明等级。公共 HTTP DAG 端点默认只返回 metadata，内容摘要必须显式授权。ARA 哈希、manifest 锚和第三方 adapter receipt 均经过严格 SHA-256、canonical JSON 与敏感字段检查；无效 ARA 边会直接使统一 DAG integrity 失败，而不是在投影时被静默丢弃。

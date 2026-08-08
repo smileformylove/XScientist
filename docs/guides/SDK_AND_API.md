@@ -44,6 +44,10 @@ xscientist/                 Public, versioned integration surface
 ├── research_lifecycle.py   Evidence-gated research transitions
 ├── research_evolution.py   Agent candidate promotion and rollback
 ├── research_commands.py    One-command researcher workflows
+├── research_journey.py     Beginner start/guide state machine
+├── research_dag.py         Unified evidence/evolution graph and browser
+├── research_adapters.py    Versioned external platform plugin contract
+├── research_tools.py       Schema-bound external evidence ingestion
 └── entrypoints.py          Compatibility workflow dispatch
 
 ai_scientist/               Internal workflow implementation
@@ -135,6 +139,10 @@ repository = ResearchRepository.init(
     question="Does method A improve the fixed baseline?",
 )
 lifecycle = ResearchLifecycle(repository)
+
+next_step = repository.guide(language="en")["next_steps"][0]
+metadata_graph = repository.dag(disclose_summaries=False)
+repository.export_dag("./research-dag")
 ```
 
 The CLI provides both research-native and familiar version-control verbs:
@@ -211,6 +219,9 @@ Endpoints:
 - `GET /v1/shortlist`
 - `GET /v1/boards/submission`
 - `GET /v1/boards/rewrite`
+- `GET /v1/projects/{project}/research/status`
+- `GET /v1/projects/{project}/research/audit`
+- `GET /v1/projects/{project}/research/dag`
 
 Example request:
 
@@ -248,6 +259,10 @@ curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
 
 curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
   "http://127.0.0.1:8000/v1/boards/submission?require_gate=true"
+
+# Metadata-only by default; add include_summaries=true only for authorized users.
+curl -H "X-API-Key: $XSCIENTIST_API_KEY" \
+  "http://127.0.0.1:8000/v1/projects/demo/research/dag?ref=HEAD"
 ```
 
 The service always reads these views from its configured `output_root`;

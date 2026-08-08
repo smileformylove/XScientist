@@ -28,6 +28,8 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(xscientist.__version__, "0.1.1")
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
+        self.assertTrue(callable(xscientist.build_research_dag))
+        self.assertTrue(callable(xscientist.build_research_guide))
 
     def test_packaged_runtime_resources_exist(self) -> None:
         self.assertTrue(bfts_config_path("default").is_file())
@@ -383,13 +385,19 @@ class PublicSdkTests(unittest.TestCase):
                 audit = client.get(
                     "/v1/projects/demo/research/audit", params={"level": "trace"}
                 )
+                dag = client.get("/v1/projects/demo/research/dag")
                 escaped = client.get("/v1/projects/../research/audit")
 
             self.assertEqual(status.status_code, 200)
             self.assertEqual(audit.status_code, 200)
             self.assertFalse(audit.json()["complete"])
             self.assertFalse(audit.json()["payloads_disclosed"])
+            self.assertEqual(dag.status_code, 200)
+            self.assertFalse(dag.json()["content_disclosed"])
+            self.assertNotIn("unbound claim", dag.text)
+            self.assertTrue(dag.json()["integrity"]["is_dag"])
             self.assertNotIn(str(Path(td).resolve()), status.text)
+            self.assertNotIn(str(Path(td).resolve()), dag.text)
             self.assertIn(escaped.status_code, {404, 422})
 
     def test_reload_server_does_not_create_a_second_app(self) -> None:

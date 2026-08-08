@@ -536,6 +536,15 @@ XScientist 直接提供科研对象和科研操作，使用者无需操作 Git �
 ```bash
 xscientist git doctor
 
+# 新手入口：只需问题、假设、证伪条件，不要求理解 Git 或对象 ID
+xscientist research start ./my-study \
+  --question "间隔练习能否提高一周后的记忆？" \
+  --hypothesis "间隔练习会提高一周后的记忆。" \
+  --falsifier "记忆表现与固定基线相同或更差。" \
+  --lang zh
+cd my-study
+xscientist research guide --lang zh
+
 xscientist research hypothesis \
   "检索反思能够提高事实准确率" \
   --falsifier "准确率不高于固定基线"
@@ -572,7 +581,22 @@ xscientist research claim \
 xscientist research decide contradiction \
   --name alternate-mechanism --contradictory-evidence
 xscientist research tree
+xscientist research dag --output ./research-dag
 ```
+
+`research guide` 会根据仓库中真实存在的对象，用普通语言解释当前完成度、下一步为什么
+重要，并给出可直接复制的命令。`research dag` 会生成无需服务器的
+`research-dag.html`，把问题、假设、计划、实验、支持/反驳证据、独立评审、门禁、复现
+和智能体演化放在同一张可搜索图上。节点会分别展示 trace、replay、verify 检查；存在
+反证的对象保持 `contested`，不会被总分掩盖。
+
+使用 `--ara <目录>` 可以把详细实验探索树按 manifest hash 接入同一张图。不同平台则
+通过显式、版本化的 `research adapter` 接口连接；第三方插件只有在用户明确执行
+`adapter doctor` 或 `adapter sync` 时才会加载。完整说明见
+[`RESEARCH_DAG_AND_ADAPTERS.md`](RESEARCH_DAG_AND_ADAPTERS.md)。
+MLflow、DVC、notebook、电子实验记录本或仪器桥接器也可以输出
+`tool_evidence.schema.json`，再由 `research ingest` 接入；它只会生成 completed、未验证
+的证据节点，不能绕过独立评审和复现门禁。
 
 这些高层命令默认自动完成记录、精确选择和 checkpoint；失败与超时实验同样进入
 正式历史。`preregister` 会在实验前生成计划并锁定预注册，`review` 会生成独立评审

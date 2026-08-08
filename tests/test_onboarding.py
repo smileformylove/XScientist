@@ -81,6 +81,8 @@ class OnboardingTests(unittest.TestCase):
                 "xscientist manager --research-dir ./outputs list-papers", readme
             )
             self.assertIn("xscientist research objects", readme)
+            self.assertIn("xscientist research guide", readme)
+            self.assertIn("xscientist research dag", readme)
             self.assertNotIn("--research-git", readme)
             self.assertNotIn("\n+  --model", readme)
             self.assertEqual(

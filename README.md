@@ -550,7 +550,19 @@ and record only scientifically meaningful progress:
 
 ```bash
 xscientist git doctor
+
+# Beginner path: three plain-language inputs create the first checkpoint.
+xscientist research start ./my-study \
+  --question "Does spaced practice improve one-week recall?" \
+  --hypothesis "Spaced practice improves one-week recall." \
+  --falsifier "Recall is unchanged or worse than the baseline."
+cd my-study
+xscientist research guide
 ```
+
+`research guide` reads the actual repository and explains one next step, why it
+matters, and an exact command. It is available in English and Chinese with
+`--lang en|zh` and does not require users to know object IDs or Git concepts.
 
 For everyday research, the high-level commands record the object, select only
 that change, and create one checkpoint automatically:
@@ -630,6 +642,7 @@ xscientist research blame <research-object-id>
 xscientist research fsck
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research dag --output ./research-dag
 xscientist research restore HEAD~1 claims/result.md
 xscientist research revert <checkpoint-commit>
 ```
@@ -680,6 +693,22 @@ preregistration`. `trace` checks semantic linkage, `replay` additionally checks
 immutable code/data/environment/evidence identities, and `verify` requires a
 passing gate plus a verified reproduction receipt. The report contains no
 research payloads and can therefore remain small even when the CAS grows.
+
+`research dag` uses the same committed state and closure rules to create one
+searchable offline browser for questions, experiment attempts, supporting and
+refuting evidence, reviews, gates, reproductions, and agent-evolution records.
+Each node exposes separate trace/replay/verify checks; refuted objects remain
+visibly `contested` instead of being hidden by a green aggregate score. Optional
+`--ara` roots link detailed experiment-search trees through manifest hashes.
+
+External tools use a versioned, opt-in adapter boundary. Discovery never loads
+third-party plugins; `research adapter doctor NAME` and `adapter sync NAME` do
+so only after explicit selection. The built-in filesystem adapter atomically
+publishes RO-Crate/PROV/CWL/DVC/MLflow exchange packages to local or mounted
+directories. See [the beginner, DAG, and adapter guide](docs/RESEARCH_DAG_AND_ADAPTERS.md).
+External tools can return a `tool_evidence.schema.json` receipt and use
+`research ingest`; the content-addressed result enters the DAG as completed but
+unverified evidence, so platform integration cannot bypass independent review.
 
 Opposing evidence remains blocking by default. An explicit
 `research merge <line> --preserve-conflicts` retains both sides and writes a

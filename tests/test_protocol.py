@@ -145,6 +145,9 @@ class SchemaTest(unittest.TestCase):
             "canary_run",
             "deployment_receipt",
             "research_interop",
+            "research_adapter_receipt",
+            "research_dag",
+            "tool_evidence",
         ):
             schema = load_schema(name)
             Draft202012Validator.check_schema(schema)

@@ -18,6 +18,10 @@ XScientist is designed as a **research operating system** that can run continuou
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
 | Native Research VCS | `xscientist/research_vcs.py`, `xscientist/research_lifecycle.py`, `xscientist/research_evolution.py` | Semver-managed public API | Typed objects, semantic staging/diff/merge, evidence gates, self-evolution promotion, and rollback |
+| Guided research journey | `xscientist/research_journey.py` | Semver-managed public API | Plain-language start, progress, falsification warnings, and exact next actions |
+| Unified scientific DAG | `xscientist/research_dag.py` | Artifact-compatible public projection | Research VCS + ARA evidence/evolution graph, layered proof checks, JSON, and offline browser |
+| Platform adapter boundary | `xscientist/research_adapters.py` | Versioned plugin protocol | Safe discovery, conformance, explicit publication, and hash-bound receipts |
+| External tool evidence | `xscientist/research_tools.py` | Artifact-compatible ingestion | Schema-bound tool receipts that enter as unverified evidence |
 | Git persistence adapter | `xscientist/research_git.py` | Internal backend | Durable local commit graph, CAS pointers, offline bundles, and checkpoint-scoped reproduction |
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Research integrity | `ai_scientist/utils/research_integrity.py` | Artifact-compatible | Immutable preregistration, blind verification, independent reproduction, claim promotion |
@@ -75,6 +79,13 @@ immutable payloads remain in `.ara-store/`. The current Git adapter uses a
 deny-first file policy, refuses external staged state, creates no remote, and
 enforces `auto_push: false`. See
 [Native Research Version Control](LOCAL_RESEARCH_GIT.md).
+
+The DAG projection reads one immutable Research VCS ref and never mutates it.
+ARA experiment graphs join only through matching manifest hashes. External
+platform adapters sit downstream of the committed interop export and are
+discovered without import; a named plugin is loaded only for an explicit
+doctor or sync operation. Neither DAG rendering nor publication can promote a
+claim.
 
 Source-operation helpers are included in Git and the source distribution, but
 not in the wheel. Installed users run `xscientist daemon`; repository operators

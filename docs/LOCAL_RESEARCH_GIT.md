@@ -277,6 +277,34 @@ stable decision ID, inputs, reasons, and commands form the decision trace.
 objects and relations, including open/contested frontier nodes, branch heads,
 topological order, cycles, and missing relation targets.
 
+For a human-facing view of the complete scientific argument, use:
+
+```bash
+xscientist research guide --lang en
+xscientist research dag --ara ./ara/<run> --output ./research-dag
+```
+
+The unified DAG is distinct from the compact technology tree. It projects every
+Research VCS object, support/refutation relation, independent review, gate,
+reproduction, and agent-evolution transition, then optionally connects detailed
+ARA experiment nodes through `manifest.lock`. Selecting a node reveals its
+trace, replay, and verify checks. The output is both schema-valid JSON and a
+self-contained offline HTML browser.
+
+Committed exchange packages can be published through an explicit adapter:
+
+```bash
+xscientist research adapter list
+xscientist research adapter doctor filesystem
+xscientist research adapter sync filesystem \
+  --dest ../shared-study --format ro-crate --format prov-json
+```
+
+Third-party adapters are discovered through the
+`xscientist.research_adapters` entry-point group and are never imported by the
+listing command. See `docs/RESEARCH_DAG_AND_ADAPTERS.md` for the versioned
+contract and platform matrix.
+
 ## Optional Git interoperability
 
 When an operator explicitly wants a Git remote, the current adapter can use

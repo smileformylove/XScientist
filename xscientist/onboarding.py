@@ -271,7 +271,14 @@ xscientist manager --research-dir ./outputs list-papers
 xscientist research status --repo outputs/projects/first-study
 xscientist research objects --repo outputs/projects/first-study
 xscientist research audit --repo outputs/projects/first-study --level trace
+xscientist research guide --repo outputs/projects/first-study
+xscientist research dag --repo outputs/projects/first-study --output ./research-dag
 ```
+
+`guide` explains the next scientific step without assuming Git or protocol
+knowledge. Open `research-dag/research-dag.html` locally to inspect hypotheses,
+experiments, supporting and refuting evidence, independent reviews,
+reproductions, and agent evolution on one searchable graph.
 
 Use `xscientist project --help` for all quality, budget, workflow, and venue
 options. The generated config has finite token and wall-time limits. API calls

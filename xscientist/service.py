@@ -456,6 +456,37 @@ def create_app(settings: ServiceSettings | None = None):
                 status_code=409, detail="research closure audit failed"
             ) from exc
 
+    @app.get("/v1/projects/{project}/research/dag")
+    def research_dag(
+        project: str,
+        ref: str = "HEAD",
+        include_summaries: bool = False,
+    ) -> dict[str, Any]:
+        """Expose a path-confined, metadata-only scientific DAG by default."""
+
+        from .research_git import ResearchGitError
+
+        try:
+            name = _validate_project_name(project, output_root=output_root)
+            selected_ref = _validate_research_ref(ref)
+            repository = output_root / "projects" / name
+            if not repository.is_dir():
+                raise HTTPException(status_code=404, detail="project not found")
+            from .research_vcs import ResearchRepository
+
+            return ResearchRepository(repository).dag(
+                ref=selected_ref,
+                disclose_summaries=include_summaries,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except ResearchGitError as exc:
+            raise HTTPException(
+                status_code=409, detail="scientific DAG projection failed"
+            ) from exc
+
     @app.get("/v1/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
         job = store.get(job_id)

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/tool_evidence.schema.json",
+  "title": "XScientist External Tool Evidence Receipt",
+  "type": "object",
+  "required": ["schema_version", "tool", "run_id", "result", "metrics"],
+  "properties": {
+    "schema_version": {"const": "xscientist.tool-evidence.v1"},
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "additionalProperties": false
+    },
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "result": {"type": "string", "minLength": 1, "maxLength": 10000},
+    "metrics": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": ["number", "integer", "string", "boolean", "null"]}
+    },
+    "artifact_hashes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

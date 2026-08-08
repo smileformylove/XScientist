@@ -115,6 +115,53 @@ def save_hypothesis(
     )
 
 
+def save_research_plan(
+    repo: str,
+    *,
+    hypothesis_id: str,
+    summary: str,
+    discriminating_tests: Sequence[str] = (),
+    success_rule: str = "",
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Record an exploratory plan without requiring raw protocol JSON."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    hypothesis = repository.get(hypothesis_id)
+    if hypothesis["kind"] != "hypothesis":
+        raise ResearchGitError("research plan hypothesis reference has wrong kind")
+    resolved_hypothesis = str(hypothesis["object_id"])
+    payload: dict[str, Any] = {
+        "summary": _required_text(summary, label="research plan summary"),
+        "study_phase": "exploratory",
+        "hypothesis_id": resolved_hypothesis,
+    }
+    tests = [
+        _required_text(value, label="discriminating test")
+        for value in discriminating_tests
+    ]
+    if tests:
+        payload["discriminating_tests"] = list(dict.fromkeys(tests))
+    if success_rule.strip():
+        payload["success_rule"] = success_rule.strip()
+    result = repository.record(
+        "research_plan",
+        payload,
+        state="draft",
+        relations=[{"type": "depends_on", "target": resolved_hypothesis}],
+    )
+    return _finish(
+        repository,
+        result,
+        stage="plan",
+        subject=message or "record exploratory research plan",
+        status="draft",
+        commit=commit,
+    )
+
+
 def save_experiment(
     repo: str,
     *,
@@ -410,5 +457,6 @@ __all__ = [
     "save_experiment",
     "save_hypothesis",
     "save_preregistration",
+    "save_research_plan",
     "save_review",
 ]

@@ -201,6 +201,29 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Start a research repository with one plain-language question and falsifiable hypothesis.",
+    )
+    start_parser.add_argument("path")
+    start_parser.add_argument("--question", required=True)
+    start_parser.add_argument("--hypothesis", required=True)
+    start_parser.add_argument("--falsifier", required=True)
+    start_parser.add_argument("--name")
+    start_parser.add_argument("--actor", default="human:researcher")
+    start_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    start_parser.add_argument("--git-user-name")
+    start_parser.add_argument("--git-user-email")
+    start_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    guide_parser = subparsers.add_parser(
+        "guide",
+        help="Explain current progress and the next scientific step in plain language.",
+    )
+    guide_parser.add_argument("--repo", default=".")
+    guide_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    guide_parser.add_argument("--json", action="store_true", dest="as_json")
+
     hypothesis_parser = subparsers.add_parser(
         "hypothesis",
         help="Record and checkpoint one falsifiable hypothesis.",
@@ -213,6 +236,24 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     hypothesis_parser.add_argument("-m", "--message")
     hypothesis_parser.add_argument("--no-commit", action="store_true")
     hypothesis_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    plan_parser = subparsers.add_parser(
+        "plan",
+        help="Record an exploratory plan in plain language before running experiments.",
+    )
+    plan_parser.add_argument("hypothesis_id")
+    plan_parser.add_argument("summary")
+    plan_parser.add_argument(
+        "--test",
+        action="append",
+        default=[],
+        help="A discriminating or falsification test; repeat as needed.",
+    )
+    plan_parser.add_argument("--success-rule", default="")
+    plan_parser.add_argument("--repo", default=".")
+    plan_parser.add_argument("-m", "--message")
+    plan_parser.add_argument("--no-commit", action="store_true")
+    plan_parser.add_argument("--json", action="store_true", dest="as_json")
 
     preregistration_parser = subparsers.add_parser(
         "preregister",
@@ -310,6 +351,19 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     evidence_parser.add_argument("-m", "--message")
     evidence_parser.add_argument("--no-commit", action="store_true")
     evidence_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Ingest one schema-bound JSON evidence receipt from an external tool.",
+    )
+    ingest_parser.add_argument("file")
+    ingest_parser.add_argument("--attempt", action="append", required=True)
+    ingest_parser.add_argument("--supports", action="append", default=[])
+    ingest_parser.add_argument("--refutes", action="append", default=[])
+    ingest_parser.add_argument("--repo", default=".")
+    ingest_parser.add_argument("-m", "--message")
+    ingest_parser.add_argument("--no-commit", action="store_true")
+    ingest_parser.add_argument("--json", action="store_true", dest="as_json")
 
     review_parser = subparsers.add_parser(
         "review",
@@ -417,6 +471,67 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     tree_parser.add_argument("--repo", default=".")
     tree_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    dag_parser = subparsers.add_parser(
+        "dag",
+        help="Build a unified evidence, verification, and agent-evolution DAG.",
+    )
+    dag_parser.add_argument("--repo", default=".")
+    dag_parser.add_argument("--ref", default="HEAD")
+    dag_parser.add_argument(
+        "--ara",
+        action="append",
+        default=[],
+        help="Optional ARA root whose experiment exploration graph should be linked.",
+    )
+    dag_parser.add_argument(
+        "--output",
+        help="Write research-dag.json and an offline research-dag.html browser.",
+    )
+    dag_parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Hide question, hypothesis, result, and claim summaries.",
+    )
+    dag_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    adapter_parser = subparsers.add_parser(
+        "adapter",
+        help="Discover and explicitly invoke versioned external platform adapters.",
+    )
+    adapter_subparsers = adapter_parser.add_subparsers(
+        dest="adapter_command", required=True
+    )
+    adapter_list = adapter_subparsers.add_parser(
+        "list",
+        help="List built-in and installed third-party adapters without loading plugins.",
+    )
+    adapter_list.add_argument("--json", action="store_true", dest="as_json")
+    adapter_doctor = adapter_subparsers.add_parser(
+        "doctor", help="Load one selected adapter and check its requirements."
+    )
+    adapter_doctor.add_argument("name")
+    adapter_doctor.add_argument("--json", action="store_true", dest="as_json")
+    adapter_sync = adapter_subparsers.add_parser(
+        "sync",
+        help="Export a committed ref and publish it through one selected adapter.",
+    )
+    adapter_sync.add_argument("name")
+    adapter_sync.add_argument("--repo", default=".")
+    adapter_sync.add_argument("--ref", default="HEAD")
+    adapter_sync.add_argument("--dest", required=True)
+    adapter_sync.add_argument(
+        "--format",
+        action="append",
+        choices=["ro-crate", "prov-json", "cwl", "dvc", "mlflow"],
+        default=[],
+        dest="formats",
+    )
+    adapter_sync.add_argument("--include-payloads", action="store_true")
+    adapter_sync.add_argument(
+        "--option", action="append", default=[], help="Adapter option as NAME=VALUE."
+    )
+    adapter_sync.add_argument("--json", action="store_true", dest="as_json")
 
     fsck_parser = subparsers.add_parser(
         "fsck", help="Verify checkpoints, ARA bindings, pointers, and CAS objects."
@@ -766,6 +881,56 @@ def main(
                     print(_display_text(payload["install_hint"]), file=sys.stderr)
             return 0 if payload["ok"] else 1
 
+        if args.command == "start":
+            from .research_journey import start_guided_research
+
+            payload = start_guided_research(
+                args.path,
+                question=args.question,
+                hypothesis=args.hypothesis,
+                falsifier=args.falsifier,
+                name=args.name,
+                actor=args.actor,
+                language=args.lang,
+                git_user_name=args.git_user_name,
+                git_user_email=args.git_user_email,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Research workspace: {_display_path(payload['repository'])}")
+                print(f"Question:           {payload['question_id']}")
+                print(f"Hypothesis:         {payload['hypothesis_id']}")
+                print("Next step:")
+                for step in payload["guide"]["next_steps"]:
+                    print(f"  {step['title']}")
+                    print(f"  Why: {_display_text(step['why'])}")
+                    print(f"  Run: {step['command']}")
+            return 0
+
+        if args.command == "guide":
+            from .research_journey import build_research_guide
+
+            payload = build_research_guide(args.repo, language=args.lang)
+            if args.as_json:
+                _print_json(payload)
+            else:
+                progress = payload["progress"]
+                print(
+                    f"Research progress: {progress['completed_stages']}/"
+                    f"{progress['total_stages']} ({progress['percent']}%)"
+                )
+                for step in payload["next_steps"]:
+                    print(f"\n{step['title']}")
+                    print(f"  {_display_text(step['why'])}")
+                    print(f"  {step['command']}")
+                for warning in payload["warnings"]:
+                    print(
+                        f"warning: {_display_text(warning['message'])}",
+                        file=sys.stderr,
+                    )
+            return 0
+
         if args.command == "hypothesis":
             from .research_commands import save_hypothesis
 
@@ -779,6 +944,21 @@ def main(
                 commit=not args.no_commit,
             )
             _print_saved_object("hypothesis", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "plan":
+            from .research_commands import save_research_plan
+
+            result = save_research_plan(
+                args.repo,
+                hypothesis_id=args.hypothesis_id,
+                summary=args.summary,
+                discriminating_tests=args.test,
+                success_rule=args.success_rule,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("research plan", result, as_json=args.as_json)
             return 0
 
         if args.command == "experiment":
@@ -844,6 +1024,21 @@ def main(
                 commit=not args.no_commit,
             )
             _print_saved_object("evidence", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "ingest":
+            from .research_tools import ingest_tool_evidence, load_tool_evidence
+
+            result = ingest_tool_evidence(
+                args.repo,
+                load_tool_evidence(args.file),
+                attempt_ids=args.attempt,
+                supports=args.supports,
+                refutes=args.refutes,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("tool evidence", result, as_json=args.as_json)
             return 0
 
         if args.command == "claim":
@@ -984,6 +1179,91 @@ def main(
                         f"[{item['classification']}]"
                     )
             return 0 if payload["integrity"]["ok"] else 1
+
+        if args.command == "dag":
+            from .research_dag import build_research_dag, export_research_dag
+
+            if args.output:
+                exported = export_research_dag(
+                    args.repo,
+                    args.output,
+                    ref=args.ref,
+                    ara_roots=args.ara,
+                    disclose_summaries=not args.metadata_only,
+                )
+                payload = exported["graph"]
+            else:
+                exported = None
+                payload = build_research_dag(
+                    args.repo,
+                    ref=args.ref,
+                    ara_roots=args.ara,
+                    disclose_summaries=not args.metadata_only,
+                )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(
+                    f"Scientific DAG: {len(payload['nodes'])} nodes, "
+                    f"{len(payload['edges'])} relations"
+                )
+                print(f"DAG integrity:  {payload['integrity']['is_dag']}")
+                print(f"Closure:        {payload['scientific_closure']['status']}")
+                print(f"Verification:   {payload['proof_summary']}")
+                if exported:
+                    print(f"JSON:           {_display_path(exported['json'])}")
+                    print(f"Browser:        {_display_path(exported['html'])}")
+                else:
+                    print(
+                        "Write browser:  xscientist research dag --output research-dag"
+                    )
+            return 0 if payload["integrity"]["is_dag"] else 1
+
+        if args.command == "adapter":
+            from .research_adapters import (
+                available_research_adapters,
+                doctor_research_adapter,
+                sync_research_repository,
+            )
+
+            if args.adapter_command == "list":
+                payload = {"adapters": available_research_adapters()}
+                if args.as_json:
+                    _print_json(payload)
+                else:
+                    for item in payload["adapters"]:
+                        print(
+                            f"{item['name']:<20} {item['source']:<24} "
+                            f"{_display_text(item['description'])}"
+                        )
+                return 0
+            if args.adapter_command == "doctor":
+                payload = doctor_research_adapter(args.name)
+                if args.as_json:
+                    _print_json(payload)
+                else:
+                    print(f"Adapter: {payload['adapter']['name']}")
+                    print(f"Ready:   {payload['ok']}")
+                    for error in payload["errors"]:
+                        print(f"error: {_display_text(error)}", file=sys.stderr)
+                return 0 if payload["ok"] else 1
+            payload = sync_research_repository(
+                args.repo,
+                adapter_name=args.name,
+                destination=args.dest,
+                ref=args.ref,
+                formats=args.formats
+                or ["ro-crate", "prov-json", "cwl", "dvc", "mlflow"],
+                include_payloads=args.include_payloads,
+                options=_parse_assignments(args.option, label="adapter option"),
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Adapter: {_display_text(payload['adapter']['name'])}")
+                print(f"Status:  {_display_text(payload['result'].get('status'))}")
+                print(f"Receipt: {payload['receipt_hash']}")
+            return 0
 
         if args.command == "fsck":
             payload = verify_research_repository(

@@ -6,6 +6,20 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Added
+
+- Beginner-oriented `research start`, exploratory `research plan`, and
+  bilingual `research guide` commands that create a falsifiable lineage and
+  explain the next scientific action.
+- A unified, content-addressed Research VCS + ARA evidence DAG with explicit
+  trace/replay/verify checks, contested-evidence states, JSON export, an
+  accessible offline browser, and a metadata-only HTTP endpoint.
+- A versioned `xscientist.research_adapters` entry-point contract with safe
+  discovery, explicit doctor/sync operations, atomic filesystem publication,
+  and hash-bound platform receipts.
+- Schema-bound `research ingest` receipts for MLflow, DVC, notebooks, ELNs,
+  instruments, and other tools; imports remain unverified until reviewed.
+
 ## [0.1.1] - 2026-08-08
 
 ### Added
