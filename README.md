@@ -25,7 +25,7 @@ System report:
 
 Important notes:
 
-- Release status: `0.1.0` is the first public PyPI release. Use the `main`
+- Release status: `0.1.1` is the latest stable PyPI release. Use the `main`
   branch only when you intentionally want unreleased development changes.
 - Cost: running the system calls LLMs / retrieval services and may incur API fees and long runtimes.
 - Reliability: model outputs may contain errors or hallucinations; verify key claims, data, and citations yourself.
@@ -207,7 +207,7 @@ backwards-compatible way to install everything.
 Pin a published release when you need an identical environment:
 
 ```bash
-python -m pip install "xscientist[full]==0.1.0"
+python -m pip install "xscientist[full]==0.1.1"
 ```
 
 To test unreleased development changes, install the current `main` branch:

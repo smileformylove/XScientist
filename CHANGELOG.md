@@ -6,8 +6,20 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-08
+
 ### Added
 
+- Unified `xscientist setup`, `doctor`, and `capability` commands with
+  task-aware readiness checks and exact opt-in installation guidance.
+- Deterministic `xscientist research decide` policy for checkpoint, fork,
+  merge, hold, and release transitions, including stable decision identifiers
+  and explicit trace requirements.
+- Payload-free long-term research technology trees spanning every local
+  research line, with topology, frontier, cycle, and missing-reference views.
+- Stable scientific merge-conflict identifiers, actionable resolution
+  guidance, and an explicit opposed-evidence preservation path that creates a
+  rejected hold gate while retaining both sides.
 - Provider-specific (`openai`, `anthropic`, `zhipu`, `openai-compatible`,
   `bedrock`, `vertex`) and capability-specific (`research`, `plot`, `pdf`,
   `pdf-layout`, `ml`, `service`) package extras; the legacy `full` profile is
@@ -48,6 +60,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- First-run workspaces now select only the capabilities required by the chosen
+  research task; provider-neutral tasks avoid model clients and ML runtimes.
+- Research VCS milestone history now records ideation as well as experiments,
+  evidence, review, paper, evolution, merge, and release boundaries.
 - Provider readiness now distinguishes credentials from installed client
   packages, prints a path-safe installation command, and discovers workspace
   configuration from nested directories.
@@ -66,6 +82,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- Unified diagnostics recursively redact credentials, personal identifiers,
+  and host-local paths, including text returned by deep runtime preflight.
+- New first-run command parsers are constructed lazily so top-level CLI startup
+  retains its lightweight import and help path.
 - PDF layout extraction is loaded only when used, so the basic PDF fallback
   remains available without the large `pymupdf4llm` dependency stack.
 - `xscientist project --help` and `xscientist batch --help` now work from the
@@ -94,5 +114,6 @@ for its Python package; the ARA protocol has its own version in
 - Dependency minimums and CI compatibility windows are explicit and checked.
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
-[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/smileformylove/XScientist/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smileformylove/XScientist/releases/tag/v0.1.0

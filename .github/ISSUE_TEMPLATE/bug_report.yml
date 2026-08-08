@@ -25,7 +25,7 @@ body:
     id: version
     attributes:
       label: XScientist version or commit
-      placeholder: 0.1.0 or d91f761
+      placeholder: 0.1.1 or d91f761
     validations:
       required: true
   - type: textarea

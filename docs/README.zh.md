@@ -25,7 +25,7 @@ English README: [README.md](../README.md)
 
 重要提示（建议先读）：
 
-- 发布状态：`0.1.0` 是首个公开 PyPI 版本。只有在明确需要尚未发布的
+- 发布状态：`0.1.1` 是最新稳定 PyPI 版本。只有在明确需要尚未发布的
   开发改动时，才建议从 `main` 分支安装。
 - 成本：运行会调用大模型/检索服务，可能产生 API 费用与较长运行时间。
 - 可靠性：生成内容可能存在错误或幻觉；请务必自行复核关键结论、数据与引用。
@@ -221,7 +221,7 @@ Hugging Face 推理、Ollama 与通用 OpenAI-compatible 端点。能力档位�
 需要固定完全相同的环境时，可锁定已发布版本：
 
 ```bash
-python -m pip install "xscientist[full]==0.1.0"
+python -m pip install "xscientist[full]==0.1.1"
 ```
 
 如需测试尚未发布的开发改动，可安装当前 `main` 分支：

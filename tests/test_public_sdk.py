@@ -24,7 +24,7 @@ from xscientist.service import run_server
 
 class PublicSdkTests(unittest.TestCase):
     def test_top_level_api_is_stable_and_lightweight(self) -> None:
-        self.assertEqual(xscientist.__version__, "0.1.0")
+        self.assertEqual(xscientist.__version__, "0.1.1")
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
 
