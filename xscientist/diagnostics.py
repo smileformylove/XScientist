@@ -81,6 +81,33 @@ def diagnose(
         bool(provider_row and provider_row["ready"]) if provider_required else True
     )
     workspace_ready = root is not None and config is not None and not workspace_error
+    research_vcs_required = str(task or "").strip().lower() != "service"
+    research_vcs_ready = False
+    research_vcs_error = ""
+    research_vcs_summary: dict[str, Any] = {
+        "branch": None,
+        "head": None,
+        "checkpoint_id": None,
+    }
+    if root is not None and (root / "research.yaml").is_file():
+        try:
+            from .research_git import ResearchGitError, repository_status
+
+            status = repository_status(root)
+            research_vcs_ready = True
+            research_vcs_summary = {
+                "branch": status.get("branch"),
+                "head": status.get("head"),
+                "checkpoint_id": (status.get("last_checkpoint") or {}).get(
+                    "checkpoint_id"
+                ),
+            }
+        except (OSError, ResearchGitError, ValueError) as exc:
+            research_vcs_error = str(exc)
+    elif research_vcs_required:
+        research_vcs_error = "local Research VCS is not initialized"
+    else:
+        research_vcs_ready = True
 
     actions: list[str] = []
     if not workspace_ready:
@@ -95,6 +122,8 @@ def diagnose(
         actions.append("xscientist auth login --user <your-name>")
     if not git["ok"] and git.get("install_hint"):
         actions.append(str(git["install_hint"]))
+    if research_vcs_required and not research_vcs_ready and root is not None:
+        actions.append("xscientist research init .")
 
     runtime_results: list[dict[str, Any]] = []
     runtime_ok: bool | None = None
@@ -150,6 +179,15 @@ def diagnose(
             "capabilities": git["capabilities"],
             "errors": git["errors"],
         },
+        "research_vcs": {
+            "ok": research_vcs_ready,
+            "required": research_vcs_required,
+            "initialized": bool(
+                root is not None and (root / "research.yaml").is_file()
+            ),
+            "error": research_vcs_error or None,
+            **research_vcs_summary,
+        },
         "capabilities": capabilities,
         "provider": {
             "ok": provider_ready,
@@ -183,6 +221,7 @@ def diagnose(
         (
             checks["workspace"]["ok"],
             checks["git"]["ok"],
+            checks["research_vcs"]["ok"],
             checks["capabilities"]["ready"],
             checks["provider"]["ok"],
             checks["auth"]["ok"],

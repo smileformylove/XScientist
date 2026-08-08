@@ -343,6 +343,18 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     status_parser.add_argument("--repo", default=".")
     status_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Audit claim-to-evidence-to-reproduction closure without disclosing payloads.",
+    )
+    audit_parser.add_argument("ref", nargs="?", default="HEAD")
+    audit_parser.add_argument("--repo", default=".")
+    audit_parser.add_argument(
+        "--level", choices=["trace", "replay", "verify"], default="trace"
+    )
+    audit_parser.add_argument("--no-objects", action="store_true")
+    audit_parser.add_argument("--json", action="store_true", dest="as_json")
+
     decide_parser = subparsers.add_parser(
         "decide",
         help="Explain whether the next research transition should checkpoint, fork, or merge.",
@@ -599,6 +611,20 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     reproduce_parser.add_argument("--repo", default=".")
     reproduce_parser.add_argument("--dest")
     reproduce_parser.add_argument("--execute", action="store_true")
+    reproduce_parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Record the compact receipt back into Research VCS.",
+    )
+    reproduce_parser.add_argument(
+        "--reproduces",
+        action="append",
+        default=[],
+        help="Typed object ID checked by the receipt; repeat as needed.",
+    )
+    reproduce_parser.add_argument("--verifier")
+    reproduce_parser.add_argument("--verified", action="store_true")
+    reproduce_parser.add_argument("--no-commit", action="store_true")
     reproduce_parser.add_argument("--timeout", type=int, default=600)
     reproduce_parser.add_argument(
         "--environment-policy",
@@ -788,6 +814,33 @@ def main(
             payload = repository_status(args.repo)
             _print_json(payload) if args.as_json else _human_status(payload)
             return 0
+
+        if args.command == "audit":
+            from .research_closure import audit_research_closure
+
+            payload = audit_research_closure(
+                args.repo,
+                ref=args.ref,
+                level=args.level,
+                verify_objects=not args.no_objects,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Scientific closure: {payload['status']}")
+                print(f"Target level:       {payload['target_level']}")
+                print(f"Commit:             {payload['commit']}")
+                print(f"Claims:             {len(payload['claims'])}")
+                print(f"Blockers:           {len(payload['blockers'])}")
+                for item in payload["blockers"]:
+                    target = f" ({item['object_id']})" if item["object_id"] else ""
+                    print(f"  {item['code']}{target}: {_display_text(item['message'])}")
+                for item in payload["warnings"]:
+                    print(
+                        f"warning: {item['code']}: {_display_text(item['message'])}",
+                        file=sys.stderr,
+                    )
+            return 0 if payload["complete"] else 1
 
         if args.command == "decide":
             from .research_policy import decide_research_transition
@@ -1237,6 +1290,18 @@ def main(
             return 0
 
         if args.command == "reproduce":
+            if not args.record and (
+                args.verified or args.reproduces or args.verifier or args.no_commit
+            ):
+                raise ResearchGitError(
+                    "--verified, --reproduces, --verifier, and --no-commit require --record"
+                )
+            if args.record and not args.reproduces:
+                raise ResearchGitError(
+                    "--record requires at least one --reproduces object"
+                )
+            if args.verified and not str(args.verifier or "").strip():
+                raise ResearchGitError("--verified requires --verifier")
             payload = reproduce_checkpoint(
                 args.repo,
                 commit=args.commit,
@@ -1245,6 +1310,24 @@ def main(
                 timeout_seconds=args.timeout,
                 environment_policy=args.environment_policy,
             )
+            if args.record:
+                from .research_lifecycle import ResearchLifecycle
+
+                recorded = ResearchLifecycle(args.repo).reproduction(
+                    payload["receipt"],
+                    reproduces=args.reproduces,
+                    verifier_id=args.verifier,
+                    verified=args.verified,
+                    commit=not args.no_commit,
+                )
+                payload["recorded_reproduction"] = {
+                    "object": recorded["reproduction"].to_dict(),
+                    "checkpoint": (
+                        recorded["checkpoint"].to_dict()
+                        if recorded["checkpoint"] is not None
+                        else None
+                    ),
+                }
             if args.as_json:
                 _print_json(payload)
             else:
@@ -1269,6 +1352,14 @@ def main(
                     print(f"Worktree:         {_display_path(payload['worktree'])}")
                 if payload.get("executed"):
                     print(f"Return code:      {payload['returncode']}")
+                print(f"Receipt:          {payload['receipt']['receipt_id']}")
+                if payload.get("receipt_path"):
+                    print(f"Receipt path:     {payload['receipt_path']}")
+                if payload.get("recorded_reproduction"):
+                    print(
+                        "Recorded object:   "
+                        f"{payload['recorded_reproduction']['object']['object_id']}"
+                    )
             return int(payload.get("returncode") or 0) if args.execute else 0
     except ResearchGitError as exc:
         print(

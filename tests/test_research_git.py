@@ -220,6 +220,15 @@ class LocalResearchGitTests(unittest.TestCase):
             self.assertTrue(bundle["complete"])
             self.assertTrue(bundle_verification["ok"], bundle_verification["errors"])
             self.assertTrue(reproduction["objects_complete"])
+            validate(reproduction["receipt"], load_schema("reproduction_receipt"))
+            self.assertEqual(
+                reproduction["receipt"]["reproduction_level"], "artifact_replay"
+            )
+            self.assertTrue(
+                (
+                    Path(reproduction["worktree"]) / reproduction["receipt_path"]
+                ).is_file()
+            )
             self.assertEqual(
                 (base / "reproduction" / "data" / "dataset.bin").read_bytes(),
                 source.read_bytes(),

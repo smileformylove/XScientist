@@ -65,6 +65,64 @@ class ResearchObjectError(ValueError):
     """A Research VCS object is malformed or has lost content integrity."""
 
 
+_PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
+    "question": ("text", "question"),
+    "hypothesis": ("statement", "core_hypothesis", "title"),
+    "preregistration": ("status", "registration_id", "hypothesis_id"),
+    "research_plan": ("plan_id", "tasks", "summary", "hypothesis"),
+    "experiment_attempt": ("status",),
+    "metric": ("name", "metric", "value"),
+    "evidence": ("result", "summary", "measurement", "metrics", "ara_manifest_hash"),
+    "claim": ("statement", "text", "claim", "claim_hash"),
+    "review": ("summary", "status", "decision", "report_hash"),
+    "gate_decision": ("decision", "claim_promotion_allowed"),
+    "manuscript": ("title", "status", "final", "idea_idx"),
+    "reproduction": (
+        "checkpoint_hash",
+        "receipt_hash",
+        "reproduction_level",
+        "verdict",
+    ),
+    "agent_candidate": ("candidate_id", "summary", "version"),
+    "agent_evaluation": ("candidate_id", "summary", "status", "verdict"),
+}
+
+
+def research_payload_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
+    """Return semantic payload gaps relevant to traceability.
+
+    The outer Research Object schema deliberately remains forwards-compatible.
+    This second layer distinguishes a syntactically storable legacy object from
+    one that is sufficiently typed for closure auditing.
+    """
+
+    normalized_kind = str(kind or "").strip()
+    if normalized_kind not in RESEARCH_OBJECT_KINDS:
+        return [f"unsupported research object kind: {normalized_kind}"]
+    if not isinstance(payload, Mapping):
+        return ["payload must be a mapping"]
+    if not payload:
+        return ["payload must not be empty"]
+    identity_fields = _PAYLOAD_IDENTITY_FIELDS.get(normalized_kind, ())
+    if identity_fields and not any(
+        field in payload and payload.get(field) not in (None, "", [], {})
+        for field in identity_fields
+    ):
+        return [
+            f"{normalized_kind} payload requires one of: " + ", ".join(identity_fields)
+        ]
+    return []
+
+
+def validate_research_payload(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate kind-specific minimum semantics and return a detached payload."""
+
+    issues = research_payload_issues(kind, payload)
+    if issues:
+        raise ResearchObjectError("invalid research payload: " + "; ".join(issues))
+    return deepcopy(dict(payload))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -174,5 +232,7 @@ __all__ = [
     "RESEARCH_RELATION_TYPES",
     "ResearchObjectError",
     "build_research_object",
+    "research_payload_issues",
+    "validate_research_payload",
     "validate_research_object",
 ]

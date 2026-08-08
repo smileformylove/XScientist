@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_closure.schema.json",
+  "title": "XScientist Scientific Closure Audit",
+  "description": "A payload-free audit view linking claims to evidence, attempts, plans, preregistrations, gates, and reproductions.",
+  "type": "object",
+  "required": ["schema_version", "ref", "commit", "target_level", "status", "complete", "counts", "claims", "blockers", "warnings", "integrity", "payloads_disclosed", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.research-closure.v1"},
+    "ref": {"type": "string", "minLength": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "target_level": {"type": "string", "enum": ["trace", "replay", "verify"]},
+    "status": {"type": "string", "enum": ["complete", "blocked"]},
+    "complete": {"type": "boolean"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "state", "evidence_ids", "attempt_ids", "plan_ids", "preregistration_ids", "gate_ids", "reproduction_ids", "trace_complete", "replay_ready", "verified", "complete", "missing"],
+        "properties": {
+          "claim_id": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+          "state": {"type": "string"},
+          "evidence_ids": {"$ref": "#/$defs/objectIds"},
+          "attempt_ids": {"$ref": "#/$defs/objectIds"},
+          "plan_ids": {"$ref": "#/$defs/objectIds"},
+          "preregistration_ids": {"$ref": "#/$defs/objectIds"},
+          "gate_ids": {"$ref": "#/$defs/objectIds"},
+          "reproduction_ids": {"$ref": "#/$defs/objectIds"},
+          "trace_complete": {"type": "boolean"},
+          "replay_ready": {"type": "boolean"},
+          "verified": {"type": "boolean"},
+          "complete": {"type": "boolean"},
+          "missing": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "blockers": {"$ref": "#/$defs/issues"},
+    "warnings": {"$ref": "#/$defs/issues"},
+    "integrity": {"type": "object"},
+    "payloads_disclosed": {"type": "boolean", "const": false},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "objectIds": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+      "uniqueItems": true
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "object_id", "message"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "object_id": {"type": "string"},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

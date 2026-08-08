@@ -4,6 +4,7 @@ import argparse
 from contextlib import asynccontextmanager
 import hmac
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,18 @@ def _validate_project_name(project: str, *, output_root: Path) -> str:
     except ValueError as exc:
         raise ValueError("project must stay within the service output_root") from exc
     return name
+
+
+def _validate_research_ref(ref: str) -> str:
+    normalized = str(ref or "").strip()
+    if (
+        not normalized
+        or normalized.startswith("-")
+        or ".." in normalized
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", normalized)
+    ):
+        raise ValueError("ref must be a safe branch, tag, HEAD, or commit name")
+    return normalized
 
 
 def _validate_extra_args(extra_args: list[str]) -> tuple[str, ...]:
@@ -387,6 +400,61 @@ def create_app(settings: ServiceSettings | None = None):
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return store.submit(request).to_dict()
+
+    @app.get("/v1/projects/{project}/research/status")
+    def research_status(project: str) -> dict[str, Any]:
+        from .research_git import ResearchGitError
+
+        try:
+            name = _validate_project_name(project, output_root=output_root)
+            repository = output_root / "projects" / name
+            if not repository.is_dir():
+                raise HTTPException(status_code=404, detail="project not found")
+            from .research_vcs import ResearchRepository
+
+            payload = ResearchRepository(repository).status()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except ResearchGitError as exc:
+            raise HTTPException(
+                status_code=409, detail="project has no valid Research VCS state"
+            ) from exc
+        return _service_output_view(payload, output_root=output_root)
+
+    @app.get("/v1/projects/{project}/research/audit")
+    def research_audit(
+        project: str,
+        ref: str = "HEAD",
+        level: str = "trace",
+        verify_objects: bool = True,
+    ) -> dict[str, Any]:
+        from .research_git import ResearchGitError
+
+        try:
+            name = _validate_project_name(project, output_root=output_root)
+            selected_ref = _validate_research_ref(ref)
+            if level not in {"trace", "replay", "verify"}:
+                raise ValueError("level must be trace, replay, or verify")
+            repository = output_root / "projects" / name
+            if not repository.is_dir():
+                raise HTTPException(status_code=404, detail="project not found")
+            from .research_vcs import ResearchRepository
+
+            return ResearchRepository(repository).audit(
+                ref=selected_ref,
+                level=level,
+                verify_objects=verify_objects,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except ResearchGitError as exc:
+            raise HTTPException(
+                status_code=409, detail="research closure audit failed"
+            ) from exc
 
     @app.get("/v1/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:

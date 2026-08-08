@@ -1,15 +1,9 @@
 """ARA conformance validator.
 
-Design choice: we implement a *minimal* JSON Schema checker inline rather than
-pulling in the ``jsonschema`` package. Two reasons:
-
-  1. The protocol package should stay dependency-free so anyone can port it.
-  2. We only need ``required``, ``type``, ``const``, ``minimum``, and object
-     recursion. Full JSON Schema semantics are overkill.
-
-If a downstream consumer wants strict validation with the real library, they
-can call ``jsonschema.validate(payload, load_schema(kind))`` themselves — our
-schemas ARE valid JSON Schema, just checked with a subset here.
+The published schemas are the protocol contract, so validation uses the full
+JSON Schema 2020-12 vocabulary.  In particular, enum, pattern, oneOf, $ref,
+uniqueItems, and additionalProperties constraints must not silently disappear
+when an artifact crosses an implementation boundary.
 """
 
 from __future__ import annotations
@@ -19,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from .constants import (
     PROTOCOL_VERSION,
     REQUIRED_TOP_LEVEL,
@@ -26,17 +22,6 @@ from .constants import (
 )
 from .graph import analyze_exploration_graph
 from .schemas import load_schema
-
-# Map JSON Schema "type" tokens to Python type checks.
-_JSON_TYPE_CHECKS = {
-    "string": lambda v: isinstance(v, str),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-    "boolean": lambda v: isinstance(v, bool),
-    "array": lambda v: isinstance(v, list),
-    "object": lambda v: isinstance(v, dict),
-    "null": lambda v: v is None,
-}
 
 
 @dataclass
@@ -80,46 +65,22 @@ class ValidationReport:
         }
 
 
-def _type_matches(value: Any, expected: Any) -> bool:
-    if isinstance(expected, list):
-        return any(_type_matches(value, t) for t in expected)
-    checker = _JSON_TYPE_CHECKS.get(expected)
-    return bool(checker and checker(value))
-
-
 def _validate_against_schema(
     payload: Any, schema: dict, path: str, report: ValidationReport
 ) -> None:
-    """Run our minimal-JSON-Schema check.
+    """Validate one payload using the complete Draft 2020-12 contract."""
 
-    Handles: required, type, const, minimum, and recursive object/array
-    checks. Silently ignores schema keywords we don't understand (they're
-    still legal JSON Schema; we just don't enforce them here).
-    """
-    if "type" in schema and not _type_matches(payload, schema["type"]):
-        report.add_error(path, f"expected type {schema['type']}, got {type(payload).__name__}")
-        return  # further checks would compound the noise
-
-    if "const" in schema and payload != schema["const"]:
-        report.add_error(path, f"expected const {schema['const']!r}, got {payload!r}")
-
-    if "minimum" in schema and isinstance(payload, (int, float)) and payload < schema["minimum"]:
-        report.add_error(path, f"value {payload} < minimum {schema['minimum']}")
-
-    if isinstance(payload, dict):
-        for req in schema.get("required", []) or []:
-            if req not in payload:
-                report.add_error(path or "$", f"missing required field '{req}'")
-        for key, sub_schema in (schema.get("properties") or {}).items():
-            if key in payload and isinstance(sub_schema, dict):
-                _validate_against_schema(
-                    payload[key], sub_schema, f"{path}.{key}" if path else key, report
-                )
-
-    if isinstance(payload, list) and isinstance(schema.get("items"), dict):
-        item_schema = schema["items"]
-        for idx, item in enumerate(payload):
-            _validate_against_schema(item, item_schema, f"{path}[{idx}]", report)
+    validator = Draft202012Validator(schema)
+    for error in sorted(
+        validator.iter_errors(payload),
+        key=lambda item: (list(item.absolute_path), item.message),
+    ):
+        suffix = "".join(
+            f"[{part}]" if isinstance(part, int) else f".{part}"
+            for part in error.absolute_path
+        )
+        location = f"{path}{suffix}" if path else (suffix.lstrip(".") or "$")
+        report.add_error(location, error.message)
 
 
 def _validate_kind(payload: Any, kind: Kind, source: str) -> ValidationReport:
@@ -134,7 +95,9 @@ def _validate_kind(payload: Any, kind: Kind, source: str) -> ValidationReport:
     return report
 
 
-def validate_manifest(payload: dict, *, source: str = "manifest.json") -> ValidationReport:
+def validate_manifest(
+    payload: dict, *, source: str = "manifest.json"
+) -> ValidationReport:
     """Validate a single manifest.json payload."""
     return _validate_kind(payload, Kind.MANIFEST, source)
 
@@ -191,7 +154,11 @@ def validate_ara(ara_root: str | Path, *, strict: bool = False) -> ValidationRep
         except (OSError, json.JSONDecodeError) as exc:
             report.add_error("exploration_graph.json", f"unreadable JSON: {exc}")
         if isinstance(graph_payload, dict):
-            report.merge(_validate_kind(graph_payload, Kind.EXPLORATION_GRAPH, "exploration_graph.json"))
+            report.merge(
+                _validate_kind(
+                    graph_payload, Kind.EXPLORATION_GRAPH, "exploration_graph.json"
+                )
+            )
             try:
                 dag = analyze_exploration_graph(graph_payload)
             except Exception as exc:  # pragma: no cover - defensive
@@ -202,7 +169,9 @@ def validate_ara(ara_root: str | Path, *, strict: bool = False) -> ValidationRep
             else:
                 for issue in dag.get("issues") or []:
                     path = str(issue.get("path") or "exploration_graph.json")
-                    message = str(issue.get("message") or issue.get("code") or "graph issue")
+                    message = str(
+                        issue.get("message") or issue.get("code") or "graph issue"
+                    )
                     if issue.get("severity") == "warning":
                         report.add_warning(path, message)
                     else:
@@ -211,23 +180,33 @@ def validate_ara(ara_root: str | Path, *, strict: bool = False) -> ValidationRep
     # Optional folders — only validate contents if present.
     if isinstance(graph_payload, dict):
         node_ids = {
-            str(n.get("id")) for n in (graph_payload.get("nodes") or []) if isinstance(n, dict)
+            str(n.get("id"))
+            for n in (graph_payload.get("nodes") or [])
+            if isinstance(n, dict)
         }
         nodes_dir = ara_root / "nodes"
         if nodes_dir.exists():
             for node_id in sorted(node_ids):
                 node_dir = nodes_dir / node_id
                 if not node_dir.exists():
-                    report.add_warning(f"nodes/{node_id}", "listed in graph but missing on disk")
+                    report.add_warning(
+                        f"nodes/{node_id}", "listed in graph but missing on disk"
+                    )
                     continue
                 metrics_path = node_dir / "metrics.json"
                 if metrics_path.exists():
                     try:
                         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
                     except (OSError, json.JSONDecodeError) as exc:
-                        report.add_error(f"nodes/{node_id}/metrics.json", f"unreadable: {exc}")
+                        report.add_error(
+                            f"nodes/{node_id}/metrics.json", f"unreadable: {exc}"
+                        )
                         continue
-                    report.merge(_validate_kind(metrics, Kind.NODE, f"nodes/{node_id}/metrics.json"))
+                    report.merge(
+                        _validate_kind(
+                            metrics, Kind.NODE, f"nodes/{node_id}/metrics.json"
+                        )
+                    )
 
     claims_dir = ara_root / "claims"
     for claim_file in _iter_json_files(claims_dir):
@@ -247,7 +226,11 @@ def validate_ara(ara_root: str | Path, *, strict: bool = False) -> ValidationRep
         except (OSError, json.JSONDecodeError):
             continue
         schema_tag = payload.get("schema") if isinstance(payload, dict) else None
-        kind = Kind.REEXEC_BATCH if schema_tag == "ara.reexec.batch.v1" else Kind.VERIFY_REPORT
+        kind = (
+            Kind.REEXEC_BATCH
+            if schema_tag == "ara.reexec.batch.v1"
+            else Kind.VERIFY_REPORT
+        )
         report.merge(_validate_kind(payload, kind, f"verify/{verify_file.name}"))
 
     if strict:

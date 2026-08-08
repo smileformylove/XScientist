@@ -129,6 +129,13 @@ Research VCS exposes backend-independent operations equivalent to:
 - `merge`, `conflicts`, `promote`, `revert` and `tag`;
 - `fsck`, `reproduce`, `pack`, `clone` and safe `gc`.
 
+The reference implementation also exposes a payload-free `audit` view with
+three explicit sufficiency targets. `trace` requires the claim/evidence/attempt
+and planning chain; `replay` adds immutable code, data, environment, and
+measurement identities; `verify` adds a passing gate and a verified
+reproduction receipt. Storage integrity (`fsck`) and scientific sufficiency
+(`audit`) are separate verdicts.
+
 Each operation MUST have a structured result, stable error category, explicit
 mutation summary, and deterministic exit status. Retrying an operation with
 the same idempotency key MUST NOT create duplicate scientific transitions.

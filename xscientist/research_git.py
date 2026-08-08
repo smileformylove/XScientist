@@ -59,6 +59,7 @@ CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
 OBJECT_POINTER_SCHEMA = "xscientist.research-object-pointer.v1"
 BUNDLE_SCHEMA = "xscientist.research-bundle.v1"
 ENVIRONMENT_SCHEMA = "xscientist.research-environment.v1"
+REPRODUCTION_RECEIPT_SCHEMA = "xscientist.reproduction-receipt.v1"
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -535,6 +536,12 @@ def _environment_receipt(repo: Path) -> dict[str, Any]:
             f"generated research environment receipt is invalid: {exc.message}"
         ) from exc
     return receipt
+
+
+def capture_environment_receipt(repo: str | Path) -> dict[str, Any]:
+    """Capture the compact, secret-free environment identity for a repository."""
+
+    return _environment_receipt(_repository_root(repo))
 
 
 def _environment_receipt_hash_valid(receipt: Any) -> bool:
@@ -3886,6 +3893,90 @@ def reproduce_checkpoint(
         "worktree": None,
         "executed": False,
     }
+
+    def finalize() -> dict[str, Any]:
+        mismatch_fields = sorted(
+            {
+                str(item.get("field") or "unknown")
+                for item in result["environment"].get("mismatches") or []
+            }
+        )
+        if result.get("executed"):
+            reproduction_level = "computational_rerun"
+            verdict = (
+                "passed"
+                if result.get("returncode") == 0 and not result.get("timed_out")
+                else "failed"
+            )
+        elif result.get("worktree"):
+            reproduction_level = "artifact_replay"
+            verdict = "materialized"
+        else:
+            reproduction_level = "inspection"
+            verdict = "ready" if result["objects_complete"] else "failed"
+        if mismatch_fields and verdict in {"ready", "materialized", "passed"}:
+            verdict = "warning"
+        receipt_base: dict[str, Any] = {
+            "schema_version": REPRODUCTION_RECEIPT_SCHEMA,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "commit": result["commit"],
+            "checkpoint_id": str(result["checkpoint"].get("checkpoint_id") or ""),
+            "checkpoint_hash": str(result["checkpoint"].get("content_hash") or ""),
+            "reproduction_level": reproduction_level,
+            "verdict": verdict,
+            "objects_complete": bool(result["objects_complete"]),
+            "environment": {
+                "policy": result["environment_policy"],
+                "recorded": bool(result["environment"].get("recorded")),
+                "matches": result["environment"].get("matches"),
+                "recorded_content_hash": result["environment"].get(
+                    "recorded_content_hash"
+                ),
+                "mismatch_fields": mismatch_fields,
+            },
+            "command_hash": (
+                content_hash(result["command"]) if result["command"] else None
+            ),
+            "executed": bool(result.get("executed")),
+            "returncode": result.get("returncode"),
+            "timed_out": bool(result.get("timed_out", False)),
+            "stdout_hash": (
+                content_hash(result.get("stdout") or "")
+                if result.get("executed")
+                else None
+            ),
+            "stderr_hash": (
+                content_hash(result.get("stderr") or "")
+                if result.get("executed")
+                else None
+            ),
+        }
+        receipt_hash = content_hash(receipt_base)
+        receipt = {
+            **receipt_base,
+            "receipt_id": f"rr-{receipt_hash.split(':', 1)[1][:16]}",
+            "content_hash": receipt_hash,
+        }
+        try:
+            validate_json(receipt, load_schema("reproduction_receipt"))
+        except ValidationError as exc:  # pragma: no cover - implementation contract
+            raise ResearchGitError(
+                f"generated reproduction receipt is invalid: {exc.message}"
+            ) from exc
+        receipt_path: str | None = None
+        if result.get("worktree"):
+            target = (
+                Path(str(result["worktree"]))
+                / ".xscientist"
+                / "reproductions"
+                / f"{receipt['receipt_id']}.json"
+            )
+            _atomic_write_json(target, receipt)
+            receipt_path = target.relative_to(Path(str(result["worktree"]))).as_posix()
+        result["receipt"] = receipt
+        result["receipt_path"] = receipt_path
+        return result
+
     if environment_policy == "strict" and environment["mismatches"]:
         raise ResearchGitError(
             "reproduction environment mismatch: "
@@ -3896,7 +3987,7 @@ def reproduce_checkpoint(
             raise ResearchGitError(
                 "--execute requires an explicit reproduction destination"
             )
-        return result
+        return finalize()
     if timeout_seconds < 1:
         raise ResearchGitError("reproduction timeout must be at least one second")
     if missing or damaged:
@@ -3966,22 +4057,24 @@ def reproduce_checkpoint(
             result["timed_out"] = True
             result["stdout"] = str(exc.stdout or "")[-20000:]
             result["stderr"] = str(exc.stderr or "")[-20000:]
-            return result
+            return finalize()
         result["executed"] = True
         result["timed_out"] = False
         result["returncode"] = completed.returncode
         result["stdout"] = (completed.stdout or "")[-20000:]
         result["stderr"] = (completed.stderr or "")[-20000:]
-    return result
+    return finalize()
 
 
 __all__ = [
     "BUNDLE_SCHEMA",
     "CHECKPOINT_SCHEMA",
     "ENVIRONMENT_SCHEMA",
+    "REPRODUCTION_RECEIPT_SCHEMA",
     "OBJECT_POINTER_SCHEMA",
     "REPOSITORY_SCHEMA",
     "CheckpointResult",
+    "capture_environment_receipt",
     "ObjectPointerResult",
     "ResearchObjectResult",
     "ResearchMergeResult",

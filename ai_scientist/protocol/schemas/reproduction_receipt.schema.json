@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/reproduction_receipt.schema.json",
+  "title": "XScientist Reproduction Receipt",
+  "description": "A compact result receipt for inspection, artifact materialization, or computational rerun without embedding command output.",
+  "type": "object",
+  "required": ["schema_version", "receipt_id", "created_at", "commit", "checkpoint_id", "checkpoint_hash", "reproduction_level", "verdict", "objects_complete", "environment", "command_hash", "executed", "returncode", "timed_out", "stdout_hash", "stderr_hash", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "xscientist.reproduction-receipt.v1"},
+    "receipt_id": {"type": "string", "pattern": "^rr-[0-9a-f]{16}$"},
+    "created_at": {"type": "string", "minLength": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "checkpoint_id": {"type": "string", "minLength": 1},
+    "checkpoint_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "reproduction_level": {"type": "string", "enum": ["inspection", "artifact_replay", "computational_rerun"]},
+    "verdict": {"type": "string", "enum": ["ready", "materialized", "passed", "failed", "warning"]},
+    "objects_complete": {"type": "boolean"},
+    "environment": {
+      "type": "object",
+      "required": ["policy", "recorded", "matches", "recorded_content_hash", "mismatch_fields"],
+      "properties": {
+        "policy": {"type": "string", "enum": ["ignore", "warn", "strict"]},
+        "recorded": {"type": "boolean"},
+        "matches": {"type": ["boolean", "null"]},
+        "recorded_content_hash": {"type": ["string", "null"]},
+        "mismatch_fields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "command_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "executed": {"type": "boolean"},
+    "returncode": {"type": ["integer", "null"]},
+    "timed_out": {"type": "boolean"},
+    "stdout_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "stderr_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -85,6 +85,13 @@ class ObjectStoreTests(unittest.TestCase):
         ref = self.store.put_bytes(b"tiny")
         self.assertEqual(self.store.get_bytes(ref.hash), b"tiny")
 
+    def test_read_rejects_content_tampering(self) -> None:
+        ref = self.store.put_bytes(b"original")
+        self.store._resolve(ref.hash).write_bytes(b"tampered")
+
+        with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+            self.store.get_bytes(ref.hash)
+
     # ------------------------------------------------------------------
     # Text / JSON convenience
     # ------------------------------------------------------------------
@@ -119,13 +126,17 @@ class ObjectStoreTests(unittest.TestCase):
             self.store.get_bytes("md5:deadbeef")
         with self.assertRaises(ValueError):
             self.store.get_bytes("no-colon-here")
+        with self.assertRaises(ValueError):
+            self.store.get_bytes("sha256:../../escape")
 
     # ------------------------------------------------------------------
     # ObjectRef.to_json
     # ------------------------------------------------------------------
     def test_object_ref_to_json_shape(self) -> None:
         ref = ObjectRef(hash="sha256:abc", size=3, gzip=False)
-        self.assertEqual(ref.to_json(), {"hash": "sha256:abc", "size": 3, "gzip": False})
+        self.assertEqual(
+            ref.to_json(), {"hash": "sha256:abc", "size": 3, "gzip": False}
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -12,7 +12,7 @@ Public surface:
 
 The protocol lives *next to* the exporter so producers and consumers can share
 one source of truth. Every schema is a plain JSON file under `schemas/`,
-loadable at runtime without a Python dependency.
+and can be consumed by any JSON Schema 2020-12 implementation.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ if TYPE_CHECKING:
         RESEARCH_RELATION_TYPES,
         ResearchObjectError,
         build_research_object,
+        research_payload_issues,
+        validate_research_payload,
         validate_research_object,
     )
 
@@ -46,12 +48,14 @@ _RESEARCH_VCS_EXPORTS = {
     "RESEARCH_RELATION_TYPES",
     "ResearchObjectError",
     "build_research_object",
+    "research_payload_issues",
+    "validate_research_payload",
     "validate_research_object",
 }
 
 
 def __getattr__(name: str):
-    """Load the optional JSON Schema validator only when Research VCS is used."""
+    """Load Research VCS protocol helpers only when they are used."""
 
     if name not in _RESEARCH_VCS_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -60,6 +64,7 @@ def __getattr__(name: str):
     value = getattr(research_vcs, name)
     globals()[name] = value
     return value
+
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -84,7 +89,9 @@ __all__ = [
     "hash_node_payload",
     "load_schema",
     "record_llm_call",
+    "research_payload_issues",
     "validate_ara",
     "validate_manifest",
+    "validate_research_payload",
     "validate_research_object",
 ]

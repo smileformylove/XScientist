@@ -69,6 +69,9 @@ def _render_bfts_config(profile: str, model: str) -> str:
     exec_config["backend"] = "docker"
     exec_config["require_isolation"] = True
     exec_config["docker_image"] = image
+    budget = payload.setdefault("llm_budget", {})
+    budget["max_total_tokens"] = 2_000_000 if profile == "deep" else 500_000
+    budget["max_wall_time_seconds"] = 86_400 if profile == "deep" else 21_600
     payload.setdefault("report", {})["model"] = model
     agent = payload.setdefault("agent", {})
     for key in ("code", "feedback", "vlm_feedback"):
@@ -267,11 +270,13 @@ Inspect the outputs without starting another model call:
 xscientist manager --research-dir ./outputs list-papers
 xscientist research status --repo outputs/projects/first-study
 xscientist research objects --repo outputs/projects/first-study
+xscientist research audit --repo outputs/projects/first-study --level trace
 ```
 
 Use `xscientist project --help` for all quality, budget, workflow, and venue
-options. API calls can incur cost; set explicit limits under `llm_budget` in
-`bfts_config.yaml` before a real run.
+options. The generated config has finite token and wall-time limits. API calls
+can still incur cost; add a provider-specific `max_cost_usd` and pricing under
+`llm_budget` before a real run.
 """
 
 

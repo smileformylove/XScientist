@@ -249,9 +249,11 @@ Create and diagnose a self-contained workspace without cloning this repository:
 xscientist setup my-research --task research
 cd my-research
 xscientist doctor --task research
+xscientist research status
 ```
 
-`setup` creates the workspace, reuses existing environment credentials, and
+`setup` creates the workspace and initializes a server-free local Research VCS
+repository for every non-service task. It reuses existing environment credentials, and
 prompts only for missing required values. It never installs packages by itself;
 the capability resolver prints one exact install command for the selected task.
 `provider add` prompts for missing secrets without echoing them and stores them
@@ -615,6 +617,8 @@ xscientist research log
 xscientist research diff HEAD~1 HEAD --deep
 xscientist research blame <research-object-id>
 xscientist research fsck
+xscientist research audit --level trace
+xscientist research audit --level replay
 ```
 
 The equivalent Git-style interface uses the same Research VCS safety rules and
@@ -656,6 +660,14 @@ without silently mutating history. `research tree` exposes object hashes,
 relations, research lines, frontier status, cycles, and missing references but
 never object payloads.
 
+`research audit` is the compact consumption surface for accumulated history.
+It does not feed every stored file back into an agent. Instead it traverses
+typed IDs and hashes through `claim → evidence → experiment_attempt → plan /
+preregistration`. `trace` checks semantic linkage, `replay` additionally checks
+immutable code/data/environment/evidence identities, and `verify` requires a
+passing gate plus a verified reproduction receipt. The report contains no
+research payloads and can therefore remain small even when the CAS grows.
+
 Opposing evidence remains blocking by default. An explicit
 `research merge <line> --preserve-conflicts` retains both sides and writes a
 rejected `hold` gate bound to the conflict ID; it never promotes the contested
@@ -683,6 +695,15 @@ xscientist research bundle \
 xscientist research bundle verify ../my-research-backup.tar.gz
 xscientist research bundle restore ../my-research-backup.tar.gz \
   --dest ../restored-research
+
+# A rerun writes a compact receipt into the detached worktree.
+xscientist research reproduce HEAD --dest ../rerun --execute \
+  --environment-policy strict
+
+# An independent verifier can bind that receipt to the checked lineage.
+xscientist research reproduce HEAD --execute --dest ../verified-rerun \
+  --environment-policy strict --record --verified \
+  --verifier independent-reviewer --reproduces <claim-object-id>
 ```
 
 An end-to-end project enables local milestone versioning by default:
@@ -883,7 +904,7 @@ Under the hood the seed manifest is passed through the `AI_SCIENTIST_ARA_SEED_PA
 
 ### Protocol package
 
-`ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): a versioned JSON Schema suite, a `content_hash` normalisation algorithm, and a minimal conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. The engineering check derives the schema inventory from the registry so documentation does not depend on a hand-maintained count. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
+`ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): a versioned JSON Schema suite, a `content_hash` normalisation algorithm, and a full JSON Schema 2020-12 conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. The engineering check derives the schema inventory from the registry so documentation does not depend on a hand-maintained count. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
 
 ### A/B evidence harness
 

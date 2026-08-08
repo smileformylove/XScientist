@@ -420,7 +420,10 @@ def _record_local_research_planning_objects(
             "hypotheses": {0: planning["hypothesis"].object_id},
             "plans": {0: planning["plan"].object_id},
             "attempts": {},
+            "evidence": {},
+            "claims": {},
             "gates": {},
+            "manuscripts": {},
         }
         if planning["preregistration"] is not None:
             object_ids["preregistration"] = planning["preregistration"].object_id
@@ -431,6 +434,22 @@ def _record_local_research_planning_objects(
                 state="draft",
             )
             object_ids["hypotheses"][index] = candidate.object_id
+            candidate_plan = lifecycle.repository.record(
+                "research_plan",
+                {
+                    "idea_idx": index,
+                    "summary": str(
+                        idea_card.get("title")
+                        or idea_card.get("core_hypothesis")
+                        or f"candidate idea {index}"
+                    ),
+                    "status": "candidate",
+                    "source": "idea_card",
+                },
+                state="draft",
+                relations=[{"type": "depends_on", "target": candidate.object_id}],
+            )
+            object_ids["plans"][index] = candidate_plan.object_id
         args._research_vcs_ids = object_ids
         print(
             "🧬 Research VCS 已记录 "
@@ -469,6 +488,63 @@ def _compact_research_result(result: dict) -> dict:
     }
 
 
+def _sha256_values(value: object) -> list[str]:
+    rows: set[str] = set()
+    if isinstance(value, dict):
+        for child in value.values():
+            rows.update(_sha256_values(child))
+    elif isinstance(value, list):
+        for child in value:
+            rows.update(_sha256_values(child))
+    elif isinstance(value, str) and len(value) == 71 and value.startswith("sha256:"):
+        if all(character in "0123456789abcdef" for character in value[7:]):
+            rows.add(value)
+    return sorted(rows)
+
+
+def _research_attempt_provenance(
+    lifecycle,
+    *,
+    result: dict,
+    preregistration_id: str | None,
+) -> dict:
+    from ai_scientist.protocol.hashing import hash_manifest
+    from xscientist.research_git import capture_environment_receipt
+
+    environment = capture_environment_receipt(lifecycle.repository.path)
+    provenance: dict[str, object] = {"environment_hash": environment["content_hash"]}
+    dependency_lock_hashes = sorted(
+        {
+            str(item["hash"])
+            for item in environment.get("dependency_locks") or []
+            if item.get("hash")
+        }
+    )
+    if dependency_lock_hashes:
+        provenance["dependency_lock_hashes"] = dependency_lock_hashes
+    head = lifecycle.repository.status().get("head")
+    if isinstance(head, str) and len(head) in {40, 64}:
+        provenance["code_commit"] = head
+    if preregistration_id:
+        registration = lifecycle.repository.get(preregistration_id)
+        dataset_hashes = _sha256_values(registration.get("payload") or {})
+        if dataset_hashes:
+            provenance["dataset_hashes"] = dataset_hashes
+    raw_seeds = result.get("seeds")
+    if isinstance(raw_seeds, list):
+        seeds = sorted({seed for seed in raw_seeds if isinstance(seed, int)})
+        if seeds:
+            provenance["seeds"] = seeds
+    elif isinstance(result.get("seed"), int):
+        provenance["seeds"] = [int(result["seed"])]
+    manifest_path = result.get("ara_manifest")
+    if manifest_path:
+        manifest = _safe_load_json(manifest_path, default=None)
+        if isinstance(manifest, dict):
+            provenance["ara_manifest_hash"] = hash_manifest(manifest)
+    return provenance
+
+
 def _record_local_research_attempt_objects(
     args: argparse.Namespace,
     *,
@@ -482,13 +558,22 @@ def _record_local_research_attempt_objects(
     try:
         lifecycle = ResearchLifecycle(args.project_dir)
         object_ids = getattr(args, "_research_vcs_ids", {})
+        preregistration_id = object_ids.get("preregistration")
         for fallback_index, result in enumerate(results):
             idea_index = int(result.get("idea_idx", fallback_index))
             payload = _compact_research_result(result)
             payload["status"] = str(result.get("status") or "failed")
             recorded = lifecycle.experiment_attempt(
                 payload,
+                preregistration_id=(preregistration_id if idea_index == 0 else None),
                 plan_id=(object_ids.get("plans") or {}).get(idea_index),
+                provenance=_research_attempt_provenance(
+                    lifecycle,
+                    result=result,
+                    preregistration_id=(
+                        preregistration_id if idea_index == 0 else None
+                    ),
+                ),
                 commit=False,
             )
             object_ids.setdefault("attempts", {})[idea_index] = recorded[
@@ -511,13 +596,99 @@ def _record_local_research_handoff_objects(
     from xscientist.research_lifecycle import ResearchLifecycle
 
     try:
+        from ai_scientist.protocol.hashing import content_hash, hash_manifest
+
         lifecycle = ResearchLifecycle(args.project_dir)
         object_ids = getattr(args, "_research_vcs_ids", {})
+        evidence_count = 0
+        claim_count = 0
         for fallback_index, result in enumerate(results):
             idea_index = int(result.get("idea_idx", fallback_index))
             attempt_id = (object_ids.get("attempts") or {}).get(idea_index)
             if not attempt_id:
                 continue
+            compact = _compact_research_result(result)
+            manifest_path = result.get("ara_manifest")
+            manifest = (
+                _safe_load_json(manifest_path, default=None) if manifest_path else None
+            )
+            manifest_hash = (
+                hash_manifest(manifest) if isinstance(manifest, dict) else None
+            )
+            evidence_payload: dict[str, object] = {
+                "result": str(result.get("status") or "unknown"),
+                "measurement_hash": content_hash(compact),
+                "metrics": {
+                    key: value
+                    for key, value in compact.items()
+                    if key.endswith("_score") or key.endswith("_passed")
+                },
+                "verification_state": "awaiting_independent_verification",
+            }
+            if manifest_hash:
+                evidence_payload["ara_manifest_hash"] = manifest_hash
+                try:
+                    evidence_payload["ara_manifest_path"] = (
+                        Path(str(manifest_path))
+                        .expanduser()
+                        .resolve()
+                        .relative_to(lifecycle.repository.path)
+                        .as_posix()
+                    )
+                except (OSError, ValueError):
+                    evidence_payload["ara_manifest_path"] = "manifest.json"
+            hypothesis_id = (object_ids.get("hypotheses") or {}).get(idea_index)
+            evidence_record = lifecycle.evidence(
+                evidence_payload,
+                attempt_ids=[attempt_id],
+                supports=[hypothesis_id] if hypothesis_id else [],
+                verified=False,
+                commit=False,
+            )["evidence"]
+            object_ids.setdefault("evidence", {})[
+                idea_index
+            ] = evidence_record.object_id
+            evidence_count += 1
+
+            claim_ids: list[str] = []
+            if manifest_hash and manifest_path:
+                claims_dir = Path(str(manifest_path)).expanduser().parent / "claims"
+                for claim_path in sorted(claims_dir.glob("*.json")):
+                    if claim_path.name.startswith("_"):
+                        continue
+                    claim_payload = _safe_load_json(claim_path, default=None)
+                    if not isinstance(claim_payload, dict):
+                        continue
+                    ara_claim_id = str(claim_payload.get("claim_id") or claim_path.stem)
+                    claim_hash = str(claim_payload.get("claim_hash") or "")
+                    if not claim_hash.startswith("sha256:"):
+                        claim_hash = content_hash(
+                            {
+                                "claim_id": ara_claim_id,
+                                "node_id": claim_payload.get("node_id"),
+                                "evidence_refs": claim_payload.get("evidence_refs")
+                                or [],
+                                "source": claim_payload.get("source") or {},
+                            }
+                        )
+                    claim_record = lifecycle.claim(
+                        {
+                            "claim_hash": claim_hash,
+                            "ara_claim_id": ara_claim_id,
+                            "node_id": claim_payload.get("node_id"),
+                            "ara_manifest_hash": manifest_hash,
+                            "resolved": bool(claim_payload.get("resolved")),
+                            "evidence_refs": sorted(
+                                set(claim_payload.get("evidence_refs") or [])
+                            ),
+                        },
+                        evidence_ids=[evidence_record.object_id],
+                        verified=False,
+                        commit=False,
+                    )["claim"]
+                    claim_ids.append(claim_record.object_id)
+                    claim_count += 1
+            object_ids.setdefault("claims", {})[idea_index] = claim_ids
             gate = lifecycle.repository.record(
                 "gate_decision",
                 {
@@ -530,14 +701,16 @@ def _record_local_research_handoff_objects(
                     ),
                 },
                 state="rejected",
-                relations=[{"type": "evaluates", "target": attempt_id}],
+                relations=[
+                    {"type": "evaluates", "target": target}
+                    for target in (claim_ids or [evidence_record.object_id])
+                ],
                 actor={
                     "actor_id": "research-handoff-gate",
                     "authority": "deterministic_gate",
                 },
             )
-            lifecycle.repository.record(
-                "manuscript",
+            manuscript = lifecycle.manuscript(
                 {
                     "idea_idx": idea_index,
                     "status": result.get("status"),
@@ -546,14 +719,19 @@ def _record_local_research_handoff_objects(
                     "final": False,
                     "blocker": "independent_verification_missing",
                 },
-                state="draft",
-                relations=[
-                    {"type": "depends_on", "target": gate.object_id, "role": "gate"}
-                ],
-            )
+                claim_ids=claim_ids,
+                gate_id=gate.object_id,
+                final=False,
+                commit=False,
+            )["manuscript"]
             object_ids.setdefault("gates", {})[idea_index] = gate.object_id
+            object_ids.setdefault("manuscripts", {})[idea_index] = manuscript.object_id
         args._research_vcs_ids = object_ids
-        print("🧬 Research VCS 已记录论文交接门禁；未通过独立验证的稿件保持 draft")
+        print(
+            "🧬 Research VCS 已投影 "
+            f"{evidence_count} 个证据对象、{claim_count} 个 claim 锚点；"
+            "未通过独立验证的稿件保持 draft"
+        )
     except (ResearchGitError, OSError, ValueError) as exc:
         _research_vcs_failure(args, "paper handoff record", exc)
 

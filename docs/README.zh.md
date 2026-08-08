@@ -263,13 +263,14 @@ python -c "from xscientist import XScientist, ProjectRequest; print('ready')"
 xscientist setup my-research --task research
 cd my-research
 xscientist doctor --task research
+xscientist research status
 ```
 
 `provider add` 会隐藏输入缺失的密钥，并将其写入 Git 忽略、仅当前用户可读写的
 `.env`。供应商元数据只保存模型 ID 和环境变量名，不保存密钥。激活的模型会自动
 应用到构思、绘图、写作、引用、审稿和 BFTS；显式传入的分角色模型参数仍优先。
 
-`setup` 会复用已有环境变量，只对缺失的必要字段进行隐藏输入；它不会擅自安装
+`setup` 会为非 service 任务自动初始化无需服务器的本地 Research VCS，并复用已有环境变量，只对缺失的必要字段进行隐藏输入；它不会擅自安装
 依赖，而是由能力解析器给出当前任务唯一、精确的安装命令。使用
 `--skip-credentials` 可只生成元数据，自动化环境可用 `--non-interactive`。
 `xscientist init` 继续作为只生成脚手架的兼容命令。工作区还包含科研问题模板、
@@ -579,6 +580,8 @@ xscientist research checkpoint --staged \
 xscientist research log
 xscientist research diff HEAD~1 HEAD
 xscientist research blame <科研对象 ID>
+xscientist research audit --level trace
+xscientist research audit --level replay
 ```
 
 大型数据、模型和二进制证据保存在本地 CAS，Git 只记录不可变指针：
@@ -614,6 +617,10 @@ checkpoint 哈希，保存失败和负面结果，并阻止未通过门禁的结
 对立证据默认阻止合并；只有显式使用 `--preserve-conflicts` 时才会同时保留两侧，
 并自动写入 rejected/hold 门禁，保证争议结论不会被误晋级。科技树输出只包含对象
 标识、哈希、关系、复线和开放前沿，不显示科研对象正文。
+`research audit` 不会把所有历史重新塞给模型，而是只沿 ID 与哈希遍历
+`claim → evidence → experiment_attempt → plan/preregistration`：`trace` 检查关系闭包，
+`replay` 再检查代码、数据、环境和证据的不可变身份，`verify` 还要求通过门禁与已验证
+的复现收据。因此原始数据继续完整保存，日常回顾仍保持小而精准。
 完整说明见 [`docs/LOCAL_RESEARCH_GIT.md`](LOCAL_RESEARCH_GIT.md)。
 
 ---
@@ -793,7 +800,7 @@ xscientist project <B_project> \
 
 ### 协议规范
 
-`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含一组带版本的 JSON Schema、`content_hash` 归一化算法与最小 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。工程一致性检查会直接从注册表读取 Schema 清单，避免文档中的手写数量再次漂移。规范正文见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md)。
+`ai_scientist/protocol/` 是独立可移植的协议包（`ara.v1`），包含一组带版本的 JSON Schema、`content_hash` 归一化算法与完整的 JSON Schema 2020-12 conformance validator。第三方 producer/consumer 无需依赖 XScientist 也能实现同一协议——用途包括：让另一个 agent 消费我们的 ARA、跨系统的 provenance 追踪、CI 中把 `--strict` 校验作为门禁。工程一致性检查会直接从注册表读取 Schema 清单，避免文档中的手写数量再次漂移。规范正文见 [`ai_scientist/protocol/SPEC.md`](../ai_scientist/protocol/SPEC.md)。
 
 ### A/B 加速证据实验
 

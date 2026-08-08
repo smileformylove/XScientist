@@ -256,5 +256,23 @@ class ResearchRepository:
             verify_objects=verify_objects,
         )
 
+    def audit(
+        self,
+        *,
+        ref: str = "HEAD",
+        level: str = "trace",
+        verify_objects: bool = True,
+    ) -> dict[str, Any]:
+        """Audit claim-to-evidence-to-reproduction closure at one ref."""
+
+        from .research_closure import audit_research_closure
+
+        return audit_research_closure(
+            self.path,
+            ref=ref,
+            level=level,
+            verify_objects=verify_objects,
+        )
+
 
 __all__ = ["ResearchRepository"]

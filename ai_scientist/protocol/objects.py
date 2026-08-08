@@ -31,6 +31,7 @@ import json
 import os
 import shutil
 import uuid
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,9 +107,7 @@ class ObjectStore:
         if target.exists():
             return
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(
-            f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-        )
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_bytes(payload)
         try:
             os.replace(tmp, target)
@@ -151,14 +150,18 @@ class ObjectStore:
         target = self._path_for(digest)
         shared_target = self._shared_path_for(digest)
         gzipped = len(data) >= _GZIP_THRESHOLD
-        if not target.exists() or (shared_target is not None and not shared_target.exists()):
+        if not target.exists() or (
+            shared_target is not None and not shared_target.exists()
+        ):
             payload = gzip.compress(data) if gzipped else data
             if shared_target is not None:
                 self._write_once(shared_target, payload)
                 self._link_or_copy(shared_target, target)
             else:
                 self._write_once(target, payload)
-        return ObjectRef(hash=f"{CONTENT_HASH_ALGO}:{digest}", size=len(data), gzip=gzipped)
+        return ObjectRef(
+            hash=f"{CONTENT_HASH_ALGO}:{digest}", size=len(data), gzip=gzipped
+        )
 
     def put_text(self, text: str) -> ObjectRef:
         """UTF-8 encode ``text`` and delegate to :meth:`put_bytes`."""
@@ -188,6 +191,10 @@ class ObjectStore:
         algo, digest = ref.split(":", 1)
         if algo != CONTENT_HASH_ALGO:
             raise ValueError(f"algo mismatch: expected {CONTENT_HASH_ALGO}, got {algo}")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(
+                "object ref digest must be 64 lowercase hexadecimal characters"
+            )
         return self._path_for(digest)
 
     def exists(self, ref: str) -> bool:
@@ -195,13 +202,16 @@ class ObjectStore:
         return self._resolve(ref).exists()
 
     def get_bytes(self, ref: str) -> bytes:
-        """Read the blob referenced by ``ref``, transparently ungzipping."""
+        """Read, decompress, and verify the blob referenced by ``ref``."""
         path = self._resolve(ref)
         raw = path.read_bytes()
         # gzip magic bytes; guarantees no false positive against raw text
-        if raw[:2] == b"\x1f\x8b":
-            return gzip.decompress(raw)
-        return raw
+        data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+        actual = hashlib.new(CONTENT_HASH_ALGO, data).hexdigest()
+        expected = ref.split(":", 1)[1]
+        if actual != expected:
+            raise ValueError(f"object content hash mismatch: {ref}")
+        return data
 
     def get_text(self, ref: str) -> str:
         return self.get_bytes(ref).decode("utf-8")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import shutil
 import sys
 import time
 import tempfile
@@ -353,6 +354,43 @@ class PublicSdkTests(unittest.TestCase):
             response = client.get("/health", headers={"X-API-Key": "secret"})
 
         self.assertEqual(response.status_code, 200)
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS API")
+    def test_http_service_exposes_payload_free_research_audit(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+        from xscientist import ResearchRepository
+
+        with tempfile.TemporaryDirectory() as td:
+            output_root = Path(td) / "output"
+            project = output_root / "projects" / "demo"
+            repository = ResearchRepository.init(
+                project,
+                question="Q?",
+                git_user_name="Research Test",
+                git_user_email="research@example.invalid",
+            )
+            repository.record("claim", {"statement": "unbound claim"})
+            repository.commit(stage="evidence", subject="record unbound claim")
+            app = xscientist.create_app(
+                ServiceSettings(max_workers=1, output_root=output_root)
+            )
+
+            with TestClient(app) as client:
+                status = client.get("/v1/projects/demo/research/status")
+                audit = client.get(
+                    "/v1/projects/demo/research/audit", params={"level": "trace"}
+                )
+                escaped = client.get("/v1/projects/../research/audit")
+
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(audit.status_code, 200)
+            self.assertFalse(audit.json()["complete"])
+            self.assertFalse(audit.json()["payloads_disclosed"])
+            self.assertNotIn(str(Path(td).resolve()), status.text)
+            self.assertIn(escaped.status_code, {404, 422})
 
     def test_reload_server_does_not_create_a_second_app(self) -> None:
         uvicorn = mock.Mock()

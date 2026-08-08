@@ -876,6 +876,17 @@ first-parent compatibility view; `parent_checkpoint_hashes` carries every
 scientific parent when divergent Git branches converge. New checkpoints embed
 a `research_environment.schema.json` receipt under `reproduce.environment`,
 covering runtime identity and hashes of supported dependency lock files.
+Each reproduction inspection/materialization/execution emits a compact
+`reproduction_receipt.schema.json`. The receipt hashes command output instead
+of embedding it, and may be bound to lineage targets as a typed `reproduction`
+object.
+
+`research_closure.schema.json` defines the payload-free consumer view over
+typed Research VCS objects. Its three sufficiency levels are: `trace` for
+claim/evidence/attempt/plan linkage, `replay` for immutable code/data/environment
+and measurement identities, and `verify` for a passing gate plus verified
+reproduction. The closure is derived and content-addressed; it does not replace
+ARA, Research VCS objects, or CAS payloads.
 
 The current Git commit SHA MUST NOT be embedded in its own tree. Producers put
 the checkpoint/event/manifest hashes in commit trailers instead:

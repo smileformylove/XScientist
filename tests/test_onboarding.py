@@ -59,6 +59,8 @@ class OnboardingTests(unittest.TestCase):
                 config["exec"]["docker_image"], f"xscientist-exec:{__version__}"
             )
             self.assertEqual(config["agent"]["code"]["model"], "glm-4-flash")
+            self.assertEqual(config["llm_budget"]["max_total_tokens"], 500_000)
+            self.assertEqual(config["llm_budget"]["max_wall_time_seconds"], 21_600)
 
             dockerfile = (workspace / "Dockerfile.executor").read_text()
             self.assertIn(f"ARG XSCIENTIST_VERSION={__version__}", dockerfile)
@@ -161,6 +163,9 @@ class OnboardingTests(unittest.TestCase):
             self.assertTrue(payload["doctor"]["checks"]["capabilities"]["ready"])
             self.assertFalse(payload["host_paths_disclosed"])
             self.assertFalse((workspace / ".env").exists())
+            self.assertTrue((workspace / "research.yaml").is_file())
+            self.assertTrue(payload["research_vcs"]["initialized"])
+            self.assertIsNotNone(payload["research_vcs"]["checkpoint_id"])
             dockerfile = (workspace / "Dockerfile.executor").read_text()
             self.assertIn(f"xscientist==${{XSCIENTIST_VERSION}}", dockerfile)
             self.assertNotIn("torch --index-url", dockerfile)

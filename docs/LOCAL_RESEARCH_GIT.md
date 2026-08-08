@@ -89,6 +89,8 @@ xscientist research show HEAD
 xscientist research diff HEAD~1 HEAD
 xscientist research diff HEAD~1 HEAD --deep
 xscientist research fsck
+xscientist research audit --level trace
+xscientist research audit --level replay
 
 # Read the reproduction closure without executing anything.
 xscientist research reproduce HEAD --json
@@ -108,6 +110,26 @@ commit, not from the latest tree. Every new checkpoint also binds a compact,
 secret-free environment receipt containing Python/platform identity and hashes
 of supported dependency lock files. `warn` is the compatibility default;
 `strict` refuses runtime or lock drift; `ignore` records but does not gate it.
+Every inspection, materialization, and rerun produces a
+`reproduction_receipt.schema.json` receipt. It stores hashes of the command and
+stdout/stderr rather than duplicating their contents. A detached worktree gets
+the receipt under `.xscientist/reproductions/`. An independent verifier may
+bind a passing receipt back to typed objects with `reproduce --record
+--verified --verifier ... --reproduces ...`.
+
+`research audit` answers a different question from `fsck`. `fsck` verifies
+storage integrity; `audit` checks scientific sufficiency without disclosing
+payloads:
+
+| Level | Required closure |
+|---|---|
+| `trace` | claim → evidence → attempt → plan; locked preregistration for confirmatory work |
+| `replay` | trace plus immutable code, data, environment, dependency-lock/container-recipe, and measurement/ARA identities |
+| `verify` | replay plus a passing gate, verified claim, and verified reproduction receipt |
+
+The audit is a derived index over IDs and hashes. Raw logs, datasets, and full
+ARA contents remain stored and drill-downable, but are not loaded merely to
+answer “what supports this claim?”.
 
 `fsck` verifies the checkpoint ancestry DAG, ARA manifest bindings, pointer
 schemas and hashes, configured CAS paths, object sizes, and payload hashes.
@@ -178,6 +200,11 @@ experiment outcomes, evidence/review/claim transitions, paper state,
 self-evolution, merges, and releases. `stage` checkpoints every requested
 stage. `manual` creates only the initialization commit; later checkpoints are
 operator-controlled.
+
+When ARA finalization succeeds, the project flow automatically projects each
+run into one compact evidence object and one hash-only Research VCS claim per
+ARA claim. It records the manifest hash and source IDs instead of copying claim
+text, node bodies, or logs into Git.
 
 Use `--research-vcs-strict` when checkpoint failure must fail the research
 command. Without it, expensive research outputs are preserved and adapter errors

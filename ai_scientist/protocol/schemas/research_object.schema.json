@@ -137,6 +137,18 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
+        "code_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "code_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "ara_manifest_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "prompt_hash": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
@@ -150,6 +162,14 @@
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
         "dataset_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "dependency_lock_hashes": {
           "type": "array",
           "items": {
             "type": "string",

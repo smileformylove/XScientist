@@ -258,6 +258,11 @@ def _build_setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--no-research-vcs",
+        action="store_true",
+        help="create files without initializing local Research VCS",
+    )
+    parser.add_argument(
         "--skip-credentials",
         action="store_true",
         help="create metadata but do not prompt for or write provider credentials",
@@ -827,6 +832,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider_required=bool(task_profile["provider_required"]),
             )
             workspace = Path(parsed.directory).expanduser().resolve()
+            research_vcs: dict[str, object] = {
+                "required": parsed.task != "service",
+                "initialized": False,
+                "checkpoint_id": None,
+                "reason": "disabled for service-only workspace",
+            }
+            if parsed.task != "service" and not parsed.no_research_vcs:
+                from .research_git import ResearchGitError, repository_status
+                from .research_vcs import ResearchRepository
+
+                try:
+                    if (workspace / "research.yaml").is_file():
+                        status = repository_status(workspace)
+                        research_vcs = {
+                            "required": True,
+                            "initialized": True,
+                            "checkpoint_id": (
+                                (status.get("last_checkpoint") or {}).get(
+                                    "checkpoint_id"
+                                )
+                            ),
+                            "reason": "existing local research repository reused",
+                        }
+                    else:
+                        question = (workspace / "topic.md").read_text(encoding="utf-8")
+                        repository = ResearchRepository.init(
+                            workspace,
+                            name=workspace.name,
+                            question=question,
+                            policy="milestone",
+                        )
+                        status = repository.status()
+                        research_vcs = {
+                            "required": True,
+                            "initialized": True,
+                            "checkpoint_id": (
+                                (status.get("last_checkpoint") or {}).get(
+                                    "checkpoint_id"
+                                )
+                            ),
+                            "reason": "local research repository initialized",
+                        }
+                except (OSError, ResearchGitError, ValueError) as exc:
+                    raise WorkspaceInitError(
+                        f"local Research VCS initialization failed: {exc}"
+                    ) from exc
+            elif parsed.no_research_vcs:
+                research_vcs = {
+                    "required": parsed.task != "service",
+                    "initialized": False,
+                    "checkpoint_id": None,
+                    "reason": "disabled by --no-research-vcs",
+                }
             provider_setup: dict[str, object] = {
                 "ok": False,
                 "skipped": True,
@@ -872,6 +930,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "workspace": onboarding["workspace"],
             "task": parsed.task,
             "provider_configuration": provider_setup,
+            "research_vcs": research_vcs,
             "doctor": report,
             "next_actions": report["next_actions"],
             "host_paths_disclosed": False,
@@ -883,6 +942,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Task profile: {parsed.task}")
             print(f"Configuration ready: {report['configuration_ready']}")
             print(f"Runtime ready: {report['runtime_ready']}")
+            print(f"Research VCS: {research_vcs['initialized']}")
             if provider_setup.get("reason"):
                 print(f"Provider setup: {provider_setup['reason']}")
             if payload["next_actions"]:

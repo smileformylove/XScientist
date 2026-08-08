@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from .models import CommandResult, ProjectRequest, ServiceSettings
     from .research_evolution import ResearchEvolution
     from .research_lifecycle import ResearchLifecycle
+    from .research_closure import audit_research_closure
     from .research_vcs import ResearchRepository
 
 _MODEL_EXPORTS = {"CommandResult", "ProjectRequest", "ServiceSettings"}
@@ -37,6 +38,10 @@ def __getattr__(name: str) -> Any:
         from .research_evolution import ResearchEvolution
 
         value = ResearchEvolution
+    elif name == "audit_research_closure":
+        from .research_closure import audit_research_closure
+
+        value = audit_research_closure
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals()[name] = value
@@ -65,6 +70,7 @@ __all__ = [
     "ResearchRepository",
     "ServiceSettings",
     "XScientist",
+    "audit_research_closure",
     "__version__",
     "create_app",
 ]

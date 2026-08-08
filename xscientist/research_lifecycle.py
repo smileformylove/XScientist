@@ -94,6 +94,7 @@ class ResearchLifecycle:
         *,
         preregistration_id: str | None = None,
         plan_id: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         """Record every attempt, including failure, timeout, and cancellation."""
@@ -146,6 +147,7 @@ class ResearchLifecycle:
             payload,
             state=state,
             relations=relations,
+            provenance=provenance,
         )
         checkpoint = (
             self.repository.commit(
@@ -319,13 +321,13 @@ class ResearchLifecycle:
                     "final manuscript cannot include an unverified claim"
                 )
             relations.append({"type": "depends_on", "target": object_id})
-        if final:
-            if not gate_id:
-                raise ResearchGitError(
-                    "final manuscript requires a passing gate decision"
-                )
+        if final and not gate_id:
+            raise ResearchGitError("final manuscript requires a passing gate decision")
+        if gate_id:
             gate = self.repository.get(gate_id)
-            if gate["kind"] != "gate_decision" or gate["state"] != "verified":
+            if gate["kind"] != "gate_decision":
+                raise ResearchGitError("manuscript gate reference has wrong kind")
+            if final and gate["state"] != "verified":
                 raise ResearchGitError(
                     "final manuscript requires a passing gate decision"
                 )
@@ -350,6 +352,98 @@ class ResearchLifecycle:
             else None
         )
         return {"manuscript": result, "checkpoint": checkpoint}
+
+    def reproduction(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        reproduces: Sequence[str],
+        verifier_id: str | None = None,
+        verified: bool = False,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Bind a compact reproduction receipt to the objects it checked."""
+
+        from jsonschema import ValidationError, validate as validate_json
+
+        from ai_scientist.protocol.schemas import load_schema
+
+        if not reproduces:
+            raise ResearchGitError("reproduction requires at least one target object")
+        receipt_payload = dict(receipt)
+        try:
+            validate_json(receipt_payload, load_schema("reproduction_receipt"))
+        except ValidationError as exc:
+            raise ResearchGitError(
+                f"invalid reproduction receipt: {exc.message}"
+            ) from exc
+        if verified and not str(verifier_id or "").strip():
+            raise ResearchGitError("verified reproduction requires verifier_id")
+        if verified and receipt_payload.get("verdict") != "passed":
+            raise ResearchGitError("verified reproduction requires a passing receipt")
+        relations: list[dict[str, str]] = []
+        for object_id in reproduces:
+            self.repository.get(object_id)
+            relations.append({"type": "reproduces", "target": object_id})
+        payload = {
+            key: receipt_payload[key]
+            for key in (
+                "receipt_id",
+                "content_hash",
+                "checkpoint_hash",
+                "commit",
+                "reproduction_level",
+                "verdict",
+                "objects_complete",
+                "executed",
+                "returncode",
+                "timed_out",
+            )
+        }
+        payload["receipt_hash"] = payload.pop("content_hash")
+        payload["receipt"] = receipt_payload
+        result = self.repository.record(
+            "reproduction",
+            payload,
+            state=(
+                "verified"
+                if verified
+                else (
+                    "completed"
+                    if receipt_payload.get("verdict") != "failed"
+                    else "failed"
+                )
+            ),
+            relations=relations,
+            actor={
+                "actor_id": str(verifier_id or "reproduction-recorder"),
+                "authority": "independent_evaluator" if verified else "recorder",
+            },
+            provenance=(
+                {
+                    "environment_hash": str(
+                        (receipt_payload.get("environment") or {}).get(
+                            "recorded_content_hash"
+                        )
+                        or ""
+                    )
+                }
+                if (receipt_payload.get("environment") or {}).get(
+                    "recorded_content_hash"
+                )
+                else None
+            ),
+        )
+        checkpoint = (
+            self.repository.commit(
+                stage="review",
+                subject="record reproduction receipt",
+                status=result.state,
+            )
+            if commit
+            else None
+        )
+        return {"reproduction": result, "checkpoint": checkpoint}
 
 
 __all__ = ["ResearchLifecycle"]

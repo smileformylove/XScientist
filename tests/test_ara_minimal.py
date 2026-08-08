@@ -86,6 +86,38 @@ class ExportMinimalARATest(unittest.TestCase):
             msg=[issue.__dict__ for issue in report.errors],
         )
 
+    def test_validator_enforces_full_schema_patterns(self) -> None:
+        result = export_minimal_ara(
+            project_dir=self.tmp / "paper_dir",
+            manuscript_pdf=None,
+            idea={"Name": "invalid-claim-hash"},
+        )
+        graph = json.loads((result.root / "exploration_graph.json").read_text())
+        node_id = graph["nodes"][0]["id"]
+        claims = result.root / "claims"
+        claims.mkdir(exist_ok=True)
+        (claims / "c1.json").write_text(
+            json.dumps(
+                {
+                    "claim_id": "c1",
+                    "claim_hash": "not-a-sha256",
+                    "node_id": node_id,
+                    "tex_file": "paper.tex",
+                    "line": 1,
+                    "resolved": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = validate_ara(result.root)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("does not match" in issue.message for issue in report.errors),
+            msg=[issue.__dict__ for issue in report.errors],
+        )
+
     def test_provenance_survives_manifest_write(self) -> None:
         provenance = {
             "parent_ara_root": "/tmp/parent",
