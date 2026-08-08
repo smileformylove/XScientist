@@ -117,16 +117,24 @@ def _call_main(
         )
         return 2
     main_fn: Callable[..., object] = getattr(module, "main")
-    if argv is None:
-        result = main_fn()
-    else:
-        original = sys.argv
-        command = module_name.rsplit(".", 1)[-1].removesuffix("_cli")
-        sys.argv = [f"xscientist {command}", *argv]
-        try:
+    try:
+        if argv is None:
             result = main_fn()
-        finally:
-            sys.argv = original
+        else:
+            original = sys.argv
+            command = module_name.rsplit(".", 1)[-1].removesuffix("_cli")
+            sys.argv = [f"xscientist {command}", *argv]
+            try:
+                result = main_fn()
+            finally:
+                sys.argv = original
+    except (OSError, RuntimeError, ValueError) as exc:
+        command = module_name.rsplit(".", 1)[-1].removesuffix("_cli")
+        print(
+            f"XScientist {command} stopped: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     return int(result or 0)
 
 

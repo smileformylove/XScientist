@@ -16,6 +16,7 @@ class ProjectRequest:
     """Stable Python API request for an end-to-end project run."""
 
     project: str
+    question: str | None = None
     topic: str | Path | None = None
     ideas: str | Path | None = None
     output_root: str | Path | None = None
@@ -28,6 +29,13 @@ class ProjectRequest:
     breakthrough_mode: bool = False
     high_quality_mode: bool = False
     bfts_config: str | Path | None = None
+    autopilot: str | None = None
+    resume: bool = False
+    data_dir: str | Path | None = None
+    allow_synthetic_data: bool = False
+    max_project_tokens: int | None = None
+    max_project_hours: float | None = None
+    max_cost_usd: float | None = None
     # ``research_git`` remains a compatibility spelling for releases <=0.1.
     research_git: str = "local"
     research_vcs: str | None = None
@@ -38,8 +46,13 @@ class ProjectRequest:
     def to_argv(self) -> list[str]:
         if not str(self.project or "").strip():
             raise ValueError("project is required")
-        if self.topic is None and self.ideas is None:
-            raise ValueError("one of topic or ideas is required")
+        sources = sum(
+            value is not None for value in (self.question, self.topic, self.ideas)
+        )
+        if sources == 0 and not self.resume:
+            raise ValueError("one of question, topic or ideas is required")
+        if sources > 1:
+            raise ValueError("question, topic, and ideas are mutually exclusive")
         if self.num_ideas < 1:
             raise ValueError("num_ideas must be at least 1")
         if self.num_workers < 1:
@@ -51,10 +64,25 @@ class ProjectRequest:
             raise ValueError(
                 "git_checkpoint_policy must be manual, stage, or milestone"
             )
+        if self.autopilot not in {None, "balanced", "discovery", "publication"}:
+            raise ValueError(
+                "autopilot must be balanced, discovery, publication, or None"
+            )
+        if self.data_dir is not None and self.allow_synthetic_data:
+            raise ValueError("data_dir and allow_synthetic_data are mutually exclusive")
+        for label, value in (
+            ("max_project_tokens", self.max_project_tokens),
+            ("max_project_hours", self.max_project_hours),
+            ("max_cost_usd", self.max_cost_usd),
+        ):
+            if value is not None and float(value) <= 0:
+                raise ValueError(f"{label} must be greater than zero")
 
         argv = [str(self.project)]
         if self.output_root is not None:
             argv.extend(["--output-root", _path_text(self.output_root) or ""])
+        if self.question is not None:
+            argv.extend(["--question", str(self.question)])
         if self.topic is not None:
             argv.extend(["--topic", _path_text(self.topic) or ""])
         if self.ideas is not None:
@@ -74,6 +102,21 @@ class ProjectRequest:
             argv.append("--high-quality-mode")
         if self.bfts_config is not None:
             argv.extend(["--bfts-config", _path_text(self.bfts_config) or ""])
+        if self.autopilot is not None:
+            argv.extend(["--autopilot", self.autopilot])
+        if self.resume:
+            argv.append("--resume")
+        if self.data_dir is not None:
+            argv.extend(["--data-dir", _path_text(self.data_dir) or ""])
+        if self.allow_synthetic_data:
+            argv.append("--allow-synthetic-data")
+        for flag, value in (
+            ("--max-project-tokens", self.max_project_tokens),
+            ("--max-project-hours", self.max_project_hours),
+            ("--max-cost-usd", self.max_cost_usd),
+        ):
+            if value is not None:
+                argv.extend([flag, str(value)])
         if research_vcs != "off":
             vcs_flag = (
                 "--research-vcs" if self.research_vcs is not None else "--research-git"
@@ -97,6 +140,7 @@ class ProjectRequest:
     def to_dict(self) -> dict[str, Any]:
         return {
             "project": self.project,
+            "question": self.question,
             "topic": _path_text(self.topic),
             "ideas": _path_text(self.ideas),
             "output_root": _path_text(self.output_root),
@@ -109,6 +153,13 @@ class ProjectRequest:
             "breakthrough_mode": self.breakthrough_mode,
             "high_quality_mode": self.high_quality_mode,
             "bfts_config": _path_text(self.bfts_config),
+            "autopilot": self.autopilot,
+            "resume": self.resume,
+            "data_dir": _path_text(self.data_dir),
+            "allow_synthetic_data": self.allow_synthetic_data,
+            "max_project_tokens": self.max_project_tokens,
+            "max_project_hours": self.max_project_hours,
+            "max_cost_usd": self.max_cost_usd,
             "research_git": self.research_git,
             "research_vcs": self.research_vcs,
             "git_checkpoint_policy": self.git_checkpoint_policy,

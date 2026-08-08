@@ -105,6 +105,8 @@ def _render_dockerfile(
         provider=provider if provider_required else None,
         version="${XSCIENTIST_VERSION}",
     )
+    local_extras = runtime_spec.removeprefix("xscientist").split("==", 1)[0]
+    local_spec = f"/tmp/xscientist-build-context{local_extras}"
     torch_install = (
         "RUN python -m pip install --no-cache-dir \\\n    torch --index-url https://download.pytorch.org/whl/cpu\n"
         if "ml" in selected
@@ -113,6 +115,8 @@ def _render_dockerfile(
     return f"""FROM python:3.11-slim
 
 ARG XSCIENTIST_VERSION={__version__}
+ARG XSCIENTIST_INSTALL_MODE=pypi
+ARG XSCIENTIST_SOURCE_REVISION=release
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
     PYTHONUNBUFFERED=1
@@ -121,7 +125,16 @@ RUN apt-get update \\
     && apt-get install -y --no-install-recommends build-essential git \\
     && rm -rf /var/lib/apt/lists/*
 {torch_install}
-RUN python -m pip install --no-cache-dir "{runtime_spec}"
+COPY . /tmp/xscientist-build-context
+RUN if [ "$XSCIENTIST_INSTALL_MODE" = "local" ]; then \\
+      python -m pip install --no-cache-dir "{local_spec}"; \\
+    else \\
+      python -m pip install --no-cache-dir "{runtime_spec}"; \\
+    fi \\
+    && rm -rf /tmp/xscientist-build-context
+
+LABEL org.opencontainers.image.version="$XSCIENTIST_VERSION" \\
+      org.opencontainers.image.revision="$XSCIENTIST_SOURCE_REVISION"
 
 RUN useradd --create-home --uid 10001 scientist
 USER scientist
@@ -252,27 +265,37 @@ Docker daemon and exact image tag before any paid model call starts. The legacy
 low-level equivalent remains `xscientist preflight --strict --bfts-config
 bfts_config.yaml`.
 
-## 7. Run one traceable study
+## 7. Run one traceable automated study
 
-Edit `topic.md`, then run:
+For an exploratory computational study, one command resumes safely, applies a
+project-wide budget, records every stage in the same local Research VCS, and
+exports the evidence DAG:
 
 ```bash
-xscientist project first-study \\
-  --output-root ./outputs \\
-  --topic topic.md \\
-  --bfts-config bfts_config.yaml \\
-  --num-ideas 1
+xscientist start . \\
+  --question "State one concrete, falsifiable research question" \\
+  --autopilot balanced \\
+  --allow-synthetic-data
 ```
+
+Use `--data-dir ./my-data` instead of `--allow-synthetic-data` for empirical
+work. XScientist hashes every input into a content-addressed snapshot before
+model calls and mounts that snapshot read-only.
+Add `--build-executor` when the isolated Docker image has not been built yet.
+When XScientist runs from a source checkout, that flag builds the exact local
+source revision into the image; installed releases use the matching PyPI
+version. This prevents a local-new/isolated-old runtime mismatch.
 
 Inspect the outputs without starting another model call:
 
 ```bash
+# Output root: --output-root ./outputs
 xscientist manager --research-dir ./outputs list-papers
-xscientist research status --repo outputs/projects/first-study
-xscientist research objects --repo outputs/projects/first-study
-xscientist research audit --repo outputs/projects/first-study --level trace
-xscientist research guide --repo outputs/projects/first-study
-xscientist research dag --repo outputs/projects/first-study --output ./research-dag
+xscientist research status --repo .
+xscientist research objects --repo .
+xscientist research audit --repo . --level trace
+xscientist research guide --repo .
+xscientist research dag --repo . --output ./research-dag
 ```
 
 `guide` explains the next scientific step without assuming Git or protocol
@@ -281,9 +304,10 @@ experiments, supporting and refuting evidence, independent reviews,
 reproductions, and agent evolution on one searchable graph.
 
 Use `xscientist project --help` for all quality, budget, workflow, and venue
-options. The generated config has finite token and wall-time limits. API calls
-can still incur cost; add a provider-specific `max_cost_usd` and pricing under
-`llm_budget` before a real run.
+options. Autopilot uses one concurrency-safe token/time/cost ledger across
+ideation, ranking, and every experiment. An unknown model price fails closed
+when `--max-cost-usd` is set; configure that model under
+`llm_budget.prices_per_million` before a real run.
 """
 
 
@@ -416,7 +440,7 @@ def create_workspace(
             "xscientist auth login --user <your-name>",
             f"docker build -f Dockerfile.executor -t xscientist-exec:{__version__} .",
             "xscientist preflight --strict --bfts-config bfts_config.yaml",
-            "edit topic.md, then follow README.md",
+            "xscientist start . --question <question> --allow-synthetic-data",
         ],
     }
 

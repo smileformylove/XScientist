@@ -8,6 +8,7 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import xscientist
@@ -103,6 +104,25 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIn("--parallel", argv)
         self.assertIn("--high-quality-mode", argv)
         self.assertEqual(argv[argv.index("--num-workers") + 1], "3")
+
+    def test_project_request_exposes_guarded_autopilot_contract(self) -> None:
+        request = ProjectRequest(
+            project="demo",
+            question="Does X affect Y?",
+            autopilot="discovery",
+            resume=True,
+            allow_synthetic_data=True,
+            max_project_tokens=100_000,
+            max_cost_usd=10,
+        )
+
+        argv = request.to_argv()
+
+        self.assertEqual(argv[argv.index("--question") + 1], "Does X affect Y?")
+        self.assertEqual(argv[argv.index("--autopilot") + 1], "discovery")
+        self.assertIn("--resume", argv)
+        self.assertIn("--allow-synthetic-data", argv)
+        self.assertEqual(argv[argv.index("--max-cost-usd") + 1], "10")
 
     def test_project_request_can_enable_local_research_git_without_remote(self) -> None:
         request = ProjectRequest(
@@ -310,6 +330,26 @@ class PublicSdkTests(unittest.TestCase):
         )
         self.assertIn("xscientist[research]", output)
 
+    def test_workflow_entrypoint_reports_expected_runtime_failures_without_traceback(
+        self,
+    ) -> None:
+        module = SimpleNamespace(
+            main=mock.Mock(side_effect=RuntimeError("isolated executor unavailable"))
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "xscientist.entrypoints.importlib.import_module", return_value=module
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            exit_code = project_main(["demo", "--topic", "topic.md"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("project stopped", stderr.getvalue())
+        self.assertIn("isolated executor unavailable", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_service_settings_validate_workers(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_workers"):
             ServiceSettings(max_workers=0)
@@ -431,12 +471,20 @@ class PublicSdkTests(unittest.TestCase):
             started_at="start",
             finished_at="finish",
         )
-        with mock.patch.object(XScientist, "run_project", return_value=completed):
+        with mock.patch.object(
+            XScientist, "run_project", return_value=completed
+        ) as run_project:
             app = xscientist.create_app(ServiceSettings(max_workers=1))
             with TestClient(app) as client:
                 response = client.post(
                     "/v1/projects",
-                    json={"project": "demo", "topic": "topic.md"},
+                    json={
+                        "project": "demo",
+                        "question": "Does X affect Y?",
+                        "autopilot": "balanced",
+                        "allow_synthetic_data": True,
+                        "max_project_tokens": 100_000,
+                    },
                 )
                 self.assertEqual(response.status_code, 202)
                 job_id = response.json()["id"]
@@ -446,6 +494,11 @@ class PublicSdkTests(unittest.TestCase):
                         break
                 self.assertEqual(status["status"], "succeeded")
                 self.assertEqual(status["result"]["stdout"], "done")
+
+        submitted = run_project.call_args.args[0]
+        self.assertEqual(submitted.question, "Does X affect Y?")
+        self.assertEqual(submitted.autopilot, "balanced")
+        self.assertTrue(submitted.allow_synthetic_data)
 
     def test_http_service_exposes_confined_read_only_research_views(self) -> None:
         try:

@@ -18,6 +18,68 @@ from xscientist.onboarding import WORKSPACE_FILES, create_workspace
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_start_requires_an_explicit_data_mode_before_creating_workspace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli_main(
+                    ["start", str(workspace), "--question", "Does X affect Y?"]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(workspace.exists())
+            self.assertIn("--data-dir", stderr.getvalue())
+
+    def test_start_reuses_one_workspace_and_forwards_guarded_autopilot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            ready = {
+                "schema": "xscientist.doctor.v1",
+                "ok": True,
+                "configuration_ready": True,
+                "runtime_ready": True,
+                "task": "research",
+                "workspace": ".",
+                "checks": {},
+                "next_actions": [],
+                "host_paths_disclosed": False,
+            }
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "tester"}),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
+                mock.patch("xscientist.cli.project_main", return_value=0) as project,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--allow-synthetic-data",
+                        "--skip-credentials",
+                        "--non-interactive",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((workspace / "research.yaml").is_file())
+            argv = project.call_args.args[0]
+            self.assertEqual(argv[0], str(workspace.resolve()))
+            self.assertIn("--autopilot", argv)
+            self.assertIn("--allow-synthetic-data", argv)
+            self.assertIn("--research-vcs-strict", argv)
+
     def test_init_creates_safe_installed_package_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
@@ -68,6 +130,12 @@ class OnboardingTests(unittest.TestCase):
                 "xscientist[research,ml,pdf-layout,zhipu]==${XSCIENTIST_VERSION}",
                 dockerfile,
             )
+            self.assertIn("ARG XSCIENTIST_INSTALL_MODE=pypi", dockerfile)
+            self.assertIn(
+                "/tmp/xscientist-build-context[research,ml,pdf-layout,zhipu]",
+                dockerfile,
+            )
+            self.assertIn("org.opencontainers.image.revision", dockerfile)
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
             self.assertIn(
@@ -177,6 +245,30 @@ class OnboardingTests(unittest.TestCase):
             self.assertNotIn("xscientist provider add zhipu", generated_readme)
             serialized = json.dumps(payload)
             self.assertNotIn(str(Path(td).resolve()), serialized)
+
+    def test_unready_setup_returns_nonzero_for_automation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(False, "missing", None),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                exit_code = cli_main(
+                    [
+                        "setup",
+                        str(workspace),
+                        "--task",
+                        "research",
+                        "--skip-credentials",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
 
     def test_deep_doctor_redacts_paths_from_runtime_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as td:

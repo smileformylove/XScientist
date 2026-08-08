@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ai_scientist.apps.project import (
+    _configure_autopilot_project_budget,
     _completed_resume_results,
     _prepare_project_input,
     _prepare_autopilot_bfts_config,
@@ -16,9 +20,42 @@ from ai_scientist.apps.project import (
     _save_project_progress,
     main,
 )
+from ai_scientist.utils.data_readiness import prepare_data_contract
 
 
 class ProjectAutopilotTests(unittest.TestCase):
+    def test_data_gate_hashes_empirical_inputs_without_disclosing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "project"
+            data = Path(td) / "private-data"
+            (root / "00_config").mkdir(parents=True)
+            data.mkdir()
+            (data / "observations.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+
+            with mock.patch.dict("os.environ", {}, clear=False):
+                contract = prepare_data_contract(root, data_dir=data, required=True)
+                snapshot = Path(os.environ["AI_SCIENTIST_PROJECT_DATA_DIR"])
+
+            self.assertTrue(contract["ready"])
+            self.assertEqual(contract["mode"], "content_addressed_snapshot_read_only")
+            self.assertEqual(contract["file_count"], 1)
+            self.assertTrue(contract["files"][0]["sha256"].startswith("sha256:"))
+            self.assertEqual(snapshot.parent.name, "datasets")
+            (data / "observations.csv").write_text("x,y\n9,9\n", encoding="utf-8")
+            self.assertEqual(
+                (snapshot / "observations.csv").read_text(encoding="utf-8"),
+                "x,y\n1,2\n",
+            )
+            serialized = (root / "00_config" / "data_manifest.json").read_text()
+            self.assertNotIn(str(data), serialized)
+
+    def test_data_gate_requires_explicit_synthetic_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "00_config").mkdir()
+            with self.assertRaisesRegex(RuntimeError, "before model calls"):
+                prepare_data_contract(root, required=True)
+
     def test_plain_language_question_materializes_reproducible_topic(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -184,6 +221,9 @@ class ProjectAutopilotTests(unittest.TestCase):
                 autopilot="balanced",
                 bfts_config=str(source),
                 project_dir=str(root / "project"),
+                max_project_tokens=250_000,
+                max_project_hours=1,
+                max_cost_usd=5,
             )
 
             derived_path = _prepare_autopilot_bfts_config(args)
@@ -194,10 +234,18 @@ class ProjectAutopilotTests(unittest.TestCase):
             self.assertTrue(derived["exec"]["require_isolation"])
             self.assertEqual(derived["exec"]["network"], "none")
             self.assertFalse(derived["exec"]["allow_experiment_network"])
-            self.assertEqual(derived["llm_budget"]["max_total_tokens"], 800_000)
-            self.assertEqual(derived["llm_budget"]["max_wall_time_seconds"], 14_400)
+            self.assertEqual(derived["llm_budget"]["max_total_tokens"], 250_000)
+            self.assertEqual(derived["llm_budget"]["max_wall_time_seconds"], 3_600)
+            self.assertEqual(derived["llm_budget"]["max_cost_usd"], 5)
             self.assertEqual(derived["agent"]["steps"], 3)
             self.assertEqual(derived["agent"]["stages"]["stage1_max_iters"], 8)
+
+            with mock.patch.dict("os.environ", {}, clear=False):
+                budget = _configure_autopilot_project_budget(args)
+                self.assertTrue(budget["shared_across_project"])
+                self.assertTrue(
+                    (root / "project" / "04_logs" / "llm_budget.json").is_file()
+                )
 
     def test_derived_autopilot_config_is_accepted_by_bfts_schema(self) -> None:
         from ai_scientist.resources import resolve_bfts_config_path
@@ -265,6 +313,114 @@ class ProjectAutopilotTests(unittest.TestCase):
 
             credentials.assert_not_called()
             preflight.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for the golden journey")
+    def test_golden_question_to_insight_and_research_dag_journey(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            output_root = base / "outputs"
+            project_root = base / "study"
+
+            def generate(project_dir, _topic, _model, _count, _reflections):
+                path = Path(project_dir) / "01_ideas" / "generated_ideas.json"
+                path.write_text(
+                    json.dumps(
+                        [
+                            {
+                                "Name": "falsifiable_mechanism",
+                                "Title": "Falsifiable mechanism study",
+                                "Experiment": "Compare the mechanism against a null control.",
+                                "Interestingness": 8,
+                                "Feasibility": 8,
+                                "Novelty": 7,
+                                "core_hypothesis": "The mechanism improves the target metric.",
+                                "failure_criteria": [
+                                    "The paired null control performs at least as well."
+                                ],
+                            }
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                return str(path)
+
+            def execute(process_args):
+                exp_dir = project_root / "02_experiments" / "idea_0"
+                exp_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "idea_idx": 0,
+                    "exp_dir": str(exp_dir),
+                    "status": "success",
+                    "quality_score": 8.0,
+                    "rigor_score": 8.0,
+                    "quality_gate_passed": True,
+                    "submission_acceptance_passed": True,
+                    "claim_support_score": 0.7,
+                    "seed": 42,
+                }
+
+            with (
+                mock.patch.dict("os.environ", {}, clear=False),
+                mock.patch("ai_scientist.apps.project.require_login"),
+                mock.patch(
+                    "ai_scientist.apps.project.initialize_runtime",
+                    return_value=SimpleNamespace(research_root=output_root),
+                ),
+                mock.patch("ai_scientist.apps.project.require_model_credentials"),
+                mock.patch(
+                    "ai_scientist.apps.project._run_autopilot_preflight",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "ai_scientist.apps.project.generate_ideas", side_effect=generate
+                ),
+                mock.patch(
+                    "ai_scientist.apps.project.select_ranked_idea_candidates",
+                    return_value=([0], []),
+                ),
+                mock.patch(
+                    "ai_scientist.apps.project.process_single_idea",
+                    side_effect=execute,
+                ),
+                mock.patch(
+                    "ai_scientist.llm.create_client",
+                    side_effect=RuntimeError("offline golden journey"),
+                ),
+                mock.patch("builtins.print"),
+            ):
+                main(
+                    [
+                        str(project_root),
+                        "--output-root",
+                        str(output_root),
+                        "--question",
+                        "Does the mechanism improve the target metric?",
+                        "--autopilot",
+                        "balanced",
+                        "--allow-synthetic-data",
+                        "--research-vcs-strict",
+                    ]
+                )
+
+            insight = json.loads(
+                (project_root / "04_logs" / "insight_report.json").read_text()
+            )
+            self.assertEqual(
+                insight["epistemic_status"], "machine_synthesized_unverified"
+            )
+            self.assertTrue(insight["insights"])
+            dag = (
+                output_root
+                / "views"
+                / project_root.name
+                / "research-dag"
+                / "research-dag.html"
+            )
+            self.assertTrue(dag.is_file())
+            self.assertTrue((project_root / "research.yaml").is_file())
+            self.assertTrue(
+                (project_root / "00_config" / "data_manifest.json").is_file()
+            )
 
 
 if __name__ == "__main__":

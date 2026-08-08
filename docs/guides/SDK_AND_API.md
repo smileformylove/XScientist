@@ -94,9 +94,10 @@ client = XScientist(
 
 request = ProjectRequest(
     project="demo",
-    topic="topic.md",
-    workflow_mode="program_driven",
-    high_quality_mode=True,
+    question="Why does the mechanism fail out of distribution?",
+    autopilot="balanced",
+    allow_synthetic_data=True,
+    max_project_tokens=400_000,
     bfts_config="deep",
 )
 
@@ -164,6 +165,7 @@ xscientist git commit --stage evidence -m "bind result"
 
 ```bash
 xscientist info
+xscientist start ./study --question "Does X affect Y?" --allow-synthetic-data
 xscientist project demo --topic topic.md
 xscientist batch --help
 xscientist daemon --help
@@ -228,9 +230,10 @@ Example request:
 ```json
 {
   "project": "demo",
-  "topic": "topic.md",
-  "workflow_mode": "adaptive",
-  "num_ideas": 3,
+  "question": "Why does the mechanism fail out of distribution?",
+  "autopilot": "balanced",
+  "allow_synthetic_data": true,
+  "max_project_tokens": 400000,
   "bfts_config": "default"
 }
 ```
@@ -238,7 +241,8 @@ Example request:
 The service owns its filesystem boundary:
 
 - `project` must be a single directory name;
-- `topic`, `ideas`, and custom BFTS configs must resolve inside `work_dir`;
+- `topic`, `ideas`, `data_dir`, and custom BFTS configs must resolve inside
+  `work_dir`; plain-language `question` values contain no host path;
 - the request cannot override the configured `output_root` through fields or
   `extra_args`.
 

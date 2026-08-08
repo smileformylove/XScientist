@@ -128,6 +128,8 @@ def diagnose(
     runtime_results: list[dict[str, Any]] = []
     runtime_ok: bool | None = None
     if deep and runtime_preflight and root is not None and config is not None:
+        import shutil
+
         from ai_scientist.apps.preflight import check_bfts_config
         from .provider_config import load_workspace_environment
 
@@ -151,6 +153,23 @@ def diagnose(
                         "detail": result.detail,
                     }
                 )
+            for command, severity, purpose in (
+                ("pdflatex", "error", "paper compilation"),
+                ("chktex", "warning", "LaTeX linting"),
+            ):
+                available = shutil.which(command) is not None
+                runtime_results.append(
+                    {
+                        "label": command,
+                        "ok": available,
+                        "severity": severity,
+                        "detail": (
+                            f"available for {purpose}"
+                            if available
+                            else f"required for {purpose} but not found on PATH"
+                        ),
+                    }
+                )
         runtime_ok = not any(
             not item["ok"] and item["severity"] == "error" for item in runtime_results
         )
@@ -162,6 +181,10 @@ def diagnose(
                     "xscientist preflight --strict --bfts-config bfts_config.yaml",
                 ]
             )
+            if not any(
+                item["ok"] for item in runtime_results if item["label"] == "pdflatex"
+            ):
+                actions.append("install a TeX distribution that provides pdflatex")
     elif runtime_preflight:
         actions.append(f"xscientist doctor --task {capabilities['task']} --deep")
     actions = list(dict.fromkeys(actions))

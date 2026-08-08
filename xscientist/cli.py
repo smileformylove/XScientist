@@ -143,6 +143,10 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--json", action="store_true", dest="as_json")
 
     for name, help_text in (
+        (
+            "start",
+            "Prepare and run a safe automated research project from one question.",
+        ),
         ("setup", "Create, configure, and diagnose a first research workspace."),
         (
             "doctor",
@@ -257,7 +261,11 @@ def _build_setup_parser() -> argparse.ArgumentParser:
         help="research intent used to resolve optional capabilities",
     )
     parser.add_argument("--profile", choices=["default", "deep"], default="default")
-    parser.add_argument("--provider", choices=_PROVIDER_CHOICES, default="zhipu")
+    parser.add_argument(
+        "--provider",
+        choices=_PROVIDER_CHOICES,
+        default="zhipu",
+    )
     parser.add_argument("--model", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
@@ -279,6 +287,60 @@ def _build_setup_parser() -> argparse.ArgumentParser:
         "--deep",
         action="store_true",
         help="also probe the Docker daemon and exact experiment image",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser
+
+
+def _build_start_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="xscientist start",
+        description=(
+            "Create or reuse one workspace, validate every prerequisite, and run "
+            "a traceable automated research project."
+        ),
+    )
+    parser.add_argument("directory", help="workspace and Research VCS root")
+    parser.add_argument(
+        "--question", required=True, help="one concrete research question"
+    )
+    parser.add_argument(
+        "--autopilot",
+        choices=["balanced", "discovery", "publication"],
+        default="balanced",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=_PROVIDER_CHOICES,
+        default=None,
+        help="provider for a new workspace; existing workspaces reuse their active provider",
+    )
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--profile", choices=["default", "deep"], default="default")
+    parser.add_argument("--user", default=None, help="local research actor name")
+    parser.add_argument(
+        "--data-dir", default=None, help="read-only empirical input directory"
+    )
+    parser.add_argument(
+        "--allow-synthetic-data",
+        action="store_true",
+        help="explicitly permit exploratory synthetic/computational evidence",
+    )
+    parser.add_argument("--max-project-tokens", type=int, default=None)
+    parser.add_argument("--max-project-hours", type=float, default=None)
+    parser.add_argument("--max-cost-usd", type=float, default=None)
+    parser.add_argument(
+        "--build-executor",
+        action="store_true",
+        help="explicitly build the generated isolated Docker image before diagnosis",
+    )
+    parser.add_argument("--skip-credentials", action="store_true")
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="stop after workspace, login, provider, and deep runtime validation",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -721,6 +783,347 @@ def _run_evolution_gate(parsed: argparse.Namespace) -> int:
     return 0 if report.get("decision") in {"promote_to_canary", "approved"} else 3
 
 
+def _run_start(parsed: argparse.Namespace) -> int:
+    """Orchestrate the safe first-run path without hiding scientific gates."""
+
+    import contextlib
+    import io
+    import os
+    import subprocess
+
+    from ai_scientist.utils.atomic_io import atomic_write_text
+    from ai_scientist.utils.auth_session import create_session, validate_session
+    from .diagnostics import diagnose
+    from .onboarding import WorkspaceInitError, create_workspace
+    from .provider_config import (
+        DEFAULT_MODELS,
+        ProviderConfigError,
+        load_provider_config,
+        load_workspace_environment,
+    )
+    from .research_git import ResearchGitError, repository_status
+    from .research_vcs import ResearchRepository
+
+    question = str(parsed.question or "").strip()
+    if not question:
+        print("xscientist start: --question cannot be empty", file=sys.stderr)
+        return 2
+    if parsed.data_dir and parsed.allow_synthetic_data:
+        print(
+            "xscientist start: --data-dir and --allow-synthetic-data are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        not parsed.prepare_only
+        and not parsed.data_dir
+        and not parsed.allow_synthetic_data
+    ):
+        print(
+            "xscientist start: choose --data-dir PATH for empirical evidence or "
+            "--allow-synthetic-data for an explicitly exploratory study",
+            file=sys.stderr,
+        )
+        return 2
+    for label, value in (
+        ("--max-project-tokens", parsed.max_project_tokens),
+        ("--max-project-hours", parsed.max_project_hours),
+        ("--max-cost-usd", parsed.max_cost_usd),
+    ):
+        if value is not None and float(value) <= 0:
+            print(
+                f"xscientist start: {label} must be greater than zero", file=sys.stderr
+            )
+            return 2
+
+    workspace = Path(parsed.directory).expanduser().resolve()
+    phases: dict[str, object] = {}
+    try:
+        config_exists = (workspace / ".xscientist" / "providers.json").is_file()
+        existing_config = (
+            load_provider_config(workspace, missing_ok=False) if config_exists else {}
+        )
+        selected_provider = str(
+            parsed.provider or existing_config.get("active_provider") or "zhipu"
+        )
+        provider_entry = (existing_config.get("providers") or {}).get(
+            selected_provider, {}
+        )
+        existing_model = (
+            str(provider_entry.get("model") or "")
+            if isinstance(provider_entry, dict)
+            else ""
+        )
+        selected_model = (
+            parsed.model or existing_model or DEFAULT_MODELS.get(selected_provider)
+        )
+        if not selected_model:
+            if parsed.non_interactive or not sys.stdin.isatty():
+                raise ProviderConfigError(
+                    f"--model is required for provider {selected_provider!r}"
+                )
+            selected_model = input(f"Model ID for {selected_provider}: ").strip()
+        if not config_exists:
+            create_workspace(
+                workspace,
+                profile=parsed.profile,
+                provider=selected_provider,
+                model=selected_model,
+                force=parsed.force,
+                task="research",
+                capabilities=("research", "ml", "pdf-layout"),
+                provider_required=True,
+            )
+        phases["workspace"] = {"ok": True, "created": not config_exists}
+
+        topic = f"# Research question\n\n{question}\n"
+        established_topic = workspace / "00_config" / "topic.md"
+        if (
+            established_topic.is_file()
+            and established_topic.read_text(encoding="utf-8") != topic
+        ):
+            raise WorkspaceInitError(
+                "this workspace already contains a different research question; "
+                "reuse the original question to resume or choose a new directory"
+            )
+        atomic_write_text(workspace / "topic.md", topic)
+        if not (workspace / "research.yaml").is_file():
+            repository = ResearchRepository.init(
+                workspace,
+                name=workspace.name,
+                question=topic,
+                policy="milestone",
+                actor=parsed.user or "xscientist",
+            )
+            status = repository.status()
+            vcs_created = True
+        else:
+            atomic_write_text(workspace / "question.md", topic)
+            status = repository_status(workspace)
+            vcs_created = False
+        phases["research_vcs"] = {
+            "ok": True,
+            "created": vcs_created,
+            "branch": status.get("branch"),
+            "checkpoint_id": (status.get("last_checkpoint") or {}).get("checkpoint_id"),
+        }
+
+        if parsed.skip_credentials:
+            provider_result: dict[str, object] = {
+                "ok": False,
+                "reason": "credentials explicitly skipped",
+            }
+        else:
+            provider_result = _configure_provider(
+                workspace,
+                name=selected_provider,
+                model_value=selected_model,
+                non_interactive=parsed.non_interactive,
+            )
+        phases["provider"] = {
+            "ok": bool(provider_result.get("ok")),
+            "ready": bool(provider_result.get("ready")),
+            "provider": selected_provider,
+            "model": selected_model,
+            "reason": provider_result.get("reason"),
+        }
+
+        authenticated, auth_status, session = validate_session()
+        if not authenticated:
+            username = str(parsed.user or "").strip()
+            if not username and not parsed.non_interactive and sys.stdin.isatty():
+                username = input("Local research actor name: ").strip()
+            if username:
+                session = create_session(username=username)
+                authenticated, auth_status = True, "ok"
+        phases["auth"] = {
+            "ok": authenticated,
+            "status": auth_status,
+            "user": (session or {}).get("username") if authenticated else None,
+        }
+
+        load_result = load_workspace_environment(workspace)
+        if load_result.get("error"):
+            raise ProviderConfigError(str(load_result["error"]))
+
+        if parsed.build_executor:
+            source_root = Path(__file__).resolve().parents[1]
+            local_source = (source_root / "pyproject.toml").is_file() and (
+                source_root / "xscientist"
+            ).is_dir()
+            build_context = source_root if local_source else workspace
+            command = [
+                "docker",
+                "build",
+                "-f",
+                str(workspace / "Dockerfile.executor"),
+                "-t",
+                f"xscientist-exec:{__version__}",
+            ]
+            if local_source:
+                revision = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=source_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                ).stdout.strip()
+                dirty = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=source_root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                ).stdout.strip()
+                if revision and dirty:
+                    revision += "-dirty"
+                command.extend(
+                    [
+                        "--build-arg",
+                        "XSCIENTIST_INSTALL_MODE=local",
+                        "--build-arg",
+                        "XSCIENTIST_SOURCE_REVISION=" + (revision or "local-source"),
+                    ]
+                )
+            command.append(str(build_context))
+            completed = subprocess.run(
+                command,
+                cwd=build_context,
+                text=True,
+                capture_output=bool(parsed.as_json),
+                check=False,
+            )
+            phases["executor_build"] = {
+                "ok": completed.returncode == 0,
+                "returncode": completed.returncode,
+            }
+
+        report = diagnose(
+            workspace,
+            task="research",
+            provider=selected_provider,
+            deep=True,
+        )
+        phases["doctor"] = report
+    except (
+        OSError,
+        ResearchGitError,
+        ProviderConfigError,
+        WorkspaceInitError,
+        ValueError,
+    ) as exc:
+        payload = {
+            "schema": "xscientist.start.v1",
+            "ok": False,
+            "phase": "prepare",
+            "error": str(exc),
+            "workspace": ".",
+            "phases": phases,
+        }
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"xscientist start stopped during preparation: {exc}", file=sys.stderr
+            )
+        return 2
+
+    if not report["ok"]:
+        payload = {
+            "schema": "xscientist.start.v1",
+            "ok": False,
+            "phase": "doctor",
+            "workspace": ".",
+            "phases": phases,
+            "next_actions": report["next_actions"],
+        }
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("XScientist is configured, but the automated run is not ready.")
+            print("Resolve these items, then rerun the same command:")
+            for action in report["next_actions"]:
+                print(f"  {action}")
+        return 1
+
+    if parsed.prepare_only:
+        payload = {
+            "schema": "xscientist.start.v1",
+            "ok": True,
+            "phase": "ready",
+            "workspace": ".",
+            "phases": phases,
+        }
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("Workspace is ready for automated research.")
+        return 0
+
+    project_args = [
+        str(workspace),
+        "--output-root",
+        str(workspace / "outputs"),
+        "--question",
+        question,
+        "--autopilot",
+        parsed.autopilot,
+        "--bfts-config",
+        str(workspace / "bfts_config.yaml"),
+        "--research-vcs-strict",
+    ]
+    if parsed.data_dir:
+        project_args.extend(["--data-dir", str(Path(parsed.data_dir).expanduser())])
+    else:
+        project_args.append("--allow-synthetic-data")
+    for flag, value in (
+        ("--max-project-tokens", parsed.max_project_tokens),
+        ("--max-project-hours", parsed.max_project_hours),
+        ("--max-cost-usd", parsed.max_cost_usd),
+    ):
+        if value is not None:
+            project_args.extend([flag, str(value)])
+
+    previous_workspace = os.environ.get("XSCIENTIST_WORKSPACE")
+    os.environ["XSCIENTIST_WORKSPACE"] = str(workspace)
+    try:
+        if parsed.as_json:
+            captured_out, captured_err = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(captured_out),
+                contextlib.redirect_stderr(captured_err),
+            ):
+                returncode = project_main(project_args)
+        else:
+            returncode = project_main(project_args)
+    finally:
+        if previous_workspace is None:
+            os.environ.pop("XSCIENTIST_WORKSPACE", None)
+        else:
+            os.environ["XSCIENTIST_WORKSPACE"] = previous_workspace
+
+    payload = {
+        "schema": "xscientist.start.v1",
+        "ok": returncode == 0,
+        "phase": "complete" if returncode == 0 else "research",
+        "workspace": ".",
+        "project": ".",
+        "returncode": returncode,
+        "research_dag": "outputs/views/"
+        + workspace.name
+        + "/research-dag/research-dag.html",
+        "phases": phases,
+    }
+    if parsed.as_json:
+        if returncode:
+            payload["error"] = captured_err.getvalue().strip().splitlines()[-1:]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif returncode == 0:
+        print("Automated research completed with a local Research VCS history.")
+        print(f"Open the research DAG under: {payload['research_dag']}")
+    return returncode
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] in _DELEGATES:
@@ -729,13 +1132,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspace_state = (
         {"loaded": False}
         if raw_argv
-        and raw_argv[0] in {"provider", "init", "setup", "doctor", "capability"}
+        and raw_argv[0]
+        in {"provider", "init", "start", "setup", "doctor", "capability"}
         else _bootstrap_workspace_environment()
     )
     if workspace_state.get("error") and (
         not raw_argv
         or raw_argv[0]
-        not in {"provider", "info", "init", "setup", "doctor", "capability"}
+        not in {"provider", "info", "init", "start", "setup", "doctor", "capability"}
     ):
         print(
             f"XScientist workspace configuration error: {workspace_state['error']}",
@@ -744,6 +1148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     lazy_parser_builders = {
+        "start": _build_start_parser,
         "setup": _build_setup_parser,
         "doctor": _build_doctor_parser,
         "capability": _build_capability_parser,
@@ -769,6 +1174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             reload=parsed.reload,
         )
         return 0
+    if parsed.command == "start":
+        return _run_start(parsed)
     if parsed.command == "info":
         payload = _installation_info()
         if parsed.as_json:
@@ -952,7 +1359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("Next actions:")
                 for index, action in enumerate(payload["next_actions"], start=1):
                     print(f"  {index}. {action}")
-        return 0
+        return 0 if payload["ok"] else 1
     if parsed.command == "doctor":
         from .diagnostics import diagnose
         from .provider_config import ProviderConfigError

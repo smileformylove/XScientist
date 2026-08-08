@@ -78,6 +78,36 @@ def build_parser(
         action="store_true",
         help="从 04_logs/progress.json 和最近的 BFTS checkpoint 安全续跑",
     )
+    data_group = parser.add_mutually_exclusive_group()
+    data_group.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="只读实验输入目录；Autopilot 会在模型调用前生成逐文件 SHA-256 清单",
+    )
+    data_group.add_argument(
+        "--allow-synthetic-data",
+        action="store_true",
+        help="显式允许合成/计算型数据；其结果保持探索性，不能自动升级为独立验证",
+    )
+    parser.add_argument(
+        "--max-project-tokens",
+        type=int,
+        default=None,
+        help="覆盖为更低的整个项目 LLM token 上限（跨构思、排序和所有实验共享）",
+    )
+    parser.add_argument(
+        "--max-project-hours",
+        type=float,
+        default=None,
+        help="覆盖为更低的整个项目 LLM 墙钟时长上限",
+    )
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help="整个项目美元成本硬上限；未知模型价格会 fail closed",
+    )
     parser.add_argument(
         "--model-ideation",
         type=str,

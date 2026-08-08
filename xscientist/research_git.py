@@ -63,6 +63,11 @@ REPRODUCTION_RECEIPT_SCHEMA = "xscientist.reproduction-receipt.v1"
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
+    ".dockerignore",
+    ".env.example",
+    "README.md",
+    "topic.md",
+    "bfts_config.yaml",
     "research.yaml",
     "question.md",
     ".xscientist/**",
@@ -107,6 +112,7 @@ DEFAULT_TRACK_PATTERNS = (
     "04_logs/submission_shortlist.md",
     "04_logs/progress.json",
     "04_logs/autopilot_run.json",
+    "04_logs/llm_budget.json",
     "04_logs/insight_report.json",
     "04_logs/insight_report.md",
     "pipeline_manifest.json",
@@ -1233,7 +1239,9 @@ def _select_paths(
         except ResearchGitError:
             excluded.append(f"{raw} (unsafe path)")
             continue
-        if _matches(relative, denied_patterns):
+        # A generated example contains placeholders only and still passes the
+        # secret scanner below; real .env variants remain denied.
+        if relative != ".env.example" and _matches(relative, denied_patterns):
             excluded.append(f"{relative} (denied pattern)")
             continue
         if not (

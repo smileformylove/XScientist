@@ -253,6 +253,22 @@ xscientist doctor --task research
 xscientist research status
 ```
 
+Or take the guarded one-command path from a question to a resumable study and
+evidence DAG (provider credentials are prompted securely when missing):
+
+```bash
+xscientist start my-research \
+  --question "Why does retrieval-guided reflection fail out of distribution?" \
+  --autopilot discovery \
+  --allow-synthetic-data \
+  --build-executor
+```
+
+For empirical work, replace `--allow-synthetic-data` with `--data-dir PATH`.
+Every input file is hashed into a content-addressed snapshot before model calls;
+experiments mount that snapshot read-only. Omitting both choices stops the run
+instead of silently inventing an empirical dataset.
+
 `setup` creates the workspace and initializes a server-free local Research VCS
 repository for every non-service task. It reuses existing environment credentials, and
 prompts only for missing required values. It never installs packages by itself;
@@ -407,19 +423,23 @@ Most scripts support stricter quality gates. During local debugging you may choo
 
 ## Usage
 
-The simplest complete run takes a plain-language question directly:
+The lower-level project runner also accepts a plain-language question directly:
 
 ```bash
 xscientist doctor --deep --task research
 xscientist project my_project \
   --question "Why does retrieval-guided reflection fail out of distribution?" \
-  --autopilot discovery
+  --autopilot discovery \
+  --allow-synthetic-data
 ```
 
 This performs fail-fast isolation preflight, finite autonomous exploration,
 quality review/repair, crash-safe resume, evidence-bound insight synthesis,
 Research VCS checkpoints, and offline DAG export. Machine-synthesized insights
 remain explicitly unverified until independent replication.
+Autopilot binds ideation, ranking, and all parallel experiments to one shared
+token/time/cost ledger. Setting `--max-cost-usd` fails closed when the selected
+model has no configured price.
 
 Advanced runs can instead use a local `topic.md` file. It can start with a
 plain-language research question:
@@ -477,7 +497,13 @@ from xscientist import ProjectRequest, XScientist
 
 client = XScientist(output_root="./research-output")
 result = client.run_project(
-    ProjectRequest(project="my_project", topic="topic.md")
+    ProjectRequest(
+        project="my_project",
+        question="Why does the mechanism fail out of distribution?",
+        autopilot="balanced",
+        allow_synthetic_data=True,
+        max_project_tokens=400_000,
+    )
 )
 print(result.returncode, result.stdout)
 ```
@@ -489,7 +515,7 @@ xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 curl http://127.0.0.1:8000/health
 curl -X POST http://127.0.0.1:8000/v1/projects \
   -H 'content-type: application/json' \
-  -d '{"project":"demo","topic":"topic.md"}'
+  -d '{"project":"demo","question":"Why does the mechanism fail?","autopilot":"balanced","allow_synthetic_data":true,"max_project_tokens":400000}'
 ```
 
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`;

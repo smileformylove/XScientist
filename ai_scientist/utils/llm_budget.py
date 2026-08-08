@@ -18,6 +18,11 @@ try:  # pragma: no cover - Windows fallback
 except ImportError:  # pragma: no cover
     fcntl = None
 
+try:  # pragma: no cover - POSIX fallback
+    import msvcrt
+except ImportError:  # pragma: no cover
+    msvcrt = None
+
 
 STATE_VERSION = "llm_budget.v1"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
@@ -106,9 +111,7 @@ def is_llm_budget_exception(exc: BaseException | None) -> bool:
         return True
     text = str(exc or "").lower()
     return (
-        "llm" in text
-        and "budget" in text
-        and ("exhaust" in text or "exceed" in text)
+        "llm" in text and "budget" in text and ("exhaust" in text or "exceed" in text)
     ) or "no price is configured for model" in text
 
 
@@ -536,9 +539,16 @@ class LLMBudgetManager:
                     self._memory_state["updated_at"] = time.time()
                 return
             lock_path = self._state_path.with_suffix(self._state_path.suffix + ".lock")
-            with lock_path.open("a+") as lock_handle:
+            with lock_path.open("a+b") as lock_handle:
                 if fcntl is not None:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                elif msvcrt is not None:  # pragma: no cover - exercised on Windows
+                    lock_handle.seek(0)
+                    if not lock_handle.read(1):
+                        lock_handle.write(b"\0")
+                        lock_handle.flush()
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
                 try:
                     try:
                         raw_state = self._state_path.read_text(encoding="utf-8")
@@ -571,6 +581,9 @@ class LLMBudgetManager:
                 finally:
                     if fcntl is not None:
                         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:  # pragma: no cover - Windows
+                        lock_handle.seek(0)
+                        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _price_for(self, model: str) -> dict[str, float] | None:
         prices = dict(DEFAULT_MODEL_PRICES_PER_MILLION)

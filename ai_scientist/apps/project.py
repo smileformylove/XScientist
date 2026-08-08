@@ -386,6 +386,24 @@ def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
             "steps": 3,
         },
     }[str(args.autopilot)]
+    max_project_tokens = getattr(args, "max_project_tokens", None)
+    max_project_hours = getattr(args, "max_project_hours", None)
+    max_cost_usd = getattr(args, "max_cost_usd", None)
+    if max_project_tokens is not None:
+        if int(max_project_tokens) <= 0:
+            raise ValueError("--max-project-tokens must be greater than zero")
+        limits["max_total_tokens"] = min(
+            int(limits["max_total_tokens"]), int(max_project_tokens)
+        )
+    if max_project_hours is not None:
+        if float(max_project_hours) <= 0:
+            raise ValueError("--max-project-hours must be greater than zero")
+        limits["max_wall_time_seconds"] = min(
+            int(limits["max_wall_time_seconds"]),
+            int(float(max_project_hours) * 3600),
+        )
+    if max_cost_usd is not None and float(max_cost_usd) <= 0:
+        raise ValueError("--max-cost-usd must be greater than zero")
 
     execution = payload.setdefault("exec", {})
     if not isinstance(execution, dict):
@@ -404,6 +422,17 @@ def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
             budget[key] = min(int(configured), ceiling) if configured else ceiling
         except (TypeError, ValueError):
             budget[key] = ceiling
+    if max_cost_usd is not None:
+        configured_cost = budget.get("max_cost_usd")
+        ceiling_cost = float(max_cost_usd)
+        try:
+            budget["max_cost_usd"] = (
+                min(float(configured_cost), ceiling_cost)
+                if configured_cost is not None
+                else ceiling_cost
+            )
+        except (TypeError, ValueError):
+            budget["max_cost_usd"] = ceiling_cost
 
     agent = payload.setdefault("agent", {})
     if not isinstance(agent, dict):
@@ -444,6 +473,35 @@ def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
     return str(destination)
 
 
+def _configure_autopilot_project_budget(args: argparse.Namespace) -> dict[str, object]:
+    """Bind every model call and worker to one concurrency-safe budget ledger."""
+
+    if not args.autopilot:
+        return {"enabled": False}
+    import yaml
+
+    from ai_scientist.utils.llm_budget import configure_llm_budget
+
+    payload = yaml.safe_load(Path(args.bfts_config).read_text(encoding="utf-8"))
+    budget = dict((payload or {}).get("llm_budget") or {})
+    state_path = Path(args.project_dir) / "04_logs" / "llm_budget.json"
+    manager = configure_llm_budget(
+        max_total_tokens=budget.get("max_total_tokens"),
+        max_cost_usd=budget.get("max_cost_usd"),
+        max_wall_time_seconds=budget.get("max_wall_time_seconds"),
+        prices_per_million=budget.get("prices_per_million") or {},
+        state_path=state_path,
+        reset=False,
+    )
+    snapshot = manager.snapshot()
+    return {
+        "enabled": True,
+        "shared_across_project": True,
+        "state": "04_logs/llm_budget.json",
+        "limits": snapshot.get("limits", {}),
+    }
+
+
 def _write_autopilot_receipt(
     args: argparse.Namespace,
     *,
@@ -473,6 +531,8 @@ def _write_autopilot_receipt(
             "research_vcs": args.research_git,
             "checkpoint_policy": args.git_checkpoint_policy,
             "resume": args.resume,
+            "data_contract": getattr(args, "_data_contract", None),
+            "project_budget": getattr(args, "_project_budget", None),
             "bfts_config_hash": canonical_content_hash(
                 Path(args.bfts_config).read_text(encoding="utf-8")
             ),
@@ -3311,6 +3371,22 @@ def main(argv=None):
     autopilot_config = _prepare_autopilot_bfts_config(args)
     if autopilot_config:
         print(f"⏱️ Autopilot 有限预算配置: {autopilot_config}")
+
+    from ai_scientist.utils.data_readiness import prepare_data_contract
+
+    args._data_contract = prepare_data_contract(
+        args.project_dir,
+        data_dir=args.data_dir,
+        allow_synthetic=bool(args.allow_synthetic_data),
+        required=bool(args.autopilot and not args.skip_experiment),
+    )
+    args._project_budget = _configure_autopilot_project_budget(args)
+    if args.autopilot:
+        print(
+            "🧾 Autopilot 数据/预算门禁: "
+            f"data={args._data_contract['mode']} "
+            "budget=project-wide"
+        )
 
     # 按实际模型检查 provider 凭证；完整恢复路径不会再次要求模型凭证。
     requested_models = _collect_requested_models(args)

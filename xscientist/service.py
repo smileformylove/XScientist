@@ -27,9 +27,17 @@ except ModuleNotFoundError:
 
 _RESERVED_PROJECT_ARGS = {
     "--output-root",
+    "--question",
     "--topic",
     "--ideas",
     "--bfts-config",
+    "--autopilot",
+    "--resume",
+    "--data-dir",
+    "--allow-synthetic-data",
+    "--max-project-tokens",
+    "--max-project-hours",
+    "--max-cost-usd",
     "--seed-from-ara",
 }
 _PACKAGED_CONFIG_ALIASES = {
@@ -152,6 +160,7 @@ def _service_request(
 
     return ProjectRequest(
         project=_validate_project_name(payload.project, output_root=output_root),
+        question=payload.question,
         topic=_resolve_service_input(payload.topic, work_dir=work_dir, label="topic"),
         ideas=_resolve_service_input(payload.ideas, work_dir=work_dir, label="ideas"),
         output_root=output_root,
@@ -164,6 +173,15 @@ def _service_request(
         breakthrough_mode=payload.breakthrough_mode,
         high_quality_mode=payload.high_quality_mode,
         bfts_config=config,
+        autopilot=payload.autopilot,
+        resume=payload.resume,
+        data_dir=_resolve_service_input(
+            payload.data_dir, work_dir=work_dir, label="data_dir"
+        ),
+        allow_synthetic_data=payload.allow_synthetic_data,
+        max_project_tokens=payload.max_project_tokens,
+        max_project_hours=payload.max_project_hours,
+        max_cost_usd=payload.max_cost_usd,
         extra_args=_validate_extra_args(payload.extra_args),
     )
 
@@ -186,6 +204,7 @@ if ConfigDict is not None and Field is not None:
         model_config = ConfigDict(extra="forbid")
 
         project: str = Field(min_length=1)
+        question: str | None = None
         topic: str | None = None
         ideas: str | None = None
         output_root: str | None = None
@@ -198,6 +217,13 @@ if ConfigDict is not None and Field is not None:
         breakthrough_mode: bool = False
         high_quality_mode: bool = False
         bfts_config: str | None = None
+        autopilot: str | None = None
+        resume: bool = False
+        data_dir: str | None = None
+        allow_synthetic_data: bool = False
+        max_project_tokens: int | None = Field(default=None, gt=0)
+        max_project_hours: float | None = Field(default=None, gt=0)
+        max_cost_usd: float | None = Field(default=None, gt=0)
         extra_args: list[str] = Field(default_factory=list)
 
         def to_request(self) -> ProjectRequest:

@@ -123,9 +123,12 @@ def edit_bfts_config_file(
     config["desc_file"] = portable_reference(idea_path)
     config["workspace_dir"] = portable_reference(idea_dir)
 
-    # make an empty data directory
-    data_dir = osp.join(idea_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
+    # Autopilot may bind an explicitly hashed external dataset.  The executor
+    # consumes it read-only; otherwise retain the legacy empty local fixture.
+    data_dir = str(os.environ.get("AI_SCIENTIST_PROJECT_DATA_DIR") or "").strip()
+    if not data_dir:
+        data_dir = osp.join(idea_dir, "data")
+        os.makedirs(data_dir, exist_ok=True)
     config["data_dir"] = portable_reference(data_dir)
 
     # make an empty log directory

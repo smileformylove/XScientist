@@ -267,6 +267,20 @@ xscientist doctor --task research
 xscientist research status
 ```
 
+也可以用一条受门禁保护的命令，从问题直接启动可续跑研究并生成证据 DAG：
+
+```bash
+xscientist start my-research \
+  --question "为什么检索引导反思在分布外会失效？" \
+  --autopilot discovery \
+  --allow-synthetic-data \
+  --build-executor
+```
+
+实证研究请把 `--allow-synthetic-data` 换成 `--data-dir PATH`。系统会在首次
+模型调用前逐文件哈希成内容寻址快照，实验只读挂载该快照；两者都不指定时会停止，
+不会暗中虚构实证数据。
+
 `provider add` 会隐藏输入缺失的密钥，并将其写入 Git 忽略、仅当前用户可读写的
 `.env`。供应商元数据只保存模型 ID 和环境变量名，不保存密钥。激活的模型会自动
 应用到构思、绘图、写作、引用、审稿和 BFTS；显式传入的分角色模型参数仍优先。
@@ -399,21 +413,24 @@ export RESEARCH_OUTPUT_DIR="/path/to/my_xscientist_outputs"
 
 ## 使用方法
 
-最简单的完整运行可以直接输入自然语言科研问题，无需先创建文件：
+底层 `project` 入口也可以直接输入自然语言科研问题，无需先创建文件：
 
 ```bash
 xscientist doctor --deep --task research
 xscientist project my_project \
   --question "为什么检索引导反思在分布外会失效？" \
-  --autopilot discovery
+  --autopilot discovery \
+  --allow-synthetic-data
 ```
 
 该入口会在首次科研模型调用前检查隔离执行环境，使用有限预算自动探索和排序
 候选方向，执行实验、质量复核与修复，支持断点续跑，并自动生成受证据约束的
 洞见报告、Research VCS checkpoint 和离线科研 DAG。内部 Agent 生成的洞见始终
 标记为 `machine_synthesized_unverified`，不能替代独立复现。
-自动驾驶会派生 `00_config/autopilot_bfts.yaml`，强制隔离、实验禁网以及总
-token/墙钟上限；用户配置中更低的上限会原样保留。
+自动驾驶会派生 `00_config/autopilot_bfts.yaml`，强制隔离和实验禁网，并让
+构思、排序及全部并行实验共用一个项目级 token/墙钟/成本账本；用户配置中更低
+的上限会原样保留。设置 `--max-cost-usd` 后，未知模型价格会直接停止而不是按零成本
+继续运行。
 
 高级用法也可以在当前目录准备一个 `topic.md` 主题文件。它可以直接从自然语言
 研究问题开始：
@@ -470,7 +487,13 @@ Python SDK：
 from xscientist import ProjectRequest, XScientist
 
 client = XScientist(output_root="./research-output")
-result = client.run_project(ProjectRequest(project="demo", topic="topic.md"))
+result = client.run_project(ProjectRequest(
+    project="demo",
+    question="为什么该机制在分布外失效？",
+    autopilot="balanced",
+    allow_synthetic_data=True,
+    max_project_tokens=400_000,
+))
 print(result.returncode, result.stdout)
 ```
 
@@ -481,7 +504,7 @@ xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 curl http://127.0.0.1:8000/health
 curl -X POST http://127.0.0.1:8000/v1/projects \
   -H 'content-type: application/json' \
-  -d '{"project":"demo","topic":"topic.md"}'
+  -d '{"project":"demo","question":"为什么该机制失效？","autopilot":"balanced","allow_synthetic_data":true,"max_project_tokens":400000}'
 ```
 
 交互式 API 文档位于 `http://127.0.0.1:8000/docs`，OpenAPI 文档位于

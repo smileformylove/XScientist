@@ -4,7 +4,16 @@ __pycache__
 *.pyc
 .DS_Store
 .auto_loop
+.env
+.env.*
+.secrets
+*.pem
+*.key
+credentials.json
+secrets.json
 _outputs
+output
+outputs
 paper
 example
 ai_scientist/fewshot_examples

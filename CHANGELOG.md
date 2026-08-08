@@ -8,6 +8,19 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- A guarded `xscientist start` journey that creates or reuses one workspace,
+  validates credentials/login/isolation/paper tooling, and runs Autopilot in
+  the same local Research VCS from a plain-language question.
+- Project-wide concurrent LLM budget accounting plus a fail-closed data gate
+  with content-hashed read-only empirical inputs or an explicit synthetic-data
+  scientific boundary.
+- First-class question/Autopilot/resume/data/budget controls in the Python SDK
+  and HTTP project contract.
+- Source-checkout executor builds now install the exact local source revision
+  and label it in the image, while installed releases remain pinned to their
+  matching PyPI version.
+- Shared project budget ledgers now use native advisory locks on both POSIX and
+  Windows, preserving cross-process token/cost caps for parallel workers.
 - Beginner-oriented `research start`, exploratory `research plan`, and
   bilingual `research guide` commands that create a falsifiable lineage and
   explain the next scientific action.
