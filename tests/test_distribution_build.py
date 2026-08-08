@@ -9,11 +9,30 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from tools.build_distribution import GENERATED_TARGETS, REPOSITORY_ROOT
+from tools.check_distribution import smoke_install
 
 
 class DistributionBuildTests(unittest.TestCase):
+    def test_isolated_smoke_installs_declared_core_dependencies(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"version":"0.1.1","schemas":23}\n',
+            stderr="",
+        )
+        with mock.patch(
+            "tools.check_distribution.subprocess.run",
+            side_effect=[completed, completed],
+        ) as run:
+            smoke_install(Path("xscientist-0.1.1-py3-none-any.whl"))
+
+        install_command = run.call_args_list[0].args[0]
+        self.assertNotIn("--no-deps", install_command)
+        self.assertIn("--target", install_command)
+
     def test_clean_build_targets_are_narrow_and_generated(self) -> None:
         self.assertEqual(
             {

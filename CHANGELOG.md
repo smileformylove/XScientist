@@ -82,6 +82,8 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- Distribution smoke checks now install declared core dependencies, preventing
+  developer site packages from hiding failures in clean release environments.
 - Unified diagnostics recursively redact credentials, personal identifiers,
   and host-local paths, including text returned by deep runtime preflight.
 - New first-run command parsers are constructed lazily so top-level CLI startup

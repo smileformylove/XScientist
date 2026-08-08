@@ -117,7 +117,6 @@ def smoke_install(wheel: Path) -> None:
                 "pip",
                 "install",
                 "--disable-pip-version-check",
-                "--no-deps",
                 "--target",
                 str(target),
                 str(wheel),
