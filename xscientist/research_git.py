@@ -844,12 +844,28 @@ def _record_research_object_locked(
     actor: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
 ) -> ResearchObjectResult:
+    normalized_relations: list[dict[str, Any]] = []
+    for relation in relations:
+        normalized_relation = dict(relation)
+        target = str(normalized_relation.get("target") or "")
+        if target.startswith("@") or re.fullmatch(r"rso-[0-9a-f]{6,16}", target):
+            normalized_relation["target"] = resolve_research_object_id(root, target)
+        normalized_relations.append(normalized_relation)
+    _refuse_private_research_object(
+        {
+            "kind": kind,
+            "payload": payload,
+            "relations": normalized_relations,
+            "actor": actor or {},
+            "provenance": provenance or {},
+        }
+    )
     try:
         research_object = build_research_object(
             kind=kind,
             payload=payload,
             state=state,
-            relations=relations,
+            relations=normalized_relations,
             actor=actor,
             provenance=provenance,
         )
@@ -924,13 +940,64 @@ def record_research_object(
         )
 
 
+def resolve_research_object_id(
+    repo: str | Path,
+    selector: str,
+    *,
+    expected_kind: str | None = None,
+) -> str:
+    """Resolve a full ID, unique prefix, or ``@latest:<kind>`` selector."""
+
+    root = _repository_root(repo)
+    normalized = str(selector or "").strip()
+    object_root = root / ".xscientist" / "objects"
+    if normalized.startswith("@latest"):
+        prefix, separator, selected_kind = normalized.partition(":")
+        if prefix != "@latest" or (separator and not selected_kind):
+            raise ResearchGitError("object selector must use @latest:<kind>")
+        kind = selected_kind or str(expected_kind or "")
+        if not kind:
+            raise ResearchGitError("@latest requires an object kind")
+        if expected_kind and kind != expected_kind:
+            raise ResearchGitError(
+                f"object selector kind mismatch: expected {expected_kind}, got {kind}"
+            )
+        candidates = list_research_objects(root, kind=kind)
+        if not candidates:
+            raise ResearchGitError(
+                f"no research objects found for selector: {normalized}"
+            )
+        return str(
+            max(
+                candidates,
+                key=lambda item: (str(item.get("created_at") or ""), item["object_id"]),
+            )["object_id"]
+        )
+    if re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
+        resolved = normalized
+    elif re.fullmatch(r"rso-[0-9a-f]{6,15}", normalized):
+        matches = sorted(object_root.glob(f"*/{normalized}*.json"))
+        if not matches:
+            raise ResearchGitError(f"research object not found: {normalized}")
+        if len(matches) != 1:
+            raise ResearchGitError(f"ambiguous research object prefix: {normalized}")
+        resolved = matches[0].stem
+    else:
+        raise ResearchGitError("invalid research object identifier or selector")
+    if expected_kind:
+        matches = sorted(object_root.glob(f"*/{resolved}.json"))
+        if len(matches) != 1 or matches[0].parent.name != expected_kind:
+            raise ResearchGitError(
+                f"research object has wrong kind; expected {expected_kind}: {resolved}"
+            )
+    return resolved
+
+
 def load_research_object(repo: str | Path, object_id: str) -> dict[str, Any]:
     """Load and validate one typed Research VCS object from working state."""
 
     root = _repository_root(repo)
-    normalized = str(object_id or "").strip()
-    if not re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
-        raise ResearchGitError("invalid research object identifier")
+    normalized = resolve_research_object_id(root, object_id)
     matches = sorted((root / ".xscientist" / "objects").glob(f"*/{normalized}.json"))
     if not matches:
         raise ResearchGitError(f"research object not found: {normalized}")
@@ -2126,6 +2193,180 @@ def switch_research_branch(repo: str | Path, name: str) -> dict[str, Any]:
         }
 
 
+def delete_research_branch(
+    repo: str | Path,
+    name: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Delete a non-current research line, protecting unmerged work by default."""
+
+    root = _repository_root(repo)
+    normalized = _validate_research_ref_name(name, kind="branch")
+    with _repository_lock(root):
+        if normalized == _branch(root):
+            raise ResearchGitError("cannot delete the current research branch")
+        exists = _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{normalized}"],
+            check=False,
+        )
+        if exists.returncode:
+            raise ResearchGitError(f"research branch not found: {normalized}")
+        commit = _run_git(root, ["rev-parse", normalized]).stdout.strip()
+        deleted = _run_git(
+            root,
+            ["branch", "-D" if force else "-d", "--", normalized],
+            check=False,
+        )
+        if deleted.returncode:
+            raise ResearchGitError(
+                f"research branch is not fully merged: {normalized}; use -D only after review"
+            )
+        return {"name": normalized, "commit": commit, "deleted": True, "force": force}
+
+
+def rename_research_branch(
+    repo: str | Path,
+    name: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename a research line without changing its scientific history."""
+
+    root = _repository_root(repo)
+    old = _validate_research_ref_name(name, kind="branch")
+    new = _validate_research_ref_name(new_name, kind="branch")
+    with _repository_lock(root):
+        if _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{old}"],
+            check=False,
+        ).returncode:
+            raise ResearchGitError(f"research branch not found: {old}")
+        if not _run_git(
+            root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{new}"],
+            check=False,
+        ).returncode:
+            raise ResearchGitError(f"research branch already exists: {new}")
+        _run_git(root, ["branch", "-m", old, new])
+        return {
+            "old_name": old,
+            "name": new,
+            "commit": _run_git(root, ["rev-parse", new]).stdout.strip(),
+            "current": _branch(root) == new,
+        }
+
+
+def restore_research_paths(
+    repo: str | Path,
+    source: str,
+    paths: Sequence[str],
+) -> dict[str, Any]:
+    """Restore explicit research paths from a checkpoint into working state."""
+
+    root = _repository_root(repo)
+    if not paths:
+        raise ResearchGitError("restore requires at least one explicit research path")
+    with _repository_lock(root):
+        if _load_research_stage(root).get("entries"):
+            raise ResearchGitError("restore requires an empty research stage")
+        resolved = _run_git(root, ["rev-parse", "--verify", f"{source}^{{commit}}"])
+        normalized = sorted({_normalise_relative(path) for path in paths})
+        config = load_repository_config(root)
+        selected, excluded = _select_paths(
+            root, config, normalized, explicit=normalized
+        )
+        if excluded or selected != normalized:
+            raise ResearchGitError(
+                "restore refused paths outside the research safety policy: "
+                + ", ".join(excluded or sorted(set(normalized) - set(selected)))
+            )
+        restored = _run_git(
+            root,
+            [
+                "restore",
+                f"--source={resolved.stdout.strip()}",
+                "--worktree",
+                "--",
+                *normalized,
+            ],
+            check=False,
+        )
+        if restored.returncode:
+            raise ResearchGitError(
+                "one or more research paths do not exist at the source ref"
+            )
+        return {
+            "source": resolved.stdout.strip(),
+            "paths": normalized,
+            "changed_paths": sorted(_changed_paths(root)[1]),
+        }
+
+
+def revert_research_checkpoint(
+    repo: str | Path,
+    commit: str,
+    *,
+    subject: str | None = None,
+) -> dict[str, Any]:
+    """Revert one Git commit and immediately document it as a research checkpoint."""
+
+    root = _repository_root(repo)
+    with _repository_lock(root):
+        _require_clean_research_switch(root)
+        resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
+        resolved_commit = resolved.stdout.strip()
+        checkpoint_paths = [
+            path
+            for path in _run_git(
+                root,
+                ["diff-tree", "--no-commit-id", "--name-only", "-r", resolved_commit],
+            ).stdout.splitlines()
+            if path.startswith("checkpoints/")
+        ]
+        reverted = _run_git(
+            root,
+            ["revert", "--no-commit", resolved_commit],
+            check=False,
+        )
+        if reverted.returncode:
+            _run_git(root, ["revert", "--abort"], check=False)
+            raise ResearchGitError(
+                "research revert has conflicts; resolve on a dedicated branch"
+            )
+        if checkpoint_paths:
+            _run_git(
+                root,
+                [
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    *checkpoint_paths,
+                ],
+            )
+        try:
+            checkpoint = _create_checkpoint_locked(
+                root,
+                stage="revert",
+                subject=subject or f"revert research checkpoint {resolved_commit[:12]}",
+                summary=f"Semantic revert of Git commit {resolved_commit}.",
+                status="completed",
+                allow_backend_stage=True,
+                allow_checkpoint_only=True,
+            )
+        except Exception:
+            _run_git(root, ["revert", "--abort"], check=False)
+            raise
+        return {
+            "reverted": resolved_commit,
+            "revert_commit": checkpoint.commit,
+            "checkpoint": checkpoint.to_dict(),
+        }
+
+
 def create_research_tag(
     repo: str | Path,
     name: str,
@@ -2548,7 +2789,9 @@ def verify_research_repository(
     }
 
 
-def research_log(repo: str | Path, *, limit: int = 20) -> list[dict[str, Any]]:
+def research_log(
+    repo: str | Path, *, limit: int = 20, ref: str = "HEAD"
+) -> list[dict[str, Any]]:
     root = _repository_root(repo)
     if limit < 1:
         raise ResearchGitError("log limit must be at least 1")
@@ -2557,7 +2800,13 @@ def research_log(repo: str | Path, *, limit: int = 20) -> list[dict[str, Any]]:
     fmt = (
         f"%H{separator}%h{separator}%aI{separator}%an{separator}%s{separator}%B{record}"
     )
-    raw = _run_git(root, ["log", f"--max-count={limit}", f"--format={fmt}"]).stdout
+    resolved_ref = _run_git(
+        root, ["rev-parse", "--verify", f"{ref}^{{commit}}"]
+    ).stdout.strip()
+    raw = _run_git(
+        root,
+        ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
+    ).stdout
     entries: list[dict[str, Any]] = []
     for item in raw.split("\x1e"):
         fields = item.strip("\n").split("\x1f", 5)
@@ -2599,6 +2848,28 @@ def _manifest_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, An
         str(item.get("path")): str(item.get("manifest_hash"))
         for item in before
         if isinstance(item, dict)
+    }
+    after_map = {
+        str(item.get("path")): str(item.get("manifest_hash"))
+        for item in after
+        if isinstance(item, dict)
+    }
+    common = set(before_map) & set(after_map)
+    return {
+        "added": sorted(set(after_map) - set(before_map)),
+        "removed": sorted(set(before_map) - set(after_map)),
+        "changed": [
+            {
+                "path": path,
+                "before": before_map[path],
+                "after": after_map[path],
+            }
+            for path in sorted(common)
+            if before_map[path] != after_map[path]
+        ],
+        "unchanged": sorted(
+            path for path in common if before_map[path] == after_map[path]
+        ),
     }
 
 
@@ -2674,28 +2945,6 @@ def _typed_object_delta(
             "added": relation_rows(after_relations - before_relations),
             "removed": relation_rows(before_relations - after_relations),
         },
-    }
-    after_map = {
-        str(item.get("path")): str(item.get("manifest_hash"))
-        for item in after
-        if isinstance(item, dict)
-    }
-    common = set(before_map) & set(after_map)
-    return {
-        "added": sorted(set(after_map) - set(before_map)),
-        "removed": sorted(set(before_map) - set(after_map)),
-        "changed": [
-            {
-                "path": path,
-                "before": before_map[path],
-                "after": after_map[path],
-            }
-            for path in sorted(common)
-            if before_map[path] != after_map[path]
-        ],
-        "unchanged": sorted(
-            path for path in common if before_map[path] == after_map[path]
-        ),
     }
 
 
@@ -4087,6 +4336,7 @@ __all__ = [
     "create_research_branch",
     "create_research_bundle",
     "create_research_tag",
+    "delete_research_branch",
     "init_repository",
     "load_repository_config",
     "load_research_object",
@@ -4096,9 +4346,13 @@ __all__ = [
     "list_research_tags",
     "merge_research_branch",
     "record_research_object",
+    "rename_research_branch",
     "repository_status",
     "reproduce_checkpoint",
     "restore_research_bundle",
+    "restore_research_paths",
+    "resolve_research_object_id",
+    "revert_research_checkpoint",
     "research_diff",
     "research_blame",
     "research_log",

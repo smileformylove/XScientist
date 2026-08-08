@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/trust.v1/attestation.schema.json",
+  "title": "XScientist Signed Attestation",
+  "type": "object",
+  "required": ["schema_version", "canonicalization", "purpose", "identity", "key_id", "algorithm", "issued_at", "payload_hash", "signature", "attestation_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.attestation.v1"},
+    "canonicalization": {"const": "xscientist.canonical-json.v1"},
+    "purpose": {"type": "string", "minLength": 1},
+    "identity": {"type": "string", "pattern": "^(agent|service|human):.+$"},
+    "key_id": {"type": "string", "minLength": 1},
+    "algorithm": {"enum": ["hmac-sha256", "ed25519"]},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "payload_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "signature": {"type": "string", "minLength": 1},
+    "attestation_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

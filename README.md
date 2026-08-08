@@ -105,7 +105,8 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
-- Native Research VCS: a project can record typed objects, stage semantic changes, fork research lines, inspect provenance, merge compatible findings, create offline bundles, and reproduce checkpoints without GitHub or any server. Git is the current replaceable persistence adapter, not the user-facing research model.
+- Native Research VCS: a project can record typed objects, stage semantic changes, fork research lines, inspect provenance, merge compatible findings, create offline bundles, reproduce checkpoints, and export RO-Crate/PROV/CWL/DVC/MLflow exchange artifacts without GitHub or any server. Git is the current replaceable persistence adapter, not the user-facing research model.
+- Executable self-evolution: immutable candidate file trees, paired shell-free benchmark runs, bounded canaries, signed multi-authority approvals, atomic local deployment, and content-verified rollback are available through `xscientist evolution`. Production mutation is opt-in and remains separate from semantic Research VCS promotion.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
 ## Public Interfaces
@@ -559,34 +560,42 @@ xscientist research hypothesis \
   "Retrieval reflection improves factual accuracy" \
   --falsifier "accuracy does not exceed the fixed baseline"
 
-xscientist research preregister <hypothesis-object-id> \
+xscientist research preregister @latest:hypothesis \
   --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
   --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
 
 xscientist research experiment \
-  "Seed 7 exceeded the fixed wall-clock budget" \
-  --status timeout --failure-class budget_exhausted \
-  --metric elapsed_seconds=600 --seed 7
+  "Seed 7 completed the confirmatory protocol" \
+  --status success --study-phase confirmatory \
+  --plan @latest:research_plan \
+  --preregistration @latest:preregistration \
+  --metric accuracy=0.84 --seed 7 \
+  --dependency-lock-file ./requirements.txt \
+  --reproduce-command "python .xscientist/verify.py"
 
 xscientist research evidence \
-  "The timeout reproduced under the sealed environment" \
-  --attempt <experiment-object-id> --verified
+  "Accuracy exceeded the preregistered baseline" \
+  --attempt @latest:experiment_attempt \
+  --supports @latest:hypothesis --metric accuracy=0.84
 
 xscientist research review \
   "Independent replication and leakage checks passed" \
-  --evaluates <evidence-object-id> --verifier independent-reviewer \
+  --evaluates @latest:evidence --verifier independent-reviewer \
   --decision pass
 
 xscientist research claim \
   "The method is not evaluable within the fixed budget" \
-  --evidence <evidence-object-id>
+  --evidence @latest:evidence --gate @latest:gate_decision --verified
 ```
 
 Failed and timed-out experiments are committed as first-class history. The
 `preregister` command creates and locks the confirmatory plan before execution;
 `review` creates an independent review and deterministic gate. A confirmatory
 experiment must bind that preregistration, and a `--verified` claim must bind a
-passing gate decision. Use `--no-commit` only when assembling several objects
+passing gate decision. Verified evidence additionally requires
+`--verifier <independent-id>`. Experiment commands automatically capture the
+current code commit, environment, dependency-lock hashes and seeds; evidence
+commands add an immutable measurement hash. Use `--no-commit` only when assembling several objects
 into a later manual checkpoint. `--split-file` stores only its SHA-256 digest,
 never the source path or contents; automated workflows may pass `--split-hash`.
 
@@ -606,6 +615,8 @@ xscientist research checkpoint --staged \
 # Fork and inspect an independent research line.
 xscientist research branch challenge/h1 --switch
 xscientist research branch
+xscientist research branch challenge/h1 -m challenge/accuracy
+xscientist research branch challenge/accuracy -d
 
 # Ask the deterministic policy before changing history, then inspect the
 # payload-free long-term research technology tree.
@@ -619,6 +630,8 @@ xscientist research blame <research-object-id>
 xscientist research fsck
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research restore HEAD~1 claims/result.md
+xscientist research revert <checkpoint-commit>
 ```
 
 The equivalent Git-style interface uses the same Research VCS safety rules and
@@ -905,6 +918,13 @@ Under the hood the seed manifest is passed through the `AI_SCIENTIST_ARA_SEED_PA
 ### Protocol package
 
 `ai_scientist/protocol/` is a standalone, portable protocol package (`ara.v1`): a versioned JSON Schema suite, a `content_hash` normalisation algorithm, and a full JSON Schema 2020-12 conformance validator. Third-party producers / consumers can implement the same protocol without depending on the rest of XScientist — useful for letting another agent consume our ARAs, for cross-system provenance tracking, or as a `--strict` gate in CI. The engineering check derives the schema inventory from the registry so documentation does not depend on a hand-maintained count. Full spec: [`ai_scientist/protocol/SPEC.md`](ai_scientist/protocol/SPEC.md).
+
+Trust-boundary receipts use the stricter
+`xscientist.canonical-json.v1` profile with HMAC-SHA256 and optional Ed25519
+attestations. Shared vectors and a Node.js consumer live under
+`ai_scientist/protocol/conformance/`.
+The executable candidate-to-deployment workflow is documented in
+[`docs/EVOLUTION_RUNTIME.md`](docs/EVOLUTION_RUNTIME.md).
 
 ### A/B evidence harness
 

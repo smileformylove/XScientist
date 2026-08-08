@@ -42,6 +42,7 @@ genson>=1.2,<2
 shutup>=0.2,<1
 python-igraph>=0.11,<1
 coolname>=2,<3
+cryptography>=42,<47
 jsonschema>=4.22,<5
 omegaconf>=2.3,<3
 botocore>=1.34,<2

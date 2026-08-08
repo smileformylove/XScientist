@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/benchmark_suite.schema.json",
+  "title": "XScientist Controlled Benchmark Suite",
+  "type": "object",
+  "required": ["schema_version", "benchmark_id", "producer_stack_id", "producer_stack_hash", "evaluator_stack_id", "evaluator_stack_hash", "evaluator_id", "tasks"],
+  "properties": {
+    "schema_version": {"const": "xscientist.benchmark-suite.v1"},
+    "benchmark_id": {"type": "string", "minLength": 1},
+    "producer_stack_id": {"type": "string", "minLength": 1},
+    "producer_stack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evaluator_stack_id": {"type": "string", "minLength": 1},
+    "evaluator_stack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evaluator_id": {"type": "string", "pattern": "^(service|human):.+$"},
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["task_id", "task_hash", "split", "evaluation_layer", "frozen_before_candidate", "benchmark_frozen_at", "domain", "command"],
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "task_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "split": {"enum": ["hidden", "public"]},
+          "evaluation_layer": {"enum": ["sealed", "prospective", "public"]},
+          "frozen_before_candidate": {"type": "boolean"},
+          "benchmark_frozen_at": {"type": "string", "format": "date-time"},
+          "domain": {"type": "string", "minLength": 1},
+          "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "environment": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}},
+          "evaluator_stack_id": {"type": "string"},
+          "evaluator_stack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "custodian_attestation_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "prospective_resolved": {"type": "boolean"},
+          "prospective_protocol_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "resolution_attestation_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "resolution_not_before": {"type": "string", "format": "date-time"},
+          "resolved_at": {"type": "string", "format": "date-time"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

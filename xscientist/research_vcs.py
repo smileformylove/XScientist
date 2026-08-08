@@ -14,6 +14,7 @@ from .research_git import (
     create_checkpoint,
     create_research_branch,
     create_research_tag,
+    delete_research_branch,
     init_repository,
     list_research_objects,
     list_research_branches,
@@ -21,6 +22,7 @@ from .research_git import (
     merge_research_branch,
     load_research_object,
     record_research_object,
+    rename_research_branch,
     repository_status,
     research_diff,
     research_blame,
@@ -29,6 +31,9 @@ from .research_git import (
     research_unstage,
     preview_research_merge,
     show_checkpoint,
+    restore_research_paths,
+    resolve_research_object_id,
+    revert_research_checkpoint,
     switch_research_branch,
     verify_research_repository,
 )
@@ -93,6 +98,9 @@ class ResearchRepository:
 
     def get(self, object_id: str) -> dict[str, Any]:
         return load_research_object(self.path, object_id)
+
+    def resolve(self, selector: str, *, kind: str | None = None) -> str:
+        return resolve_research_object_id(self.path, selector, expected_kind=kind)
 
     def objects(
         self,
@@ -160,6 +168,18 @@ class ResearchRepository:
     def switch(self, name: str) -> dict[str, Any]:
         return switch_research_branch(self.path, name)
 
+    def delete_branch(self, name: str, *, force: bool = False) -> dict[str, Any]:
+        return delete_research_branch(self.path, name, force=force)
+
+    def rename_branch(self, name: str, new_name: str) -> dict[str, Any]:
+        return rename_research_branch(self.path, name, new_name)
+
+    def restore(self, source: str, *paths: str) -> dict[str, Any]:
+        return restore_research_paths(self.path, source, paths)
+
+    def revert(self, commit: str, *, subject: str | None = None) -> dict[str, Any]:
+        return revert_research_checkpoint(self.path, commit, subject=subject)
+
     def tag(
         self,
         name: str,
@@ -177,8 +197,8 @@ class ResearchRepository:
     def tags(self) -> list[dict[str, Any]]:
         return list_research_tags(self.path)
 
-    def log(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        return research_log(self.path, limit=limit)
+    def log(self, *, limit: int = 20, ref: str = "HEAD") -> list[dict[str, Any]]:
+        return research_log(self.path, limit=limit, ref=ref)
 
     def show(self, commit: str = "HEAD") -> dict[str, Any]:
         return show_checkpoint(self.path, commit)
@@ -272,6 +292,32 @@ class ResearchRepository:
             ref=ref,
             level=level,
             verify_objects=verify_objects,
+        )
+
+    def export(
+        self,
+        destination: str | Path,
+        *,
+        ref: str = "HEAD",
+        formats: Sequence[str] = (
+            "ro-crate",
+            "prov-json",
+            "cwl",
+            "dvc",
+            "mlflow",
+        ),
+        include_payloads: bool = False,
+    ) -> dict[str, Any]:
+        """Export one committed state to standard provenance/tool formats."""
+
+        from .research_interop import export_research_interop
+
+        return export_research_interop(
+            self.path,
+            destination,
+            ref=ref,
+            formats=formats,
+            include_payloads=include_payloads,
         )
 
 

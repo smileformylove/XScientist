@@ -1,0 +1,29 @@
+{
+  "profile": "xscientist.canonical-json.v1",
+  "cases": [
+    {
+      "name": "ordering",
+      "value": {"z": 1, "a": [true, null, "研究"]},
+      "canonical": "{\"a\":[true,null,\"研究\"],\"z\":1}",
+      "sha256": "sha256:6c22766591f6920494f1fbd121977a0fc6f07ec67a21a05b0df05ff03b7c7024"
+    },
+    {
+      "name": "numbers",
+      "value": [1.0, -0.0, 1e-7, 1e-6, 1e20, 1e21, 333333333.33333329],
+      "canonical": "[1,0,1e-7,0.000001,100000000000000000000,1e+21,333333333.3333333]",
+      "sha256": "sha256:a6caae610f6f4dec8acedd9238a11c681a2a7339a8e4c020cca6f62e91c2538d"
+    },
+    {
+      "name": "unicode-keys",
+      "value": {"😀": "astral", "": "bmp", "a": "latin"},
+      "canonical": "{\"a\":\"latin\",\"😀\":\"astral\",\"\":\"bmp\"}",
+      "sha256": "sha256:b4f1eecd39ca3ae64501d68bcb220e6475c90e0981285d8e14cd6104860c880c"
+    },
+    {
+      "name": "escapes",
+      "value": {"line": "a\nb\t\"\\"},
+      "canonical": "{\"line\":\"a\\nb\\t\\\"\\\\\"}",
+      "sha256": "sha256:c07f535d38650c286b2601ce7a05f2c0ec77771c0d863d6dd2ddeeaed492ba28"
+    }
+  ]
+}

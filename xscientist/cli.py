@@ -13,6 +13,7 @@ from .entrypoints import (
     batch_main,
     bfts_main,
     daemon_main,
+    evolution_main,
     feedback_main,
     git_main,
     manager_main,
@@ -36,6 +37,7 @@ _DELEGATES = {
     "zhipu": zhipu_main,
     "preflight": preflight_main,
     "research": research_main,
+    "evolution": evolution_main,
     "git": git_main,
 }
 
@@ -84,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("zhipu", "Run the Zhipu-oriented experiment launcher."),
         ("preflight", "Check runtime dependencies and credentials."),
         ("research", "Use native version control for scientific progress."),
+        ("evolution", "Build, evaluate, sign, deploy, or roll back agent candidates."),
         ("git", "Check and use XScientist native research version control."),
     ):
         subparser = subparsers.add_parser(

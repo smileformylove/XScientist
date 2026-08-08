@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/evolution_artifact.schema.json",
+  "title": "XScientist Evolution Artifact Manifest",
+  "type": "object",
+  "required": ["schema_version", "component_type", "logical_root", "entries", "file_count", "total_bytes", "artifact_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.evolution-artifact.v1"},
+    "component_type": {"enum": ["agent_scaffold", "prompt", "tool", "model_routing", "search_policy", "resource_allocation", "failure_recovery"]},
+    "logical_root": {"type": "string", "minLength": 1},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "size", "executable"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0},
+          "executable": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "file_count": {"type": "integer", "minimum": 1},
+    "total_bytes": {"type": "integer", "minimum": 0},
+    "artifact_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

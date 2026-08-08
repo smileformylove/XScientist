@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/canary_run.schema.json",
+  "title": "XScientist Canary Run",
+  "type": "object",
+  "required": ["schema_version", "candidate_hash", "canary_report", "project_receipts", "deployment_receipt", "rollback_deployment_receipt", "status", "errors", "report_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.canary-run.v1"},
+    "candidate_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "canary_report": {"type": "object"},
+    "project_receipts": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "deployment_receipt": {"type": "object"},
+    "rollback_deployment_receipt": {"type": "object"},
+    "status": {"enum": ["passed", "blocked"]},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "report_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

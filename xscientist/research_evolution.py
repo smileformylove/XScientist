@@ -11,6 +11,7 @@ from ai_scientist.utils.evolution_gate import (
     validate_production_promotion,
     validate_rollback_receipt,
 )
+from ai_scientist.utils.evolution_deployment import validate_deployment_receipt
 
 from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
 from .research_vcs import ResearchRepository
@@ -212,6 +213,12 @@ class ResearchEvolution:
             "promoted_candidate": promoted,
             "decision": decision,
             "checkpoint": checkpoint,
+            "execution_mode": "semantic_receipt_only",
+            "production_mutated": False,
+            "next_action": (
+                "apply the exact candidate artifact through an authorized deployment "
+                "adapter, then record its independently observed canary receipt"
+            ),
         }
 
     def rollback(
@@ -257,6 +264,86 @@ class ResearchEvolution:
                 stage="rollback",
                 subject="record verified agent rollback",
                 status="superseded",
+            )
+            if commit
+            else None
+        )
+        return {
+            "decision": decision,
+            "checkpoint": checkpoint,
+            "execution_mode": (
+                "verified_external_rollback"
+                if receipt_payload.get("exercise_only") is False
+                else "semantic_receipt_only"
+            ),
+            "production_mutated": receipt_payload.get("exercise_only") is False,
+            "receipt_mode": (
+                "production"
+                if receipt_payload.get("exercise_only") is False
+                else "exercise"
+            ),
+            "next_action": (
+                "rollback receipt recorded; no further production mutation is implied"
+                if receipt_payload.get("exercise_only") is False
+                else "restore the approved baseline through an authorized rollback adapter "
+                "and attach a production rollback receipt"
+            ),
+        }
+
+    def deployment(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        promoted_id: str,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Attach an observed production deployment to the promoted candidate."""
+
+        promoted = self.repository.get(promoted_id)
+        if promoted["kind"] != "agent_candidate" or promoted["state"] != "promoted":
+            raise ResearchGitError(
+                "deployment receipt requires a promoted agent candidate"
+            )
+        candidate_payload = promoted["payload"].get("candidate") or {}
+        expected_hash = candidate_payload.get("candidate_artifact_hash")
+        validation = validate_deployment_receipt(
+            receipt, candidate_artifact_hash=expected_hash
+        )
+        if not validation["ok"]:
+            raise ResearchGitError(
+                "deployment receipt failed integrity validation: "
+                + ", ".join(validation["errors"])
+            )
+        receipt_payload = validation["receipt"]
+        if (
+            receipt_payload.get("mode") != "production"
+            or receipt_payload.get("production_mutated") is not True
+        ):
+            raise ResearchGitError(
+                "Research VCS production deployment requires an applied production receipt"
+            )
+        decision = self.repository.record(
+            "gate_decision",
+            {
+                "decision": "deployed",
+                "candidate_hash": candidate_payload.get("candidate_hash"),
+                "candidate_artifact_hash": expected_hash,
+                "deployment_receipt": receipt_payload,
+            },
+            state="promoted",
+            relations=[
+                {"type": "depends_on", "target": promoted_id, "role": "deployment"}
+            ],
+            actor={
+                "actor_id": str(receipt_payload.get("executed_by")),
+                "authority": "deterministic_gate",
+            },
+        )
+        checkpoint = (
+            self.repository.commit(
+                stage="deployment",
+                subject="record verified production deployment",
+                status="promoted",
             )
             if commit
             else None

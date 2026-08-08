@@ -20,6 +20,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .constants import PROTOCOL_VERSION, Kind
+from .canonical_json import (
+    CANONICAL_JSON_PROFILE,
+    CanonicalJSONError,
+    canonical_content_hash,
+    canonical_json,
+    canonical_json_bytes,
+)
+from .attestation import (
+    ATTESTATION_SCHEMA,
+    AttestationError,
+    sign_attestation,
+    verify_attestation,
+    verify_authorization_bundle,
+)
 from .graph import analyze_exploration_graph, graph_with_dag_metadata
 from .hashing import build_provenance, content_hash, hash_manifest, hash_node_payload
 from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
@@ -67,6 +81,10 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "ATTESTATION_SCHEMA",
+    "CANONICAL_JSON_PROFILE",
+    "AttestationError",
+    "CanonicalJSONError",
     "PROTOCOL_VERSION",
     "RESEARCH_AUTHORITIES",
     "RESEARCH_OBJECT_KINDS",
@@ -83,6 +101,9 @@ __all__ = [
     "build_provenance",
     "build_research_object",
     "capture_llm_calls",
+    "canonical_content_hash",
+    "canonical_json",
+    "canonical_json_bytes",
     "content_hash",
     "graph_with_dag_metadata",
     "hash_manifest",
@@ -94,4 +115,7 @@ __all__ = [
     "validate_manifest",
     "validate_research_payload",
     "validate_research_object",
+    "sign_attestation",
+    "verify_attestation",
+    "verify_authorization_bundle",
 ]

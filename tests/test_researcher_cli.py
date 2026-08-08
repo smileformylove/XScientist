@@ -91,6 +91,8 @@ class ResearcherCliTests(unittest.TestCase):
                     "--metric",
                     "reproduced=true",
                     "--verified",
+                    "--verifier",
+                    "independent-evidence-verifier",
                     "--repo",
                     str(root),
                 ]
@@ -257,6 +259,8 @@ class ResearcherCliTests(unittest.TestCase):
                     "--metric",
                     "accuracy=0.91",
                     "--verified",
+                    "--verifier",
+                    "independent-evidence-verifier",
                     "--repo",
                     str(root),
                 ]

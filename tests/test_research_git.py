@@ -36,6 +36,24 @@ from xscientist.research_git import (
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for research history tests")
 class LocalResearchGitTests(unittest.TestCase):
+    def test_manifest_delta_reports_added_changed_and_unchanged_paths(self) -> None:
+        delta = research_git_module._manifest_delta(
+            [
+                {"path": "ara/a", "manifest_hash": "sha256:" + "a" * 64},
+                {"path": "ara/b", "manifest_hash": "sha256:" + "b" * 64},
+            ],
+            [
+                {"path": "ara/a", "manifest_hash": "sha256:" + "c" * 64},
+                {"path": "ara/b", "manifest_hash": "sha256:" + "b" * 64},
+                {"path": "ara/c", "manifest_hash": "sha256:" + "d" * 64},
+            ],
+        )
+
+        self.assertEqual(delta["added"], ["ara/c"])
+        self.assertEqual(delta["removed"], [])
+        self.assertEqual(delta["unchanged"], ["ara/b"])
+        self.assertEqual(delta["changed"][0]["path"], "ara/a")
+
     def _init(self, root: Path, **kwargs):
         return init_repository(
             root,

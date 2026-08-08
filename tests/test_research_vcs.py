@@ -25,6 +25,10 @@ from xscientist.research_git import add_research_object
 
 
 class ResearchObjectProtocolTests(unittest.TestCase):
+    def test_empty_semantic_payload_is_rejected_before_persistence(self) -> None:
+        with self.assertRaisesRegex(ResearchObjectError, "payload must not be empty"):
+            build_research_object(kind="hypothesis", payload={})
+
     def test_identity_is_deterministic_and_relations_are_canonical(self) -> None:
         first = build_research_object(
             kind="claim",
@@ -126,6 +130,26 @@ class ResearchRepositoryTests(unittest.TestCase):
             blame = repository.blame(hypothesis.object_id)
             self.assertEqual(blame["object"]["content_hash"], hypothesis.object_hash)
             self.assertEqual(blame["origin"]["checkpoint_id"], checkpoint.checkpoint_id)
+
+    def test_object_selectors_resolve_latest_kind_and_unique_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._init(Path(td) / "research")
+            first = repository.record("hypothesis", {"statement": "H1"})
+            second = repository.record("hypothesis", {"statement": "H2"})
+
+            self.assertEqual(repository.resolve("@latest:hypothesis"), second.object_id)
+            self.assertEqual(
+                repository.get(first.object_id[:10])["object_id"], first.object_id
+            )
+            plan = repository.record(
+                "research_plan",
+                {"summary": "Test latest hypothesis"},
+                relations=[{"type": "depends_on", "target": "@latest:hypothesis"}],
+            )
+            self.assertEqual(
+                repository.get(plan.object_id)["relations"][0]["target"],
+                second.object_id,
+            )
 
     def test_privacy_gate_rejects_secret_without_persisting_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -253,6 +277,35 @@ class ResearchRepositoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ResearchGitError, "clean working state"):
                 repository.switch("alternative")
+
+    def test_branch_rename_delete_restore_and_semantic_revert(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.fork("draft", switch=False)
+            renamed = repository.rename_branch("draft", "challenge")
+            self.assertEqual(renamed["name"], "challenge")
+            deleted = repository.delete_branch("challenge")
+            self.assertTrue(deleted["deleted"])
+
+            claim_path = root / "claims" / "result.md"
+            claim_path.write_text("version one\n", encoding="utf-8")
+            first = repository.commit(stage="claim", subject="record version one")
+            claim_path.write_text("version two\n", encoding="utf-8")
+            second = repository.commit(stage="claim", subject="record version two")
+
+            restored = repository.restore(first.commit or "HEAD~1", "claims/result.md")
+            self.assertEqual(restored["paths"], ["claims/result.md"])
+            self.assertEqual(claim_path.read_text(encoding="utf-8"), "version one\n")
+            restored_checkpoint = repository.commit(
+                stage="restore", subject="restore version one"
+            )
+
+            reverted = repository.revert(restored_checkpoint.commit or "HEAD")
+            self.assertEqual(reverted["reverted"], restored_checkpoint.commit)
+            self.assertTrue(reverted["checkpoint"]["committed"])
+            self.assertEqual(claim_path.read_text(encoding="utf-8"), "version two\n")
+            self.assertTrue(repository.fsck()["ok"])
 
     def test_clean_research_merge_retains_both_scientific_parents(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -486,6 +539,32 @@ class ResearchRepositoryTests(unittest.TestCase):
                 ["alternative", "main"],
             )
 
+    def test_cli_json_errors_are_structured_and_raw_verified_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = research_main(
+                    [
+                        "record",
+                        "claim",
+                        "--repo",
+                        str(root),
+                        "--state",
+                        "verified",
+                        "--data",
+                        '{"statement":"unsafe"}',
+                        "--json",
+                    ]
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(status, 2)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["category"], "research_vcs_error")
+            self.assertIn("cannot create verified", payload["error"]["message"])
+
     def test_evidence_gated_lifecycle_reaches_final_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "research"
@@ -535,6 +614,7 @@ class ResearchRepositoryTests(unittest.TestCase):
                 attempt_ids=[attempt["attempt"].object_id],
                 supports=[planning["hypothesis"].object_id],
                 verified=True,
+                verifier_id="evidence-verifier",
             )
             evaluation = lifecycle.evaluation(
                 {

@@ -28,6 +28,7 @@ from .research_git import (
     create_research_branch,
     create_research_bundle,
     create_research_tag,
+    delete_research_branch,
     init_repository,
     list_research_branches,
     list_research_objects,
@@ -36,10 +37,13 @@ from .research_git import (
     merge_research_branch,
     preview_research_merge,
     record_research_object,
+    rename_research_branch,
     research_blame,
     repository_status,
     reproduce_checkpoint,
     restore_research_bundle,
+    restore_research_paths,
+    revert_research_checkpoint,
     research_diff,
     research_log,
     research_stage,
@@ -267,7 +271,20 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
     experiment_parser.add_argument("--seed", action="append", type=int, default=[])
+    experiment_parser.add_argument("--environment-hash")
+    experiment_parser.add_argument(
+        "--dependency-lock-hash", action="append", default=[]
+    )
+    experiment_parser.add_argument(
+        "--dependency-lock-file", action="append", default=[]
+    )
+    experiment_parser.add_argument("--dataset-hash", action="append", default=[])
+    experiment_parser.add_argument("--code-commit")
     experiment_parser.add_argument("--failure-class", default="")
+    experiment_parser.add_argument(
+        "--reproduce-command",
+        help="Shell-free command stored for later `research reproduce --execute`.",
+    )
     experiment_parser.add_argument("--repo", default=".")
     experiment_parser.add_argument("-m", "--message")
     experiment_parser.add_argument("--no-commit", action="store_true")
@@ -285,6 +302,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
     evidence_parser.add_argument("--verified", action="store_true")
+    evidence_parser.add_argument(
+        "--verifier",
+        help="Independent verifier identity; required with --verified.",
+    )
     evidence_parser.add_argument("--repo", default=".")
     evidence_parser.add_argument("-m", "--message")
     evidence_parser.add_argument("--no-commit", action="store_true")
@@ -505,6 +526,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     branch_parser.add_argument("--repo", default=".")
     branch_parser.add_argument("--from", default="HEAD", dest="from_ref")
     branch_parser.add_argument("--switch", action="store_true")
+    branch_action = branch_parser.add_mutually_exclusive_group()
+    branch_action.add_argument("-d", "--delete", action="store_true")
+    branch_action.add_argument("-D", "--force-delete", action="store_true")
+    branch_action.add_argument("-m", "--move", metavar="NEW_NAME")
     branch_parser.add_argument("--json", action="store_true", dest="as_json")
 
     switch_parser = subparsers.add_parser(
@@ -513,6 +538,22 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     switch_parser.add_argument("name")
     switch_parser.add_argument("--repo", default=".")
     switch_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore explicit research paths from a checkpoint."
+    )
+    restore_parser.add_argument("source")
+    restore_parser.add_argument("paths", nargs="+")
+    restore_parser.add_argument("--repo", default=".")
+    restore_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    revert_parser = subparsers.add_parser(
+        "revert", help="Revert a checkpoint and record the reversal scientifically."
+    )
+    revert_parser.add_argument("commit")
+    revert_parser.add_argument("--repo", default=".")
+    revert_parser.add_argument("-m", "--message")
+    revert_parser.add_argument("--json", action="store_true", dest="as_json")
 
     tag_parser = subparsers.add_parser(
         "tag", help="List or immutably name scientific checkpoints."
@@ -604,6 +645,28 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     bundle_parser.add_argument("--allow-incomplete", action="store_true")
     bundle_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export one committed research state to standard ecosystem formats.",
+    )
+    export_parser.add_argument("--repo", default=".")
+    export_parser.add_argument("--ref", default="HEAD")
+    export_parser.add_argument("--dest", required=True)
+    export_parser.add_argument(
+        "--format",
+        action="append",
+        choices=["ro-crate", "prov-json", "cwl", "dvc", "mlflow"],
+        default=[],
+        dest="formats",
+        help="Repeat to select formats; the default exports all adapters.",
+    )
+    export_parser.add_argument(
+        "--include-payloads",
+        action="store_true",
+        help="Include scientific payloads in RO-Crate; metadata-only is safer by default.",
+    )
+    export_parser.add_argument("--json", action="store_true", dest="as_json")
+
     reproduce_parser = subparsers.add_parser(
         "reproduce", help="Inspect or materialize a commit's reproduction closure."
     )
@@ -644,6 +707,10 @@ def _human_status(payload: dict[str, Any]) -> None:
     print(f"Research staged:   {len(payload['research_stage']['paths'])}")
     print(f"Eligible changes:  {len(payload['eligible_changes'])}")
     print(f"Excluded changes:  {len(payload['excluded_changes'])}")
+    for path in payload["eligible_changes"]:
+        print(f"  eligible:        {path}")
+    for path in payload["excluded_changes"]:
+        print(f"  excluded:        {_display_text(path)}")
     store = payload["object_store"]
     print(f"Local CAS:         {store['objects']} objects / {store['bytes']} bytes")
     previous = payload.get("last_checkpoint") or {}
@@ -652,6 +719,25 @@ def _human_status(payload: dict[str, Any]) -> None:
             f"Last checkpoint:   {previous.get('checkpoint_id')} "
             f"({previous.get('stage')} / {previous.get('status')})"
         )
+
+
+def _object_summary(payload: dict[str, Any]) -> str:
+    data = payload.get("payload") or {}
+    for key in (
+        "statement",
+        "summary",
+        "result",
+        "title",
+        "text",
+        "decision",
+        "status",
+        "name",
+    ):
+        value = data.get(key)
+        if value not in (None, "", [], {}):
+            compact = " ".join(str(value).split())
+            return compact[:77] + ("..." if len(compact) > 77 else "")
+    return "(no summary)"
 
 
 def main(
@@ -707,7 +793,15 @@ def main(
                 preregistration_id=args.preregistration,
                 metrics=_parse_assignments(args.metric, label="metric"),
                 seeds=args.seed,
+                environment_hash=args.environment_hash,
+                dependency_lock_hashes=[
+                    *args.dependency_lock_hash,
+                    *(_hash_local_file(path) for path in args.dependency_lock_file),
+                ],
+                dataset_hashes=args.dataset_hash,
+                code_commit=args.code_commit,
                 failure_class=args.failure_class,
+                reproduce_command=args.reproduce_command,
                 message=args.message,
                 commit=not args.no_commit,
             )
@@ -745,6 +839,7 @@ def main(
                 refutes=args.refutes,
                 metrics=_parse_assignments(args.metric, label="metric"),
                 verified=args.verified,
+                verifier_id=args.verifier,
                 message=args.message,
                 commit=not args.no_commit,
             )
@@ -962,6 +1057,11 @@ def main(
             return 0
 
         if args.command == "record":
+            if args.state in {"verified", "promoted"}:
+                raise ResearchGitError(
+                    "raw record cannot create verified or promoted objects; "
+                    "use the evidence/review/claim/reproduce lifecycle commands"
+                )
             result = record_research_object(
                 args.repo,
                 kind=args.kind,
@@ -993,7 +1093,7 @@ def main(
                 for item in payload:
                     print(
                         f"{item['object_id']} {item['kind']} "
-                        f"[{item['state']}] {item['content_hash']}"
+                        f"[{item['state']}] {_display_text(_object_summary(item))}"
                     )
             return 0
 
@@ -1048,18 +1148,33 @@ def main(
             return 0
 
         if args.command == "branch":
-            payload = (
-                create_research_branch(
+            if (args.delete or args.force_delete or args.move) and not args.name:
+                raise ResearchGitError("branch maintenance requires a branch name")
+            if args.delete or args.force_delete:
+                payload = delete_research_branch(
+                    args.repo,
+                    args.name,
+                    force=args.force_delete,
+                )
+            elif args.move:
+                payload = rename_research_branch(args.repo, args.name, args.move)
+            elif args.name:
+                payload = create_research_branch(
                     args.repo,
                     args.name,
                     from_ref=args.from_ref,
                     switch=args.switch,
                 )
-                if args.name
-                else list_research_branches(args.repo)
-            )
+            else:
+                payload = list_research_branches(args.repo)
             if args.as_json:
                 _print_json(payload)
+            elif args.delete or args.force_delete:
+                print(f"Research branch deleted: {payload['name']}")
+            elif args.move:
+                print(
+                    f"Research branch renamed: {payload['old_name']} -> {payload['name']}"
+                )
             elif args.name:
                 marker = " and switched" if args.switch else ""
                 print(f"Research branch created{marker}: {payload['name']}")
@@ -1079,6 +1194,34 @@ def main(
             else:
                 print(f"Research branch: {payload['name']}")
                 print(f"Commit:          {payload['commit']}")
+            return 0
+
+        if args.command == "restore":
+            payload = restore_research_paths(args.repo, args.source, args.paths)
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Restored from: {payload['source']}")
+                for path in payload["paths"]:
+                    print(f"  {path}")
+                print("Review the working changes, then checkpoint them explicitly.")
+            return 0
+
+        if args.command == "revert":
+            payload = revert_research_checkpoint(
+                args.repo,
+                args.commit,
+                subject=args.message,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Reverted commit:    {payload['reverted']}")
+                print(f"Backend revert:     {payload['revert_commit']}")
+                print(
+                    "Research checkpoint: "
+                    f"{payload['checkpoint'].get('checkpoint_id') or '(not committed)'}"
+                )
             return 0
 
         if args.command == "tag":
@@ -1246,6 +1389,27 @@ def main(
                 print("Run `xscientist research checkpoint` to commit the pointer.")
             return 0
 
+        if args.command == "export":
+            from .research_interop import INTEROP_FORMATS, export_research_interop
+
+            payload = export_research_interop(
+                args.repo,
+                args.dest,
+                ref=args.ref,
+                formats=args.formats or INTEROP_FORMATS,
+                include_payloads=args.include_payloads,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                print(f"Research export: {_display_path(payload['destination'])}")
+                print(f"Commit:          {payload['repository_commit']}")
+                print(f"Checkpoint:      {payload['checkpoint_id']}")
+                print(f"Objects:         {payload['object_count']}")
+                print(f"Formats:         {', '.join(payload['formats'])}")
+                print(f"Export hash:     {payload['export_hash']}")
+            return 0
+
         if args.command == "bundle":
             if args.action == "create":
                 if not args.dest:
@@ -1362,10 +1526,21 @@ def main(
                     )
             return int(payload.get("returncode") or 0) if args.execute else 0
     except ResearchGitError as exc:
-        print(
-            f"research vcs error: {redact_sensitive_text(str(exc))}",
-            file=sys.stderr,
-        )
+        message = redact_sensitive_text(str(exc))
+        if getattr(args, "as_json", False):
+            _print_json(
+                {
+                    "schema_version": "xscientist.error.v1",
+                    "ok": False,
+                    "error": {
+                        "category": "research_vcs_error",
+                        "command": args.command,
+                        "message": message,
+                    },
+                }
+            )
+        else:
+            print(f"research vcs error: {message}", file=sys.stderr)
         return 2
     parser.error(f"unsupported command: {args.command}")
     return 2

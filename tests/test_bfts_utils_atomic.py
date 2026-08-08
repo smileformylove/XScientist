@@ -11,6 +11,26 @@ from ai_scientist.treesearch import bfts_utils
 
 
 class BftsUtilsAtomicTests(unittest.TestCase):
+    def test_idea_markdown_embeds_binding_research_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "idea.md"
+            bfts_utils.idea_to_markdown(
+                {"title": "H1"},
+                str(output),
+                None,
+                research_plan={
+                    "plan_id": "plan-1",
+                    "tasks": [{"task_id": "t1", "metric": "accuracy"}],
+                    "required_discriminating_tests": ["negative control"],
+                    "acceptance_rules": ["predeclared metric improves"],
+                },
+            )
+
+            rendered = output.read_text(encoding="utf-8")
+            self.assertIn("Binding Research Contract", rendered)
+            self.assertIn("negative control", rendered)
+            self.assertIn("not optional context", rendered)
+
     def test_markdown_output_format_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

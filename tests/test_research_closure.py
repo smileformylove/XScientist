@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from jsonschema import validate
 
+from ai_scientist.protocol import content_hash
 from ai_scientist.protocol.schemas import load_schema
 from xscientist import ResearchRepository
 from xscientist.research_cli import main as research_main
@@ -99,14 +101,32 @@ class ResearchClosureTests(unittest.TestCase):
     def test_verified_closure_requires_gate_and_reproduction_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repository = self._repository(Path(td) / "research")
-            claim_id, _evidence_id, attempt_id = self._record_lineage(
+            claim_id, evidence_id, attempt_id = self._record_lineage(
                 repository, replay_ready=True
+            )
+            review = repository.record(
+                "review",
+                {
+                    "summary": "Independent verification passed",
+                    "status": "verified",
+                    "report_hash": "sha256:" + "9" * 64,
+                },
+                state="verified",
+                relations=[{"type": "evaluates", "target": evidence_id}],
+                actor={
+                    "actor_id": "independent-reviewer",
+                    "authority": "independent_evaluator",
+                },
             )
             gate = repository.record(
                 "gate_decision",
                 {"decision": "promote", "claim_promotion_allowed": True},
                 state="verified",
-                relations=[{"type": "evaluates", "target": claim_id}],
+                relations=[{"type": "evaluates", "target": review.object_id}],
+                actor={
+                    "actor_id": "integrity-gate",
+                    "authority": "deterministic_gate",
+                },
             )
             # A verified claim is a new immutable object bound to the same evidence.
             draft = repository.get(claim_id)
@@ -119,18 +139,52 @@ class ResearchClosureTests(unittest.TestCase):
                     {"type": "depends_on", "target": gate.object_id, "role": "gate"},
                 ],
             )
+            receipt_base = {
+                "schema_version": "xscientist.reproduction-receipt.v1",
+                "created_at": "2026-08-08T00:00:00+00:00",
+                "commit": "a" * 40,
+                "checkpoint_id": "rcp-test",
+                "checkpoint_hash": "sha256:" + "b" * 64,
+                "reproduction_level": "computational_rerun",
+                "verdict": "passed",
+                "objects_complete": True,
+                "environment": {
+                    "policy": "strict",
+                    "recorded": True,
+                    "matches": True,
+                    "recorded_content_hash": "sha256:" + "c" * 64,
+                    "mismatch_fields": [],
+                },
+                "command_hash": "sha256:" + "d" * 64,
+                "executed": True,
+                "returncode": 0,
+                "timed_out": False,
+                "stdout_hash": "sha256:" + "e" * 64,
+                "stderr_hash": "sha256:" + "f" * 64,
+            }
+            receipt_hash = content_hash(receipt_base)
+            receipt = {
+                **receipt_base,
+                "receipt_id": f"rr-{receipt_hash.split(':', 1)[1][:16]}",
+                "content_hash": receipt_hash,
+            }
             repository.record(
                 "reproduction",
                 {
                     "reproduction_level": "computational_rerun",
                     "verdict": "passed",
-                    "receipt_hash": "sha256:" + "5" * 64,
+                    "receipt_hash": receipt_hash,
+                    "receipt": receipt,
                 },
                 state="verified",
                 relations=[
                     {"type": "reproduces", "target": attempt_id},
                     {"type": "reproduces", "target": verified_claim.object_id},
                 ],
+                actor={
+                    "actor_id": "independent-reproducer",
+                    "authority": "independent_evaluator",
+                },
             )
             repository.commit(stage="review", subject="verify reproduced claim")
 
@@ -142,9 +196,8 @@ class ResearchClosureTests(unittest.TestCase):
             )
 
             self.assertTrue(verified_row["complete"], audit["blockers"])
-            # The historical draft remains visible and correctly prevents the
-            # whole ref from being called fully verified.
-            self.assertFalse(audit["complete"])
+            self.assertTrue(audit["complete"], audit["blockers"])
+            self.assertEqual(audit["superseded_claim_ids"], [claim_id])
 
     def test_cli_audit_returns_success_for_trace_complete_ref(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -160,6 +213,137 @@ class ResearchClosureTests(unittest.TestCase):
 
             self.assertEqual(status, 0)
             self.assertIn("Scientific closure: complete", output.getvalue())
+
+    def test_complete_high_level_cli_journey_reaches_verified_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+
+            def run_json(*args: str, expected: int = 0) -> dict:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    status = research_main([*args, "--json"])
+                self.assertEqual(status, expected, output.getvalue())
+                return json.loads(output.getvalue())
+
+            run_json(
+                "init",
+                str(root),
+                "--question",
+                "Does H1 improve accuracy?",
+                "--git-user-name",
+                "Research Test",
+                "--git-user-email",
+                "research@example.invalid",
+            )
+            (root / "requirements.txt").write_text(
+                "jsonschema==4.23.0\n", encoding="utf-8"
+            )
+            verifier_script = root / ".xscientist" / "verify.py"
+            verifier_script.write_text("print('verified')\n", encoding="utf-8")
+            hypothesis = run_json(
+                "hypothesis",
+                "H1 improves accuracy",
+                "--falsifier",
+                "Accuracy does not improve",
+                "--repo",
+                str(root),
+            )["object"]
+            run_json(
+                "preregister",
+                "@latest:hypothesis",
+                "--dataset",
+                "benchmark-v1",
+                "--metric",
+                "accuracy",
+                "--baseline",
+                "baseline-a",
+                "--split-hash",
+                "sha256:" + "a" * 64,
+                "--registered-by",
+                "principal-investigator",
+                "--repo",
+                str(root),
+            )
+            experiment_result = run_json(
+                "experiment",
+                "confirmatory run",
+                "--status",
+                "success",
+                "--study-phase",
+                "confirmatory",
+                "--plan",
+                "@latest:research_plan",
+                "--preregistration",
+                "@latest:preregistration",
+                "--seed",
+                "42",
+                "--reproduce-command",
+                "python .xscientist/verify.py",
+                "--repo",
+                str(root),
+            )
+            attempt = experiment_result["object"]
+            experiment_commit = experiment_result["checkpoint"]["commit"]
+            evidence = run_json(
+                "evidence",
+                "accuracy improved",
+                "--attempt",
+                "@latest:experiment_attempt",
+                "--supports",
+                hypothesis["object_id"],
+                "--metric",
+                "accuracy=0.91",
+                "--repo",
+                str(root),
+            )["object"]
+            run_json(
+                "review",
+                "independent review passed",
+                "--evaluates",
+                "@latest:evidence",
+                "--verifier",
+                "external-reviewer",
+                "--decision",
+                "pass",
+                "--repo",
+                str(root),
+            )
+            claim = run_json(
+                "claim",
+                "H1 improves accuracy",
+                "--evidence",
+                "@latest:evidence",
+                "--gate",
+                "@latest:gate_decision",
+                "--verified",
+                "--repo",
+                str(root),
+            )["object"]
+
+            replay = run_json("audit", "--repo", str(root), "--level", "replay")
+            self.assertTrue(replay["complete"], replay["blockers"])
+            run_json(
+                "reproduce",
+                experiment_commit,
+                "--repo",
+                str(root),
+                "--dest",
+                str(base / "reproduction"),
+                "--execute",
+                "--record",
+                "--reproduces",
+                attempt["object_id"],
+                "--reproduces",
+                claim["object_id"],
+                "--verifier",
+                "independent-reproducer",
+                "--verified",
+            )
+            verified = run_json("audit", "--repo", str(root), "--level", "verify")
+            self.assertTrue(verified["complete"], verified["blockers"])
+            self.assertEqual(verified["claims"][0]["claim_id"], claim["object_id"])
+            self.assertEqual(evidence["kind"], "evidence")
 
 
 if __name__ == "__main__":

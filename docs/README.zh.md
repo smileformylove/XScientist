@@ -122,7 +122,8 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
-- **原生 Research VCS**：无需 GitHub 或服务器即可版本化假设、预注册、实验、证据、结论、评审和智能体进化；支持语义暂存、研究分支、差异、合并、溯源、离线备份与复现。Git 只是当前可替换的存储适配器。
+- **原生 Research VCS**：无需 GitHub 或服务器即可版本化假设、预注册、实验、证据、结论、评审和智能体进化；支持语义暂存、研究分支、差异、合并、溯源、离线备份、复现，以及 RO-Crate/PROV/CWL/DVC/MLflow 标准导出。Git 只是当前可替换的存储适配器。
+- **可执行自进化**：`xscientist evolution` 可以构建不可变候选文件树、成对执行无 shell 的基准任务、运行受控 canary、验证多方签名、原子部署到明确目录并恢复精确基线。生产修改默认关闭，并与 Research VCS 的语义晋级分离。
 - **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `xscientist ara` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
 ## 公共接口
@@ -539,19 +540,33 @@ xscientist research hypothesis \
   "检索反思能够提高事实准确率" \
   --falsifier "准确率不高于固定基线"
 
-xscientist research preregister <假设对象ID> \
+xscientist research preregister @latest:hypothesis \
   --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
   --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
 
 xscientist research experiment \
-  "种子 7 超过固定时间预算" \
-  --status timeout --failure-class budget_exhausted \
-  --metric elapsed_seconds=600 --seed 7
+  "种子 7 完成确证实验" \
+  --status success --study-phase confirmatory \
+  --plan @latest:research_plan \
+  --preregistration @latest:preregistration \
+  --metric accuracy=0.84 --seed 7 \
+  --dependency-lock-file ./requirements.txt \
+  --reproduce-command "python .xscientist/verify.py"
+
+xscientist research evidence \
+  "准确率超过预注册基线" \
+  --attempt @latest:experiment_attempt \
+  --supports @latest:hypothesis --metric accuracy=0.84
 
 xscientist research review \
   "独立复验和数据泄漏检查均通过" \
-  --evaluates <证据对象ID> --verifier independent-reviewer \
+  --evaluates @latest:evidence --verifier independent-reviewer \
   --decision pass
+
+xscientist research claim \
+  "方法提高了准确率" \
+  --evidence @latest:evidence \
+  --gate @latest:gate_decision --verified
 
 # 在改变历史前先获得可解释、只读的 checkpoint / fork / merge 建议
 xscientist research decide contradiction \
@@ -563,7 +578,10 @@ xscientist research tree
 正式历史。`preregister` 会在实验前生成计划并锁定预注册，`review` 会生成独立评审
 和确定性门禁。确证性实验必须绑定该预注册，晋级为 verified 的结论必须绑定通过的
 门禁。`--split-file` 只保存 SHA-256 摘要，不保存源文件路径或正文；自动化流程也可
-直接使用 `--split-hash`。需要组合多个对象时才使用 `--no-commit` 和下面的底层暂存命令。
+直接使用 `--split-hash`。`@latest:<类型>` 可免去反复复制完整对象 ID；实验会自动
+记录代码提交、环境、依赖锁与 seed，证据会自动生成 measurement hash。把 evidence
+直接标成 verified 时还必须提供独立的 `--verifier`。需要组合多个对象时才使用
+`--no-commit` 和下面的底层暂存命令。
 
 ```bash
 xscientist research init ./my-research \
@@ -582,6 +600,11 @@ xscientist research diff HEAD~1 HEAD
 xscientist research blame <科研对象 ID>
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research branch challenge/h1 --switch
+xscientist research branch challenge/h1 -m challenge/accuracy
+xscientist research branch challenge/accuracy -d
+xscientist research restore HEAD~1 claims/result.md
+xscientist research revert <checkpoint提交>
 ```
 
 大型数据、模型和二进制证据保存在本地 CAS，Git 只记录不可变指针：

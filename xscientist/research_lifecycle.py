@@ -168,16 +168,27 @@ class ResearchLifecycle:
         supports: Sequence[str] = (),
         refutes: Sequence[str] = (),
         verified: bool = False,
+        verifier_id: str | None = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         if not attempt_ids:
             raise ResearchGitError("evidence requires at least one experiment attempt")
+        if verified and not str(verifier_id or "").strip():
+            raise ResearchGitError("verified evidence requires verifier_id")
         relations: list[dict[str, str]] = []
+        producer_ids: set[str] = set()
         for object_id in attempt_ids:
             attempt = self.repository.get(object_id)
             if attempt["kind"] != "experiment_attempt":
                 raise ResearchGitError("evidence attempt reference has wrong kind")
+            actor_id = str((attempt.get("actor") or {}).get("actor_id") or "")
+            if actor_id:
+                producer_ids.add(actor_id)
             relations.append({"type": "derived_from", "target": object_id})
+        if verified and str(verifier_id) in producer_ids:
+            raise ResearchGitError(
+                "verified evidence requires a verifier independent of the experiment producer"
+            )
         for object_id in supports:
             self.repository.get(object_id)
             relations.append({"type": "supports", "target": object_id})
@@ -189,6 +200,14 @@ class ResearchLifecycle:
             payload,
             state="verified" if verified else "completed",
             relations=relations,
+            actor=(
+                {
+                    "actor_id": str(verifier_id),
+                    "authority": "independent_evaluator",
+                }
+                if verified
+                else None
+            ),
         )
         checkpoint = (
             self.repository.commit(
@@ -218,9 +237,17 @@ class ResearchLifecycle:
             and not report_payload.get("required_failures")
         )
         relations = []
+        producer_ids: set[str] = set()
         for object_id in evaluates:
-            self.repository.get(object_id)
+            evaluated = self.repository.get(object_id)
+            actor_id = str((evaluated.get("actor") or {}).get("actor_id") or "")
+            if actor_id:
+                producer_ids.add(actor_id)
             relations.append({"type": "evaluates", "target": object_id})
+        if verifier_id in producer_ids:
+            raise ResearchGitError(
+                "independent verifier must differ from the evaluated object's producer"
+            )
         review = self.repository.record(
             "review",
             report_payload,
@@ -271,11 +298,14 @@ class ResearchLifecycle:
         if not evidence_ids:
             raise ResearchGitError("claim requires evidence")
         relations: list[dict[str, str]] = []
+        resolved_evidence_ids: list[str] = []
         for object_id in evidence_ids:
             evidence = self.repository.get(object_id)
             if evidence["kind"] != "evidence":
                 raise ResearchGitError("claim evidence reference has wrong kind")
-            relations.append({"type": "depends_on", "target": object_id})
+            resolved_id = str(evidence["object_id"])
+            resolved_evidence_ids.append(resolved_id)
+            relations.append({"type": "depends_on", "target": resolved_id})
         if verified:
             if not gate_id:
                 raise ResearchGitError("verified claim requires a gate decision")
@@ -283,6 +313,26 @@ class ResearchLifecycle:
             if gate["kind"] != "gate_decision" or gate["state"] != "verified":
                 raise ResearchGitError(
                     "verified claim requires a passing gate decision"
+                )
+            evaluated = {
+                str(item.get("target") or "")
+                for item in gate.get("relations") or []
+                if item.get("type") == "evaluates"
+            }
+            for target in list(evaluated):
+                try:
+                    linked = self.repository.get(target)
+                except ResearchGitError:
+                    continue
+                if linked.get("kind") == "review":
+                    evaluated.update(
+                        str(item.get("target") or "")
+                        for item in linked.get("relations") or []
+                        if item.get("type") == "evaluates"
+                    )
+            if not evaluated.intersection(resolved_evidence_ids):
+                raise ResearchGitError(
+                    "verified claim gate does not evaluate the selected evidence"
                 )
             relations.append({"type": "depends_on", "target": gate_id, "role": "gate"})
         result = self.repository.record(
@@ -377,14 +427,44 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 f"invalid reproduction receipt: {exc.message}"
             ) from exc
+        from ai_scientist.protocol import content_hash
+
+        receipt_base = {
+            key: value
+            for key, value in receipt_payload.items()
+            if key not in {"receipt_id", "content_hash"}
+        }
+        expected_hash = content_hash(receipt_base)
+        expected_id = f"rr-{expected_hash.split(':', 1)[1][:16]}"
+        if receipt_payload.get("content_hash") != expected_hash:
+            raise ResearchGitError("reproduction receipt content hash mismatch")
+        if receipt_payload.get("receipt_id") != expected_id:
+            raise ResearchGitError("reproduction receipt identifier mismatch")
         if verified and not str(verifier_id or "").strip():
             raise ResearchGitError("verified reproduction requires verifier_id")
-        if verified and receipt_payload.get("verdict") != "passed":
-            raise ResearchGitError("verified reproduction requires a passing receipt")
+        if verified and (
+            receipt_payload.get("verdict") != "passed"
+            or receipt_payload.get("reproduction_level") != "computational_rerun"
+            or receipt_payload.get("executed") is not True
+            or receipt_payload.get("returncode") != 0
+            or receipt_payload.get("timed_out") is True
+            or receipt_payload.get("objects_complete") is not True
+        ):
+            raise ResearchGitError(
+                "verified reproduction requires a successful computational rerun"
+            )
         relations: list[dict[str, str]] = []
+        producer_ids: set[str] = set()
         for object_id in reproduces:
-            self.repository.get(object_id)
+            reproduced = self.repository.get(object_id)
+            actor_id = str((reproduced.get("actor") or {}).get("actor_id") or "")
+            if actor_id:
+                producer_ids.add(actor_id)
             relations.append({"type": "reproduces", "target": object_id})
+        if verified and str(verifier_id) in producer_ids:
+            raise ResearchGitError(
+                "verified reproduction requires a verifier independent of its targets"
+            )
         payload = {
             key: receipt_payload[key]
             for key in (

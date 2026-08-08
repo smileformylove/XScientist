@@ -91,6 +91,16 @@ xscientist research diff HEAD~1 HEAD --deep
 xscientist research fsck
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research audit --level verify
+
+# Resolve IDs without copying them by hand.
+xscientist research objects @latest:hypothesis
+
+# Safe maintenance and recovery operations.
+xscientist research branch challenge/h1 -m challenge/accuracy
+xscientist research branch challenge/accuracy -d
+xscientist research restore HEAD~1 claims/result.md
+xscientist research revert <checkpoint-commit>
 
 # Read the reproduction closure without executing anything.
 xscientist research reproduce HEAD --json
@@ -125,7 +135,22 @@ payloads:
 |---|---|
 | `trace` | claim → evidence → attempt → plan; locked preregistration for confirmatory work |
 | `replay` | trace plus immutable code, data, environment, dependency-lock/container-recipe, and measurement/ARA identities |
-| `verify` | replay plus a passing gate, verified claim, and verified reproduction receipt |
+| `verify` | replay plus an independently reviewed deterministic gate, verified claim, and hash-recomputed successful reproduction receipt |
+
+`verify` means that the selected ref satisfies XScientist's local protocol
+closure. It does not replace signatures, external custody, peer review, or a
+third-party scientific attestation.
+
+For ecosystem exchange, export one committed ref without exposing payloads by
+default:
+
+```bash
+xscientist research export --repo . --ref HEAD --dest ../research-export
+```
+
+The export contains a hash-bound manifest plus RO-Crate, W3C PROV-JSON, CWL,
+DVC, and MLflow adapter files. Repeat `--format` to select a subset. Scientific
+payloads enter RO-Crate only with the explicit `--include-payloads` flag.
 
 The audit is a derived index over IDs and hashes. Raw logs, datasets, and full
 ARA contents remain stored and drill-downable, but are not loaded merely to

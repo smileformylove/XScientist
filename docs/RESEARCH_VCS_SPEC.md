@@ -104,7 +104,10 @@ objects. Research VCS identifiers and semantics remain authoritative.
 
 ## 6. Refs and branch roles
 
-The default stable ref is `stable`. Implementations support the following
+The reference implementation initializes `main` as the default local ref.
+Deployments MAY designate an immutable tag or a policy-controlled ref as
+`stable`; a branch name alone never grants scientific authority. Implementations
+support the following
 logical branch roles:
 
 | Role | Meaning |
@@ -121,20 +124,29 @@ can advance stable knowledge. A merge retains every scientific parent.
 
 ## 7. Operations
 
-Research VCS exposes backend-independent operations equivalent to:
+The reference implementation exposes backend-independent operations equivalent to:
 
 - `init`, `status`, `stage`, `commit` and `show`;
-- `branch`, `fork`, `switch` and `branches`;
-- `log`, `tree`, `diff`, `blame` and `bisect`;
-- `merge`, `conflicts`, `promote`, `revert` and `tag`;
-- `fsck`, `reproduce`, `pack`, `clone` and safe `gc`.
+- `branch` (create/list/delete/rename), `fork`, `switch` and `branches`;
+- `log`, `tree`, `diff`, `blame`, `restore` and `revert`;
+- `merge`, semantic conflict preflight and `tag`;
+- `fsck`, `audit`, `reproduce`, standards `export`, offline `bundle` and bundle restore.
+
+`bisect`, cross-repository `clone`, policy-level promotion, and safe semantic
+garbage collection remain protocol operations for a later conformance level;
+they MUST NOT be advertised as implemented commands until shipped.
 
 The reference implementation also exposes a payload-free `audit` view with
-three explicit sufficiency targets. `trace` requires the claim/evidence/attempt
+three explicit sufficiency targets over the effective claim frontier. Explicit
+`supersedes` relations, the `superseded` state, and immutable draft-to-verified
+promotion determine which historical claims remain active. `trace` requires the claim/evidence/attempt
 and planning chain; `replay` adds immutable code, data, environment, and
 measurement identities; `verify` adds a passing gate and a verified
 reproduction receipt. Storage integrity (`fsck`) and scientific sufficiency
-(`audit`) are separate verdicts.
+(`audit`) are separate verdicts. `verify` proves local, hash-bound protocol
+closure; it is not by itself a third-party attestation or claim of scientific
+truth. Signed attestations are a separate trust layer and do not change the
+meaning of the closure verdict.
 
 Each operation MUST have a structured result, stable error category, explicit
 mutation summary, and deterministic exit status. Retrying an operation with

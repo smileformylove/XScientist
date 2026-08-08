@@ -54,7 +54,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from jsonschema import ValidationError
+
 from ..protocol.hashing import hash_manifest
+from ..protocol.schemas import schema_validator
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,8 @@ _LOCK_HASHER_ID = "hash_manifest.v1"
 
 
 def write_manifest_lock(
-    ara_dir: str | os.PathLike[str], manifest: dict[str, Any],
+    ara_dir: str | os.PathLike[str],
+    manifest: dict[str, Any],
 ) -> Path:
     """Write ``<ara>/manifest.lock`` and return its path.
 
@@ -99,7 +103,8 @@ def write_manifest_lock(
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug(
                 "write_manifest_lock: replacing malformed lock at %s: %s",
-                lock_path, exc,
+                lock_path,
+                exc,
             )
     payload = {
         "schema_version": _LOCK_SCHEMA_VERSION,
@@ -152,8 +157,9 @@ def append_manifest_revision(
     try:
         current = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("append_manifest_revision: unreadable manifest %s: %s",
-                       manifest_path, exc)
+        logger.warning(
+            "append_manifest_revision: unreadable manifest %s: %s", manifest_path, exc
+        )
         return None
     if not isinstance(current, dict):
         return None
@@ -230,23 +236,115 @@ def verify_manifest_lock(ara_dir: str | os.PathLike[str]) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         return _report(False, "unlocked", None, None, 0, f"unreadable: {exc}")
 
+    if not isinstance(manifest, dict) or not isinstance(lock, dict):
+        return _report(
+            False, "tampered", None, None, 0, "manifest or lock is not a JSON object"
+        )
+    try:
+        schema_validator("manifest_lock").validate(lock)
+    except ValidationError as exc:
+        return _report(
+            False,
+            "tampered",
+            None,
+            hash_manifest(manifest),
+            0,
+            f"manifest.lock is invalid: {exc.message}",
+        )
+    if lock.get("hasher") not in (None, _LOCK_HASHER_ID):
+        return _report(
+            False,
+            "tampered",
+            str(lock.get("manifest_hash")),
+            hash_manifest(manifest),
+            0,
+            f"unsupported manifest hasher: {lock.get('hasher')}",
+        )
+
     current_hash = hash_manifest(manifest)
-    base_hash = lock.get("manifest_hash")
+    base_hash = str(lock["manifest_hash"])
+    history, history_issues = _read_history_strict(ara_path)
+    if history_issues:
+        return _report(
+            False,
+            "tampered",
+            base_hash,
+            current_hash,
+            len(history),
+            "invalid manifest history: " + "; ".join(history_issues),
+        )
 
-    history = _read_history(ara_path)
-    if current_hash == base_hash:
-        return _report(True, "clean", base_hash, current_hash, len(history),
-                       "manifest matches revision 0")
+    expected_base = base_hash
+    chain_issues: list[str] = []
+    for expected_revision, row in enumerate(history, start=1):
+        if row.get("revision") != expected_revision:
+            chain_issues.append(
+                f"revision {expected_revision} is numbered {row.get('revision')}"
+            )
+        if row.get("base_hash") != expected_base:
+            chain_issues.append(
+                f"revision {expected_revision} does not extend the previous hash"
+            )
+        archive = _history_snapshot_path(ara_path, str(row.get("base_hash") or ""))
+        if archive is None or not archive.is_file():
+            chain_issues.append(
+                f"revision {expected_revision} is missing its base snapshot"
+            )
+        else:
+            try:
+                archived = json.loads(archive.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                chain_issues.append(
+                    f"revision {expected_revision} base snapshot is unreadable"
+                )
+            else:
+                if not isinstance(archived, dict) or hash_manifest(archived) != row.get(
+                    "base_hash"
+                ):
+                    chain_issues.append(
+                        f"revision {expected_revision} base snapshot hash mismatch"
+                    )
+        expected_base = str(row.get("new_hash") or "")
 
-    # Match against the newest revision — the trail moves forward.
-    if history:
-        newest = history[-1]
-        if current_hash == newest.get("new_hash"):
-            return _report(True, "revised", base_hash, current_hash, len(history),
-                           f"manifest matches revision {newest.get('revision')}")
-
-    return _report(False, "tampered", base_hash, current_hash, len(history),
-                   "manifest hash matches neither the lock nor any known revision")
+    if chain_issues:
+        return _report(
+            False,
+            "tampered",
+            base_hash,
+            current_hash,
+            len(history),
+            "broken manifest history chain: " + "; ".join(chain_issues),
+        )
+    if not history:
+        if current_hash == base_hash:
+            return _report(
+                True, "clean", base_hash, current_hash, 0, "manifest matches revision 0"
+            )
+        return _report(
+            False,
+            "tampered",
+            base_hash,
+            current_hash,
+            0,
+            "manifest differs from revision 0 without a history row",
+        )
+    if current_hash == expected_base:
+        return _report(
+            True,
+            "revised",
+            base_hash,
+            current_hash,
+            len(history),
+            f"manifest matches revision {len(history)}",
+        )
+    return _report(
+        False,
+        "tampered",
+        base_hash,
+        current_hash,
+        len(history),
+        "current manifest does not match the end of the history chain",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +359,9 @@ def _now_iso() -> str:
 def _atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-                   encoding="utf-8")
+    tmp.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+    )
     os.replace(tmp, path)
 
 
@@ -291,8 +390,7 @@ def _append_history_row(
     # max(revision)+1 rather than len+1 so a corrupt (skipped) row on
     # disk can't cause a revision number collision with a survivor.
     highest = max(
-        (r["revision"] for r in existing
-         if isinstance(r.get("revision"), int)),
+        (r["revision"] for r in existing if isinstance(r.get("revision"), int)),
         default=0,
     )
     row = {
@@ -334,6 +432,47 @@ def _read_history(ara_dir: Path) -> list[dict[str, Any]]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _read_history_strict(ara_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read history without hiding malformed or schema-invalid rows."""
+
+    path = ara_dir / MANIFEST_HISTORY_NAME
+    if not path.exists():
+        return [], []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [], [f"history is unreadable: {exc}"]
+    rows: list[dict[str, Any]] = []
+    issues: list[str] = []
+    validator = schema_validator("manifest_revision")
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            issues.append(f"line {line_number} is invalid JSON")
+            continue
+        if not isinstance(row, dict):
+            issues.append(f"line {line_number} is not an object")
+            continue
+        errors = sorted(validator.iter_errors(row), key=lambda item: item.message)
+        if errors:
+            issues.append(f"line {line_number}: {errors[0].message}")
+            continue
+        rows.append(row)
+    return rows, issues
+
+
+def _history_snapshot_path(ara_dir: Path, manifest_hash: str) -> Path | None:
+    if not manifest_hash.startswith("sha256:"):
+        return None
+    digest = manifest_hash.split(":", 1)[1]
+    if len(digest) != 64:
+        return None
+    return ara_dir / HISTORY_SUBDIR / f"{digest}.json"
 
 
 def _normalise_changed_fields(hint: Iterable[str] | None) -> list[str]:

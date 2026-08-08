@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/deployment_receipt.schema.json",
+  "title": "XScientist Deployment Plan or Receipt",
+  "type": "object",
+  "required": ["schema_version", "mode", "target", "candidate_artifact_hash", "production_mutated"],
+  "properties": {
+    "schema_version": {"const": "xscientist.evolution-deployment.v1"},
+    "mode": {"enum": ["plan", "canary", "production"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "target": {"type": "string", "minLength": 1},
+    "target_path": {"type": "string"},
+    "target_exists": {"type": "boolean"},
+    "current_artifact_hash": {"type": ["string", "null"]},
+    "current_tree_hash": {"type": ["string", "null"]},
+    "candidate_artifact_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "candidate_file_count": {"type": "integer", "minimum": 1},
+    "candidate_total_bytes": {"type": "integer", "minimum": 0},
+    "will_replace": {"type": "boolean"},
+    "before_tree_hash": {"type": ["string", "null"]},
+    "after_tree_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "backup_ref": {"type": ["string", "null"]},
+    "executed_by": {"type": "string", "pattern": "^(service|human):.+$"},
+    "approval_id": {"type": "string", "pattern": "^human:.+$"},
+    "authorization_hash": {"type": ["string", "null"]},
+    "status": {"const": "applied"},
+    "production_mutated": {"type": "boolean"},
+    "receipt_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

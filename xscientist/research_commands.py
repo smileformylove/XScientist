@@ -16,6 +16,7 @@ from .research_git import (
     CheckpointResult,
     ResearchGitError,
     ResearchObjectResult,
+    capture_environment_receipt,
     create_checkpoint,
 )
 from .research_lifecycle import ResearchLifecycle
@@ -27,6 +28,18 @@ def _required_text(value: str, *, label: str) -> str:
     if not normalized:
         raise ResearchGitError(f"{label} cannot be empty")
     return normalized
+
+
+def _hashes(values: Sequence[str], *, label: str) -> list[str]:
+    import re
+
+    rows = sorted({str(value).strip() for value in values if str(value).strip()})
+    invalid = [
+        value for value in rows if not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+    ]
+    if invalid:
+        raise ResearchGitError(f"{label} must use sha256:<64 lowercase hex>")
+    return rows
 
 
 def _ensure_direct_save_is_safe(
@@ -52,6 +65,7 @@ def _finish(
     status: str,
     commit: bool,
     related: Sequence[ResearchObjectResult] = (),
+    reproduce_command: str | None = None,
 ) -> dict[str, Any]:
     checkpoint: CheckpointResult | None = None
     if commit:
@@ -65,6 +79,7 @@ def _finish(
             subject=subject,
             status=status,
             include=includes,
+            reproduce_command=reproduce_command,
         )
     return {"object": result, "related": list(related), "checkpoint": checkpoint}
 
@@ -110,7 +125,12 @@ def save_experiment(
     preregistration_id: str | None = None,
     metrics: Mapping[str, Any] | None = None,
     seeds: Sequence[int] = (),
+    environment_hash: str | None = None,
+    dependency_lock_hashes: Sequence[str] = (),
+    dataset_hashes: Sequence[str] = (),
+    code_commit: str | None = None,
     failure_class: str = "",
+    reproduce_command: str | None = None,
     message: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
@@ -127,11 +147,34 @@ def save_experiment(
         payload["seeds"] = list(dict.fromkeys(seeds))
     if failure_class.strip():
         payload["failure_class"] = failure_class.strip()
+    environment = capture_environment_receipt(repository.path)
+    provenance: dict[str, Any] = {
+        "environment_hash": environment_hash or environment["content_hash"],
+        "dependency_lock_hashes": _hashes(
+            [
+                *(
+                    str(item.get("hash") or "")
+                    for item in environment["dependency_locks"]
+                ),
+                *dependency_lock_hashes,
+            ],
+            label="dependency lock hash",
+        ),
+        "dataset_hashes": _hashes(dataset_hashes, label="dataset hash"),
+        "seeds": sorted(set(seeds)),
+    }
+    selected_commit = str(code_commit or repository.status().get("head") or "")
+    if selected_commit:
+        provenance["code_commit"] = selected_commit
+    provenance = {
+        key: value for key, value in provenance.items() if value not in (None, "", [])
+    }
     lifecycle = ResearchLifecycle(repository)
     recorded = lifecycle.experiment_attempt(
         payload,
         preregistration_id=preregistration_id,
         plan_id=plan_id,
+        provenance=provenance,
         commit=False,
     )
     result = recorded["attempt"]
@@ -143,6 +186,7 @@ def save_experiment(
         subject=message or f"record {result.state} experiment attempt",
         status=result.state,
         commit=commit,
+        reproduce_command=reproduce_command,
     )
 
 
@@ -166,6 +210,7 @@ def save_preregistration(
     hypothesis = repository.get(hypothesis_id)
     if hypothesis["kind"] != "hypothesis":
         raise ResearchGitError("preregistration hypothesis reference has wrong kind")
+    hypothesis_id = str(hypothesis["object_id"])
     hypothesis_payload = hypothesis["payload"]
     statement = _required_text(
         str(hypothesis_payload.get("statement") or ""),
@@ -243,6 +288,7 @@ def save_evidence(
     refutes: Sequence[str] = (),
     metrics: Mapping[str, Any] | None = None,
     verified: bool = False,
+    verifier_id: str | None = None,
     message: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
@@ -253,6 +299,9 @@ def save_evidence(
     }
     if metrics:
         payload["metrics"] = dict(metrics)
+    payload["measurement_hash"] = content_hash(
+        {"result": payload["result"], "metrics": payload.get("metrics") or {}}
+    )
     lifecycle = ResearchLifecycle(repository)
     recorded = lifecycle.evidence(
         payload,
@@ -260,6 +309,7 @@ def save_evidence(
         supports=supports,
         refutes=refutes,
         verified=verified,
+        verifier_id=verifier_id,
         commit=False,
     )
     result = recorded["evidence"]

@@ -13,15 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
 from .constants import (
     PROTOCOL_VERSION,
     REQUIRED_TOP_LEVEL,
     Kind,
 )
 from .graph import analyze_exploration_graph
-from .schemas import load_schema
+from .schemas import load_schema, schema_registry
 
 
 @dataclass
@@ -70,7 +68,9 @@ def _validate_against_schema(
 ) -> None:
     """Validate one payload using the complete Draft 2020-12 contract."""
 
-    validator = Draft202012Validator(schema)
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(schema, registry=schema_registry())
     for error in sorted(
         validator.iter_errors(payload),
         key=lambda item: (list(item.absolute_path), item.message),

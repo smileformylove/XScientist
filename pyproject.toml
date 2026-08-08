@@ -164,6 +164,9 @@ service = [
   "pydantic>=2.5",
   "uvicorn[standard]>=0.30",
 ]
+trust = [
+  "cryptography>=42",
+]
 dev = [
   "black>=24.0",
   "build>=1.2",
@@ -230,6 +233,7 @@ ai_scientist = [
   "ideas/*.json",
   "ideas/*.md",
   "protocol/SPEC.md",
+  "protocol/conformance/*",
   "protocol/schemas/*.json",
   "resources/configs/*.yaml",
   "treesearch/utils/viz_templates/*.html",

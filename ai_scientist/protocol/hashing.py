@@ -35,7 +35,7 @@ _CANONICAL_ENCODER = json.JSONEncoder(
     sort_keys=True,
     ensure_ascii=False,
     separators=(",", ":"),
-    default=str,
+    allow_nan=False,
 )
 
 
@@ -66,12 +66,13 @@ def _canonical(payload: Any) -> str:
     return _CANONICAL_ENCODER.encode(payload)
 
 
-def content_hash(payload: dict[str, Any]) -> str:
+def content_hash(payload: Any) -> str:
     """Content-address a serialisable payload.
 
-    ``payload`` should be a dict of primitive-ish values. Anything unhashable
-    is coerced through JSON's ``default=str`` — the hash still stabilises on
-    identical inputs across processes.
+    ``payload`` must contain only JSON values. Non-finite floats and
+    implementation-specific Python objects are rejected instead of being
+    silently stringified, so independent producers cannot hash different
+    meanings into an apparently compatible identifier.
     """
     canonical = _canonical(payload).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
@@ -190,10 +191,12 @@ def hash_manifest(manifest: dict[str, Any]) -> str:
 
 # Fields that must NOT feed hash_manifest — see hash_manifest() docstring.
 # Keep this set in sync with manifest.schema.json.
-_LOCK_EXCLUDED_KEYS = frozenset({
-    "signatures",       # signatures cover the hash, so can't be part of it
-    "manifest_hash",    # hypothetical self-reference; not currently written
-})
+_LOCK_EXCLUDED_KEYS = frozenset(
+    {
+        "signatures",  # signatures cover the hash, so can't be part of it
+        "manifest_hash",  # hypothetical self-reference; not currently written
+    }
+)
 
 
 def build_provenance(

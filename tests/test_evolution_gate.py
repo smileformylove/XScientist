@@ -9,6 +9,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.evolution_deployment import DEPLOYMENT_RECEIPT_SCHEMA
 from ai_scientist.utils.evolution_gate import (
     EvolutionGateError,
     approve_production_promotion,
@@ -466,16 +468,39 @@ class EvolutionGateTests(unittest.TestCase):
                 constitution=_constitution(),
                 approver_ids=["human:release-owner"],
             )
-            promoted = evolution.promote(
+            promotion = evolution.promote(
                 promotion_payload,
                 constitution=_constitution(),
                 candidate_id=candidate.object_id,
                 evaluation_id=evaluation.object_id,
-            )["promoted_candidate"]
+            )
+            promoted = promotion["promoted_candidate"]
             repository.switch("main")
 
             preview = repository.merge_preview("evolve/search-policy-v2")
             merged = repository.merge("evolve/search-policy-v2")
+            deployment_receipt = {
+                "schema_version": DEPLOYMENT_RECEIPT_SCHEMA,
+                "mode": "production",
+                "generated_at": "2020-01-04T00:00:00+00:00",
+                "target": "search",
+                "candidate_artifact_hash": candidate_payload["candidate_artifact_hash"],
+                "before_tree_hash": candidate_payload["base_artifact_hash"],
+                "after_tree_hash": candidate_payload["candidate_artifact_hash"],
+                "backup_ref": ".xscientist-deploy/backups/search/release-1",
+                "executed_by": "service:release-adapter",
+                "approval_id": "human:release-owner",
+                "authorization_hash": _digest("deployment-authorization"),
+                "status": "applied",
+                "production_mutated": True,
+            }
+            deployment_receipt["receipt_hash"] = canonical_content_hash(
+                deployment_receipt
+            )
+            deployment = ResearchEvolution(repository).deployment(
+                deployment_receipt,
+                promoted_id=promoted.object_id,
+            )
             rollback = ResearchEvolution(repository).rollback(
                 canary["rollback_receipt"],
                 candidate_id=candidate.object_id,
@@ -485,7 +510,11 @@ class EvolutionGateTests(unittest.TestCase):
 
             self.assertTrue(preview["clean"], preview["conflicts"])
             self.assertTrue(merged.commit)
+            self.assertEqual(deployment["decision"].state, "promoted")
+            self.assertEqual(promotion["execution_mode"], "semantic_receipt_only")
+            self.assertFalse(promotion["production_mutated"])
             self.assertEqual(rollback["decision"].state, "superseded")
+            self.assertFalse(rollback["production_mutated"])
             self.assertTrue(repository.fsck()["ok"])
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")

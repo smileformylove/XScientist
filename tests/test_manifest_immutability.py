@@ -41,8 +41,10 @@ class HashManifestTests(unittest.TestCase):
     def test_hash_excludes_signatures(self) -> None:
         # Signing must not invalidate the very hash it signs.
         base = {"schema_version": "ara.v1", "counts": {"nodes": 1}}
-        signed = {**base, "signatures": [{"algo": "minisign", "key_id": "x",
-                                           "signature": "AAA"}]}
+        signed = {
+            **base,
+            "signatures": [{"algo": "minisign", "key_id": "x", "signature": "AAA"}],
+        }
         self.assertEqual(hash_manifest(base), hash_manifest(signed))
 
     def test_hash_sensitive_to_counts(self) -> None:
@@ -86,6 +88,7 @@ class ManifestLockTests(unittest.TestCase):
         first_mtime_ns = lock_path.stat().st_mtime_ns
         # Sleep past mtime resolution so a rewrite would be observable.
         import time as _time
+
         _time.sleep(1.1)
         result = write_manifest_lock(ara, manifest)
         self.assertEqual(result, lock_path)
@@ -100,6 +103,7 @@ class ManifestLockTests(unittest.TestCase):
         m2 = dict(manifest)
         m2["counts"] = {"nodes": 999}
         import time as _time
+
         _time.sleep(1.1)
         write_manifest_lock(ara, m2)
         updated = json.loads(lock_path.read_text())
@@ -132,15 +136,20 @@ class AppendManifestRevisionTests(unittest.TestCase):
             return ["counts.claims"]
 
         new = append_manifest_revision(
-            ara / "manifest.json", _mutate,
-            reason="claim scan finished", producer="update_manifest_claim_count",
+            ara / "manifest.json",
+            _mutate,
+            reason="claim scan finished",
+            producer="update_manifest_claim_count",
         )
         self.assertIsNotNone(new)
         self.assertEqual(new["counts"]["claims"], 5)
 
         # History row
-        rows = [json.loads(l) for l in
-                (ara / MANIFEST_HISTORY_NAME).read_text().splitlines() if l]
+        rows = [
+            json.loads(l)
+            for l in (ara / MANIFEST_HISTORY_NAME).read_text().splitlines()
+            if l
+        ]
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["revision"], 1)
@@ -164,7 +173,10 @@ class AppendManifestRevisionTests(unittest.TestCase):
         ara, _ = _fresh_ara(self.tmp)
         append_manifest_revision(
             ara / "manifest.json",
-            lambda m: (m.setdefault("counts", {}).__setitem__("claims", 3), ["counts.claims"])[1],
+            lambda m: (
+                m.setdefault("counts", {}).__setitem__("claims", 3),
+                ["counts.claims"],
+            )[1],
         )
         report = verify_manifest_lock(ara)
         self.assertTrue(report["ok"])
@@ -185,11 +197,16 @@ class AppendManifestRevisionTests(unittest.TestCase):
         for n in (1, 2, 3):
             append_manifest_revision(
                 ara / "manifest.json",
-                lambda m, k=n: (m.setdefault("counts", {}).__setitem__("claims", k),
-                                ["counts.claims"])[1],
+                lambda m, k=n: (
+                    m.setdefault("counts", {}).__setitem__("claims", k),
+                    ["counts.claims"],
+                )[1],
             )
-        rows = [json.loads(l) for l in
-                (ara / MANIFEST_HISTORY_NAME).read_text().splitlines() if l]
+        rows = [
+            json.loads(l)
+            for l in (ara / MANIFEST_HISTORY_NAME).read_text().splitlines()
+            if l
+        ]
         self.assertEqual([r["revision"] for r in rows], [1, 2, 3])
         # Each row's base_hash equals the previous row's new_hash
         for prev, cur in zip(rows, rows[1:]):
@@ -203,7 +220,8 @@ class AppendManifestRevisionTests(unittest.TestCase):
     def test_missing_manifest_returns_none(self) -> None:
         # Callers used to swallow this silently — preserve that contract.
         result = append_manifest_revision(
-            self.tmp / "nope.json", lambda m: None,
+            self.tmp / "nope.json",
+            lambda m: None,
         )
         self.assertIsNone(result)
 
@@ -239,8 +257,10 @@ class CorruptHistoryToleranceTests(unittest.TestCase):
     def _bump(self, ara: Path, val: int) -> None:
         append_manifest_revision(
             ara / "manifest.json",
-            lambda m, v=val: (m.setdefault("counts", {}).__setitem__("claims", v),
-                              ["counts.claims"])[1],
+            lambda m, v=val: (
+                m.setdefault("counts", {}).__setitem__("claims", v),
+                ["counts.claims"],
+            )[1],
         )
 
     def _corrupt_first(self, ara: Path) -> None:
@@ -252,33 +272,63 @@ class CorruptHistoryToleranceTests(unittest.TestCase):
     def test_read_history_tolerates_single_corrupt_row(self) -> None:
         ara, _ = _fresh_ara(self.tmp)
         (ara / MANIFEST_HISTORY_NAME).write_text(
-            json.dumps({"revision": 1}) + "\n{not valid json\n"
-            + json.dumps({"revision": 2}) + "\n", encoding="utf-8",
+            json.dumps({"revision": 1})
+            + "\n{not valid json\n"
+            + json.dumps({"revision": 2})
+            + "\n",
+            encoding="utf-8",
         )
         self.assertEqual([r["revision"] for r in _read_history(ara)], [1, 2])
 
     def test_verify_manifest_lock_survives_single_corrupt_history_row(self) -> None:
         ara, _ = _fresh_ara(self.tmp)
-        self._bump(ara, 1); self._bump(ara, 2)
+        self._bump(ara, 1)
+        self._bump(ara, 2)
         self._corrupt_first(ara)
         report = verify_manifest_lock(ara)
-        # Pre-fix bug collapsed to tampered/revision_count=0.
-        self.assertNotEqual((report["state"], report["revision_count"]),
-                            ("tampered", 0), f"regression: {report}")
-        self.assertEqual(report["state"], "revised")
-        self.assertTrue(report["ok"])
+        self.assertEqual(report["state"], "tampered")
+        self.assertFalse(report["ok"])
+        self.assertIn("invalid manifest history", report["detail"])
+
+    def test_forged_latest_hash_without_a_valid_chain_is_rejected(self) -> None:
+        ara, manifest = _fresh_ara(self.tmp)
+        forged = {**manifest, "counts": {"nodes": 99}}
+        (ara / "manifest.json").write_text(json.dumps(forged), encoding="utf-8")
+        (ara / MANIFEST_HISTORY_NAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": "ara.v1",
+                    "protocol_kind": "manifest_revision",
+                    "revision": 9,
+                    "ts": "2026-08-08T00:00:00Z",
+                    "base_hash": "sha256:" + "0" * 64,
+                    "new_hash": hash_manifest(forged),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        report = verify_manifest_lock(ara)
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["state"], "tampered")
+        self.assertIn("broken manifest history chain", report["detail"])
 
     def test_append_manifest_revision_next_number_survives_corrupt_row(self) -> None:
         ara, _ = _fresh_ara(self.tmp)
-        self._bump(ara, 1); self._bump(ara, 2)
+        self._bump(ara, 1)
+        self._bump(ara, 2)
         self._corrupt_first(ara)
         self._bump(ara, 3)
         parsed = []
         for ln in (ara / MANIFEST_HISTORY_NAME).read_text().splitlines():
             if not ln.strip():
                 continue
-            try: parsed.append(json.loads(ln))
-            except json.JSONDecodeError: continue
+            try:
+                parsed.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
         self.assertEqual(parsed[-1]["revision"], 3)
 
 

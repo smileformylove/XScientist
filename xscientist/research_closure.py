@@ -64,11 +64,121 @@ def _has_hash_anchor(payload: Mapping[str, Any]) -> bool:
             return True
         if key.endswith("_hashes") and isinstance(value, list) and value:
             return True
+        if isinstance(value, Mapping) and _has_hash_anchor(value):
+            return True
+        if isinstance(value, list) and any(
+            isinstance(item, Mapping) and _has_hash_anchor(item) for item in value
+        ):
+            return True
     return False
 
 
 def _blocker(code: str, object_id: str, message: str) -> dict[str, str]:
     return {"code": code, "object_id": object_id, "message": message}
+
+
+def _claim_identity(
+    claim: Mapping[str, Any],
+    objects: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, tuple[str, ...]]:
+    """Return the stable semantic identity used for implicit promotions."""
+
+    payload = claim.get("payload") or {}
+    statement = next(
+        (
+            str(payload.get(key)).strip()
+            for key in ("claim_hash", "statement", "text", "claim")
+            if payload.get(key) not in (None, "")
+        ),
+        "",
+    )
+    evidence = tuple(
+        target
+        for target in _targets(claim, relation_types=("depends_on",), role=None)
+        if objects.get(target, {}).get("kind") == "evidence"
+    )
+    return statement, evidence
+
+
+def _effective_claim_frontier(
+    claims: Iterable[Mapping[str, Any]],
+    objects: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[Mapping[str, Any]], list[str]]:
+    """Select current claims while retaining superseded objects in history.
+
+    Explicit ``supersedes`` relations and the ``superseded`` state are
+    authoritative. A verified claim also implicitly promotes an older draft
+    with the exact same statement and evidence anchors; this matches the
+    immutable lifecycle where promotion creates a new object.
+    """
+
+    rows = list(claims)
+    superseded = {
+        target
+        for item in objects.values()
+        for target in _targets(item, relation_types=("supersedes",))
+        if objects.get(target, {}).get("kind") == "claim"
+    }
+    superseded.update(
+        str(item["object_id"]) for item in rows if item.get("state") == "superseded"
+    )
+    verified_identities = {
+        _claim_identity(item, objects)
+        for item in rows
+        if item.get("state") == "verified"
+    }
+    for item in rows:
+        if (
+            item.get("state") != "verified"
+            and _claim_identity(item, objects) in verified_identities
+        ):
+            superseded.add(str(item["object_id"]))
+    frontier = [item for item in rows if str(item["object_id"]) not in superseded]
+    return frontier, sorted(superseded)
+
+
+def _receipt_integrity_issues(
+    reproduction: Mapping[str, Any],
+    *,
+    producer_ids: set[str],
+) -> list[str]:
+    """Validate a verified reproduction beyond its caller-supplied state."""
+
+    payload = reproduction.get("payload") or {}
+    receipt = payload.get("receipt")
+    if not isinstance(receipt, Mapping):
+        return ["verified reproduction does not embed its source receipt"]
+    receipt_base = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"receipt_id", "content_hash"}
+    }
+    expected_hash = content_hash(receipt_base)
+    expected_id = f"rr-{expected_hash.split(':', 1)[1][:16]}"
+    issues: list[str] = []
+    if receipt.get("content_hash") != expected_hash:
+        issues.append("reproduction receipt content hash mismatch")
+    if receipt.get("receipt_id") != expected_id:
+        issues.append("reproduction receipt identifier mismatch")
+    if payload.get("receipt_hash") != expected_hash:
+        issues.append("reproduction object is not bound to the embedded receipt")
+    if (
+        not receipt.get("executed")
+        or receipt.get("reproduction_level") != "computational_rerun"
+    ):
+        issues.append("verified reproduction was not a computational rerun")
+    if (
+        receipt.get("verdict") != "passed"
+        or receipt.get("returncode") != 0
+        or receipt.get("timed_out") is True
+        or receipt.get("objects_complete") is not True
+    ):
+        issues.append("verified reproduction does not contain a successful result")
+    if (reproduction.get("actor") or {}).get("authority") != "independent_evaluator":
+        issues.append("verified reproduction lacks independent-evaluator authority")
+    if str((reproduction.get("actor") or {}).get("actor_id") or "") in producer_ids:
+        issues.append("reproduction verifier is also a producer in the claim lineage")
+    return issues
 
 
 def _claim_closure(
@@ -245,18 +355,62 @@ def _claim_closure(
     replay_ready = trace_complete and not replay_blockers
 
     verification_blockers: list[dict[str, str]] = []
-    passing_gates = [
-        object_id
-        for object_id in gate_ids
-        if objects[object_id].get("state") == "verified"
-        and (objects[object_id].get("payload") or {}).get("claim_promotion_allowed")
-        is True
-    ]
-    verified_reproductions = [
-        object_id
-        for object_id in reproduction_ids
-        if objects[object_id].get("state") == "verified"
-    ]
+    producer_ids = {
+        str((objects[object_id].get("actor") or {}).get("actor_id") or "")
+        for object_id in {claim_id, *evidence_ids, *attempt_ids}
+        if str((objects[object_id].get("actor") or {}).get("actor_id") or "")
+    }
+    passing_gates: list[str] = []
+    for object_id in gate_ids:
+        gate = objects[object_id]
+        direct_evaluated = set(_targets(gate, relation_types=("evaluates",)))
+        evaluated = set(direct_evaluated)
+        reviews = _kind_ids(direct_evaluated, objects, "review")
+        trusted_review = False
+        for review_id in reviews:
+            review = objects[review_id]
+            review_targets = set(_targets(review, relation_types=("evaluates",)))
+            evaluated.update(review_targets)
+            review_actor = review.get("actor") or {}
+            trusted_review = trusted_review or (
+                review.get("state") == "verified"
+                and review_actor.get("authority") == "independent_evaluator"
+                and str(review_actor.get("actor_id") or "") not in producer_ids
+                and bool(review_targets.intersection({claim_id, *evidence_ids}))
+            )
+        bound = bool(evaluated.intersection({claim_id, *evidence_ids}))
+        if (
+            gate.get("state") == "verified"
+            and (gate.get("payload") or {}).get("claim_promotion_allowed") is True
+            and (gate.get("actor") or {}).get("authority") == "deterministic_gate"
+            and bound
+            and trusted_review
+        ):
+            passing_gates.append(object_id)
+        elif gate.get("state") == "verified":
+            verification_blockers.append(
+                _blocker(
+                    "unbound_or_untrusted_gate",
+                    object_id,
+                    "passing gate must bind an independent verified review of this claim or evidence",
+                )
+            )
+    verified_reproductions: list[str] = []
+    for object_id in reproduction_ids:
+        reproduction = objects[object_id]
+        if reproduction.get("state") != "verified":
+            continue
+        receipt_issues = _receipt_integrity_issues(
+            reproduction,
+            producer_ids=producer_ids,
+        )
+        if receipt_issues:
+            verification_blockers.extend(
+                _blocker("invalid_reproduction_receipt", object_id, issue)
+                for issue in receipt_issues
+            )
+        else:
+            verified_reproductions.append(object_id)
     if claim.get("state") != "verified":
         verification_blockers.append(
             _blocker("claim_not_verified", claim_id, "claim is not in verified state")
@@ -320,10 +474,11 @@ def audit_research_closure(
     resolved = str(checkpoint["commit"])
     object_rows = list_research_objects_at_ref(repo, resolved)
     objects = {str(item["object_id"]): item for item in object_rows}
-    claims = sorted(
+    all_claims = sorted(
         (item for item in object_rows if item.get("kind") == "claim"),
         key=lambda item: str(item["object_id"]),
     )
+    claims, superseded_claim_ids = _effective_claim_frontier(all_claims, objects)
     fsck = verify_research_repository(
         repo, commit=resolved, verify_objects=verify_objects
     )
@@ -365,6 +520,7 @@ def audit_research_closure(
         "counts": dict(
             sorted(Counter(str(item["kind"]) for item in object_rows).items())
         ),
+        "superseded_claim_ids": superseded_claim_ids,
         "claims": claim_rows,
         "blockers": blockers,
         "warnings": warnings,

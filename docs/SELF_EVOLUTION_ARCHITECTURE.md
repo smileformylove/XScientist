@@ -21,6 +21,16 @@ knowledge. Batch runs initialize this L0 engine and the external-agent
 orchestrator only when an evolution API is first used; ordinary adaptive
 generation does not pay their model-client, history-loading, or memory cost.
 
+`ResearchEvolution.promote()` remains a semantic receipt operation: it records
+an approved candidate but does not itself hold infrastructure authority. The
+separate executable runtime now builds real CAS artifacts, runs paired
+benchmarks and bounded canaries, and provides a recoverable local directory
+deployment adapter. Production apply requires both semantic promotion and a
+verified multi-authority signature bundle. `rollback()` distinguishes an
+exercise receipt from an externally executed production receipt; only the
+latter reports `production_mutated=true`. See
+[`EVOLUTION_RUNTIME.md`](EVOLUTION_RUNTIME.md).
+
 ## Organization model
 
 ```mermaid
@@ -47,7 +57,7 @@ flowchart LR
   program --> challenge --> next --> program
 ```
 
-The implementation has five planes:
+The implementation has six planes:
 
 1. **Signal plane** — `self_evolution.json` converts review, repair, and stage
    failures into typed lessons. Repeated observations are deduplicated by risk,
@@ -67,6 +77,10 @@ The implementation has five planes:
 5. **Memory plane** — playbooks, program epochs, and gate outcomes are
    append-only. Repeated holds force a new exploratory branch; approvals provide
    weak supporting evidence but never bypass a fresh gate.
+6. **Execution plane** — immutable candidate CAS objects, shell-free paired
+   benchmark commands, bounded canary targets, atomic directory swaps, signed
+   authorization, and verified rollback receipts turn gate evidence into
+   observable actions without giving the research agent production authority.
 
 ## Fixed-utility epochs
 
@@ -144,6 +158,7 @@ agent systems while preserving AlphaEvolve-style quality-diverse search.
 | `evolution_gate.json` | Latest shadow/canary/promotion decision |
 | `evolution_gate_history.jsonl` | Candidate outcomes feeding later portfolios |
 | `evolution/quarantined_learning_candidates.jsonl` | Unconfirmed legacy/self-scored learning proposals |
+| evolution CAS, run and deployment receipts | Exact candidate files and observed execution evidence |
 
 ## Operational invariant
 

@@ -100,6 +100,12 @@ class HashingTest(unittest.TestCase):
         b = content_hash({"b": [2, 3], "a": 1})
         self.assertEqual(a, b)
 
+    def test_content_hash_rejects_non_json_and_non_finite_values(self) -> None:
+        with self.assertRaises((TypeError, ValueError)):
+            content_hash({"value": object()})
+        with self.assertRaises(ValueError):
+            content_hash({"value": float("nan")})
+
     def test_large_code_is_truncated_but_length_still_stabilises_identity(self) -> None:
         big_a = "a" * (512 * 1024)
         big_b = "b" * (512 * 1024)
@@ -126,6 +132,23 @@ class SchemaTest(unittest.TestCase):
             schema = load_schema(kind)
             self.assertIn("$id", schema)
             self.assertEqual(schema.get("type"), "object")
+
+    def test_evolution_and_interop_schemas_are_published(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        for name in (
+            "attestation",
+            "evolution_artifact",
+            "benchmark_suite",
+            "benchmark_run",
+            "canary_suite",
+            "canary_run",
+            "deployment_receipt",
+            "research_interop",
+        ):
+            schema = load_schema(name)
+            Draft202012Validator.check_schema(schema)
+            self.assertTrue(str(schema["$id"]).startswith("https://xscientist.io/"))
 
 
 class MultiParentProvenanceTest(unittest.TestCase):
@@ -220,6 +243,24 @@ class MultiParentProvenanceTest(unittest.TestCase):
 
 
 class ValidatorTest(unittest.TestCase):
+    def test_manifest_relative_reference_schema_resolves_offline(self) -> None:
+        report = validate_manifest(
+            {
+                "schema_version": PROTOCOL_VERSION,
+                "protocol_kind": "manifest",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_exp_dir": "/tmp/x",
+                "idea": {"name": "abc"},
+                "counts": {"nodes": 0},
+                "references": {
+                    "pipeline_artifacts": [
+                        {"kind": "research_plan", "path": "pipeline/plan.json"}
+                    ]
+                },
+            }
+        )
+        self.assertTrue(report.ok, msg=[e.__dict__ for e in report.errors])
+
     def test_minimal_manifest_valid(self) -> None:
         report = validate_manifest(
             {

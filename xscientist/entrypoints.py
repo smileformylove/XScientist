@@ -200,6 +200,12 @@ def research_main(argv: Sequence[str] | None = None) -> int:
     return main(argv, prog="xscientist research")
 
 
+def evolution_main(argv: Sequence[str] | None = None) -> int:
+    from .evolution_cli import main
+
+    return main(argv)
+
+
 def git_main(argv: Sequence[str] | None = None) -> int:
     """Expose Research VCS with familiar Git-like command names."""
 

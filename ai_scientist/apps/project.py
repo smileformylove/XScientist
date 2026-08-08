@@ -1469,10 +1469,15 @@ def process_single_idea(args):
         # ========== 步骤1: 运行实验 ==========
         print(f"\n📊 [想法 #{idea_idx}] 步骤 1/4: 运行实验")
         idea_path_md = osp.join(exp_dir, "idea.md")
-        idea_to_markdown(idea, idea_path_md, None)
+        idea_to_markdown(
+            idea,
+            idea_path_md,
+            None,
+            research_plan=research_plan,
+        )
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
-        idea_config_path = edit_bfts_config_file(config_path, exp_dir, idea_path_json)
+        idea_config_path = edit_bfts_config_file(config_path, exp_dir, idea_path_md)
 
         experiment_result = perform_experiments_bfts(idea_config_path)
         if (

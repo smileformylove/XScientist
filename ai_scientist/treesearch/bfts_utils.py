@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import json
 import uuid
 from pathlib import Path
 
@@ -10,7 +11,13 @@ from ai_scientist.resources import resolve_bfts_config_path
 from .utils.serialize import atomic_write_text
 
 
-def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
+def idea_to_markdown(
+    data: dict,
+    output_path: str,
+    load_code: str | None,
+    *,
+    research_plan: dict | None = None,
+) -> None:
     """
     Convert a dictionary into a markdown file.
 
@@ -44,6 +51,36 @@ def idea_to_markdown(data: dict, output_path: str, load_code: str) -> None:
                 "## Code To Potentially Use\n\n",
                 "Use the following code as context for your experiments:\n\n",
                 f"```python\n{code}\n```\n\n",
+            ]
+        )
+
+    if research_plan:
+        contract = {
+            "plan_id": research_plan.get("plan_id"),
+            "workflow_mode": research_plan.get("workflow_mode"),
+            "tasks": [
+                item
+                for item in research_plan.get("tasks") or []
+                if isinstance(item, dict)
+            ],
+            "acceptance_rules": research_plan.get("acceptance_rules") or [],
+            "required_discriminating_tests": research_plan.get(
+                "required_discriminating_tests"
+            )
+            or [],
+            "produced_artifacts": research_plan.get("produced_artifacts") or [],
+            "execution_policy": research_plan.get("execution_policy") or {},
+        }
+        lines.extend(
+            [
+                "## Binding Research Contract\n\n",
+                "The following plan is an execution constraint, not optional context. "
+                "Run its required tasks and discriminating tests, preserve failed or "
+                "refuting outcomes, and explicitly report every deviation. Do not claim "
+                "completion when an acceptance rule or required artifact is missing.\n\n",
+                "```json\n",
+                json.dumps(contract, indent=2, ensure_ascii=False, sort_keys=True),
+                "\n```\n\n",
             ]
         )
 

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/canary_suite.schema.json",
+  "title": "XScientist Canary Suite",
+  "type": "object",
+  "required": ["schema_version", "target", "approval_id", "projects"],
+  "properties": {
+    "schema_version": {"const": "xscientist.canary-suite.v1"},
+    "target": {"type": "string", "minLength": 1},
+    "approval_id": {"type": "string", "pattern": "^human:.+$"},
+    "projects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["project_id", "baseline", "command"],
+        "properties": {
+          "project_id": {"type": "string", "minLength": 1},
+          "baseline": {"type": "object", "required": ["error_rate", "quality"], "additionalProperties": {"type": "number"}},
+          "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "environment": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

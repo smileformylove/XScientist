@@ -1022,6 +1022,7 @@ def build_rollback_receipt(
     execution_log_hash: str,
     executed_by: str,
     trigger: str = "canary_exercise",
+    exercise_only: bool = True,
 ) -> dict[str, Any]:
     """Record a content-verified rollback exercise for the exact candidate."""
 
@@ -1049,7 +1050,7 @@ def build_rollback_receipt(
         "execution_log_hash": execution_log_hash,
         "executed_by": actor,
         "trigger": event,
-        "exercise_only": True,
+        "exercise_only": bool(exercise_only),
         "status": "verified" if verified else "failed",
     }
     payload["receipt_hash"] = _canonical_hash(_rollback_core(payload))
@@ -1060,6 +1061,7 @@ def validate_rollback_receipt(
     payload: dict[str, Any] | None,
     *,
     candidate: dict[str, Any],
+    require_exercise: bool | None = None,
 ) -> dict[str, Any]:
     receipt = payload if isinstance(payload, dict) else {}
     errors: list[str] = []
@@ -1073,8 +1075,15 @@ def validate_rollback_receipt(
         errors.append("expected_artifact_mismatch")
     if receipt.get("restored_artifact_hash") != candidate.get("base_artifact_hash"):
         errors.append("restored_artifact_mismatch")
-    if receipt.get("status") != "verified" or receipt.get("exercise_only") is not True:
+    if receipt.get("status") != "verified" or not isinstance(
+        receipt.get("exercise_only"), bool
+    ):
         errors.append("rollback_not_verified")
+    elif (
+        require_exercise is not None
+        and receipt.get("exercise_only") is not require_exercise
+    ):
+        errors.append("rollback_mode_mismatch")
     if receipt.get("receipt_hash") != _canonical_hash(_rollback_core(receipt)):
         errors.append("receipt_hash_mismatch")
     return {"passed": not errors, "errors": errors}
@@ -1127,7 +1136,9 @@ def build_canary_report(
         _is_content_hash(value) for value in run_hashes.values()
     )
     incident_rows = _strings(incidents)
-    rollback_check = validate_rollback_receipt(rollback_receipt, candidate=candidate)
+    rollback_check = validate_rollback_receipt(
+        rollback_receipt, candidate=candidate, require_exercise=True
+    )
     status = (
         "passed"
         if observations is not None
@@ -1247,7 +1258,9 @@ def approve_production_promotion(
         and canary_executor not in approvers
     )
     rollback_check = validate_rollback_receipt(
-        canary_report.get("rollback_receipt"), candidate=candidate
+        canary_report.get("rollback_receipt"),
+        candidate=candidate,
+        require_exercise=True,
     )
     criteria = [
         _criterion(

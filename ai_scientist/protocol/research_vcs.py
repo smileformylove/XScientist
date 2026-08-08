@@ -72,7 +72,15 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "research_plan": ("plan_id", "tasks", "summary", "hypothesis"),
     "experiment_attempt": ("status",),
     "metric": ("name", "metric", "value"),
-    "evidence": ("result", "summary", "measurement", "metrics", "ara_manifest_hash"),
+    "evidence": (
+        "result",
+        "summary",
+        "measurement",
+        "metrics",
+        "metric",
+        "effect",
+        "ara_manifest_hash",
+    ),
     "claim": ("statement", "text", "claim", "claim_hash"),
     "review": ("summary", "status", "decision", "report_hash"),
     "gate_decision": ("decision", "claim_promotion_allowed"),
@@ -83,8 +91,23 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
         "reproduction_level",
         "verdict",
     ),
-    "agent_candidate": ("candidate_id", "summary", "version"),
-    "agent_evaluation": ("candidate_id", "summary", "status", "verdict"),
+    "agent_candidate": (
+        "candidate_id",
+        "candidate_hash",
+        "candidate",
+        "promotion",
+        "summary",
+        "version",
+    ),
+    "agent_evaluation": (
+        "candidate_id",
+        "candidate",
+        "summary",
+        "status",
+        "verdict",
+        "decision",
+        "gate_hash",
+    ),
 }
 
 
@@ -177,6 +200,7 @@ def build_research_object(
 
     normalized_kind = str(kind or "").strip()
     normalized_state = str(state or "").strip()
+    semantic_payload = validate_research_payload(normalized_kind, payload)
     actor_payload = _mapping(actor, label="actor") or {
         "actor_id": "xscientist",
         "authority": "research_agent",
@@ -186,7 +210,7 @@ def build_research_object(
         "protocol_kind": "research_object",
         "kind": normalized_kind,
         "state": normalized_state,
-        "payload": _mapping(payload, label="payload"),
+        "payload": semantic_payload,
         "relations": _normalise_relations(relations),
         "actor": actor_payload,
         "provenance": _mapping(provenance, label="provenance"),
@@ -215,6 +239,9 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
         validate_json(result, load_schema("research_object"))
     except ValidationError as exc:
         raise ResearchObjectError(f"invalid research object: {exc.message}") from exc
+    validate_research_payload(
+        str(result.get("kind") or ""), result.get("payload") or {}
+    )
     expected = content_hash(_identity_payload(result))
     if result.get("content_hash") != expected:
         raise ResearchObjectError("research object content hash mismatch")

@@ -39,6 +39,7 @@
         "additionalProperties": false
       }
     },
+    "superseded_claim_ids": {"$ref": "#/$defs/objectIds"},
     "blockers": {"$ref": "#/$defs/issues"},
     "warnings": {"$ref": "#/$defs/issues"},
     "integrity": {"type": "object"},

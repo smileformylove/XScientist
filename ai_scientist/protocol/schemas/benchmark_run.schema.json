@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evolution.v1/benchmark_run.schema.json",
+  "title": "XScientist Controlled Benchmark Run",
+  "type": "object",
+  "required": ["schema_version", "benchmark_id", "candidate_hash", "evaluator_id", "suite_hash", "samples", "run_receipts", "task_count", "status", "errors", "report_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.benchmark-run.v1"},
+    "benchmark_id": {"type": "string"},
+    "candidate_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evaluator_id": {"type": "string", "pattern": "^(service|human):.+$"},
+    "suite_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "samples": {"type": "array", "items": {"type": "object"}},
+    "run_receipts": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "task_count": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["completed", "failed"]},
+    "errors": {"type": "array", "items": {"type": "string"}},
+    "report_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

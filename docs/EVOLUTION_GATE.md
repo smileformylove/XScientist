@@ -55,9 +55,11 @@ diversity, canary coverage, confidence, regression, and improvement thresholds.
 Safety, research-integrity, and reproducibility requirements cannot be
 disabled. Gate, canary, rollback, and promotion artifacts are reconstructed
 during validation; post-hoc semantic rewrites are rejected even if an outer
-hash is recomputed. Authentication, signatures, and physical benchmark custody
-remain deployment trust-boundary responsibilities, so their identities and
-attestation hashes are preserved for external verification.
+hash is recomputed. The executable runtime additionally supports HMAC-SHA256
+and optional Ed25519 identity attestations. Actual production deployment
+requires signed candidate, independent benchmark, canary, and human approval
+evidence. Hardware-backed keys, external timestamps, and physical benchmark
+custody remain deployment trust-boundary responsibilities.
 
 ## Required evidence records
 
@@ -107,3 +109,6 @@ Repeat `--approver` for a high-risk candidate.
 The latest decision is written to `evolution_gate.json`; compact decisions are
 appended to `evolution_gate_history.jsonl`. A held or blocked candidate remains
 shadow-only.
+
+To build the candidate evidence instead of supplying hand-authored hashes, run
+the workflow in [`EVOLUTION_RUNTIME.md`](EVOLUTION_RUNTIME.md).
