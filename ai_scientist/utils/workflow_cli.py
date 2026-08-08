@@ -13,6 +13,61 @@ from ai_scientist.writing_prompt_profiles import (
     normalize_writing_profile,
 )
 
+AUTOPILOT_PROFILES = ("balanced", "discovery", "publication")
+
+
+def apply_project_autopilot_profile(args: Namespace) -> Namespace:
+    """Resolve one finite, scientifically guarded project automation preset.
+
+    The preset deliberately configures orchestration only. It never marks internal
+    evidence as independently verified and it never removes the configured BFTS
+    budgets or stopping conditions.
+    """
+
+    profile = str(getattr(args, "autopilot", "") or "").strip().lower()
+    if not profile:
+        return args
+    if profile not in AUTOPILOT_PROFILES:
+        raise ValueError(
+            f"Unknown autopilot profile {profile!r}; expected one of {AUTOPILOT_PROFILES}"
+        )
+
+    args.resume = True
+    args.rank_ideas = True
+    args.fallback_ranked_ideas = True
+    args.high_quality_mode = True
+    args.require_quality_gate = True
+    args.strict_writing_guardrails = True
+    args.integrity_forensics = True
+    args.parallel = True
+    args.num_workers = max(1, min(int(getattr(args, "num_workers", 2)), 3))
+
+    if profile == "balanced":
+        args.workflow_mode = "program_driven"
+        args.num_ideas = max(int(args.num_ideas), 3)
+        args.top_k_ideas = args.top_k_ideas or 2
+        args.improvement_rounds = max(int(args.improvement_rounds), 2)
+        args.quality_preset = "high"
+    elif profile == "discovery":
+        args.workflow_mode = "agentic_tree"
+        args.num_ideas = max(int(args.num_ideas), 5)
+        args.top_k_ideas = args.top_k_ideas or 3
+        args.improvement_rounds = max(int(args.improvement_rounds), 2)
+        args.quality_preset = "high"
+        args.review_strategy = args.review_strategy or "depth"
+        args.autonomous_quality_followup_rounds = max(
+            int(args.autonomous_quality_followup_rounds), 1
+        )
+    else:
+        args.workflow_mode = "multi_agent_board"
+        args.submission_mode = True
+        args.num_ideas = max(int(args.num_ideas), 3)
+        args.top_k_ideas = args.top_k_ideas or 2
+        args.improvement_rounds = max(int(args.improvement_rounds), 2)
+        args.quality_preset = "publishable"
+
+    return args
+
 
 def normalize_writing_workflow_args(
     args: Namespace,
@@ -48,7 +103,9 @@ def recommend_default_target_venue(
         base_paper_type = "journal"
     else:
         normalized_paper_types = [str(paper_type) for paper_type in (paper_types or [])]
-        base_paper_type = normalized_paper_types[0] if normalized_paper_types else "normal"
+        base_paper_type = (
+            normalized_paper_types[0] if normalized_paper_types else "normal"
+        )
     return recommend_target_venue_from_idea(None, base_paper_type)
 
 

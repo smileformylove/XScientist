@@ -181,6 +181,8 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/protocol/schemas/research_adapter_receipt.schema.json",
                 "ai_scientist/protocol/schemas/research_dag.schema.json",
                 "ai_scientist/protocol/schemas/tool_evidence.schema.json",
+                "ai_scientist/protocol/schemas/insight_report.schema.json",
+                "ai_scientist/utils/insight_synthesis.py",
                 "ai_scientist/protocol/canonical_json.py",
                 "ai_scientist/protocol/attestation.py",
                 "ai_scientist/protocol/conformance/canonical-json-v1.json",

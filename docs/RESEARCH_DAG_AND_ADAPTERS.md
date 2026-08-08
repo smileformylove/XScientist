@@ -1,5 +1,12 @@
 # Beginner Workflow, Scientific DAG, and Platform Adapters
 
+`xscientist project ... --autopilot` exports the unified DAG automatically at
+the end of a successful project. Its self-contained browser is written to
+`<output_root>/views/<project>/research-dag/research-dag.html`, outside the
+Research VCS working tree, so refreshing a view cannot alter scientific
+history. Machine-synthesized insights appear as draft, unverified claim nodes
+linked to run evidence and hold gates.
+
 This layer is designed for people who understand their question but do not
 already know Git, provenance standards, autonomous-agent governance, or the
 XScientist object model.

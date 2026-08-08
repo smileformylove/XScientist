@@ -33,6 +33,9 @@ The IDEA JSON should include the following fields:
 - "Name": A short descriptor of the idea. Lowercase, no spaces, underscores allowed.
 - "Title": A catchy and informative title for the proposal.
 - "Short Hypothesis": A concise statement of the main hypothesis or research question. Clarify the need for this specific direction, ensure this is the best setting to investigate this idea, and there are not obvious other simpler ways to answer the question.
+- "Mechanism": The measurable causal or algorithmic mechanism the experiments are intended to isolate.
+- "Generation Operator": Exactly one supported discovery operator.
+- "Falsifiers": One or more observations that would reject or materially narrow the hypothesis.
 - "Related Work": A brief discussion of the most relevant related work and how the proposal clearly distinguishes from it, and is not a trivial extension.
 - "Abstract": An abstract that summarizes the proposal in conference format (approximately 250 words).
 - "Experiments": A list of experiments that would be conducted to validate the proposal. Ensure these are simple and feasible. Be specific in exactly how you would test the hypothesis, and detail precise algorithmic changes. Include the evaluation metrics you would use.
@@ -130,6 +133,56 @@ Results from your last action (if any):
 
 {last_tool_results}
 """
+
+
+DISCOVERY_OPERATORS = {
+    "analogy",
+    "combination",
+    "contradiction",
+    "boundary_condition",
+    "simplification",
+    "failure_driven",
+    "mechanism",
+    "out_of_distribution",
+}
+
+
+def validate_discovery_idea(idea: Any) -> list[str]:
+    """Return actionable contract errors for a proposed scientific idea."""
+
+    if not isinstance(idea, dict):
+        return ["idea_must_be_an_object"]
+    errors: list[str] = []
+    required_text = (
+        "Name",
+        "Title",
+        "Short Hypothesis",
+        "Mechanism",
+        "Related Work",
+        "Abstract",
+        "Experiments",
+        "Risk Factors and Limitations",
+    )
+    for field in required_text:
+        value = idea.get(field)
+        if isinstance(value, list):
+            valid = any(str(item).strip() for item in value)
+        else:
+            valid = bool(str(value or "").strip())
+        if not valid:
+            errors.append(f"missing_or_empty:{field}")
+    name = str(idea.get("Name") or "")
+    if name and not re.fullmatch(r"[a-z0-9_]+", name):
+        errors.append("invalid:Name_must_be_lowercase_snake_case")
+    operator = str(idea.get("Generation Operator") or "").strip()
+    if operator not in DISCOVERY_OPERATORS:
+        errors.append("invalid:Generation Operator")
+    falsifiers = idea.get("Falsifiers")
+    if not isinstance(falsifiers, list) or not any(
+        str(item).strip() for item in falsifiers
+    ):
+        errors.append("missing_or_empty:Falsifiers")
+    return errors
 
 
 def generate_temp_free_idea(
@@ -267,6 +320,15 @@ def generate_temp_free_idea(
                             idea = arguments_json.get("idea")
                             if not idea:
                                 raise ValueError("Missing 'idea' in arguments.")
+
+                            contract_errors = validate_discovery_idea(idea)
+                            if contract_errors:
+                                last_tool_results = (
+                                    "FinalizeIdea rejected by the scientific idea contract: "
+                                    + "; ".join(contract_errors)
+                                    + ". Revise the proposal and try again."
+                                )
+                                continue
 
                             idea["Literature Search"] = {
                                 "queries": list(literature_queries),

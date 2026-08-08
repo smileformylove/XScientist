@@ -24,7 +24,10 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 
 from ai_scientist.utils.deferred_imports import load_module_attr
 from ai_scientist.utils.high_quality_pipeline import run_high_quality_pass
-from ai_scientist.utils.workflow_cli import normalize_project_workflow_args
+from ai_scientist.utils.workflow_cli import (
+    apply_project_autopilot_profile,
+    normalize_project_workflow_args,
+)
 from ai_scientist.utils.fallback_audit import (
     format_strict_fallback_error,
     record_quality_fallback_if_needed,
@@ -86,6 +89,8 @@ from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
     update_pipeline_artifact,
 )
+from ai_scientist.utils.atomic_io import atomic_write_json, atomic_write_text
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.research_planning import (
     build_claim_evidence_graph,
     build_idea_cards,
@@ -289,6 +294,320 @@ def create_project_structure(
         f"{format_project_relative_path(project_path, project_root=PROJECT_ROOT)})"
     )
     return dirs
+
+
+def _prepare_project_input(args: argparse.Namespace, dirs: dict[str, Path]) -> None:
+    supplied = [bool(args.question), bool(args.topic), bool(args.ideas)]
+    if sum(supplied) > 1:
+        raise ValueError("--question, --topic, and --ideas are mutually exclusive")
+
+    topic_path = dirs["root"] / "00_config" / "topic.md"
+    if args.question:
+        question = str(args.question).strip()
+        if not question:
+            raise ValueError("--question cannot be empty")
+        content = f"# Research question\n\n{question}\n"
+        if args.resume and topic_path.exists():
+            existing = topic_path.read_text(encoding="utf-8")
+            if existing != content:
+                raise ValueError(
+                    "--resume refused because the supplied question differs from the "
+                    "existing project question"
+                )
+        atomic_write_text(topic_path, content)
+        args.topic = str(topic_path)
+    elif args.resume and not args.topic and not args.ideas and topic_path.is_file():
+        args.topic = str(topic_path)
+
+    generated = dirs["ideas"] / "generated_ideas.json"
+    stable = dirs["ideas"] / "ideas.json"
+    if args.resume and (generated.is_file() or stable.is_file()):
+        args.skip_ideation = True
+
+
+def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]]:
+    if not args.autopilot:
+        return []
+    from ai_scientist.apps.preflight import check_bfts_config
+
+    checks = check_bfts_config(args.bfts_config)
+    rows = [
+        {
+            "label": item.label,
+            "ok": bool(item.ok),
+            "severity": item.severity,
+            "detail": item.detail,
+        }
+        for item in checks
+    ]
+    blockers = [row for row in rows if not row["ok"] and row["severity"] == "error"]
+    if blockers:
+        details = "; ".join(f"{row['label']}: {row['detail']}" for row in blockers)
+        raise RuntimeError(
+            "Autopilot preflight failed before any research-model call: "
+            f"{details}. Run `xscientist doctor --deep --task research` and ensure "
+            "the configured isolated experiment runtime is available."
+        )
+    return rows
+
+
+def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
+    """Create a finite, isolated BFTS config without mutating the user's source."""
+
+    if not args.autopilot:
+        return None
+    import yaml
+
+    from ai_scientist.resources import resolve_bfts_config_path
+
+    source = resolve_bfts_config_path(args.bfts_config)
+    payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Autopilot BFTS configuration root must be a mapping")
+    source_config_hash = canonical_content_hash(payload)
+
+    limits = {
+        "balanced": {
+            "max_total_tokens": 800_000,
+            "max_wall_time_seconds": 14_400,
+            "stages": (8, 6, 6, 8),
+            "steps": 3,
+        },
+        "discovery": {
+            "max_total_tokens": 1_500_000,
+            "max_wall_time_seconds": 28_800,
+            "stages": (12, 10, 10, 12),
+            "steps": 4,
+        },
+        "publication": {
+            "max_total_tokens": 1_200_000,
+            "max_wall_time_seconds": 28_800,
+            "stages": (10, 8, 8, 10),
+            "steps": 3,
+        },
+    }[str(args.autopilot)]
+
+    execution = payload.setdefault("exec", {})
+    if not isinstance(execution, dict):
+        raise ValueError("Autopilot BFTS exec configuration must be a mapping")
+    execution["require_isolation"] = True
+    execution["network"] = "none"
+    execution["allow_experiment_network"] = False
+
+    budget = payload.setdefault("llm_budget", {})
+    if not isinstance(budget, dict):
+        raise ValueError("Autopilot BFTS llm_budget configuration must be a mapping")
+    for key in ("max_total_tokens", "max_wall_time_seconds"):
+        configured = budget.get(key)
+        ceiling = int(limits[key])
+        try:
+            budget[key] = min(int(configured), ceiling) if configured else ceiling
+        except (TypeError, ValueError):
+            budget[key] = ceiling
+
+    agent = payload.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        raise ValueError("Autopilot BFTS agent configuration must be a mapping")
+    configured_steps = agent.get("steps")
+    try:
+        agent["steps"] = min(int(configured_steps), int(limits["steps"]))
+    except (TypeError, ValueError):
+        agent["steps"] = int(limits["steps"])
+    stages = agent.setdefault("stages", {})
+    if not isinstance(stages, dict):
+        raise ValueError("Autopilot BFTS agent.stages configuration must be a mapping")
+    stage_keys = (
+        "stage1_max_iters",
+        "stage2_max_iters",
+        "stage3_max_iters",
+        "stage4_max_iters",
+    )
+    for key, ceiling in zip(stage_keys, limits["stages"]):
+        configured = stages.get(key)
+        try:
+            stages[key] = min(int(configured), int(ceiling))
+        except (TypeError, ValueError):
+            stages[key] = int(ceiling)
+
+    destination = Path(args.project_dir) / "00_config" / "autopilot_bfts.yaml"
+    header = (
+        "# XScientist finite autopilot derivative\n"
+        f"# profile: {args.autopilot}\n"
+        f"# source_config_hash: {source_config_hash}\n"
+        "# isolation_required: true; experiment_network: none\n"
+    )
+    atomic_write_text(
+        destination,
+        header + yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+    )
+    args.bfts_config = str(destination)
+    return str(destination)
+
+
+def _write_autopilot_receipt(
+    args: argparse.Namespace,
+    *,
+    checks: list[dict[str, object]],
+) -> str | None:
+    if not args.autopilot:
+        return None
+    topic_text = ""
+    if args.topic:
+        try:
+            topic_text = Path(args.topic).read_text(encoding="utf-8")
+        except OSError:
+            topic_text = str(args.question or "")
+    receipt: dict[str, object] = {
+        "schema_version": "xscientist.autopilot-run.v1",
+        "profile": args.autopilot,
+        "topic_hash": canonical_content_hash(topic_text),
+        "resolved_controls": {
+            "workflow_mode": args.workflow_mode,
+            "num_ideas": args.num_ideas,
+            "top_k_ideas": args.top_k_ideas,
+            "parallel": args.parallel,
+            "num_workers": args.num_workers,
+            "improvement_rounds": args.improvement_rounds,
+            "quality_preset": args.quality_preset,
+            "integrity_forensics": args.integrity_forensics,
+            "research_vcs": args.research_git,
+            "checkpoint_policy": args.git_checkpoint_policy,
+            "resume": args.resume,
+            "bfts_config_hash": canonical_content_hash(
+                Path(args.bfts_config).read_text(encoding="utf-8")
+            ),
+        },
+        "scientific_boundaries": {
+            "independent_verification_required_for_verified_claims": True,
+            "internal_review_is_independent_verification": False,
+            "retain_negative_and_failed_results": True,
+            "respect_bfts_budget_and_stopping_conditions": True,
+        },
+        "preflight": checks,
+    }
+    receipt["receipt_hash"] = canonical_content_hash(receipt)
+    destination = Path(args.project_dir) / "04_logs" / "autopilot_run.json"
+    atomic_write_json(destination, receipt, ensure_ascii=False)
+    return str(destination)
+
+
+def _load_project_progress(project_dir: str | Path) -> dict[str, Any]:
+    payload = _safe_load_json(
+        Path(project_dir) / "04_logs" / "progress.json", default={}
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_project_progress(
+    project_dir: str | Path,
+    *,
+    results: list[dict[str, Any]],
+    total: int,
+    selected_indices: list[int],
+) -> str:
+    latest: dict[int, dict[str, Any]] = {}
+    for fallback_idx, result in enumerate(results):
+        latest[int(result.get("idea_idx", fallback_idx))] = result
+    ordered = [latest[index] for index in sorted(latest)]
+    payload = {
+        "schema_version": "xscientist.project-progress.v1",
+        "completed": sum(1 for result in ordered if result.get("status") == "success"),
+        "attempted": len(ordered),
+        "total": int(total),
+        "selected_indices": list(selected_indices),
+        "results": ordered,
+    }
+    path = Path(project_dir) / "04_logs" / "progress.json"
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False, default=str)
+    return str(path)
+
+
+def _resolve_resume_work(
+    project_dir: str | Path,
+    idea_indices: list[int],
+    *,
+    enabled: bool,
+) -> tuple[list[int], list[dict[str, Any]], dict[int, str]]:
+    if not enabled:
+        return list(idea_indices), [], {}
+    progress = _load_project_progress(project_dir)
+    latest: dict[int, dict[str, Any]] = {}
+    checkpoints: dict[int, str] = {}
+    for fallback_idx, result in enumerate(progress.get("results") or []):
+        if not isinstance(result, dict):
+            continue
+        idea_idx = int(result.get("idea_idx", fallback_idx))
+        latest[idea_idx] = result
+        checkpoint = str(result.get("checkpoint_path") or "")
+        if checkpoint and Path(checkpoint).expanduser().is_file():
+            checkpoints[idea_idx] = checkpoint
+    completed = {
+        idea_idx
+        for idea_idx, result in latest.items()
+        if result.get("status") == "success"
+    }
+    pending = [idea_idx for idea_idx in idea_indices if idea_idx not in completed]
+    prior = [
+        latest[idea_idx] for idea_idx in sorted(completed) if idea_idx in idea_indices
+    ]
+    return pending, prior, checkpoints
+
+
+def _completed_resume_results(
+    project_dir: str | Path,
+) -> list[dict[str, Any]] | None:
+    """Return the completed cached selection, or None when any work remains."""
+
+    progress = _load_project_progress(project_dir)
+    selected = progress.get("selected_indices")
+    if not isinstance(selected, list) or not selected:
+        return None
+    latest: dict[int, dict[str, Any]] = {}
+    for fallback_idx, result in enumerate(progress.get("results") or []):
+        if not isinstance(result, dict):
+            continue
+        latest[int(result.get("idea_idx", fallback_idx))] = result
+    try:
+        selected_indices = [int(value) for value in selected]
+    except (TypeError, ValueError):
+        return None
+    if not all(
+        idea_idx in latest and latest[idea_idx].get("status") == "success"
+        for idea_idx in selected_indices
+    ):
+        return None
+    return [latest[idea_idx] for idea_idx in selected_indices]
+
+
+def _export_project_research_dag(
+    args: argparse.Namespace,
+    *,
+    results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not getattr(args, "_research_git_active", False):
+        return None
+    from xscientist.research_git import ResearchGitError
+    from xscientist.research_vcs import ResearchRepository
+
+    ara_roots = [
+        str(Path(str(result["ara_manifest"])).expanduser().parent)
+        for result in results
+        if result.get("ara_manifest")
+    ]
+    destination = (
+        Path(args.output_root) / "views" / Path(args.project_dir).name / "research-dag"
+    )
+    try:
+        exported = ResearchRepository(args.project_dir).export_dag(
+            destination,
+            ara_roots=ara_roots,
+            disclose_summaries=True,
+        )
+        print(f"🕸️ 统一科研 DAG: {exported['html']}")
+        return exported
+    except (ResearchGitError, OSError, ValueError) as exc:
+        _research_vcs_failure(args, "DAG export", exc)
+        return None
 
 
 def _local_research_git_question(topic: str | None) -> str | None:
@@ -589,6 +908,7 @@ def _record_local_research_handoff_objects(
     args: argparse.Namespace,
     *,
     results: list[dict],
+    insight_report: dict[str, Any] | None = None,
 ) -> None:
     if not getattr(args, "_research_git_active", False):
         return
@@ -602,6 +922,15 @@ def _record_local_research_handoff_objects(
         object_ids = getattr(args, "_research_vcs_ids", {})
         evidence_count = 0
         claim_count = 0
+        insights_by_idea: dict[int, list[dict[str, Any]]] = {}
+        for insight in (insight_report or {}).get("insights") or []:
+            if not isinstance(insight, dict):
+                continue
+            try:
+                insight_index = int(insight.get("idea_idx"))
+            except (TypeError, ValueError):
+                continue
+            insights_by_idea.setdefault(insight_index, []).append(insight)
         for fallback_index, result in enumerate(results):
             idea_index = int(result.get("idea_idx", fallback_index))
             attempt_id = (object_ids.get("attempts") or {}).get(idea_index)
@@ -688,6 +1017,24 @@ def _record_local_research_handoff_objects(
                     )["claim"]
                     claim_ids.append(claim_record.object_id)
                     claim_count += 1
+            for insight in insights_by_idea.get(idea_index, []):
+                insight_claim = lifecycle.claim(
+                    {
+                        "statement": str(insight.get("claim") or ""),
+                        "claim_hash": content_hash(insight),
+                        "insight_kind": insight.get("kind"),
+                        "confidence": insight.get("confidence"),
+                        "epistemic_status": "machine_synthesized_unverified",
+                        "evidence_refs": list(insight.get("evidence_refs") or []),
+                        "uncertainty": insight.get("uncertainty"),
+                        "next_experiment": insight.get("next_experiment") or {},
+                    },
+                    evidence_ids=[evidence_record.object_id],
+                    verified=False,
+                    commit=False,
+                )["claim"]
+                claim_ids.append(insight_claim.object_id)
+                claim_count += 1
             object_ids.setdefault("claims", {})[idea_index] = claim_ids
             gate = lifecycle.repository.record(
                 "gate_decision",
@@ -1316,6 +1663,9 @@ def improve_paper_with_review(
 def process_single_idea(args):
     """处理单个想法的完整流程（可在子进程中运行）"""
     args = list(args)
+    resume_from = None
+    if len(args) == 41:
+        resume_from = args.pop()
     requested_workflow_mode = None
     if len(args) == 40:
         requested_workflow_mode = args.pop()
@@ -1385,10 +1735,30 @@ def process_single_idea(args):
         print(f"🚀 开始处理想法 #{idea_idx}: {idea_name}")
         print(f"{'='*80}")
 
-        # 创建实验目录
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_dir = osp.join(project_dir, "02_experiments", f"{timestamp}_{idea_name}")
-        os.makedirs(exp_dir, exist_ok=True)
+        # 创建实验目录，或严格限定在当前项目内恢复已有实验。
+        if resume_from:
+            checkpoint = Path(str(resume_from)).expanduser().resolve()
+            if not checkpoint.is_file() or len(checkpoint.parents) < 4:
+                raise ValueError(f"Invalid resume checkpoint: {resume_from}")
+            resumed_exp_dir = checkpoint.parents[3]
+            experiments_root = (
+                Path(project_dir).expanduser().resolve() / "02_experiments"
+            )
+            try:
+                resumed_exp_dir.relative_to(experiments_root)
+            except ValueError as exc:
+                raise ValueError(
+                    "Resume checkpoint must belong to this project's 02_experiments directory"
+                ) from exc
+            exp_dir = str(resumed_exp_dir)
+            timestamp = resumed_exp_dir.name.split("_", 1)[0]
+            print(f"♻️ 从 BFTS checkpoint 恢复: {checkpoint}")
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            exp_dir = osp.join(
+                project_dir, "02_experiments", f"{timestamp}_{idea_name}"
+            )
+            os.makedirs(exp_dir, exist_ok=True)
 
         # Turn on LLM tracing NOW: every prompt from ideation → writeup →
         # review will be journaled into <ara>/llm/calls.jsonl with its
@@ -1477,7 +1847,12 @@ def process_single_idea(args):
         )
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
-        idea_config_path = edit_bfts_config_file(config_path, exp_dir, idea_path_md)
+        idea_config_path = edit_bfts_config_file(
+            config_path,
+            exp_dir,
+            idea_path_md,
+            resume_from=resume_from,
+        )
 
         experiment_result = perform_experiments_bfts(idea_config_path)
         if (
@@ -1486,6 +1861,7 @@ def process_single_idea(args):
         ):
             return {
                 "idea_idx": idea_idx,
+                "exp_dir": exp_dir,
                 "status": experiment_result.get("status", "failed"),
                 "stage": "experiment",
                 "error": (
@@ -2576,6 +2952,7 @@ def run_parallel_experiments(
                 kwargs["strict_fallbacks"],
                 kwargs["integrity_forensics_enabled"],
                 kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
+                (kwargs.get("resume_checkpoints") or {}).get(idx),
             )
         )
 
@@ -2592,18 +2969,14 @@ def run_parallel_experiments(
                 result = future.result()
                 results.append(result)
 
-                # 保存进度
-                progress_file = osp.join(project_dir, "04_logs", "progress.json")
-                with open(progress_file, "w") as f:
-                    json.dump(
-                        {
-                            "completed": len(results),
-                            "total": len(args_list),
-                            "results": results,
-                        },
-                        f,
-                        indent=4,
-                    )
+                _save_project_progress(
+                    project_dir,
+                    results=list(kwargs.get("prior_results") or []) + results,
+                    total=int(kwargs.get("progress_total") or len(args_list)),
+                    selected_indices=list(
+                        kwargs.get("selected_indices") or idea_indices
+                    ),
+                )
 
             except Exception as e:
                 print(f"❌ 想法 #{idea_idx} 执行出错: {e}")
@@ -2615,12 +2988,23 @@ def run_parallel_experiments(
                         "error": str(e),
                     }
                 )
+                _save_project_progress(
+                    project_dir,
+                    results=list(kwargs.get("prior_results") or []) + results,
+                    total=int(kwargs.get("progress_total") or len(args_list)),
+                    selected_indices=list(
+                        kwargs.get("selected_indices") or idea_indices
+                    ),
+                )
 
     return results
 
 
 def save_project_summary(
-    project_dir: str, results: list[dict]
+    project_dir: str,
+    results: list[dict],
+    *,
+    insight_report: dict[str, Any] | None = None,
 ) -> tuple[str, str, dict]:
     logs_dir = Path(project_dir) / "04_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -2765,12 +3149,20 @@ def save_project_summary(
             "review_role_counts": review_role_counts,
             "failed_stage_counts": stage_counts,
         },
+        "insight_summary": {
+            "count": len((insight_report or {}).get("insights") or []),
+            "synthesis_mode": (insight_report or {}).get("synthesis_mode"),
+            "epistemic_status": (insight_report or {}).get("epistemic_status"),
+            "independent_verification": (insight_report or {}).get(
+                "independent_verification"
+            ),
+            "report_hash": (insight_report or {}).get("report_hash"),
+        },
         "results": results,
     }
 
     summary_file = logs_dir / "project_summary.json"
-    with open(summary_file, "w") as f:
-        json.dump(summary, f, indent=4)
+    atomic_write_json(summary_file, summary, indent=4, default=str)
 
     shortlist_pool = [r for r in results if r.get("status") == "success"] or results
     ranked = sorted(
@@ -2844,6 +3236,9 @@ def main(argv=None):
         workflow_modes=list_workflow_modes(),
     )
     args = parser.parse_args(argv)
+    if sum(bool(value) for value in (args.question, args.topic, args.ideas)) > 1:
+        parser.error("--question, --topic, and --ideas are mutually exclusive")
+    apply_project_autopilot_profile(args)
     require_login("项目管理操作(run_project)")
     requested_workflow_mode = args.workflow_mode
     normalize_project_workflow_args(
@@ -2893,13 +3288,40 @@ def main(argv=None):
     if integrity_forensics_enabled:
         print("🔎 启用 integrity forensics：最终稿将生成可追溯一致性检查报告。")
 
-    # 按实际模型检查 provider 凭证
-    requested_models = _collect_requested_models(args)
-    require_model_credentials(requested_models)
-
     # 创建项目结构
     dirs = create_project_structure(args.project_dir, output_root=args.output_root)
     args.project_dir = str(dirs["root"])
+    _prepare_project_input(args, dirs)
+
+    completed_resume = (
+        _completed_resume_results(args.project_dir)
+        if args.resume
+        and not args.idea_indices
+        and not args.seed_from_ara
+        and not args.seed_node_id
+        else None
+    )
+    if completed_resume is not None:
+        args._research_git_active = _initialize_local_research_git(args)
+        print("♻️ 选定的科研流程已经完整完成；复用现有证据、论文与洞见，不再调用模型。")
+        _export_project_research_dag(args, results=completed_resume)
+        print(f"📁 项目目录: {args.project_dir}")
+        return
+
+    autopilot_config = _prepare_autopilot_bfts_config(args)
+    if autopilot_config:
+        print(f"⏱️ Autopilot 有限预算配置: {autopilot_config}")
+
+    # 按实际模型检查 provider 凭证；完整恢复路径不会再次要求模型凭证。
+    requested_models = _collect_requested_models(args)
+    require_model_credentials(requested_models)
+    autopilot_checks = _run_autopilot_preflight(args)
+    autopilot_receipt = _write_autopilot_receipt(
+        args,
+        checks=autopilot_checks,
+    )
+    if autopilot_receipt:
+        print(f"🧭 Autopilot 运行契约: {autopilot_receipt}")
     args._research_git_active = _initialize_local_research_git(args)
     record_model_provider_decisions(
         args.project_dir,
@@ -2991,20 +3413,40 @@ def main(argv=None):
         else None
     )
     default_indices = list(range(len(ideas))) if args.parallel else [0]
-    idea_indices, rankings = select_ranked_idea_candidates(
-        ideas,
-        ranking_enabled=args.rank_ideas,
-        ranking_model=args.idea_rank_model or args.model_writeup,
-        target_venue=args.target_venue,
-        prioritize_breakthrough=args.breakthrough_mode,
-        research_root=Path(args.output_root).expanduser(),
-        ranking_output_path=osp.join(args.project_dir, "04_logs", "idea_rankings.json"),
-        requested_indices=requested_indices,
-        default_indices=default_indices,
-        fallback_to_ranked=args.fallback_ranked_ideas,
-        use_ranked_all=args.parallel,
-        limit=args.top_k_ideas if args.rank_ideas else None,
+    cached_selection = (
+        _load_project_progress(args.project_dir).get("selected_indices")
+        if args.resume and requested_indices is None
+        else None
     )
+    idea_indices = []
+    if isinstance(cached_selection, list) and cached_selection:
+        for value in cached_selection:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(ideas):
+                idea_indices.append(index)
+    if idea_indices:
+        rankings = []
+        print(f"♻️ 复用上次已记录的 idea 选择: {idea_indices}")
+    else:
+        idea_indices, rankings = select_ranked_idea_candidates(
+            ideas,
+            ranking_enabled=args.rank_ideas,
+            ranking_model=args.idea_rank_model or args.model_writeup,
+            target_venue=args.target_venue,
+            prioritize_breakthrough=args.breakthrough_mode,
+            research_root=Path(args.output_root).expanduser(),
+            ranking_output_path=osp.join(
+                args.project_dir, "04_logs", "idea_rankings.json"
+            ),
+            requested_indices=requested_indices,
+            default_indices=default_indices,
+            fallback_to_ranked=args.fallback_ranked_ideas,
+            use_ranked_all=args.parallel,
+            limit=args.top_k_ideas if args.rank_ideas else None,
+        )
     if rankings:
         ranking_event = record_ranking_fallbacks(
             args.project_dir,
@@ -3026,6 +3468,25 @@ def main(argv=None):
                 f"  - idea #{item['idea_idx']} ranking_score={item.get('ranking_score')} total={item.get('total_score')} "
                 f"name={item.get('idea_name')}"
             )
+
+    selected_idea_indices = list(idea_indices)
+    idea_indices, prior_results, resume_checkpoints = _resolve_resume_work(
+        args.project_dir,
+        selected_idea_indices,
+        enabled=bool(args.resume),
+    )
+    if args.resume:
+        print(
+            "♻️ 恢复计划: "
+            f"selected={len(selected_idea_indices)} completed={len(prior_results)} "
+            f"pending={len(idea_indices)} checkpoints={len(resume_checkpoints)}"
+        )
+    _save_project_progress(
+        args.project_dir,
+        results=prior_results,
+        total=len(selected_idea_indices),
+        selected_indices=selected_idea_indices,
+    )
 
     # 运行实验
     if not args.skip_experiment:
@@ -3077,17 +3538,24 @@ def main(argv=None):
             "strict_fallbacks": strict_fallbacks,
             "integrity_forensics_enabled": integrity_forensics_enabled,
         }
-        results = []
+        results = list(prior_results)
+        executed_results: list[dict[str, Any]] = []
 
         if args.parallel and len(idea_indices) > 1:
             # 并行处理
-            results = run_parallel_experiments(
+            new_results = run_parallel_experiments(
                 args.project_dir,
                 idea_json,
                 args.num_workers,
                 idea_indices,
+                prior_results=prior_results,
+                resume_checkpoints=resume_checkpoints,
+                progress_total=len(selected_idea_indices),
+                selected_indices=selected_idea_indices,
                 **kwargs,
             )
+            results.extend(new_results)
+            executed_results.extend(new_results)
 
             # 打印结果摘要
             print("\n" + "=" * 80)
@@ -3147,14 +3615,23 @@ def main(argv=None):
                     kwargs["strict_fallbacks"],
                     kwargs["integrity_forensics_enabled"],
                     kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
+                    resume_checkpoints.get(idx),
                 )
 
                 result = process_single_idea(process_args)
                 results.append(result)
+                executed_results.append(result)
+                _save_project_progress(
+                    args.project_dir,
+                    results=results,
+                    total=len(selected_idea_indices),
+                    selected_indices=selected_idea_indices,
+                )
 
                 status_icon = "✅" if result["status"] == "success" else "❌"
                 print(f"\n{status_icon} 想法 #{idx}: {result['status']}")
 
+        results.sort(key=lambda item: int(item.get("idea_idx", 0)))
         experiment_ara_paths = [
             str(result.get("ara_manifest"))
             for result in results
@@ -3163,24 +3640,44 @@ def main(argv=None):
         successful_experiments = sum(
             1 for result in results if result.get("status") == "success"
         )
-        _record_local_research_attempt_objects(args, results=results)
+        _record_local_research_attempt_objects(args, results=executed_results)
         _record_local_research_checkpoint(
             args,
             stage="experiment",
-            subject=f"record {len(results)} experiment outcomes",
+            subject=f"record {len(executed_results)} new experiment outcomes",
             summary=(
-                f"Record {successful_experiments} successful and "
-                f"{len(results) - successful_experiments} unsuccessful research outcomes, "
-                "including their ARA manifests and compact evidence state."
+                f"Record {len(executed_results)} newly executed research outcomes while "
+                f"retaining {len(prior_results)} completed resume results, including "
+                "their ARA manifests and compact evidence state."
             ),
             status="completed" if successful_experiments else "failed",
             ara_paths=experiment_ara_paths,
         )
 
-        summary_file, shortlist_file, summary_payload = save_project_summary(
-            args.project_dir, results
+        from ai_scientist.utils.insight_synthesis import synthesize_project_insights
+
+        insight_report = synthesize_project_insights(
+            args.project_dir,
+            results,
+            model=args.model_review,
+            use_llm=bool(args.autopilot),
         )
-        _record_local_research_handoff_objects(args, results=results)
+        print(
+            "💡 洞见报告: "
+            f"mode={insight_report.get('synthesis_mode')} "
+            f"insights={len(insight_report.get('insights') or [])} "
+            "status=machine_synthesized_unverified"
+        )
+        summary_file, shortlist_file, summary_payload = save_project_summary(
+            args.project_dir,
+            results,
+            insight_report=insight_report,
+        )
+        _record_local_research_handoff_objects(
+            args,
+            results=executed_results,
+            insight_report=insight_report,
+        )
         save_contract_artifact(
             args.project_dir,
             "pipeline_manifest",
@@ -3240,6 +3737,7 @@ def main(argv=None):
             status="completed",
             ara_paths=experiment_ara_paths,
         )
+        _export_project_research_dag(args, results=results)
 
     print("\n" + "=" * 80)
     print("🎉 项目完成!")

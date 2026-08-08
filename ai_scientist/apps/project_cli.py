@@ -29,13 +29,16 @@ def build_parser(
         epilog="""
 示例用法:
 
-1. 生成3个想法并并行写成论文:
+1. 从自然语言问题开箱运行（自动预检、恢复、洞见和科研 DAG）:
+   xscientist project my_project --question "为什么这个机制在分布外失效？" --autopilot discovery
+
+2. 生成3个想法并并行写成论文:
    python -m xscientist project my_project --topic topic.md --num-ideas 3 --parallel
 
-2. 并行处理已有想法的前2个:
+3. 并行处理已有想法的前2个:
    python -m xscientist project my_project --ideas ideas.json --idea-indices 0,1 --parallel
 
-3. 自动改进2轮:
+4. 自动改进2轮:
    python -m xscientist project my_project --topic topic.md --improvement-rounds 2
         """,
     )
@@ -53,7 +56,28 @@ def build_parser(
     )
 
     parser.add_argument("--topic", type=str, help="主题描述文件")
+    parser.add_argument(
+        "--question",
+        type=str,
+        help="直接输入自然语言科研问题；无需预先创建 topic.md（与 --topic/--ideas 互斥）",
+    )
     parser.add_argument("--ideas", type=str, help="已有想法JSON文件")
+    parser.add_argument(
+        "--autopilot",
+        nargs="?",
+        const="balanced",
+        choices=["balanced", "discovery", "publication"],
+        default=None,
+        help=(
+            "开箱自动科研预设。balanced 控制成本，discovery 强化反证与探索，"
+            "publication 强化多角色复核和投稿门禁。"
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="从 04_logs/progress.json 和最近的 BFTS checkpoint 安全续跑",
+    )
     parser.add_argument(
         "--model-ideation",
         type=str,

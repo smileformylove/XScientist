@@ -231,6 +231,12 @@ run into one compact evidence object and one hash-only Research VCS claim per
 ARA claim. It records the manifest hash and source IDs instead of copying claim
 text, node bodies, or logs into Git.
 
+Autopilot runs also project each evidence-bound item from
+`04_logs/insight_report.json` as a draft claim. It preserves exact run evidence
+selectors, calibrated confidence, unresolved rivals, and the next
+high-information experiment. Internal agent review never promotes the claim to
+`verified`; the independent-verification hold gate remains authoritative.
+
 Use `--research-vcs-strict` when checkpoint failure must fail the research
 command. Without it, expensive research outputs are preserved and adapter errors
 are surfaced as warnings for later repair.

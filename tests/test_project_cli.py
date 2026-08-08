@@ -5,6 +5,10 @@ from unittest import mock
 
 from ai_scientist.apps import project
 from ai_scientist.apps.project_cli import build_parser
+from ai_scientist.utils.workflow_cli import (
+    apply_project_autopilot_profile,
+    normalize_project_workflow_args,
+)
 
 
 class ProjectCliTests(unittest.TestCase):
@@ -75,6 +79,56 @@ class ProjectCliTests(unittest.TestCase):
         self.assertEqual(args.model_writeup_small, "openai/research-model")
         self.assertEqual(args.model_citation, "gemini/citation-model")
         self.assertEqual(args.model_review, "anthropic/review-model")
+
+    def test_plain_language_question_and_autopilot_are_first_class_options(
+        self,
+    ) -> None:
+        parser = build_parser(
+            default_output_root="/tmp/research",
+            default_writing_profile="default",
+            writing_profiles=["default"],
+            workflow_modes=[
+                "adaptive",
+                "agentic_tree",
+                "program_driven",
+                "multi_agent_board",
+            ],
+        )
+        args = parser.parse_args(
+            [
+                "demo",
+                "--question",
+                "Why does the effect fail?",
+                "--autopilot",
+                "discovery",
+            ]
+        )
+        apply_project_autopilot_profile(args)
+        normalize_project_workflow_args(args)
+
+        self.assertEqual(args.question, "Why does the effect fail?")
+        self.assertEqual(args.autopilot, "discovery")
+        self.assertEqual(args.workflow_mode, "agentic_tree")
+        self.assertTrue(args.resume)
+        self.assertTrue(args.rank_ideas)
+        self.assertTrue(args.parallel)
+        self.assertGreaterEqual(args.num_ideas, 5)
+        self.assertEqual(args.top_k_ideas, 3)
+        self.assertTrue(args.integrity_forensics)
+
+    def test_bare_autopilot_uses_cost_bounded_balanced_profile(self) -> None:
+        parser = build_parser(
+            default_output_root="/tmp/research",
+            default_writing_profile="default",
+            writing_profiles=["default"],
+            workflow_modes=["adaptive", "program_driven"],
+        )
+        args = parser.parse_args(["demo", "--autopilot"])
+        apply_project_autopilot_profile(args)
+
+        self.assertEqual(args.autopilot, "balanced")
+        self.assertEqual(args.workflow_mode, "program_driven")
+        self.assertEqual(args.top_k_ideas, 2)
 
 
 if __name__ == "__main__":

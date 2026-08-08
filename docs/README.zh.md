@@ -399,7 +399,24 @@ export RESEARCH_OUTPUT_DIR="/path/to/my_xscientist_outputs"
 
 ## 使用方法
 
-先在当前目录准备一个 `topic.md` 主题文件。它可以直接从自然语言研究问题开始：
+最简单的完整运行可以直接输入自然语言科研问题，无需先创建文件：
+
+```bash
+xscientist doctor --deep --task research
+xscientist project my_project \
+  --question "为什么检索引导反思在分布外会失效？" \
+  --autopilot discovery
+```
+
+该入口会在首次科研模型调用前检查隔离执行环境，使用有限预算自动探索和排序
+候选方向，执行实验、质量复核与修复，支持断点续跑，并自动生成受证据约束的
+洞见报告、Research VCS checkpoint 和离线科研 DAG。内部 Agent 生成的洞见始终
+标记为 `machine_synthesized_unverified`，不能替代独立复现。
+自动驾驶会派生 `00_config/autopilot_bfts.yaml`，强制隔离、实验禁网以及总
+token/墙钟上限；用户配置中更低的上限会原样保留。
+
+高级用法也可以在当前目录准备一个 `topic.md` 主题文件。它可以直接从自然语言
+研究问题开始：
 
 ```markdown
 # 研究主题

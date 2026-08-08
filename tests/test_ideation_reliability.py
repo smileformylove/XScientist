@@ -15,6 +15,25 @@ class _FakeSearchTool:
 
 
 class IdeationReliabilityTests(unittest.TestCase):
+    def test_discovery_contract_rejects_semantically_empty_idea(self) -> None:
+        from ai_scientist.perform_ideation_temp_free import validate_discovery_idea
+
+        errors = validate_discovery_idea(
+            {
+                "Name": "too_shallow",
+                "Title": "A title",
+                "Short Hypothesis": "A vague hypothesis",
+                "Related Work": "Prior work",
+                "Abstract": "Abstract",
+                "Experiments": "Try it",
+                "Risk Factors and Limitations": "Unknown",
+            }
+        )
+
+        self.assertIn("missing_or_empty:Mechanism", errors)
+        self.assertIn("missing_or_empty:Falsifiers", errors)
+        self.assertIn("invalid:Generation Operator", errors)
+
     def test_balanced_literature_ranking_does_not_reduce_to_citation_count(
         self,
     ) -> None:
@@ -32,7 +51,7 @@ class IdeationReliabilityTests(unittest.TestCase):
         from ai_scientist import perform_ideation_temp_free as module
 
         idea = {
-            "Name": "Evidence First",
+            "Name": "evidence_first",
             "Title": "Evidence First Discovery",
             "Short Hypothesis": "A grounded mechanism improves discovery.",
             "Mechanism": "Contradiction-guided experiment selection.",

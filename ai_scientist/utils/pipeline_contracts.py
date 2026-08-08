@@ -49,6 +49,7 @@ ARTIFACT_FILENAMES = {
     "evaluation_report": "evaluation_report.json",
     "evolution_program": "evolution_program.json",
     "evolution_control": "evolution_control.json",
+    "insight_report": "04_logs/insight_report.json",
 }
 
 ARTIFACT_DEFAULT_STATUS = {
@@ -84,6 +85,7 @@ ARTIFACT_DEFAULT_STATUS = {
     "evaluation_report": "missing",
     "evolution_program": "missing",
     "evolution_control": "missing",
+    "insight_report": "missing",
 }
 
 ARTIFACT_ALLOWED_STATUS = {

@@ -407,8 +407,22 @@ Most scripts support stricter quality gates. During local debugging you may choo
 
 ## Usage
 
-Create a local topic file such as `topic.md` before running the examples below.
-It can start with a plain-language research question:
+The simplest complete run takes a plain-language question directly:
+
+```bash
+xscientist doctor --deep --task research
+xscientist project my_project \
+  --question "Why does retrieval-guided reflection fail out of distribution?" \
+  --autopilot discovery
+```
+
+This performs fail-fast isolation preflight, finite autonomous exploration,
+quality review/repair, crash-safe resume, evidence-bound insight synthesis,
+Research VCS checkpoints, and offline DAG export. Machine-synthesized insights
+remain explicitly unverified until independent replication.
+
+Advanced runs can instead use a local `topic.md` file. It can start with a
+plain-language research question:
 
 ```markdown
 # Research topic
