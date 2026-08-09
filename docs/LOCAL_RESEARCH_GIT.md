@@ -182,9 +182,10 @@ default:
 xscientist research export --repo . --ref HEAD --dest ../research-export
 ```
 
-The export contains a hash-bound manifest plus RO-Crate, W3C PROV-JSON, CWL,
-DVC, and MLflow adapter files. Repeat `--format` to select a subset. Scientific
-payloads enter RO-Crate only with the explicit `--include-payloads` flag.
+The export contains a hash-bound manifest plus Process Run RO-Crate, W3C
+PROV-JSON, CWL, DVC, MLflow, OpenLineage, Croissant, and Nanopublication files.
+Repeat `--format` to select a subset. Scientific payloads enter RO-Crate only
+with the explicit `--include-payloads` flag.
 
 The audit is a derived index over IDs and hashes. Raw logs, datasets, and full
 ARA contents remain stored and drill-downable, but are not loaded merely to

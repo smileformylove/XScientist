@@ -32,6 +32,10 @@ RESEARCH_DAG_SCHEMA = "xscientist.research-dag.v1"
 
 _PHASES = {
     "question": 0,
+    "search_plan": 1,
+    "search_receipt": 2,
+    "source_snapshot": 3,
+    "passage_evidence": 4,
     "hypothesis": 1,
     "research_plan": 2,
     "preregistration": 2,
@@ -42,6 +46,7 @@ _PHASES = {
     "experiment_node": 3,
     "metric": 4,
     "evidence": 4,
+    "observation": 4,
     "review": 5,
     "gate_decision": 5,
     "claim": 6,
@@ -68,6 +73,8 @@ def _summary(item: Mapping[str, Any], *, disclose: bool) -> str:
         "summary",
         "result",
         "title",
+        "query",
+        "locator",
         "decision",
         "status",
         "name",
@@ -351,6 +358,95 @@ def _object_proof(
                     "data_bound",
                     "Dataset identity is recorded",
                     bool(provenance.get("dataset_hashes")),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind == "search_plan":
+        checks.extend(
+            [
+                _check(
+                    "search_plan_locked",
+                    "Literature queries and criteria were locked",
+                    state == "locked",
+                    "trace",
+                ),
+                _check(
+                    "search_plan_bound",
+                    "Search plan has an immutable commitment",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind == "search_receipt":
+        checks.extend(
+            [
+                _check(
+                    "search_plan_bound",
+                    "Retrieval receipt points to its locked search plan",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"search_plan"},
+                            relations={"depends_on"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "retrieval_bound",
+                    "Retrieval candidates have an immutable receipt hash",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind == "source_snapshot":
+        checks.extend(
+            [
+                _check(
+                    "search_receipt_bound",
+                    "Source selection points to its retrieval receipt",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"search_receipt"},
+                            relations={"derived_from"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "source_content_bound",
+                    "Source content has an immutable identity",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind == "passage_evidence":
+        checks.extend(
+            [
+                _check(
+                    "source_snapshot_bound",
+                    "Passage points to an immutable source snapshot",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"source_snapshot"},
+                            relations={"quotes"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "passage_bound",
+                    "Passage quote and locator have immutable identities",
+                    _has_hash_anchor(payload),
                     "replay",
                 ),
             ]
@@ -1186,7 +1282,7 @@ def build_research_dag(
         str(relation.get("target"))
         for item in rows
         for relation in item.get("relations") or []
-        if relation.get("type") in {"refutes", "contradicts"}
+        if relation.get("type") in {"refutes", "qualified_refutes", "contradicts"}
     }
     nodes = [
         {
@@ -1215,14 +1311,23 @@ def build_research_dag(
     dangling: list[str] = []
     category = {
         "supports": "support",
+        "qualified_supports": "support",
         "refutes": "challenge",
+        "qualified_refutes": "challenge",
         "contradicts": "challenge",
         "evaluates": "verification",
         "reproduces": "verification",
+        "attests": "verification",
         "promotes": "evolution",
         "supersedes": "evolution",
         "depends_on": "lineage",
         "derived_from": "lineage",
+        "retrieves": "lineage",
+        "cites": "lineage",
+        "quotes": "lineage",
+        "observes": "lineage",
+        "generated_by": "lineage",
+        "uses_context": "context",
     }
     for item in rows:
         for relation in item.get("relations") or []:

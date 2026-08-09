@@ -22,6 +22,7 @@ from xscientist import ResearchLifecycle, ResearchRepository
 from xscientist.research_cli import main as research_main
 from xscientist.research_git import ResearchGitError
 from xscientist.research_git import add_research_object
+from xscientist.research_semantics import claim_scope_hash, normalize_claim_scope
 
 
 class ResearchObjectProtocolTests(unittest.TestCase):
@@ -383,6 +384,41 @@ class ResearchRepositoryTests(unittest.TestCase):
                 opposed["conflict_id"],
             )
             self.assertTrue(repository.fsck()["ok"])
+
+    def test_merge_does_not_confuse_disjoint_scopes_with_a_contradiction(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            repository.commit(stage="ideation", subject="record H1")
+            repository.fork("children")
+            child_scope = normalize_claim_scope({"population": "children"})
+            repository.record(
+                "evidence",
+                {
+                    "result": "negative in children",
+                    "scope": child_scope,
+                    "scope_hash": claim_scope_hash(child_scope),
+                },
+                relations=[{"type": "refutes", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="challenge H1 in children")
+            repository.switch("main")
+            adult_scope = normalize_claim_scope({"population": "adults"})
+            repository.record(
+                "evidence",
+                {
+                    "result": "positive in adults",
+                    "scope": adult_scope,
+                    "scope_hash": claim_scope_hash(adult_scope),
+                },
+                relations=[{"type": "supports", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="support H1 in adults")
+
+            preview = repository.merge_preview("children")
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
 
     def test_decision_policy_checkpoints_before_fork_without_mutating(self) -> None:
         with tempfile.TemporaryDirectory() as td:

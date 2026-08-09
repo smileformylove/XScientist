@@ -51,7 +51,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+from ai_scientist.protocol import (
+    NODE_IDENTITY_PROFILE,
+    PROTOCOL_VERSION,
+    hash_node_payload,
+)
 from ai_scientist.utils.ara_graph import (
     graph_with_dag_metadata,
     write_exploration_graph_visualization,
@@ -68,6 +72,52 @@ from ai_scientist.utils.privacy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_EXECUTION_IDENTITY_FIELDS = (
+    "command_hash",
+    "container_digest",
+    "environment_hash",
+    "observed_dependency_hash",
+    "runner_hash",
+)
+_EXECUTION_IDENTITY_LIST_FIELDS = (
+    "dataset_hashes",
+    "dependency_lock_hashes",
+    "observed_dependency_hashes",
+    "seeds",
+    "tool_hashes",
+)
+
+
+def _node_execution_identity(raw: dict[str, Any]) -> dict[str, Any]:
+    """Return portable, stable execution inputs explicitly supplied by a node.
+
+    Paths, timestamps, host names, and raw environment variables are excluded.
+    Producers may provide a complete ``execution_identity`` mapping, or the
+    common hash/seed fields directly on the journal node.
+    """
+
+    supplied = raw.get("execution_identity")
+    identity = dict(supplied) if isinstance(supplied, dict) else {}
+    for field in _EXECUTION_IDENTITY_FIELDS:
+        value = raw.get(field)
+        if value not in (None, ""):
+            identity.setdefault(field, str(value))
+    for field in _EXECUTION_IDENTITY_LIST_FIELDS:
+        values = raw.get(field)
+        if isinstance(values, (list, tuple, set)):
+            cleaned = sorted({value for value in values if value not in (None, "")})
+            if cleaned:
+                identity.setdefault(field, cleaned)
+    backend = str(raw.get("execution_backend") or "").strip()
+    if backend:
+        identity.setdefault("backend", backend)
+    isolation = raw.get("execution_isolation")
+    if isinstance(isolation, dict) and isolation:
+        identity.setdefault("isolation", dict(isolation))
+    return identity
+
 
 ARA_SCHEMA_VERSION = PROTOCOL_VERSION
 ARA_ROOT_NAME = "ara"
@@ -328,6 +378,7 @@ def _export_nodes_from_journal(
         llm_refs = [str(r) for r in llm_refs_raw if r]
         context_refs_raw = raw.get("context_pack_refs") or []
         context_refs = [str(r) for r in context_refs_raw if r]
+        execution_identity = _node_execution_identity(raw)
         is_seed = bool(raw.get("is_seed_node"))
         evaluation_binding = evaluation_hash_binding(raw.get("evaluation_report"))
         hash_inputs = ["code", "metric"]
@@ -335,6 +386,10 @@ def _export_nodes_from_journal(
             hash_inputs.append("evaluation")
         if llm_refs:
             hash_inputs.append("llm_calls")
+        if context_refs:
+            hash_inputs.append("context")
+        if execution_identity:
+            hash_inputs.append("execution")
         if is_seed:
             hash_inputs.append("seed")
         try:
@@ -345,6 +400,8 @@ def _export_nodes_from_journal(
                     {"evaluation": evaluation_binding} if evaluation_binding else None
                 ),
                 llm_call_hashes=llm_refs or None,
+                context_hashes=context_refs or None,
+                execution_identity=execution_identity or None,
                 is_seed=is_seed,
             )
         except Exception as exc:  # pragma: no cover - defensive; hashing is best-effort
@@ -352,6 +409,8 @@ def _export_nodes_from_journal(
         if node_content_hash:
             metrics_payload["content_hash"] = node_content_hash
             metrics_payload["content_hash_inputs"] = hash_inputs
+            metrics_payload["identity_profile"] = NODE_IDENTITY_PROFILE
+            metrics_payload["execution_identity"] = execution_identity
         _safe_write_json(node_dir / "metrics.json", metrics_payload)
         if isinstance(raw.get("evaluation_report"), dict):
             _safe_write_json(node_dir / "evaluation.json", raw["evaluation_report"])
@@ -385,6 +444,8 @@ def _export_nodes_from_journal(
                 "id": node_id,
                 "content_hash": node_content_hash,
                 "content_hash_inputs": hash_inputs,
+                "identity_profile": NODE_IDENTITY_PROFILE,
+                "execution_identity": execution_identity,
                 "llm_call_refs": llm_refs,
                 "context_pack_refs": context_refs,
                 "stage": stage_label,
@@ -1083,6 +1144,8 @@ def export_ara(
     manifest = {
         "schema_version": ARA_SCHEMA_VERSION,
         "protocol_kind": "manifest",
+        "portability_profile": "ara.portable.v1",
+        "conformance_profile": "ara.conformance.v1",
         "created_at": _now_iso(),
         "source_exp_dir": relative_path_reference(exp_dir_path, base=ara_dir),
         "project_dir": relative_path_reference(project_dir_path, base=ara_dir),

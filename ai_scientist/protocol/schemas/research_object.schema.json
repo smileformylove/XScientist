@@ -30,14 +30,27 @@
       "type": "string",
       "pattern": "^rso-[0-9a-f]{16}$"
     },
+    "qualified_id": {
+      "type": "string",
+      "pattern": "^urn:xscientist:research-object:sha256:[0-9a-f]{64}$"
+    },
+    "identity_profile": {
+      "type": "string",
+      "const": "xscientist.research-object-identity.v1"
+    },
     "kind": {
       "type": "string",
       "enum": [
         "question",
+        "search_plan",
+        "search_receipt",
+        "source_snapshot",
+        "passage_evidence",
         "hypothesis",
         "preregistration",
         "research_plan",
         "experiment_attempt",
+        "observation",
         "metric",
         "evidence",
         "claim",
@@ -87,7 +100,16 @@
               "contradicts",
               "derived_from",
               "evaluates",
-              "promotes"
+              "promotes",
+              "retrieves",
+              "cites",
+              "quotes",
+              "observes",
+              "generated_by",
+              "qualified_supports",
+              "qualified_refutes",
+              "attests",
+              "uses_context"
             ]
           },
           "target": {

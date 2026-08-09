@@ -95,7 +95,7 @@ def _claim_identity(
     evidence = tuple(
         target
         for target in _targets(claim, relation_types=("depends_on",), role=None)
-        if objects.get(target, {}).get("kind") == "evidence"
+        if objects.get(target, {}).get("kind") in {"evidence", "passage_evidence"}
     )
     return statement, evidence
 
@@ -226,11 +226,12 @@ def _claim_closure(
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     claim_id = str(claim["object_id"])
     direct = _targets(claim, relation_types=("depends_on",))
-    evidence_ids = _kind_ids(direct, objects, "evidence")
+    experimental_evidence_ids = _kind_ids(direct, objects, "evidence")
+    passage_ids = _kind_ids(direct, objects, "passage_evidence")
     gate_ids = _kind_ids(direct, objects, "gate_decision")
     # Evidence may also point at a claim, which supports imported/legacy graphs.
-    evidence_ids = sorted(
-        set(evidence_ids)
+    experimental_evidence_ids = sorted(
+        set(experimental_evidence_ids)
         | {
             object_id
             for object_id, item in objects.items()
@@ -238,10 +239,24 @@ def _claim_closure(
             and claim_id in _targets(item, relation_types=("supports", "refutes"))
         }
     )
+    passage_ids = sorted(
+        set(passage_ids)
+        | {
+            object_id
+            for object_id, item in objects.items()
+            if item.get("kind") == "passage_evidence"
+            and claim_id
+            in _targets(
+                item,
+                relation_types=("qualified_supports", "qualified_refutes"),
+            )
+        }
+    )
+    evidence_ids = sorted({*experimental_evidence_ids, *passage_ids})
     attempt_ids = sorted(
         {
             target
-            for evidence_id in evidence_ids
+            for evidence_id in experimental_evidence_ids
             for target in _targets(
                 objects[evidence_id], relation_types=("derived_from",)
             )
@@ -264,7 +279,38 @@ def _claim_closure(
             if objects.get(target, {}).get("kind") == "preregistration"
         }
     )
-    lineage_ids = {claim_id, *evidence_ids, *attempt_ids}
+    source_ids = sorted(
+        {
+            target
+            for passage_id in passage_ids
+            for target in _targets(objects[passage_id], relation_types=("quotes",))
+            if objects.get(target, {}).get("kind") == "source_snapshot"
+        }
+    )
+    search_receipt_ids = sorted(
+        {
+            target
+            for source_id in source_ids
+            for target in _targets(objects[source_id], relation_types=("derived_from",))
+            if objects.get(target, {}).get("kind") == "search_receipt"
+        }
+    )
+    search_plan_ids = sorted(
+        {
+            target
+            for receipt_id in search_receipt_ids
+            for target in _targets(objects[receipt_id], relation_types=("depends_on",))
+            if objects.get(target, {}).get("kind") == "search_plan"
+        }
+    )
+    lineage_ids = {
+        claim_id,
+        *evidence_ids,
+        *attempt_ids,
+        *source_ids,
+        *search_receipt_ids,
+        *search_plan_ids,
+    }
     reproduction_ids = sorted(
         object_id
         for object_id, item in objects.items()
@@ -274,11 +320,20 @@ def _claim_closure(
 
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
+    claim_payload = claim.get("payload") or {}
+    if claim.get("state") == "verified" and not claim_payload.get("scope_hash"):
+        warnings.append(
+            _blocker(
+                "claim_scope_unstructured",
+                claim_id,
+                "verified claim should bind a structured applicability scope hash",
+            )
+        )
     if not evidence_ids:
         blockers.append(
             _blocker("claim_without_evidence", claim_id, "claim has no evidence anchor")
         )
-    if evidence_ids and not attempt_ids:
+    if experimental_evidence_ids and not attempt_ids:
         blockers.append(
             _blocker(
                 "evidence_without_attempt",
@@ -290,6 +345,56 @@ def _claim_closure(
         blockers.append(
             _blocker("attempt_without_plan", claim_id, "attempt has no research plan")
         )
+    for passage_id in passage_ids:
+        bound_sources = [
+            target
+            for target in _targets(objects[passage_id], relation_types=("quotes",))
+            if objects.get(target, {}).get("kind") == "source_snapshot"
+        ]
+        if not bound_sources:
+            blockers.append(
+                _blocker(
+                    "passage_without_source",
+                    passage_id,
+                    "passage evidence has no immutable source snapshot",
+                )
+            )
+    if passage_ids and not source_ids:
+        blockers.append(
+            _blocker(
+                "literature_without_source",
+                claim_id,
+                "literature claim has no source snapshot",
+            )
+        )
+    for source_id in source_ids:
+        bound_receipts = [
+            target
+            for target in _targets(objects[source_id], relation_types=("derived_from",))
+            if objects.get(target, {}).get("kind") == "search_receipt"
+        ]
+        if not bound_receipts:
+            blockers.append(
+                _blocker(
+                    "source_without_search_receipt",
+                    source_id,
+                    "source selection has no retrieval receipt",
+                )
+            )
+    for receipt_id in search_receipt_ids:
+        bound_plans = [
+            target
+            for target in _targets(objects[receipt_id], relation_types=("depends_on",))
+            if objects.get(target, {}).get("kind") == "search_plan"
+        ]
+        if not bound_plans:
+            blockers.append(
+                _blocker(
+                    "receipt_without_search_plan",
+                    receipt_id,
+                    "retrieval receipt has no preregistered search plan",
+                )
+            )
 
     semantic_ids = [
         claim_id,
@@ -297,6 +402,9 @@ def _claim_closure(
         *attempt_ids,
         *plan_ids,
         *preregistration_ids,
+        *source_ids,
+        *search_receipt_ids,
+        *search_plan_ids,
     ]
     for object_id in semantic_ids:
         item = objects[object_id]
@@ -516,6 +624,11 @@ def _claim_closure(
         "claim_id": claim_id,
         "state": str(claim.get("state") or ""),
         "evidence_ids": evidence_ids,
+        "experimental_evidence_ids": experimental_evidence_ids,
+        "passage_evidence_ids": passage_ids,
+        "source_snapshot_ids": source_ids,
+        "search_receipt_ids": search_receipt_ids,
+        "search_plan_ids": search_plan_ids,
         "attempt_ids": attempt_ids,
         "plan_ids": plan_ids,
         "preregistration_ids": preregistration_ids,

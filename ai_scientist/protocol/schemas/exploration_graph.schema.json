@@ -26,6 +26,15 @@
             "type": ["string", "null"],
             "description": "sha256:<hex>. See content_hash_inputs for which fields fed the hash."
           },
+          "identity_profile": {
+            "type": "string",
+            "enum": ["ara.node-identity.v1", "ara.node-identity.v2"],
+            "description": "Canonical identity recipe. Missing means the legacy v1 recipe."
+          },
+          "execution_identity": {
+            "type": "object",
+            "description": "Portable data, environment, runner, tool, seed, and observed-dependency identities bound into the node hash."
+          },
           "content_hash_inputs": {
             "type": "array",
             "items": {"type": "string"},

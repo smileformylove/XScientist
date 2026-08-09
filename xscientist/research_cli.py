@@ -169,14 +169,14 @@ def _hash_local_file(path_value: str) -> str:
 
     path = Path(path_value).expanduser()
     if not path.is_file():
-        raise ResearchGitError("dataset split file was not found")
+        raise ResearchGitError("local file was not found")
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
-        raise ResearchGitError("dataset split file could not be read") from exc
+        raise ResearchGitError("local file could not be read") from exc
     return "sha256:" + digest.hexdigest()
 
 
@@ -205,6 +205,39 @@ def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) ->
         print(f"Checkpoint: {checkpoint.checkpoint_id}")
     else:
         print(f"Checkpoint skipped: {checkpoint.reason}")
+
+
+def _add_scope_arguments(
+    parser: argparse.ArgumentParser, *, metric_flag: str = "--scope-metric"
+) -> None:
+    parser.add_argument("--scope", default="", help="Legacy free-text applicability.")
+    parser.add_argument("--population", default="")
+    parser.add_argument("--intervention", default="")
+    parser.add_argument("--comparator", default="")
+    parser.add_argument("--outcome", default="")
+    parser.add_argument("--dataset", action="append", default=[])
+    parser.add_argument("--dataset-slice", action="append", default=[])
+    parser.add_argument(metric_flag, dest="scope_metric", default="")
+    parser.add_argument("--unit", default="")
+    parser.add_argument("--condition", action="append", default=[])
+    parser.add_argument("--time-window", default="")
+    parser.add_argument("--estimand", default="")
+
+
+def _scope_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "population": args.population,
+        "intervention": args.intervention,
+        "comparator": args.comparator,
+        "outcome": args.outcome,
+        "datasets": args.dataset,
+        "dataset_slices": args.dataset_slice,
+        "metric": args.scope_metric,
+        "unit": args.unit,
+        "conditions": args.condition,
+        "time_window": args.time_window,
+        "estimand": args.estimand,
+    }
 
 
 def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentParser:
@@ -276,6 +309,84 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     plan_parser.add_argument("-m", "--message")
     plan_parser.add_argument("--no-commit", action="store_true")
     plan_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    literature_parser = subparsers.add_parser(
+        "literature",
+        help="Record a reproducible literature search and source-qualified passages.",
+    )
+    literature_subparsers = literature_parser.add_subparsers(
+        dest="literature_command", required=True
+    )
+    literature_plan = literature_subparsers.add_parser(
+        "plan", help="Lock queries and selection criteria before searching."
+    )
+    literature_plan.add_argument("question")
+    literature_plan.add_argument("--query", action="append", required=True)
+    literature_plan.add_argument("--provider", action="append", default=[])
+    literature_plan.add_argument("--include", action="append", default=[])
+    literature_plan.add_argument("--exclude", action="append", default=[])
+    literature_plan.add_argument("--repo", default=".")
+    literature_plan.add_argument("-m", "--message")
+    literature_plan.add_argument("--no-commit", action="store_true")
+    literature_plan.add_argument("--json", action="store_true", dest="as_json")
+
+    literature_receipt = literature_subparsers.add_parser(
+        "receipt", help="Record every ranked candidate returned by one provider call."
+    )
+    literature_receipt.add_argument("plan_id")
+    literature_receipt.add_argument("--provider", required=True)
+    literature_receipt.add_argument("--query", required=True)
+    literature_receipt.add_argument(
+        "--results",
+        required=True,
+        help="JSON array, or object with a candidates array; secrets and raw bodies are removed.",
+    )
+    literature_receipt.add_argument("--retrieved-at", default="")
+    literature_receipt.add_argument("--corpus-version", default="")
+    literature_receipt.add_argument("--error", action="append", default=[])
+    literature_receipt.add_argument("--repo", default=".")
+    literature_receipt.add_argument("-m", "--message")
+    literature_receipt.add_argument("--no-commit", action="store_true")
+    literature_receipt.add_argument("--json", action="store_true", dest="as_json")
+
+    literature_source = literature_subparsers.add_parser(
+        "source", help="Freeze one selected source by identifier and content hash."
+    )
+    literature_source.add_argument("receipt_id")
+    literature_source.add_argument("title")
+    source_identity = literature_source.add_mutually_exclusive_group(required=True)
+    source_identity.add_argument("--content-hash")
+    source_identity.add_argument(
+        "--file", help="Hash a local source without storing its path."
+    )
+    literature_source.add_argument("--metadata-hash")
+    literature_source.add_argument("--doi", default="")
+    literature_source.add_argument("--pmid", default="")
+    literature_source.add_argument("--arxiv-id", default="")
+    literature_source.add_argument("--url", default="")
+    literature_source.add_argument("--license", default="", dest="license_name")
+    literature_source.add_argument("--retraction-status", default="unknown")
+    literature_source.add_argument("--supersedes", dest="previous_source_id")
+    literature_source.add_argument("--repo", default=".")
+    literature_source.add_argument("-m", "--message")
+    literature_source.add_argument("--no-commit", action="store_true")
+    literature_source.add_argument("--json", action="store_true", dest="as_json")
+
+    literature_passage = literature_subparsers.add_parser(
+        "passage",
+        help="Record an exact quote, locator, source, and semantic direction.",
+    )
+    literature_passage.add_argument("source_id")
+    literature_passage.add_argument("quote")
+    literature_passage.add_argument("--locator", required=True)
+    literature_passage.add_argument("--supports", action="append", default=[])
+    literature_passage.add_argument("--refutes", action="append", default=[])
+    literature_passage.add_argument("--context")
+    _add_scope_arguments(literature_passage, metric_flag="--metric")
+    literature_passage.add_argument("--repo", default=".")
+    literature_passage.add_argument("-m", "--message")
+    literature_passage.add_argument("--no-commit", action="store_true")
+    literature_passage.add_argument("--json", action="store_true", dest="as_json")
 
     preregistration_parser = subparsers.add_parser(
         "preregister",
@@ -365,6 +476,7 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
     evidence_parser.add_argument("--verified", action="store_true")
+    _add_scope_arguments(evidence_parser)
     evidence_parser.add_argument(
         "--verifier",
         help="Independent verifier identity; required with --verified.",
@@ -407,7 +519,7 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     claim_parser.add_argument("statement")
     claim_parser.add_argument("--evidence", action="append", required=True)
-    claim_parser.add_argument("--scope", default="")
+    _add_scope_arguments(claim_parser, metric_flag="--metric")
     claim_parser.add_argument("--gate")
     claim_parser.add_argument("--verified", action="store_true")
     claim_parser.add_argument("--repo", default=".")
@@ -576,7 +688,16 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     adapter_sync.add_argument(
         "--format",
         action="append",
-        choices=["ro-crate", "prov-json", "cwl", "dvc", "mlflow"],
+        choices=[
+            "ro-crate",
+            "prov-json",
+            "cwl",
+            "dvc",
+            "mlflow",
+            "openlineage",
+            "croissant",
+            "nanopub",
+        ],
         default=[],
         dest="formats",
     )
@@ -1014,6 +1135,101 @@ def main(
             _print_saved_object("research plan", result, as_json=args.as_json)
             return 0
 
+        if args.command == "literature":
+            from .research_commands import (
+                save_passage_evidence,
+                save_search_plan,
+                save_search_receipt,
+                save_source_snapshot,
+            )
+
+            if args.literature_command == "plan":
+                result = save_search_plan(
+                    args.repo,
+                    question=args.question,
+                    queries=args.query,
+                    providers=args.provider,
+                    inclusion_criteria=args.include,
+                    exclusion_criteria=args.exclude,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "literature search plan", result, as_json=args.as_json
+                )
+                return 0
+            if args.literature_command == "receipt":
+                path = Path(args.results).expanduser()
+                if not path.is_file():
+                    raise ResearchGitError("literature results file was not found")
+                try:
+                    raw_results = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ResearchGitError(
+                        "literature results file is invalid JSON"
+                    ) from exc
+                candidates = (
+                    raw_results.get("candidates")
+                    if isinstance(raw_results, dict)
+                    else raw_results
+                )
+                if not isinstance(candidates, list) or not all(
+                    isinstance(item, dict) for item in candidates
+                ):
+                    raise ResearchGitError(
+                        "literature results must be an array of candidate objects"
+                    )
+                result = save_search_receipt(
+                    args.repo,
+                    plan_id=args.plan_id,
+                    provider=args.provider,
+                    query=args.query,
+                    candidates=candidates,
+                    retrieved_at=args.retrieved_at,
+                    corpus_version=args.corpus_version,
+                    errors=args.error,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "literature search receipt", result, as_json=args.as_json
+                )
+                return 0
+            if args.literature_command == "source":
+                result = save_source_snapshot(
+                    args.repo,
+                    receipt_id=args.receipt_id,
+                    title=args.title,
+                    content_hash=args.content_hash or _hash_local_file(args.file),
+                    metadata_hash=args.metadata_hash,
+                    doi=args.doi,
+                    pmid=args.pmid,
+                    arxiv_id=args.arxiv_id,
+                    url=args.url,
+                    license_name=args.license_name,
+                    retraction_status=args.retraction_status,
+                    previous_source_id=args.previous_source_id,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("literature source", result, as_json=args.as_json)
+                return 0
+            result = save_passage_evidence(
+                args.repo,
+                source_id=args.source_id,
+                quote=args.quote,
+                locator=args.locator,
+                supports=args.supports,
+                refutes=args.refutes,
+                context_id=args.context,
+                scope=args.scope,
+                structured_scope=_scope_from_args(args),
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("passage evidence", result, as_json=args.as_json)
+            return 0
+
         if args.command == "experiment":
             from .research_commands import save_experiment
 
@@ -1071,6 +1287,8 @@ def main(
                 supports=args.supports,
                 refutes=args.refutes,
                 metrics=_parse_assignments(args.metric, label="metric"),
+                scope=args.scope,
+                structured_scope=_scope_from_args(args),
                 verified=args.verified,
                 verifier_id=args.verifier,
                 message=args.message,
@@ -1102,6 +1320,7 @@ def main(
                 statement=args.statement,
                 evidence_ids=args.evidence,
                 scope=args.scope,
+                structured_scope=_scope_from_args(args),
                 gate_id=args.gate,
                 verified=args.verified,
                 message=args.message,

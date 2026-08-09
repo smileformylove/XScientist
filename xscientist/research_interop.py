@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import tempfile
+import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,7 +25,16 @@ from .research_git import (
 )
 
 INTEROP_SCHEMA = "xscientist.research-interop.v1"
-INTEROP_FORMATS = ("ro-crate", "prov-json", "cwl", "dvc", "mlflow")
+INTEROP_FORMATS = (
+    "ro-crate",
+    "prov-json",
+    "cwl",
+    "dvc",
+    "mlflow",
+    "openlineage",
+    "croissant",
+    "nanopub",
+)
 
 
 def _object_urn(object_id: str) -> str:
@@ -56,10 +66,15 @@ def _summary(item: dict[str, Any]) -> str:
 def _schema_type(kind: str) -> str:
     return {
         "question": "Question",
+        "search_plan": "PlanAction",
+        "search_receipt": "Dataset",
+        "source_snapshot": "ScholarlyArticle",
+        "passage_evidence": "Quotation",
         "hypothesis": "CreativeWork",
         "preregistration": "DigitalDocument",
         "research_plan": "PlanAction",
         "experiment_attempt": "Action",
+        "observation": "Observation",
         "metric": "PropertyValue",
         "evidence": "Dataset",
         "claim": "Claim",
@@ -84,6 +99,15 @@ def _relation_property(relation_type: str) -> str:
         "contradicts": "xscientist:contradicts",
         "evaluates": "schema:reviewedItem",
         "promotes": "xscientist:promotes",
+        "retrieves": "schema:result",
+        "cites": "schema:citation",
+        "quotes": "schema:isPartOf",
+        "observes": "schema:observationAbout",
+        "generated_by": "prov:wasGeneratedBy",
+        "qualified_supports": "xscientist:qualifiedSupports",
+        "qualified_refutes": "xscientist:qualifiedRefutes",
+        "attests": "xscientist:attests",
+        "uses_context": "prov:used",
     }.get(relation_type, "schema:isRelatedTo")
 
 
@@ -103,6 +127,7 @@ def build_ro_crate(
         "dateCreated": checkpoint.get("created_at"),
         "hasPart": [{"@id": _object_urn(str(item["object_id"]))} for item in rows],
         "mentions": {"@id": _checkpoint_urn(checkpoint_id)},
+        "conformsTo": {"@id": "https://w3id.org/ro/wfrun/process/0.5"},
     }
     graph: list[dict[str, Any]] = [
         {
@@ -117,8 +142,25 @@ def build_ro_crate(
             "@type": "CreateAction",
             "name": str(checkpoint.get("subject") or checkpoint_id),
             "startTime": checkpoint.get("created_at"),
-            "actionStatus": str(checkpoint.get("status") or "completed"),
+            "actionStatus": (
+                "https://schema.org/FailedActionStatus"
+                if str(checkpoint.get("status") or "")
+                in {"failed", "timed_out", "cancelled", "rejected"}
+                else "https://schema.org/CompletedActionStatus"
+            ),
+            "instrument": {"@id": "https://xscientist.io/software"},
             "result": [{"@id": _object_urn(str(item["object_id"]))} for item in rows],
+        },
+        {
+            "@id": "https://xscientist.io/software",
+            "@type": "SoftwareApplication",
+            "name": "XScientist",
+        },
+        {
+            "@id": "https://w3id.org/ro/wfrun/process/0.5",
+            "@type": "CreativeWork",
+            "name": "Process Run Crate",
+            "version": "0.5",
         },
     ]
     agents: dict[str, dict[str, Any]] = {}
@@ -142,6 +184,7 @@ def build_ro_crate(
             "dateCreated": item.get("created_at"),
             "creativeWorkStatus": item.get("state"),
             "sha256": str(item.get("content_hash") or "").removeprefix("sha256:"),
+            "identifier": item.get("qualified_id") or item.get("object_id"),
             "creator": {"@id": agent_urn},
         }
         for relation in item.get("relations") or []:
@@ -160,6 +203,7 @@ def build_ro_crate(
     return {
         "@context": [
             "https://w3id.org/ro/crate/1.1/context",
+            "https://w3id.org/ro/terms/workflow-run/context",
             {
                 "prov": "http://www.w3.org/ns/prov#",
                 "schema": "https://schema.org/",
@@ -366,6 +410,217 @@ def build_mlflow_export(objects: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {"schema_version": "xscientist.mlflow-export.v1", "runs": runs}
 
 
+def build_openlineage_events(objects: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Map immutable experiment attempts to portable OpenLineage RunEvents."""
+
+    rows = {str(item["object_id"]): item for item in objects}
+    events: list[dict[str, Any]] = []
+    terminal = {
+        "completed": "COMPLETE",
+        "verified": "COMPLETE",
+        "failed": "FAIL",
+        "timed_out": "FAIL",
+        "cancelled": "ABORT",
+        "running": "RUNNING",
+    }
+    producer = "https://xscientist.io/openlineage/v1"
+    schema_url = (
+        "https://openlineage.io/spec/1-0-5/OpenLineage.json#/definitions/RunEvent"
+    )
+    for item in sorted(rows.values(), key=lambda value: str(value["object_id"])):
+        if item.get("kind") != "experiment_attempt":
+            continue
+        object_id = str(item["object_id"])
+        inputs = [
+            {
+                "namespace": "xscientist.research-object",
+                "name": str(relation.get("target")),
+            }
+            for relation in item.get("relations") or []
+            if relation.get("target") in rows
+        ]
+        outputs = [
+            {
+                "namespace": "xscientist.research-object",
+                "name": candidate_id,
+            }
+            for candidate_id, candidate in sorted(rows.items())
+            if any(
+                relation.get("target") == object_id
+                and relation.get("type") == "derived_from"
+                for relation in candidate.get("relations") or []
+            )
+        ]
+        event = {
+            "eventType": terminal.get(str(item.get("state") or ""), "OTHER"),
+            "eventTime": item.get("created_at"),
+            "producer": producer,
+            "schemaURL": schema_url,
+            "run": {
+                "runId": str(uuid.uuid5(uuid.NAMESPACE_URL, _object_urn(object_id))),
+                "facets": {
+                    "xscientist_identity": {
+                        "_producer": producer,
+                        "_schemaURL": "https://xscientist.io/ns/openlineage-identity.v1.json",
+                        "objectId": object_id,
+                        "qualifiedId": item.get("qualified_id"),
+                        "contentHash": item.get("content_hash"),
+                    }
+                },
+            },
+            "job": {
+                "namespace": "xscientist.research",
+                "name": object_id,
+            },
+            "inputs": inputs,
+            "outputs": outputs,
+        }
+        events.append({**deepcopy(event), "eventType": "START", "outputs": []})
+        events.append(event)
+    return {"schema_version": "xscientist.openlineage-export.v1", "events": events}
+
+
+def build_croissant_export(objects: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Describe hash-addressed research data using Croissant 1.1 JSON-LD."""
+
+    distributions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in objects:
+        provenance = item.get("provenance") or {}
+        payload = item.get("payload") or {}
+        hashes = [
+            *(provenance.get("dataset_hashes") or []),
+            *(
+                [payload.get("content_hash")]
+                if item.get("kind") == "source_snapshot" and payload.get("content_hash")
+                else []
+            ),
+        ]
+        for digest in hashes:
+            value = str(digest)
+            if value in seen:
+                continue
+            seen.add(value)
+            distributions.append(
+                {
+                    "@type": "cr:FileObject",
+                    "@id": "urn:xscientist:content:" + value,
+                    "name": value,
+                    "sha256": value.removeprefix("sha256:"),
+                    "encodingFormat": "application/octet-stream",
+                }
+            )
+    return {
+        "@context": {
+            "@vocab": "https://schema.org/",
+            "cr": "http://mlcommons.org/croissant/",
+            "dct": "http://purl.org/dc/terms/",
+        },
+        "@type": "Dataset",
+        "@id": "urn:xscientist:research-dataset",
+        "name": "XScientist immutable research data closure",
+        "description": "Content-addressed data identities used by this research state.",
+        "license": "NOASSERTION",
+        "dct:conformsTo": "http://mlcommons.org/croissant/1.1",
+        "distribution": distributions,
+    }
+
+
+def build_nanopublications(objects: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Represent each Claim as assertion, provenance, and publication-info graphs."""
+
+    rows = {str(item["object_id"]): item for item in objects}
+    graph: list[dict[str, Any]] = []
+    for claim in sorted(rows.values(), key=lambda value: str(value["object_id"])):
+        if claim.get("kind") != "claim":
+            continue
+        claim_id = str(claim["object_id"])
+        digest = str(claim.get("content_hash") or "").removeprefix("sha256:")
+        base = "urn:xscientist:nanopub:sha256:" + digest
+        head = base + "#head"
+        assertion = base + "#assertion"
+        provenance = base + "#provenance"
+        pubinfo = base + "#pubinfo"
+        graph.extend(
+            [
+                {
+                    "@id": head,
+                    "@graph": [
+                        {
+                            "@id": base,
+                            "@type": "np:Nanopublication",
+                            "np:hasAssertion": {"@id": assertion},
+                            "np:hasProvenance": {"@id": provenance},
+                            "np:hasPublicationInfo": {"@id": pubinfo},
+                        }
+                    ],
+                },
+                {
+                    "@id": assertion,
+                    "@graph": [
+                        {
+                            "@id": claim.get("qualified_id") or _object_urn(claim_id),
+                            "@type": "schema:Claim",
+                            "schema:text": (claim.get("payload") or {}).get(
+                                "statement"
+                            ),
+                            "xsc:scopeHash": (claim.get("payload") or {}).get(
+                                "scope_hash"
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "@id": provenance,
+                    "@graph": [
+                        {
+                            "@id": assertion,
+                            "prov:wasDerivedFrom": [
+                                {
+                                    "@id": (
+                                        rows.get(str(relation.get("target")), {}).get(
+                                            "qualified_id"
+                                        )
+                                        or _object_urn(str(relation.get("target")))
+                                    )
+                                }
+                                for relation in claim.get("relations") or []
+                                if relation.get("type") == "depends_on"
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "@id": pubinfo,
+                    "@graph": [
+                        {
+                            "@id": base,
+                            "dct:created": claim.get("created_at"),
+                            "dct:creator": {
+                                "@id": "urn:xscientist:actor:"
+                                + str(
+                                    (claim.get("actor") or {}).get("actor_id")
+                                    or "xscientist"
+                                )
+                            },
+                            "xsc:contentHash": claim.get("content_hash"),
+                        }
+                    ],
+                },
+            ]
+        )
+    return {
+        "@context": {
+            "np": "http://www.nanopub.org/nschema#",
+            "prov": "http://www.w3.org/ns/prov#",
+            "dct": "http://purl.org/dc/terms/",
+            "schema": "https://schema.org/",
+            "xsc": "https://xscientist.io/ns/",
+        },
+        "@graph": graph,
+    }
+
+
 def _file_hash(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -461,6 +716,45 @@ def export_research_interop(
                 encoding="utf-8",
             )
             files.append(path)
+        if "openlineage" in selected:
+            path = staging / "openlineage-events.json"
+            path.write_text(
+                json.dumps(
+                    build_openlineage_events(objects),
+                    indent=2,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            files.append(path)
+        if "croissant" in selected:
+            path = staging / "croissant.json"
+            path.write_text(
+                json.dumps(
+                    build_croissant_export(objects),
+                    indent=2,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            files.append(path)
+        if "nanopub" in selected:
+            path = staging / "nanopublications.jsonld"
+            path.write_text(
+                json.dumps(
+                    build_nanopublications(objects),
+                    indent=2,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            files.append(path)
         manifest = {
             "schema_version": INTEROP_SCHEMA,
             "repository_commit": shown["commit"],
@@ -499,7 +793,10 @@ __all__ = [
     "build_cwl_export",
     "build_dvc_export",
     "build_mlflow_export",
+    "build_nanopublications",
+    "build_openlineage_events",
     "build_prov_json",
     "build_ro_crate",
+    "build_croissant_export",
     "export_research_interop",
 ]

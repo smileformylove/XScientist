@@ -14,7 +14,7 @@ from ai_scientist.protocol.schemas import schema_validator
 from xscientist.research_cli import main as research_main
 from xscientist.research_commands import save_experiment, save_hypothesis
 from xscientist.research_git import ResearchGitError
-from xscientist.research_interop import export_research_interop
+from xscientist.research_interop import build_nanopublications, export_research_interop
 from xscientist.research_vcs import ResearchRepository
 
 
@@ -55,7 +55,16 @@ class ResearchInteropTests(unittest.TestCase):
         )
         self.assertEqual(
             set(result["formats"]),
-            {"ro-crate", "prov-json", "cwl", "dvc", "mlflow"},
+            {
+                "ro-crate",
+                "prov-json",
+                "cwl",
+                "dvc",
+                "mlflow",
+                "openlineage",
+                "croissant",
+                "nanopub",
+            },
         )
         self.assertTrue(result["export_hash"].startswith("sha256:"))
         crate = json.loads((destination / "ro-crate-metadata.json").read_text())
@@ -75,6 +84,16 @@ class ResearchInteropTests(unittest.TestCase):
         self.assertTrue(dvc["stages"])
         mlflow = json.loads((destination / "mlflow-runs.json").read_text())
         self.assertEqual(len(mlflow["runs"]), 1)
+        openlineage = json.loads((destination / "openlineage-events.json").read_text())
+        self.assertEqual(
+            [item["eventType"] for item in openlineage["events"]],
+            ["START", "COMPLETE"],
+        )
+        croissant = json.loads((destination / "croissant.json").read_text())
+        self.assertEqual(
+            croissant["dct:conformsTo"], "http://mlcommons.org/croissant/1.1"
+        )
+        self.assertTrue((destination / "nanopublications.jsonld").is_file())
         with self.assertRaises(ResearchGitError):
             export_research_interop(self.repo, destination)
 
@@ -116,3 +135,27 @@ class ResearchInteropTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["formats"], ["ro-crate", "prov-json"])
         self.assertTrue((destination / "xscientist-export.json").is_file())
+
+    def test_nanopublication_has_four_distinct_named_graphs(self) -> None:
+        nanopubs = build_nanopublications(
+            [
+                {
+                    "object_id": "rso-" + "a" * 16,
+                    "qualified_id": (
+                        "urn:xscientist:research-object:sha256:" + "b" * 64
+                    ),
+                    "kind": "claim",
+                    "content_hash": "sha256:" + "b" * 64,
+                    "created_at": "2026-08-09T00:00:00Z",
+                    "payload": {"statement": "A scoped claim."},
+                    "relations": [],
+                    "actor": {"actor_id": "human:reviewer"},
+                }
+            ]
+        )
+        named_graphs = nanopubs["@graph"]
+        self.assertEqual(len(named_graphs), 4)
+        self.assertTrue(all("@graph" in item for item in named_graphs))
+        head = next(item for item in named_graphs if item["@id"].endswith("#head"))
+        nanopub = head["@graph"][0]
+        self.assertEqual(nanopub["@type"], "np:Nanopublication")

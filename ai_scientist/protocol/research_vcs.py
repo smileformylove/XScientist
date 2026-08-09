@@ -2,22 +2,30 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from jsonschema import ValidationError, validate as validate_json
 
+from .canonical_json import canonical_content_hash
 from .hashing import content_hash
 from .schemas import load_schema
 
 RESEARCH_OBJECT_SCHEMA = "xscientist.research-object.v1"
+RESEARCH_OBJECT_IDENTITY_PROFILE = "xscientist.research-object-identity.v1"
 RESEARCH_OBJECT_KINDS = (
     "question",
+    "search_plan",
+    "search_receipt",
+    "source_snapshot",
+    "passage_evidence",
     "hypothesis",
     "preregistration",
     "research_plan",
     "experiment_attempt",
+    "observation",
     "metric",
     "evidence",
     "claim",
@@ -52,6 +60,15 @@ RESEARCH_RELATION_TYPES = (
     "derived_from",
     "evaluates",
     "promotes",
+    "retrieves",
+    "cites",
+    "quotes",
+    "observes",
+    "generated_by",
+    "qualified_supports",
+    "qualified_refutes",
+    "attests",
+    "uses_context",
 )
 RESEARCH_AUTHORITIES = (
     "research_agent",
@@ -66,12 +83,29 @@ class ResearchObjectError(ValueError):
     """A Research VCS object is malformed or has lost content integrity."""
 
 
+def _is_sha256(value: Any) -> bool:
+    return bool(re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or "")))
+
+
 _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "question": ("text", "question"),
+    "search_plan": ("queries", "question", "search_plan_hash"),
+    "search_receipt": ("receipt_hash", "provider", "candidates"),
+    "source_snapshot": (
+        "source_hash",
+        "content_hash",
+        "metadata_hash",
+        "doi",
+        "pmid",
+        "arxiv_id",
+        "title",
+    ),
+    "passage_evidence": ("passage_hash", "quote_hash", "locator"),
     "hypothesis": ("statement", "core_hypothesis", "title"),
     "preregistration": ("status", "registration_id", "hypothesis_id"),
     "research_plan": ("plan_id", "tasks", "summary", "hypothesis"),
     "experiment_attempt": ("status",),
+    "observation": ("measurement", "result", "output_hash", "metrics"),
     "metric": ("name", "metric", "value"),
     "evidence": (
         "result",
@@ -140,7 +174,72 @@ def research_payload_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
         return [
             f"{normalized_kind} payload requires one of: " + ", ".join(identity_fields)
         ]
-    return []
+    issues: list[str] = []
+    required_fields: dict[str, tuple[str, ...]] = {
+        "search_plan": ("question", "queries", "search_plan_hash"),
+        "search_receipt": (
+            "profile",
+            "provider",
+            "query",
+            "retrieved_at",
+            "candidates",
+            "receipt_hash",
+        ),
+        "source_snapshot": ("title", "content_hash", "source_hash"),
+        "passage_evidence": (
+            "source_id",
+            "locator",
+            "quote",
+            "quote_hash",
+            "passage_hash",
+        ),
+    }
+    for field in required_fields.get(normalized_kind, ()):
+        if field not in payload or payload.get(field) in (None, ""):
+            issues.append(f"{normalized_kind} payload requires {field}")
+    if normalized_kind == "search_plan" and not isinstance(
+        payload.get("queries"), list
+    ):
+        issues.append("search_plan queries must be an array")
+    if normalized_kind == "search_receipt" and not isinstance(
+        payload.get("candidates"), list
+    ):
+        issues.append("search_receipt candidates must be an array")
+    commitment_fields = {
+        "search_plan": "search_plan_hash",
+        "search_receipt": "receipt_hash",
+        "source_snapshot": "source_hash",
+        "passage_evidence": "passage_hash",
+    }
+    commitment_field = commitment_fields.get(normalized_kind)
+    if commitment_field and payload.get(commitment_field):
+        expected = canonical_content_hash(
+            {key: value for key, value in payload.items() if key != commitment_field}
+        )
+        if payload.get(commitment_field) != expected:
+            issues.append(f"{normalized_kind} {commitment_field} mismatch")
+    if normalized_kind == "passage_evidence" and payload.get("quote"):
+        expected_quote = canonical_content_hash(str(payload["quote"]))
+        if payload.get("quote_hash") != expected_quote:
+            issues.append("passage_evidence quote_hash mismatch")
+    if isinstance(payload.get("scope"), Mapping):
+        expected_scope = canonical_content_hash(dict(payload["scope"]))
+        if payload.get("scope_hash") != expected_scope:
+            issues.append(f"{normalized_kind} structured scope_hash mismatch")
+    for field in (
+        "search_plan_hash",
+        "receipt_hash",
+        "source_hash",
+        "content_hash",
+        "metadata_hash",
+        "passage_hash",
+        "quote_hash",
+        "scope_hash",
+    ):
+        value = payload.get(field)
+        if value not in (None, "") and not _is_sha256(value):
+            issues.append(f"{normalized_kind} {field} must use sha256:<64 hex>")
+    return issues
 
 
 def validate_research_payload(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -188,7 +287,14 @@ def _identity_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: deepcopy(value)
         for key, value in payload.items()
-        if key not in {"object_id", "created_at", "content_hash"}
+        if key
+        not in {
+            "object_id",
+            "qualified_id",
+            "identity_profile",
+            "created_at",
+            "content_hash",
+        }
     }
 
 
@@ -225,6 +331,10 @@ def build_research_object(
     result = {
         **core,
         "object_id": f"rso-{object_hash.split(':', 1)[1][:16]}",
+        "qualified_id": (
+            "urn:xscientist:research-object:sha256:" + object_hash.split(":", 1)[1]
+        ),
+        "identity_profile": RESEARCH_OBJECT_IDENTITY_PROFILE,
         "created_at": str(created_at or _now_iso()),
         "content_hash": object_hash,
     }
@@ -254,12 +364,23 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
     expected_id = f"rso-{expected.split(':', 1)[1][:16]}"
     if result.get("object_id") != expected_id:
         raise ResearchObjectError("research object identifier mismatch")
+    qualified_id = result.get("qualified_id")
+    identity_profile = result.get("identity_profile")
+    if qualified_id is not None or identity_profile is not None:
+        expected_qualified = (
+            "urn:xscientist:research-object:sha256:" + expected.split(":", 1)[1]
+        )
+        if identity_profile != RESEARCH_OBJECT_IDENTITY_PROFILE:
+            raise ResearchObjectError("research object identity profile mismatch")
+        if qualified_id != expected_qualified:
+            raise ResearchObjectError("research object qualified identifier mismatch")
     return result
 
 
 __all__ = [
     "RESEARCH_AUTHORITIES",
     "RESEARCH_OBJECT_KINDS",
+    "RESEARCH_OBJECT_IDENTITY_PROFILE",
     "RESEARCH_OBJECT_SCHEMA",
     "RESEARCH_OBJECT_STATES",
     "RESEARCH_RELATION_TYPES",

@@ -14,6 +14,16 @@
       "type": "string",
       "const": "manifest"
     },
+    "portability_profile": {
+      "type": "string",
+      "enum": ["ara.portable.v1"],
+      "description": "When present, every machine-local path in the portable manifest must be relative."
+    },
+    "conformance_profile": {
+      "type": "string",
+      "enum": ["ara.conformance.v1"],
+      "description": "Declares support for independently assessed index/trace/replay/verify levels."
+    },
     "created_at": {"type": "string", "description": "ISO-8601 timestamp."},
     "counts_updated_at": {"type": "string"},
     "source_exp_dir": {"type": "string"},

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from ai_scientist.protocol import (
+    LEGACY_NODE_IDENTITY_PROFILE,
     PROTOCOL_VERSION,
     Kind,
     available_schemas,
@@ -124,6 +125,42 @@ class HashingTest(unittest.TestCase):
             hash_node_payload(code=short, metric={"value": 1}),
             hash_node_payload(code=long_, metric={"value": 1}),
         )
+
+    def test_v2_hashes_full_source_while_v1_remains_verifiable(self) -> None:
+        prefix = "a" * (256 * 1024)
+        left = prefix + "left-suffix-0001"
+        right = prefix + "right-suffix-001"
+        self.assertEqual(len(left), len(right))
+        self.assertNotEqual(
+            hash_node_payload(code=left, metric={"value": 1}),
+            hash_node_payload(code=right, metric={"value": 1}),
+        )
+        self.assertEqual(
+            hash_node_payload(
+                code=left,
+                metric={"value": 1},
+                identity_profile=LEGACY_NODE_IDENTITY_PROFILE,
+            ),
+            hash_node_payload(
+                code=right,
+                metric={"value": 1},
+                identity_profile=LEGACY_NODE_IDENTITY_PROFILE,
+            ),
+        )
+
+    def test_v2_binds_context_and_execution_identity(self) -> None:
+        base = hash_node_payload(code="x = 1", metric={"value": 1})
+        with_context = hash_node_payload(
+            code="x = 1",
+            metric={"value": 1},
+            context_hashes=["sha256:" + "a" * 64],
+        )
+        with_execution = hash_node_payload(
+            code="x = 1",
+            metric={"value": 1},
+            execution_identity={"container_digest": "sha256:" + "b" * 64},
+        )
+        self.assertEqual(3, len({base, with_context, with_execution}))
 
 
 class SchemaTest(unittest.TestCase):
@@ -246,6 +283,22 @@ class MultiParentProvenanceTest(unittest.TestCase):
 
 
 class ValidatorTest(unittest.TestCase):
+    def test_portable_profile_rejects_absolute_paths_but_legacy_remains_readable(
+        self,
+    ) -> None:
+        payload = {
+            "schema_version": PROTOCOL_VERSION,
+            "protocol_kind": "manifest",
+            "portability_profile": "ara.portable.v1",
+            "created_at": "2026-07-01T00:00:00Z",
+            "source_exp_dir": "/tmp/private-machine/path",
+            "idea": {"name": "abc"},
+            "counts": {"nodes": 0},
+        }
+        self.assertFalse(validate_manifest(payload).ok)
+        payload.pop("portability_profile")
+        self.assertTrue(validate_manifest(payload).ok)
+
     def test_manifest_relative_reference_schema_resolves_offline(self) -> None:
         report = validate_manifest(
             {
@@ -328,6 +381,12 @@ class ARARoundTripTest(unittest.TestCase):
             # Each node has a content_hash.
             for node in graph["nodes"]:
                 self.assertTrue(node["content_hash"].startswith("sha256:"))
+            replay = validate_ara(result.root, level="replay")
+            self.assertTrue(replay.ok, replay.to_dict())
+            self.assertEqual(replay.conformance["achieved"], "replay")
+            verify = validate_ara(result.root, level="verify")
+            self.assertFalse(verify.ok)
+            self.assertFalse(verify.conformance["levels"]["verify"]["ok"])
 
     def test_provenance_survives_manifest_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

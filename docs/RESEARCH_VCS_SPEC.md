@@ -62,10 +62,15 @@ API.
 The initial object kinds are:
 
 - `question`
+- `search_plan`
+- `search_receipt`
+- `source_snapshot`
+- `passage_evidence`
 - `hypothesis`
 - `preregistration`
 - `research_plan`
 - `experiment_attempt`
+- `observation`
 - `metric`
 - `evidence`
 - `claim`
@@ -80,7 +85,9 @@ The initial object kinds are:
 Every object contains a versioned schema identifier, object kind, lifecycle
 state, payload, typed relations, actor receipt, provenance receipt, and content
 hash. Relations include `depends_on`, `supports`, `refutes`, `supersedes`,
-`reproduces`, `contradicts`, `derived_from`, `evaluates`, and `promotes`.
+`reproduces`, `contradicts`, `derived_from`, `evaluates`, `promotes`, `quotes`,
+`retrieves`, `qualified_supports`, `qualified_refutes`, `attests`, and
+`uses_context`.
 
 Scientific payload schemas MAY be kind-specific, but an implementation MUST
 validate a payload before it can enter the durable object store.
@@ -93,6 +100,26 @@ selection-policy hash, omissions, and a canonical `context_hash`. Token budgets
 MAY trim summaries only. They MUST NOT trim source IDs, hashes, failed attempts,
 contradictions, or decision alternatives. Memory can inform a decision but does
 not gain evaluator or verification authority merely by being remembered.
+
+Literature grounding is a first-class immutable chain:
+
+```
+search_plan -> search_receipt -> source_snapshot -> passage_evidence -> claim
+```
+
+The plan freezes queries and inclusion/exclusion criteria. The receipt records
+provider, corpus version, retrieval time, complete ranked candidates, selection
+decisions, failures, and a canonical receipt hash; it MUST exclude credentials
+and raw response bodies. A source snapshot binds persistent identifiers,
+license/retraction status, and content/metadata hashes. Passage evidence binds
+an exact locator and quote hash. Updating a source creates a new snapshot with
+`supersedes`; it never rewrites the historical source.
+
+Claims SHOULD carry `xscientist.claim-scope.v1`: population, intervention,
+comparator, outcome, datasets/slices, metric, unit, conditions, time window,
+and estimand, plus a canonical `scope_hash`. Support and refutation only form a
+semantic contradiction when their explicit scopes can overlap; missing scope
+is handled conservatively as potentially overlapping.
 
 ## 5. Research commits
 
@@ -154,14 +181,22 @@ they MUST NOT be advertised as implemented commands until shipped.
 The reference implementation also exposes a payload-free `audit` view with
 three explicit sufficiency targets over the effective claim frontier. Explicit
 `supersedes` relations, the `superseded` state, and immutable draft-to-verified
-promotion determine which historical claims remain active. `trace` requires the claim/evidence/attempt
-and planning chain; `replay` adds immutable code, data, environment, and
+promotion determine which historical claims remain active. `trace` requires
+either the claim/evidence/attempt/planning chain or the complete literature
+retrieval/source/passage chain; `replay` adds immutable code, data, environment, and
 measurement identities; `verify` adds a passing gate and a verified
 reproduction receipt. Storage integrity (`fsck`) and scientific sufficiency
 (`audit`) are separate verdicts. `verify` proves local, hash-bound protocol
 closure; it is not by itself a third-party attestation or claim of scientific
 truth. Signed attestations are a separate trust layer and do not change the
 meaning of the closure verdict.
+
+Trust-boundary exports MAY wrap a Research VCS closure in an in-toto Statement
+v1 carried by a DSSE envelope. Local HMAC is suitable only for same-domain
+automation; federated exchange SHOULD use Ed25519 or a deployment-specific
+transparency-backed signer. The protocol verifies key identity, revocation,
+signature threshold, predicate type, and subject digest without claiming that
+a signature makes a scientific conclusion true.
 
 Each operation MUST have a structured result, stable error category, explicit
 mutation summary, and deterministic exit status. Retrying an operation with
@@ -260,6 +295,9 @@ creates a new evolution commit.
 Existing `xscientist.research-repository.v1` repositories and research
 checkpoints remain readable. Migration creates a new migration commit and MUST
 NOT edit an existing commit, checkpoint, object hash, or branch ancestry.
+
+The additive identity and evidence migration is documented in
+[`PROTOCOL_MIGRATION_2026.md`](PROTOCOL_MIGRATION_2026.md).
 
 The existing `checkpoint` operation remains a compatibility alias for a
 Research VCS commit until a future major version. Ordinary Git inspection MAY

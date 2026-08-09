@@ -11,9 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_scientist.protocol.attestation import (
+    build_in_toto_statement,
     sign_attestation,
+    sign_dsse_statement,
     verify_attestation,
     verify_authorization_bundle,
+    verify_dsse_statement,
 )
 from ai_scientist.protocol.canonical_json import (
     CanonicalJSONError,
@@ -186,6 +189,39 @@ class CanonicalJSONTests(unittest.TestCase):
 
 
 class AttestationTests(unittest.TestCase):
+    def test_dsse_in_toto_statement_is_threshold_verified(self) -> None:
+        statement = build_in_toto_statement(
+            subjects=[{"name": "research-dag", "digest": {"sha256": "a" * 64}}],
+            predicate_type="https://xscientist.io/predicate/research-closure/v1",
+            predicate={"level": "verify", "complete": True},
+        )
+        envelope = sign_dsse_statement(
+            statement,
+            key_id="key:reviewer",
+            algorithm="hmac-sha256",
+            key=b"reviewer-secret",
+        )
+        self.assertEqual(set(envelope), {"payloadType", "payload", "signatures"})
+        self.assertEqual(set(envelope["signatures"][0]), {"keyid", "sig"})
+        verified = verify_dsse_statement(
+            envelope,
+            trust_store={
+                "key:reviewer": {
+                    "algorithm": "hmac-sha256",
+                    "key": b"reviewer-secret",
+                }
+            },
+            predicate_type="https://xscientist.io/predicate/research-closure/v1",
+        )
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["statement"], statement)
+        rejected = verify_dsse_statement(
+            envelope,
+            trust_store={},
+            minimum_signatures=1,
+        )
+        self.assertIn("signature_threshold_not_met", rejected["errors"])
+
     def test_hmac_attestation_binds_identity_purpose_and_payload(self) -> None:
         payload = {"candidate_hash": _digest("candidate")}
         trust = {

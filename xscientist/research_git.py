@@ -344,6 +344,7 @@ class ResearchObjectResult:
     created: bool
     path: Path
     object_id: str
+    qualified_id: str | None
     object_hash: str
     kind: str
     state: str
@@ -353,6 +354,7 @@ class ResearchObjectResult:
             "created": self.created,
             "path": str(self.path),
             "object_id": self.object_id,
+            "qualified_id": self.qualified_id,
             "object_hash": self.object_hash,
             "kind": self.kind,
             "state": self.state,
@@ -860,7 +862,11 @@ def _record_research_object_locked(
     for relation in relations:
         normalized_relation = dict(relation)
         target = str(normalized_relation.get("target") or "")
-        if target.startswith("@") or re.fullmatch(r"rso-[0-9a-f]{6,16}", target):
+        if (
+            target.startswith("@")
+            or target.startswith("urn:xscientist:research-object:sha256:")
+            or re.fullmatch(r"rso-[0-9a-f]{6,16}", target)
+        ):
             normalized_relation["target"] = resolve_research_object_id(root, target)
         normalized_relations.append(normalized_relation)
     _refuse_private_research_object(
@@ -916,6 +922,9 @@ def _record_research_object_locked(
         created=created,
         path=target,
         object_id=str(persisted["object_id"]),
+        qualified_id=(
+            str(persisted["qualified_id"]) if persisted.get("qualified_id") else None
+        ),
         object_hash=str(persisted["content_hash"]),
         kind=str(persisted["kind"]),
         state=str(persisted["state"]),
@@ -985,7 +994,18 @@ def resolve_research_object_id(
                 key=lambda item: (str(item.get("created_at") or ""), item["object_id"]),
             )["object_id"]
         )
-    if re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
+    if normalized.startswith("urn:xscientist:research-object:sha256:"):
+        matches = [
+            item
+            for item in list_research_objects(root, kind=expected_kind)
+            if item.get("qualified_id") == normalized
+        ]
+        if not matches:
+            raise ResearchGitError(f"research object not found: {normalized}")
+        if len(matches) != 1:
+            raise ResearchGitError(f"duplicate qualified research object: {normalized}")
+        resolved = str(matches[0]["object_id"])
+    elif re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
         resolved = normalized
     elif re.fullmatch(r"rso-[0-9a-f]{6,15}", normalized):
         matches = sorted(object_root.glob(f"*/{normalized}*.json"))
@@ -3311,6 +3331,7 @@ def _semantic_merge_conflicts(
     ours_new = _new_objects_since(base, ours)
     theirs_new = _new_objects_since(base, theirs)
     conflicts: list[dict[str, Any]] = []
+    combined_objects = {**base, **ours, **theirs}
 
     def relation_objects(
         values: Sequence[dict[str, Any]],
@@ -3319,9 +3340,13 @@ def _semantic_merge_conflicts(
         for payload in values:
             for relation in payload.get("relations") or []:
                 relation_type = str(relation.get("type") or "")
-                if relation_type in {"supports", "refutes"}:
+                normalized_relation = {
+                    "qualified_supports": "supports",
+                    "qualified_refutes": "refutes",
+                }.get(relation_type, relation_type)
+                if normalized_relation in {"supports", "refutes"}:
                     result.setdefault(str(relation.get("target") or ""), {}).setdefault(
-                        relation_type, set()
+                        normalized_relation, set()
                     ).add(str(payload["object_id"]))
         return result
 
@@ -3338,12 +3363,34 @@ def _semantic_merge_conflicts(
                 ours_relations[target].get("refutes", set())
                 | theirs_relations[target].get("refutes", set())
             )
+            from .research_semantics import scopes_compatible
+
+            overlapping_pairs = [
+                (support_id, refute_id)
+                for support_id in supporting
+                for refute_id in refuting
+                if scopes_compatible(
+                    (combined_objects.get(support_id, {}).get("payload") or {}).get(
+                        "scope"
+                    )
+                    or {},
+                    (combined_objects.get(refute_id, {}).get("payload") or {}).get(
+                        "scope"
+                    )
+                    or {},
+                )
+            ]
+            if not overlapping_pairs:
+                continue
             conflicts.append(
                 {
                     "type": "opposed_evidence",
                     "target": target,
                     "supporting_evidence": supporting,
                     "refuting_evidence": refuting,
+                    "overlapping_scope_pairs": [
+                        list(item) for item in overlapping_pairs
+                    ],
                     "message": "the same research object is supported and refuted",
                 }
             )

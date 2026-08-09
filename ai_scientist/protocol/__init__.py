@@ -29,22 +29,42 @@ from .canonical_json import (
 )
 from .attestation import (
     ATTESTATION_SCHEMA,
+    DSSE_PAYLOAD_TYPE,
+    IN_TOTO_STATEMENT_TYPE,
     AttestationError,
+    build_in_toto_statement,
     sign_attestation,
+    sign_dsse_statement,
     verify_attestation,
     verify_authorization_bundle,
+    verify_dsse_statement,
 )
 from .graph import analyze_exploration_graph, graph_with_dag_metadata
-from .hashing import build_provenance, content_hash, hash_manifest, hash_node_payload
+from .hashing import (
+    LEGACY_NODE_IDENTITY_PROFILE,
+    NODE_IDENTITY_PROFILE,
+    SUPPORTED_NODE_IDENTITY_PROFILES,
+    build_provenance,
+    content_hash,
+    hash_manifest,
+    hash_node_payload,
+)
 from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
 from .objects import ObjectRef, ObjectStore
 from .schemas import available_schemas, load_schema
-from .validator import ValidationReport, validate_ara, validate_manifest
+from .validator import (
+    ARA_CONFORMANCE_LEVELS,
+    PORTABILITY_PROFILE,
+    ValidationReport,
+    validate_ara,
+    validate_manifest,
+)
 
 if TYPE_CHECKING:
     from .research_vcs import (
         RESEARCH_AUTHORITIES,
         RESEARCH_OBJECT_KINDS,
+        RESEARCH_OBJECT_IDENTITY_PROFILE,
         RESEARCH_OBJECT_STATES,
         RESEARCH_RELATION_TYPES,
         ResearchObjectError,
@@ -57,7 +77,9 @@ if TYPE_CHECKING:
 
 _RESEARCH_VCS_EXPORTS = {
     "RESEARCH_AUTHORITIES",
+    "RESEARCH_OBJECT_IDENTITY_PROFILE",
     "RESEARCH_OBJECT_KINDS",
+    "RESEARCH_OBJECT_IDENTITY_PROFILE",
     "RESEARCH_OBJECT_STATES",
     "RESEARCH_RELATION_TYPES",
     "ResearchObjectError",
@@ -82,18 +104,26 @@ def __getattr__(name: str):
 
 __all__ = [
     "ATTESTATION_SCHEMA",
+    "DSSE_PAYLOAD_TYPE",
+    "IN_TOTO_STATEMENT_TYPE",
+    "ARA_CONFORMANCE_LEVELS",
     "CANONICAL_JSON_PROFILE",
     "AttestationError",
+    "build_in_toto_statement",
     "CanonicalJSONError",
     "PROTOCOL_VERSION",
+    "PORTABILITY_PROFILE",
     "RESEARCH_AUTHORITIES",
     "RESEARCH_OBJECT_KINDS",
     "RESEARCH_OBJECT_STATES",
     "RESEARCH_RELATION_TYPES",
     "Kind",
+    "LEGACY_NODE_IDENTITY_PROFILE",
+    "NODE_IDENTITY_PROFILE",
     "ObjectRef",
     "ObjectStore",
     "ResearchObjectError",
+    "SUPPORTED_NODE_IDENTITY_PROFILES",
     "ValidationReport",
     "active_ara_root",
     "available_schemas",
@@ -116,6 +146,8 @@ __all__ = [
     "validate_research_payload",
     "validate_research_object",
     "sign_attestation",
+    "sign_dsse_statement",
     "verify_attestation",
     "verify_authorization_bundle",
+    "verify_dsse_statement",
 ]

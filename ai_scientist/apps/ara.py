@@ -328,7 +328,11 @@ def cmd_fork(args: argparse.Namespace) -> int:
       3. Downstream tools that only speak ARA don't need to learn a second
          "fork layout".
     """
-    from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+    from ai_scientist.protocol import (
+        NODE_IDENTITY_PROFILE,
+        PROTOCOL_VERSION,
+        hash_node_payload,
+    )
     from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 
     ara_root = _resolve_ara_root(args.ara)
@@ -399,6 +403,8 @@ def cmd_fork(args: argparse.Namespace) -> int:
     if isinstance(parent_metrics, dict) and fork_hash:
         fork_metrics = dict(parent_metrics)
         fork_metrics["content_hash"] = fork_hash
+        fork_metrics["identity_profile"] = NODE_IDENTITY_PROFILE
+        fork_metrics["execution_identity"] = {}
         fork_metrics["content_hash_inputs"] = [
             "code",
             "metric",
@@ -440,6 +446,8 @@ def cmd_fork(args: argparse.Namespace) -> int:
                     {
                         "id": args.node_id,
                         "content_hash": fork_hash,
+                        "identity_profile": NODE_IDENTITY_PROFILE,
+                        "execution_identity": {},
                         # Match the metrics.json declaration above so ara_diff's
                         # category-flip logic can index the fork's inputs, and so the
                         # fork's node entry matches the schema shape enforced by
@@ -504,6 +512,8 @@ def cmd_fork(args: argparse.Namespace) -> int:
     fork_manifest = {
         "schema_version": PROTOCOL_VERSION,
         "protocol_kind": "manifest",
+        "portability_profile": "ara.portable.v1",
+        "conformance_profile": "ara.conformance.v1",
         "created_at": now_iso,
         "source_exp_dir": relative_path_reference(node_dir, base=dest),
         "project_dir": "..",
@@ -1049,7 +1059,10 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
     Shared between single-ARA ``hash-check --ara`` and the ``--all --project``
     sweep — keeps the classification rules in exactly one place.
     """
-    from ai_scientist.protocol import hash_node_payload
+    from ai_scientist.protocol import (
+        LEGACY_NODE_IDENTITY_PROFILE,
+        hash_node_payload,
+    )
     from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
 
     graph = _load_json(ara_root / "exploration_graph.json") or {}
@@ -1070,6 +1083,20 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
         # Mirror _export_nodes_from_journal's binding logic exactly.
         llm_refs_raw = node.get("llm_call_refs") or []
         llm_refs = [str(r) for r in llm_refs_raw if r]
+        context_refs_raw = node.get("context_pack_refs") or []
+        context_refs = [str(r) for r in context_refs_raw if r]
+        identity_profile = str(
+            node.get("identity_profile")
+            or (metrics.get("identity_profile") if isinstance(metrics, dict) else "")
+            or LEGACY_NODE_IDENTITY_PROFILE
+        )
+        execution_identity = (
+            node.get("execution_identity")
+            or (
+                metrics.get("execution_identity") if isinstance(metrics, dict) else None
+            )
+            or None
+        )
         is_seed = bool(node.get("is_seed_node"))
         metric = metrics.get("metric") if isinstance(metrics, dict) else None
         evaluation_binding = evaluation_hash_binding(
@@ -1106,7 +1133,10 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
                     {"evaluation": evaluation_binding} if evaluation_binding else None
                 ),
                 llm_call_hashes=llm_refs or None,
+                context_hashes=context_refs or None,
+                execution_identity=execution_identity,
                 is_seed=is_seed,
+                identity_profile=identity_profile,
             )
         except Exception as exc:  # pragma: no cover - defensive
             entries.append(
@@ -2338,7 +2368,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from ai_scientist.protocol import validate_ara
 
     ara_root = _resolve_ara_root(args.ara)
-    report = validate_ara(ara_root, strict=args.strict)
+    report = validate_ara(ara_root, strict=args.strict, level=args.level)
     print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
     return 0 if report.ok else 8
 
@@ -2863,6 +2893,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate_p.add_argument("--ara", required=True)
     validate_p.add_argument(
         "--strict", action="store_true", help="Promote warnings to errors"
+    )
+    validate_p.add_argument(
+        "--level",
+        choices=["index", "trace", "replay", "verify"],
+        default="index",
+        help="Require an explicit scientific sufficiency level (default: index).",
     )
     validate_p.set_defaults(func=cmd_validate)
 

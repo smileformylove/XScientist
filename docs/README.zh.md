@@ -122,7 +122,7 @@ flowchart LR
 - **增强反馈系统**：多源反馈收集、实时健康监控、趋势分析、自动行动生成。
 - **可观测与可回放**：关键阶段工件结构化落盘（JSON/MD），便于对比、复盘与二次加工。
 - **工程化安全**：登录守卫、预检/仓库校验、配置 schema、默认输出目录隔离。
-- **原生 Research VCS**：无需 GitHub 或服务器即可版本化假设、预注册、实验、证据、结论、评审和智能体进化；支持语义暂存、研究分支、差异、合并、溯源、离线备份、复现，以及 RO-Crate/PROV/CWL/DVC/MLflow 标准导出。Git 只是当前可替换的存储适配器。
+- **原生 Research VCS**：无需 GitHub 或服务器即可版本化检索计划、检索回执、来源快照、段落证据、假设、预注册、实验、结论、评审和智能体进化；支持语义暂存、研究分支、差异、合并、溯源、离线备份、复现，以及 Process Run RO-Crate/PROV/CWL/DVC/MLflow/OpenLineage/Croissant/Nanopublication 标准导出。Git 只是当前可替换的存储适配器。
 - **可执行自进化**：`xscientist evolution` 可以构建不可变候选文件树、成对执行无 shell 的基准任务、运行受控 canary、验证多方签名、原子部署到明确目录并恢复精确基线。生产修改默认关闭，并与 Research VCS 的语义晋级分离。
 - **ARA（Agent-Native Research Artifact）导出**：每次运行结束会在 `<project_dir>/ara/` 下额外落一份「面向下游智能体」的机读工件——完整的 exploration graph、每个节点的 `code.py`/`term_out.log`/`metrics.json`/`plots.json`、Pareto 池、修复历史、环境指纹，以及从 LaTeX 中扫描出的 `\claimref{node_id}` 声明到节点的映射。配套的 `xscientist ara` CLI 可以 inspect / re-exec / fork 任意节点，让另一个 AI Scientist 无需解码 PDF 就能续跑或验证前作；`exploration_graph.html` 则把每篇小论文的探索过程展示成可浏览的科技探索树。
 
@@ -589,6 +589,19 @@ xscientist research hypothesis \
   "检索反思能够提高事实准确率" \
   --falsifier "准确率不高于固定基线"
 
+# 文献检索本身也进入 DAG：计划、完整候选回执、来源快照、精确段落
+xscientist research literature plan \
+  "检索反思能否提高事实准确率？" \
+  --query '"retrieval reflection" AND factual accuracy' \
+  --provider OpenAlex --include "有对照或固定基准的研究"
+xscientist research literature receipt @latest:search_plan \
+  --provider OpenAlex --query '"retrieval reflection" AND factual accuracy' \
+  --results ./openalex-results.json
+xscientist research literature source @latest:search_receipt \
+  "入选研究" --file ./selected-study.pdf --doi 10.0000/example
+xscientist research literature passage @latest:source_snapshot \
+  "与结论直接相关的原文段落" --locator "page=7;section=Results;paragraph=2"
+
 xscientist research preregister @latest:hypothesis \
   --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
   --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
@@ -615,7 +628,9 @@ xscientist research review \
 xscientist research claim \
   "方法提高了准确率" \
   --evidence @latest:evidence \
-  --gate @latest:gate_decision --verified
+  --gate @latest:gate_decision --verified \
+  --population "benchmark-v1 任务" --intervention "检索反思" \
+  --outcome "事实准确率" --metric accuracy --unit proportion
 
 # 在改变历史前先获得可解释、只读的 checkpoint / fork / merge 建议
 xscientist research decide contradiction \
@@ -627,7 +642,7 @@ xscientist research dag --output ./research-dag
 
 `research guide` 会根据仓库中真实存在的对象，用普通语言解释当前完成度、下一步为什么
 重要，并给出可直接复制的命令。`research dag` 会生成无需服务器的
-`research-dag.html`，把问题、假设、计划、实验、支持/反驳证据、独立评审、门禁、复现
+`research-dag.html`，把问题、检索计划、来源、段落证据、假设、实验、支持/反驳证据、独立评审、门禁、复现
 和智能体演化放在同一张可搜索图上。节点会分别展示 trace、replay、verify 检查；存在
 反证的对象保持 `contested`，不会被总分掩盖。
 

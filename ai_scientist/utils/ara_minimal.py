@@ -35,7 +35,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_scientist.protocol import PROTOCOL_VERSION, hash_node_payload
+from ai_scientist.protocol import (
+    NODE_IDENTITY_PROFILE,
+    PROTOCOL_VERSION,
+    hash_node_payload,
+)
 from ai_scientist.utils.ara_artifact import (
     ARAExportResult,
     ara_dir_for_idea,
@@ -149,6 +153,9 @@ def export_minimal_ara(
             "exc_info": None,
             "exec_time": None,
             "content_hash": hash_node_payload(code="", metric=None, is_seed=True),
+            "content_hash_inputs": ["code", "metric", "seed"],
+            "identity_profile": NODE_IDENTITY_PROFILE,
+            "execution_identity": {},
         },
     )
 
@@ -165,6 +172,9 @@ def export_minimal_ara(
                         "content_hash": hash_node_payload(
                             code="", metric=None, is_seed=True
                         ),
+                        "content_hash_inputs": ["code", "metric", "seed"],
+                        "identity_profile": NODE_IDENTITY_PROFILE,
+                        "execution_identity": {},
                         "stage": "manuscript_only",
                         "step": 0,
                         "parent_id": None,
@@ -194,6 +204,8 @@ def export_minimal_ara(
     manifest_payload = {
         "schema_version": PROTOCOL_VERSION,
         "protocol_kind": "manifest",
+        "portability_profile": "ara.portable.v1",
+        "conformance_profile": "ara.conformance.v1",
         "created_at": now,
         "source_exp_dir": relative_path_reference(project_dir_path, base=ara_dir),
         "project_dir": relative_path_reference(project_dir_path, base=ara_dir),

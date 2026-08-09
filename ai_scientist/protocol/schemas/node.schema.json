@@ -20,6 +20,14 @@
     "execution_backend": {"type": ["string", "null"]},
     "execution_isolation": {"type": ["object", "null"]},
     "content_hash": {"type": ["string", "null"]},
+    "identity_profile": {
+      "type": "string",
+      "enum": ["ara.node-identity.v1", "ara.node-identity.v2"]
+    },
+    "execution_identity": {
+      "type": "object",
+      "description": "Portable hashes and deterministic inputs bound into the v2 node identity."
+    },
     "content_hash_inputs": {
       "type": "array",
       "items": {"type": "string"},

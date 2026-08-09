@@ -105,7 +105,7 @@ flowchart LR
 - Enhanced feedback system: multi-source feedback collection, real-time health monitoring, trend analysis, automated action generation.
 - Observability and replay: critical stage artifacts are written as structured files (JSON/MD) for comparison and post-mortems.
 - Engineering safeguards: login guard, preflight/repo validation, config schemas, output directory isolation.
-- Native Research VCS: a project can record typed objects, stage semantic changes, fork research lines, inspect provenance, merge compatible findings, create offline bundles, reproduce checkpoints, and export RO-Crate/PROV/CWL/DVC/MLflow exchange artifacts without GitHub or any server. Git is the current replaceable persistence adapter, not the user-facing research model.
+- Native Research VCS: a project can record typed objects, stage semantic changes, fork research lines, inspect provenance, merge compatible findings, create offline bundles, reproduce checkpoints, and export Process Run RO-Crate/PROV/CWL/DVC/MLflow/OpenLineage/Croissant/Nanopublication exchange artifacts without GitHub or any server. Git is the current replaceable persistence adapter, not the user-facing research model.
 - Executable self-evolution: immutable candidate file trees, paired shell-free benchmark runs, bounded canaries, signed multi-authority approvals, atomic local deployment, and content-verified rollback are available through `xscientist evolution`. Production mutation is opt-in and remains separate from semantic Research VCS promotion.
 - Agent-Native Research Artifact (ARA) export: every finished run also writes a machine-readable bundle under `<project_dir>/ara/`, containing the full exploration graph, per-node `code.py` / `term_out.log` / `metrics.json` / `plots.json`, the Pareto pool, repair history, an environment fingerprint, and a scan of `\claimref{node_id}` markers from the LaTeX source. Companion command `xscientist ara` can inspect / re-execute / fork any node so a downstream AI scientist can continue or verify prior work without decoding the PDF; `exploration_graph.html` presents each paper's process as a browser-viewable science exploration tree.
 
@@ -612,6 +612,19 @@ xscientist research hypothesis \
   "Retrieval reflection improves factual accuracy" \
   --falsifier "accuracy does not exceed the fixed baseline"
 
+# Literature is a reviewable DAG, not a flattened citation list.
+xscientist research literature plan \
+  "Does retrieval reflection improve factual accuracy?" \
+  --query '"retrieval reflection" AND factual accuracy' \
+  --provider OpenAlex --include "controlled or benchmarked studies"
+xscientist research literature receipt @latest:search_plan \
+  --provider OpenAlex --query '"retrieval reflection" AND factual accuracy' \
+  --results ./openalex-results.json
+xscientist research literature source @latest:search_receipt \
+  "Selected study" --file ./selected-study.pdf --doi 10.0000/example
+xscientist research literature passage @latest:source_snapshot \
+  "Exact evidence-bearing passage" --locator "page=7;section=Results;paragraph=2"
+
 xscientist research preregister @latest:hypothesis \
   --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
   --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
@@ -637,7 +650,9 @@ xscientist research review \
 
 xscientist research claim \
   "The method is not evaluable within the fixed budget" \
-  --evidence @latest:evidence --gate @latest:gate_decision --verified
+  --evidence @latest:evidence --gate @latest:gate_decision --verified \
+  --population "benchmark-v1 tasks" --intervention "retrieval reflection" \
+  --outcome "factual accuracy" --metric accuracy --unit proportion
 ```
 
 Failed and timed-out experiments are committed as first-class history. The

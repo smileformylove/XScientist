@@ -25,11 +25,18 @@ from typing import Any
 
 from .constants import CONTENT_HASH_ALGO
 
-# Cap the code payload we feed into the hash. Pathologically large nodes (some
-# ARA producers embed data blobs inline) would otherwise turn every export
-# into a 500-node × N-MB SHA loop. When we truncate we still record the
-# original length in the payload so two different long files hash differently.
+# Legacy v1 embedded at most this much code in the canonical JSON payload.
+# Keep the constant only so old artifacts can still be verified.  New v2
+# identities stream-hash every byte of the source and therefore cannot collide
+# merely because two files share a prefix and length.
 _MAX_CODE_BYTES = 256 * 1024  # 256 KiB — well above any realistic node code
+
+LEGACY_NODE_IDENTITY_PROFILE = "ara.node-identity.v1"
+NODE_IDENTITY_PROFILE = "ara.node-identity.v2"
+SUPPORTED_NODE_IDENTITY_PROFILES = {
+    LEGACY_NODE_IDENTITY_PROFILE,
+    NODE_IDENTITY_PROFILE,
+}
 
 _CANONICAL_ENCODER = json.JSONEncoder(
     sort_keys=True,
@@ -96,13 +103,45 @@ def _prep_code_for_hash(code: str) -> tuple[str, int, bool]:
     return truncated, original_len, True
 
 
+def _code_bytes(code: str) -> bytes:
+    return (code or "").strip().encode("utf-8", errors="replace")
+
+
+def _digest_bytes(payload: bytes) -> str:
+    return f"{CONTENT_HASH_ALGO}:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _stable_hash_refs(
+    values: list[str] | None,
+    *,
+    label: str,
+    require_sha256: bool = True,
+) -> list[str]:
+    cleaned = sorted({str(value) for value in values or [] if str(value)})
+    if not require_sha256:
+        return cleaned
+    for value in cleaned:
+        if not value.startswith("sha256:") or len(value) != 71:
+            raise ValueError(f"{label} must contain sha256:<64 hex> references")
+        try:
+            int(value.split(":", 1)[1], 16)
+        except ValueError as exc:
+            raise ValueError(
+                f"{label} must contain sha256:<64 hex> references"
+            ) from exc
+    return cleaned
+
+
 def hash_node_payload(
     *,
     code: str,
     metric: Any,
     extras: dict[str, Any] | None = None,
     llm_call_hashes: list[str] | None = None,
+    context_hashes: list[str] | None = None,
+    execution_identity: dict[str, Any] | None = None,
     is_seed: bool = False,
+    identity_profile: str = NODE_IDENTITY_PROFILE,
 ) -> str:
     """Compute the canonical hash for one exploration node.
 
@@ -132,27 +171,50 @@ def hash_node_payload(
     protocol revisions — hash-compatible with ARAs exported before this
     field existed.
 
-    Large ``code`` inputs (>256 KiB) are truncated for hashing speed, but the
-    original length is captured in the payload so distinct long files still
-    hash differently.
+    ``ara.node-identity.v2`` binds a digest of the complete source bytes plus
+    optional execution and context identities.  ``ara.node-identity.v1`` is
+    retained exclusively for verification of legacy artifacts and preserves
+    its historical prefix-truncation behavior.
     """
-    prepped, original_len, truncated = _prep_code_for_hash(code or "")
-    payload: dict[str, Any] = {
-        "code": prepped,
-        "code_len_bytes": original_len,
-        "metric": _normalise_metric(metric),
-    }
-    if truncated:
-        payload["code_truncated"] = True
+    normalized_profile = str(identity_profile or "").strip()
+    if normalized_profile not in SUPPORTED_NODE_IDENTITY_PROFILES:
+        raise ValueError(f"unsupported node identity profile: {identity_profile}")
+    raw_code = _code_bytes(code or "")
+    if normalized_profile == LEGACY_NODE_IDENTITY_PROFILE:
+        prepped, original_len, truncated = _prep_code_for_hash(code or "")
+        payload: dict[str, Any] = {
+            "code": prepped,
+            "code_len_bytes": original_len,
+            "metric": _normalise_metric(metric),
+        }
+        if truncated:
+            payload["code_truncated"] = True
+    else:
+        payload = {
+            "identity_profile": NODE_IDENTITY_PROFILE,
+            "code_digest": _digest_bytes(raw_code),
+            "code_len_bytes": len(raw_code),
+            "metric": _normalise_metric(metric),
+        }
     if extras:
         payload["extras"] = dict(extras)
-    if llm_call_hashes:
-        # sort so ordering of concurrent calls doesn't churn the hash.
-        # duplicates and empty strings collapse to nothing — a list of only
-        # empty strings must be treated the same as "no LLM calls bound".
-        cleaned = sorted({str(h) for h in llm_call_hashes if h})
-        if cleaned:
-            payload["llm_calls"] = cleaned
+    # Older callers treated LLM references as opaque stable identifiers. Keep
+    # accepting them so legacy producer APIs remain hash-verifiable; current
+    # exporters and schemas emit sha256 references.
+    cleaned_llm = _stable_hash_refs(
+        llm_call_hashes,
+        label="llm_call_hashes",
+        require_sha256=False,
+    )
+    if cleaned_llm:
+        payload["llm_calls"] = cleaned_llm
+    cleaned_context = _stable_hash_refs(context_hashes, label="context_hashes")
+    if cleaned_context:
+        payload["contexts"] = cleaned_context
+    if execution_identity:
+        if not isinstance(execution_identity, dict):
+            raise TypeError("execution_identity must be a JSON object")
+        payload["execution"] = dict(execution_identity)
     if is_seed:
         # Only add the marker when actually seed-derived — mirrors the
         # llm_calls pattern so ``is_seed=False`` is a no-op and back-compat

@@ -71,12 +71,14 @@ Required top-level keys:
 | `schema_version` | string | MUST equal `"ara.v1"` for this protocol version. |
 | `protocol_kind` | string | RECOMMENDED. Consumers may assert `== "manifest"`. |
 | `created_at` | string (ISO-8601) | UTC recommended. |
-| `source_exp_dir` | string | Absolute path to the origin experiment directory. Purely informational — do not rely on it existing on the consumer's disk. |
+| `source_exp_dir` | string | Portable relative reference to the origin experiment directory. Legacy absolute values remain readable, but producers declaring `ara.portable.v1` MUST NOT emit them. |
 | `idea` | object | Must contain `name`; other fields optional. |
 | `counts` | object | Must contain `nodes`. `edges`, `buggy_nodes`, `journals`, `claims` recommended. |
 
 Optional keys:
 
+- `portability_profile`: new producers SHOULD declare `ara.portable.v1`.
+- `conformance_profile`: new producers SHOULD declare `ara.conformance.v1`.
 - `project_dir`: the parent directory this ARA landed under.
 - `references`: producer-specific pointers to sub-artifacts.
 - `missing`: array of strings describing intentionally-absent pieces.
@@ -111,21 +113,27 @@ additional sources of truth.
 ## 4. Content Addressing (`content_hash`)
 
 Every node SHOULD carry a `content_hash` field of the form
-`sha256:<64 hex chars>`. The hash is computed over a canonical JSON payload:
+`sha256:<64 hex chars>` and an `identity_profile`. New producers MUST use
+`ara.node-identity.v2`; consumers retain `ara.node-identity.v1` only to verify
+legacy artifacts. Version 2 hashes the complete stripped UTF-8 source first:
 
 ```json
 {
-  "code": "<node's code, stripped>",
+  "identity_profile": "ara.node-identity.v2",
+  "code_digest": "sha256:<digest of every source byte>",
   "code_len_bytes": 1234,
   "metric": {"name": ..., "value": ..., "maximize": ...},
-  "extras": { ... optional producer-supplied fields ... }
+  "extras": { ... optional producer-supplied fields ... },
+  "llm_calls": ["sha256:..."],
+  "contexts": ["sha256:..."],
+  "execution": {"container_digest": "sha256:...", "seeds": [7]}
 }
 ```
 
-For large code payloads (>256 KiB) the ``code`` field is truncated to the
-byte cap and a ``code_truncated: true`` marker is added — the original
-``code_len_bytes`` still stabilises the identity, so two different long
-files hash differently.
+Version 2 never truncates the identity input. This closes the legacy v1 case
+where equal-length files with a common 256 KiB prefix could collide. The full
+code itself is not embedded in the canonical identity JSON, keeping hashing
+bounded while preserving byte-complete identity.
 
 Rules:
 
@@ -137,6 +145,9 @@ Rules:
   (dataset name, seed, verified evaluator/input/result hashes) SHOULD do so via
   `extras`; unstable inputs
   (timestamps, memory addresses) MUST NOT enter the payload.
+- LLM calls, ContextPacks, dataset/dependency/container identities, evaluator
+  bindings, tool hashes, and seeds that can affect an output MUST be bound
+  through their dedicated hash fields or `execution` envelope.
 
 Reference implementation: `ai_scientist.protocol.hash_node_payload`.
 
@@ -559,7 +570,18 @@ against their own key ring; the protocol treats each entry as opaque.
 Reference validator: `ai_scientist.protocol.validate_ara(path)`.
 
 The validator returns a `ValidationReport` with `ok`, `errors`, `warnings`,
-and `checked`. `strict=True` promotes warnings to errors — useful in CI.
+`checked`, and a cumulative `conformance` assessment. `strict=True` promotes
+warnings to errors — useful in CI.
+
+| Level | Meaning |
+|---|---|
+| `index` | Manifest and exploration DAG are schema-valid and inspectable. |
+| `trace` | Every node has a content hash and explicit identity profile. |
+| `replay` | Trace plus code, metrics, runner, and environment receipts. |
+| `verify` | Replay plus a passing verification receipt for every non-buggy node. |
+
+Use `xscientist ara validate --level index|trace|replay|verify`. Higher levels
+inherit all lower-level blockers.
 
 To claim conformance a producer MUST pass:
 

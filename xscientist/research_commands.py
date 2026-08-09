@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from ai_scientist.protocol import content_hash
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.research_integrity import (
     ResearchIntegrityError,
     build_preregistration,
@@ -20,6 +22,11 @@ from .research_git import (
     create_checkpoint,
 )
 from .research_lifecycle import ResearchLifecycle
+from .research_semantics import (
+    build_search_receipt_payload,
+    claim_scope_hash,
+    normalize_claim_scope,
+)
 from .research_vcs import ResearchRepository
 
 
@@ -158,6 +165,236 @@ def save_research_plan(
         stage="plan",
         subject=message or "record exploratory research plan",
         status="draft",
+        commit=commit,
+    )
+
+
+def save_search_plan(
+    repo: str,
+    *,
+    question: str,
+    queries: Sequence[str],
+    providers: Sequence[str] = (),
+    inclusion_criteria: Sequence[str] = (),
+    exclusion_criteria: Sequence[str] = (),
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Preregister a literature search so result selection is reviewable."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    normalized_queries = [
+        _required_text(item, label="search query") for item in queries
+    ]
+    if not normalized_queries:
+        raise ResearchGitError("search plan requires at least one query")
+    core: dict[str, Any] = {
+        "question": _required_text(question, label="search question"),
+        "queries": list(dict.fromkeys(normalized_queries)),
+        "providers": sorted(
+            {_required_text(item, label="search provider") for item in providers}
+        ),
+        "inclusion_criteria": [
+            _required_text(item, label="inclusion criterion")
+            for item in inclusion_criteria
+        ],
+        "exclusion_criteria": [
+            _required_text(item, label="exclusion criterion")
+            for item in exclusion_criteria
+        ],
+    }
+    payload = {**core, "search_plan_hash": canonical_content_hash(core)}
+    result = repository.record("search_plan", payload, state="locked")
+    return _finish(
+        repository,
+        result,
+        stage="plan",
+        subject=message or "lock literature search plan",
+        status="locked",
+        commit=commit,
+    )
+
+
+def save_search_receipt(
+    repo: str,
+    *,
+    plan_id: str,
+    provider: str,
+    query: str,
+    candidates: Sequence[Mapping[str, Any]],
+    retrieved_at: str = "",
+    corpus_version: str = "",
+    errors: Sequence[str] = (),
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Record the complete ranked candidate set returned by one search call."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    plan = repository.get(plan_id)
+    if plan["kind"] != "search_plan":
+        raise ResearchGitError("search receipt plan reference has wrong kind")
+    resolved_plan = str(plan["object_id"])
+    try:
+        payload = build_search_receipt_payload(
+            provider=_required_text(provider, label="search provider"),
+            query=_required_text(query, label="search query"),
+            candidates=candidates,
+            retrieved_at=(
+                retrieved_at.strip()
+                or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            ),
+            corpus_version=corpus_version,
+            errors=errors,
+        )
+    except ValueError as exc:
+        raise ResearchGitError(str(exc)) from exc
+    result = repository.record(
+        "search_receipt",
+        payload,
+        state="completed",
+        relations=[
+            {"type": "depends_on", "target": resolved_plan, "role": "search_plan"}
+        ],
+    )
+    return _finish(
+        repository,
+        result,
+        stage="evidence",
+        subject=message or "record literature search receipt",
+        status="completed",
+        commit=commit,
+    )
+
+
+def save_source_snapshot(
+    repo: str,
+    *,
+    receipt_id: str,
+    title: str,
+    content_hash: str,
+    metadata_hash: str | None = None,
+    doi: str = "",
+    pmid: str = "",
+    arxiv_id: str = "",
+    url: str = "",
+    license_name: str = "",
+    retraction_status: str = "unknown",
+    previous_source_id: str | None = None,
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Freeze identifiers and hashes for one selected literature source."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    receipt = repository.get(receipt_id)
+    if receipt["kind"] != "search_receipt":
+        raise ResearchGitError("source receipt reference has wrong kind")
+    _hashes(
+        [content_hash, *([metadata_hash] if metadata_hash else [])],
+        label="source hash",
+    )
+    core = {
+        "title": _required_text(title, label="source title"),
+        "content_hash": content_hash,
+        "metadata_hash": metadata_hash or "",
+        "doi": doi.strip(),
+        "pmid": pmid.strip(),
+        "arxiv_id": arxiv_id.strip(),
+        "url": url.strip(),
+        "license": license_name.strip(),
+        "retraction_status": retraction_status.strip() or "unknown",
+    }
+    payload = {**core, "source_hash": canonical_content_hash(core)}
+    relations: list[dict[str, str]] = [
+        {"type": "derived_from", "target": str(receipt["object_id"])}
+    ]
+    if previous_source_id:
+        previous = repository.get(previous_source_id)
+        if previous["kind"] != "source_snapshot":
+            raise ResearchGitError("superseded source reference has wrong kind")
+        relations.append({"type": "supersedes", "target": str(previous["object_id"])})
+    result = repository.record(
+        "source_snapshot", payload, state="completed", relations=relations
+    )
+    return _finish(
+        repository,
+        result,
+        stage="evidence",
+        subject=message or "record immutable literature source",
+        status="completed",
+        commit=commit,
+    )
+
+
+def save_passage_evidence(
+    repo: str,
+    *,
+    source_id: str,
+    quote: str,
+    locator: str,
+    supports: Sequence[str] = (),
+    refutes: Sequence[str] = (),
+    context_id: str | None = None,
+    scope: str = "",
+    structured_scope: Mapping[str, Any] | None = None,
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Bind a precise passage and locator to its immutable source snapshot."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    source = repository.get(source_id)
+    if source["kind"] != "source_snapshot":
+        raise ResearchGitError("passage source reference has wrong kind")
+    normalized_quote = _required_text(quote, label="passage quote")
+    normalized_locator = _required_text(locator, label="passage locator")
+    quote_hash = canonical_content_hash(normalized_quote)
+    core = {
+        "source_id": str(source["object_id"]),
+        "locator": normalized_locator,
+        "quote": normalized_quote,
+        "quote_hash": quote_hash,
+    }
+    payload = {**core, "passage_hash": canonical_content_hash(core)}
+    normalized_scope = normalize_claim_scope(structured_scope, legacy_text=scope)
+    if normalized_scope:
+        payload["scope"] = normalized_scope
+        payload["scope_hash"] = claim_scope_hash(normalized_scope)
+        payload["passage_hash"] = canonical_content_hash(
+            {key: value for key, value in payload.items() if key != "passage_hash"}
+        )
+    relations: list[dict[str, str]] = [
+        {"type": "quotes", "target": str(source["object_id"])}
+    ]
+    for selector in supports:
+        target = repository.get(selector)
+        relations.append(
+            {"type": "qualified_supports", "target": str(target["object_id"])}
+        )
+    for selector in refutes:
+        target = repository.get(selector)
+        relations.append(
+            {"type": "qualified_refutes", "target": str(target["object_id"])}
+        )
+    if context_id:
+        context = repository.get(context_id)
+        if context["kind"] != "context_snapshot":
+            raise ResearchGitError("passage context reference has wrong kind")
+        relations.append({"type": "uses_context", "target": str(context["object_id"])})
+    result = repository.record(
+        "passage_evidence", payload, state="completed", relations=relations
+    )
+    return _finish(
+        repository,
+        result,
+        stage="evidence",
+        subject=message or "record source-qualified passage evidence",
+        status="completed",
         commit=commit,
     )
 
@@ -334,6 +571,8 @@ def save_evidence(
     supports: Sequence[str] = (),
     refutes: Sequence[str] = (),
     metrics: Mapping[str, Any] | None = None,
+    scope: str = "",
+    structured_scope: Mapping[str, Any] | None = None,
     verified: bool = False,
     verifier_id: str | None = None,
     message: str | None = None,
@@ -346,6 +585,10 @@ def save_evidence(
     }
     if metrics:
         payload["metrics"] = dict(metrics)
+    normalized_scope = normalize_claim_scope(structured_scope, legacy_text=scope)
+    if normalized_scope:
+        payload["scope"] = normalized_scope
+        payload["scope_hash"] = claim_scope_hash(normalized_scope)
     payload["measurement_hash"] = content_hash(
         {"result": payload["result"], "metrics": payload.get("metrics") or {}}
     )
@@ -376,6 +619,7 @@ def save_claim(
     statement: str,
     evidence_ids: Sequence[str],
     scope: str = "",
+    structured_scope: Mapping[str, Any] | None = None,
     gate_id: str | None = None,
     verified: bool = False,
     message: str | None = None,
@@ -386,8 +630,10 @@ def save_claim(
     payload: dict[str, Any] = {
         "statement": _required_text(statement, label="claim statement")
     }
-    if scope.strip():
-        payload["scope"] = scope.strip()
+    normalized_scope = normalize_claim_scope(structured_scope, legacy_text=scope)
+    if normalized_scope:
+        payload["scope"] = normalized_scope
+        payload["scope_hash"] = claim_scope_hash(normalized_scope)
     lifecycle = ResearchLifecycle(repository)
     recorded = lifecycle.claim(
         payload,
@@ -459,7 +705,11 @@ __all__ = [
     "save_evidence",
     "save_experiment",
     "save_hypothesis",
+    "save_passage_evidence",
     "save_preregistration",
     "save_research_plan",
     "save_review",
+    "save_search_plan",
+    "save_search_receipt",
+    "save_source_snapshot",
 ]

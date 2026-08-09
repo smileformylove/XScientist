@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -17,6 +18,8 @@ from .canonical_json import (
 
 ATTESTATION_SCHEMA = "xscientist.attestation.v1"
 SUPPORTED_ALGORITHMS = {"hmac-sha256", "ed25519"}
+DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json"
+IN_TOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 
 
 class AttestationError(ValueError):
@@ -242,6 +245,164 @@ def verify_attestation(
     }
 
 
+def build_in_toto_statement(
+    *,
+    subjects: list[Mapping[str, Any]],
+    predicate_type: str,
+    predicate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the stable in-toto Statement v1 shape used inside DSSE."""
+
+    normalized_subjects: list[dict[str, Any]] = []
+    for subject in subjects:
+        name = str(subject.get("name") or "").strip()
+        digest = subject.get("digest") or {}
+        sha256 = str(digest.get("sha256") or "").removeprefix("sha256:")
+        if not name or len(sha256) != 64:
+            raise AttestationError("in-toto subject requires name and sha256 digest")
+        try:
+            int(sha256, 16)
+        except ValueError as exc:
+            raise AttestationError("in-toto subject sha256 digest is invalid") from exc
+        normalized_subjects.append({"name": name, "digest": {"sha256": sha256}})
+    if not normalized_subjects or not str(predicate_type or "").strip():
+        raise AttestationError("in-toto subjects and predicate_type are required")
+    return {
+        "_type": IN_TOTO_STATEMENT_TYPE,
+        "subject": normalized_subjects,
+        "predicateType": str(predicate_type).strip(),
+        "predicate": deepcopy(dict(predicate)),
+    }
+
+
+def _dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    type_bytes = payload_type.encode("utf-8")
+    return (
+        b"DSSEv1 "
+        + str(len(type_bytes)).encode("ascii")
+        + b" "
+        + type_bytes
+        + b" "
+        + str(len(payload)).encode("ascii")
+        + b" "
+        + payload
+    )
+
+
+def sign_dsse_statement(
+    statement: Mapping[str, Any],
+    *,
+    key_id: str,
+    algorithm: str,
+    key: bytes,
+    payload_type: str = DSSE_PAYLOAD_TYPE,
+) -> dict[str, Any]:
+    """Sign an in-toto statement with a standard DSSE pre-auth encoding."""
+
+    if statement.get("_type") != IN_TOTO_STATEMENT_TYPE:
+        raise AttestationError("DSSE statement must use in-toto Statement v1")
+    if algorithm not in SUPPORTED_ALGORITHMS or not key_id or not key:
+        raise AttestationError("valid key_id, algorithm, and key are required")
+    payload = canonical_json_bytes(dict(statement))
+    message = _dsse_pae(payload_type, payload)
+    if algorithm == "hmac-sha256":
+        signature = hmac.new(key, message, hashlib.sha256).digest()
+    else:
+        signature = _load_ed25519_private_key(key).sign(message)
+    return {
+        "payloadType": payload_type,
+        "payload": base64.b64encode(payload).decode("ascii"),
+        "signatures": [
+            {
+                "keyid": key_id,
+                "sig": base64.b64encode(signature).decode("ascii"),
+            }
+        ],
+    }
+
+
+def verify_dsse_statement(
+    envelope: Mapping[str, Any],
+    *,
+    trust_store: Mapping[str, Mapping[str, Any]],
+    predicate_type: str | None = None,
+    minimum_signatures: int = 1,
+) -> dict[str, Any]:
+    """Verify DSSE signatures and return the decoded in-toto statement."""
+
+    if minimum_signatures < 1:
+        raise AttestationError("minimum_signatures must be at least one")
+    errors: list[str] = []
+    payload_type = str(envelope.get("payloadType") or "")
+    try:
+        payload = base64.b64decode(str(envelope.get("payload") or ""), validate=True)
+        statement = json.loads(payload)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        payload = b""
+        statement = {}
+        errors.append("payload_invalid")
+    if payload_type != DSSE_PAYLOAD_TYPE:
+        errors.append("payload_type_invalid")
+    if (
+        not isinstance(statement, dict)
+        or statement.get("_type") != IN_TOTO_STATEMENT_TYPE
+    ):
+        errors.append("statement_type_invalid")
+    elif not isinstance(statement.get("predicate"), dict):
+        errors.append("statement_predicate_invalid")
+    else:
+        try:
+            build_in_toto_statement(
+                subjects=list(statement.get("subject") or []),
+                predicate_type=str(statement.get("predicateType") or ""),
+                predicate=statement["predicate"],
+            )
+        except (AttestationError, TypeError):
+            errors.append("statement_subject_invalid")
+    if predicate_type is not None and statement.get("predicateType") != predicate_type:
+        errors.append("predicate_type_mismatch")
+    valid_key_ids: set[str] = set()
+    message = _dsse_pae(payload_type, payload)
+    for signature_row in envelope.get("signatures") or []:
+        key_id = str(signature_row.get("keyid") or "")
+        trusted = trust_store.get(key_id) or {}
+        algorithm = str(trusted.get("algorithm") or "")
+        if trusted.get("revoked") is True:
+            continue
+        try:
+            signature = base64.b64decode(
+                str(signature_row.get("sig") or ""), validate=True
+            )
+        except (ValueError, TypeError):
+            continue
+        if algorithm == "hmac-sha256":
+            secret = trusted.get("key")
+            if isinstance(secret, str):
+                secret = secret.encode("utf-8")
+            if isinstance(secret, bytes) and hmac.compare_digest(
+                signature, hmac.new(secret, message, hashlib.sha256).digest()
+            ):
+                valid_key_ids.add(key_id)
+        elif algorithm == "ed25519":
+            public_key = trusted.get("public_key")
+            if isinstance(public_key, str):
+                public_key = public_key.encode("utf-8")
+            try:
+                if isinstance(public_key, bytes):
+                    _load_ed25519_public_key(public_key).verify(signature, message)
+                    valid_key_ids.add(key_id)
+            except Exception:
+                pass
+    if len(valid_key_ids) < minimum_signatures:
+        errors.append("signature_threshold_not_met")
+    return {
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "valid_key_ids": sorted(valid_key_ids),
+        "statement": statement,
+    }
+
+
 def verify_authorization_bundle(
     bundle: Mapping[str, Any],
     *,
@@ -354,9 +515,14 @@ def verify_authorization_bundle(
 
 __all__ = [
     "ATTESTATION_SCHEMA",
+    "DSSE_PAYLOAD_TYPE",
+    "IN_TOTO_STATEMENT_TYPE",
     "SUPPORTED_ALGORITHMS",
     "AttestationError",
+    "build_in_toto_statement",
     "sign_attestation",
+    "sign_dsse_statement",
     "verify_attestation",
     "verify_authorization_bundle",
+    "verify_dsse_statement",
 ]
