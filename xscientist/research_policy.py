@@ -250,6 +250,63 @@ def decide_research_transition(
                 "commands": [],
             }
         )
+    context_snapshot: dict[str, Any] | None = None
+    context_candidates = [
+        item
+        for item in list_research_objects(repo)
+        if item.get("kind")
+        in {
+            "hypothesis",
+            "research_plan",
+            "preregistration",
+            "experiment_attempt",
+            "evidence",
+            "claim",
+            "review",
+            "gate_decision",
+            "agent_candidate",
+            "agent_evaluation",
+        }
+    ]
+    if context_candidates:
+        from .research_context import build_research_context_snapshot
+
+        chosen = "+".join(str(item["action"]) for item in actions)
+        alternative = "hold" if chosen != "hold" else "apply_transition"
+        latest_targets = [
+            str(item["object_id"])
+            for item in sorted(
+                context_candidates,
+                key=lambda item: (
+                    str(item.get("created_at") or ""),
+                    str(item["object_id"]),
+                ),
+                reverse=True,
+            )[:8]
+        ]
+        context_snapshot = build_research_context_snapshot(
+            repo,
+            target_ids=latest_targets,
+            decision_kind="version_control_transition",
+            selected=chosen,
+            options_considered=[
+                {"option": chosen, "rejected_because": ""},
+                {
+                    "option": alternative,
+                    "rejected_because": "deterministic transition policy selected "
+                    + chosen,
+                },
+            ],
+            rationale=[
+                str(item.get("reason") or "") for item in actions if item.get("reason")
+            ],
+            constraints=[
+                "decision trace is read-only",
+                "material divergent state must remain on an explicit research line",
+            ],
+            ref="WORKTREE",
+            budget_tokens=3000,
+        )
     decision_base = {
         "policy_version": POLICY_VERSION,
         "event": normalized_event,
@@ -261,6 +318,9 @@ def decide_research_transition(
         "signals": signals,
         "actions": actions,
         "merge_preview": merge_preview,
+        "context_hash": (
+            context_snapshot.get("context_hash") if context_snapshot else None
+        ),
     }
     return {
         "schema": "xscientist.research-vcs-decision.v1",
@@ -269,6 +329,7 @@ def decide_research_transition(
         "rationale": rationale,
         "mutates_repository": False,
         "trace_required": True,
+        "context": context_snapshot,
         "host_paths_disclosed": False,
     }
 

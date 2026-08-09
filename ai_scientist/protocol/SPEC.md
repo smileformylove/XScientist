@@ -811,16 +811,17 @@ directory as a prompt. Three derived layers provide bounded consumption:
    rebuildable from the manifest, graph, claims, event ledger, and verify
    reports. `metadata.source_fingerprint` declares freshness.
 3. A `context_pack` is an ephemeral, content-addressed view for exactly one
-   intent: `continue`, `write`, `audit`, or `reproduce`. It records a target,
-   hard-closure items, optional ranked context, omissions, `source_refs`, and a
-   `source_closure_hash`.
+   intent: `continue`, `write`, `audit`, `reproduce`, or `decide`. It records a
+   target, hard-closure items, optional ranked context, omissions,
+   `source_refs`, a `source_closure_hash`, prior `memory_refs`, and a
+   `memory_snapshot_hash`.
 
 **`catalog --ara <path> [--rebuild]`** — Inspect index freshness or rebuild the
 semantic catalog. Normal ContextPack compilation rebuilds a stale/missing index
 automatically, so agents do not need to invoke this manually.
 
-**`context --ara <path> --intent continue|write|audit|reproduce [--node ID]
-[--claim ID] [--budget N] [--receipt] [--json]`** — Compile the smallest view
+**`context --ara <path> --intent continue|write|audit|reproduce|decide [--node ID]
+[--claim ID] [--decision-json JSON] [--budget N] [--receipt] [--json]`** — Compile the smallest view
 for the named consumer. `--budget` only trims optional context; target identity,
 evidence refs, execution hooks, and verification rules form a hard closure.
 `--receipt` stores the exact pack in CAS and appends a compact receipt under
@@ -837,7 +838,13 @@ Pipeline producers integrate these views at mandatory consumption points:
   its hash is written to the verify report.
 
 ContextPack summaries are caches, not facts. Consumers verify them through
-`source_closure_hash` and may always drill down to the immutable source refs.
+`source_closure_hash`, `memory_snapshot_hash`, and `pack_hash`, and may always
+drill down to the immutable source refs. Compilation and consumption receipts
+carry a stable `receipt_hash`; invalid receipts MUST NOT enter the admitted
+semantic event ledger. Prompt budgets trim display material only and MUST NOT
+remove source or memory identities from the hard closure. `generated_at` and
+the post-write `persisted_ref` storage location are excluded from `pack_hash`;
+the latter cannot be part of the payload that determines its own CAS address.
 
 ### 20.8 Exit-code conventions
 
@@ -923,6 +930,21 @@ Research-State: completed
 Research-Event: sha256:...
 ARA-Manifest: sha256:...
 ```
+
+Within the checkpoint JSON, new ARA references SHOULD also carry
+`exploration_graph_hash`, the canonical content hash of the graph committed in
+the same tree. Consumers MUST reject a mismatching graph binding before adding
+ARA-to-evidence verification edges. Older checkpoints without this field may
+be treated as Git-commit-bound, but the weaker binding must remain visible in
+diagnostics.
+
+Research Objects produced from an ARA SHOULD carry both `ara_manifest_hash`
+and `ara_exploration_graph_hash` in provenance (or, for lifecycle payloads, in
+the payload). Consumers MUST interpret them as one version pair rather than two
+independent hints. If an object visible at a later ref binds an older graph
+version, a consumer MAY rehydrate the matching ARA snapshot from reachable Git
+history, but only when the checkpoint at that historical commit validates the
+same manifest/graph pair.
 
 Large payloads use `research_object_pointer.schema.json`; the pointer enters
 Git and the immutable payload remains in the local CAS. Portable offline

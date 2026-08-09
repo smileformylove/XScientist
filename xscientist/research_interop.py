@@ -69,6 +69,7 @@ def _schema_type(kind: str) -> str:
         "reproduction": "Action",
         "agent_candidate": "SoftwareSourceCode",
         "agent_evaluation": "Review",
+        "context_snapshot": "DigitalDocument",
     }.get(kind, "CreativeWork")
 
 

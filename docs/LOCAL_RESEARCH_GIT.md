@@ -11,8 +11,8 @@ The design separates three concerns:
 
 | Layer | Stores | Why |
 |---|---|---|
-| Research VCS | Typed objects, relations, semantic stage, research lines, commits, gates, and provenance | Stable public scientific history |
-| ARA | Exploration DAG, provenance, verification state, and reproducibility metadata | Scientific semantics |
+| Research VCS | Typed objects, exact decision-context snapshots, relations, semantic stage, research lines, commits, gates, and provenance | Stable public scientific history |
+| ARA | Exploration DAG, consumed ContextPacks, provenance, verification state, and reproducibility metadata | Scientific semantics |
 | Local CAS | Datasets, models, binaries, full logs, and other immutable payloads | Complete storage without inflating Git |
 | Git adapter | Durable commit graph and optional interoperability | Replaceable implementation detail |
 
@@ -79,7 +79,13 @@ Reproduce: xscientist ara verify ...
 
 The backend commit SHA is intentionally not embedded in its own tree. Research
 object/checkpoint content hashes remain the scientific identities and avoid a
-self-referential hash.
+self-referential hash. Each new checkpoint ARA reference also stores the
+canonical `exploration_graph.json` hash in its checkpoint JSON. This binds the
+node/edge projection to the same scientific transition while retaining
+read compatibility with older commit-bound checkpoints. ARA bindings carry
+forward across later checkpoints until that ARA is explicitly changed or
+passed with `--ara`; an unrelated checkpoint therefore cannot silently accept
+a graph that was edited through raw Git.
 
 ## Inspect, compare, and reproduce
 
@@ -95,6 +101,24 @@ xscientist research audit --level verify
 
 # Resolve IDs without copying them by hand.
 xscientist research objects @latest:hypothesis
+
+# Inspect exactly what a decision would see, including failures and prior gates.
+xscientist research context @latest:hypothesis \
+  --decision-kind next_experiment \
+  --selected revise_method \
+  --option revise_method \
+  --option 'repeat_failed_setup=the retained attempt already failed' \
+  --rationale 'use the failed run as negative knowledge'
+
+# Persist that context as an immutable Research Object and checkpoint.
+xscientist research context @latest:evidence \
+  --decision-kind evidence_triage \
+  --selected hold --option hold \
+  --option 'promote=independent reproduction is missing' \
+  --record
+
+# Reconstruct context from an old commit; selectors resolve inside that commit.
+xscientist research context @latest:hypothesis --ref HEAD~3 --json
 
 # Safe maintenance and recovery operations.
 xscientist research branch challenge/h1 -m challenge/accuracy
@@ -140,6 +164,16 @@ payloads:
 `verify` means that the selected ref satisfies XScientist's local protocol
 closure. It does not replace signatures, external custody, peer review, or a
 third-party scientific attestation.
+
+`research context` answers a third question: “which exact evidence and memory
+did this decision consume?” Its hard closure retains full object IDs and hashes
+for supporting and negative evidence, failed attempts, prior reviews/gates, and
+earlier context snapshots. Only short display summaries are budgeted. Recorded
+reviews and gates bind this snapshot using a `decision_context` DAG edge and a
+matching `context_hash`; closure verification fails closed if a required
+snapshot is missing or changed. Historical `--ref` reads objects and resolves
+`@latest:<kind>` at that ref, so old decisions cannot accidentally see today's
+worktree memory.
 
 For ecosystem exchange, export one committed ref without exposing payloads by
 default:

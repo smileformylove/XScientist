@@ -248,11 +248,55 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 "independent verifier must differ from the evaluated object's producer"
             )
+        from .research_context import record_research_context_snapshot
+
+        selected_option = "promote" if verified else "hold"
+        context = record_research_context_snapshot(
+            self.repository,
+            target_ids=list(evaluates),
+            decision_kind="independent_evidence_review",
+            selected=selected_option,
+            options_considered=[
+                {
+                    "option": "promote",
+                    "rejected_because": (
+                        "review is not verified or retains required failures"
+                        if not verified
+                        else ""
+                    ),
+                },
+                {
+                    "option": "hold",
+                    "rejected_because": (
+                        "independent review passed every required gate"
+                        if verified
+                        else ""
+                    ),
+                },
+            ],
+            rationale=[
+                str(report_payload.get("summary") or "independent review decision")
+            ],
+            constraints=[
+                str(value) for value in report_payload.get("required_failures") or []
+            ],
+            actor_id="research-review-context-recorder",
+        )
+        context_payload = self.repository.get(context.object_id)["payload"]
+        report_payload["context_required"] = True
+        report_payload["context_hash"] = context_payload["context_hash"]
         review = self.repository.record(
             "review",
             report_payload,
             state="verified" if verified else "rejected",
-            relations=relations,
+            relations=[
+                *relations,
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
+            ],
             actor={
                 "actor_id": verifier_id,
                 "authority": "independent_evaluator",
@@ -267,9 +311,18 @@ class ResearchLifecycle:
                     report_payload.get("required_failures") or []
                 ),
                 "report_hash": report_payload.get("report_hash"),
+                "context_required": True,
+                "context_hash": context_payload["context_hash"],
             },
             state="verified" if verified else "rejected",
-            relations=[{"type": "evaluates", "target": review.object_id}],
+            relations=[
+                {"type": "evaluates", "target": review.object_id},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
+            ],
             actor={
                 "actor_id": "research-integrity-gate",
                 "authority": "deterministic_gate",
@@ -284,7 +337,12 @@ class ResearchLifecycle:
             if commit
             else None
         )
-        return {"review": review, "gate": gate, "checkpoint": checkpoint}
+        return {
+            "context": context,
+            "review": review,
+            "gate": gate,
+            "checkpoint": checkpoint,
+        }
 
     def claim(
         self,

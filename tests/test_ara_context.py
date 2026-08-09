@@ -18,14 +18,21 @@ from ai_scientist.utils.ara_catalog import (
     rebuild_semantic_catalog,
 )
 from ai_scientist.utils.ara_context import (
+    ARAContextError,
     compile_context_pack,
     compile_live_continue_context,
     compile_live_write_context,
     persist_active_context_pack,
     persist_context_pack,
+    record_context_consumption,
+    validate_context_pack,
 )
 from ai_scientist.utils.ara_events import bootstrap_event_ledger, iter_events
 from ai_scientist.utils.claim_registry import write_claims_into_ara
+from ai_scientist.utils.context_receipts import (
+    ContextReceiptError,
+    validate_context_receipt,
+)
 from ai_scientist.utils.review_execution import execute_review_pass
 
 
@@ -190,7 +197,9 @@ class ARAContextTests(unittest.TestCase):
             self.assertIn("base", {item["node_id"] for item in pack["must_read"]})
             self.assertIn("bad", {item["node_id"] for item in pack["failed_attempts"]})
             self.assertTrue(pack["source_closure_hash"].startswith("sha256:"))
+            self.assertTrue(pack["memory_snapshot_hash"].startswith("sha256:"))
             self.assertTrue(pack["budget"]["hard_closure_preserved"])
+            self.assertIs(validate_context_pack(pack), pack)
 
     def test_write_audit_and_reproduce_are_distinct_consumption_views(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,6 +213,23 @@ class ARAContextTests(unittest.TestCase):
                 "open", {item["claim_id"] for item in audit["open_questions"]}
             )
             self.assertIn("bad", {item["node_id"] for item in audit["failed_attempts"]})
+
+            decide = compile_context_pack(
+                ara,
+                intent="decide",
+                node_id="good",
+                decision={"action": "choose next falsification"},
+            )
+            self.assertTrue(decide["complete"])
+            self.assertEqual(decide["decision"]["action"], "choose next falsification")
+            self.assertIn(
+                "good",
+                {
+                    item.get("node_id")
+                    for item in decide["decisive_evidence"]
+                    if isinstance(item, dict)
+                },
+            )
 
             reproduce = compile_context_pack(ara, intent="reproduce", node_id="good")
             self.assertTrue(reproduce["complete"])
@@ -220,8 +246,55 @@ class ARAContextTests(unittest.TestCase):
             self.assertEqual(
                 ObjectStore(ara).get_json(ref)["pack_hash"], pack["pack_hash"]
             )
+            returned = {**pack, "persisted_ref": ref}
+            self.assertEqual(validate_context_pack(returned), returned)
             receipts = (ara / "context" / "receipts.jsonl").read_text(encoding="utf-8")
             self.assertIn(ref, receipts)
+            self.assertIn("receipt_hash", receipts)
+            tampered = dict(pack)
+            tampered["memory_refs"] = ["sha256:" + "f" * 64]
+            with self.assertRaises(ARAContextError):
+                validate_context_pack(tampered)
+
+    def test_tampered_consumption_receipt_is_not_admitted_as_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ara = self._build_ara(Path(tmp) / "ara")
+            pack = compile_context_pack(ara, intent="reproduce", node_id="good")
+            ref = persist_context_pack(ara, pack, consumer="reproduce_agent")
+            record_context_consumption(
+                ara,
+                pack_ref=ref,
+                consumer="reproduce_agent",
+                output_type="verification",
+                output_id="verify-1",
+            )
+            receipts_path = ara / "context" / "receipts.jsonl"
+            receipts = [
+                json.loads(line)
+                for line in receipts_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(receipts), 2)
+            for receipt in receipts:
+                self.assertEqual(validate_context_receipt(receipt), receipt)
+            receipts[1]["output"]["id"] = "tampered"
+            with self.assertRaises(ContextReceiptError):
+                validate_context_receipt(receipts[1])
+            receipts_path.write_text(
+                "\n".join(json.dumps(item) for item in receipts) + "\n",
+                encoding="utf-8",
+            )
+
+            report = bootstrap_event_ledger(ara)
+            context_events = [
+                event
+                for event in iter_events(ara)
+                if event["event_type"].startswith("context_")
+            ]
+            self.assertEqual(report["invalid_context_receipts"], 1)
+            self.assertEqual(
+                {event["event_type"] for event in context_events},
+                {"context_compiled"},
+            )
 
     def test_live_pack_is_injected_via_active_ara_and_node_serializes_ref(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -333,6 +406,19 @@ class ARAContextTests(unittest.TestCase):
             )
             self.assertEqual(cmd_context(args), 0)
             self.assertTrue((ara / "context" / "receipts.jsonl").is_file())
+
+            decide_args = Namespace(
+                ara=str(ara),
+                intent="decide",
+                node="good",
+                claim=None,
+                decision_json='{"action":"choose next falsification"}',
+                budget=2000,
+                receipt=False,
+                json=True,
+                allow_incomplete=False,
+            )
+            self.assertEqual(cmd_context(decide_args), 0)
 
 
 if __name__ == "__main__":

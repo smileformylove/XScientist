@@ -52,9 +52,11 @@ xscientist ara context --ara <ara> --intent continue --node n17
 xscientist ara context --ara <ara> --intent write --claim c12
 xscientist ara context --ara <ara> --intent audit --claim c12
 xscientist ara context --ara <ara> --intent reproduce --node n17 --receipt --json
+xscientist ara context --ara <ara> --intent decide --node n17 \
+  --decision-json '{"action":"choose next falsification"}' --receipt --json
 ```
 
-The four views have different consumers and effects:
+The five views have different consumers and effects:
 
 | Intent | Consumer | Operational use |
 |---|---|---|
@@ -62,15 +64,26 @@ The four views have different consumers and effects:
 | `write` | Writing Agent | Permit resolved evidence-backed claims and expose unsupported statements as hypotheses. |
 | `audit` | Reviewer Agent | Present positive/negative evidence, unresolved claims, verification status, and omissions. |
 | `reproduce` | Reproduce executor | Supply code, environment, run hook, expected outputs, and verification rules. |
+| `decide` | Decision Agent | Retain decisive evidence, failures, contradictions, omissions, prior context, and explicit decision inputs before choosing an action. |
 
 The normal pipeline injects these packs automatically. New nodes record
 `context_pack_refs`; claims record the writer packs; verify reports record the
-reproduction pack. `context/receipts.jsonl` therefore answers which stored
+reproduction pack. Packs retain `memory_refs` to prior packs and bind them with
+`memory_snapshot_hash`. `context/receipts.jsonl` therefore answers which stored
 information a consumer actually saw without duplicating that information.
+Compilation and consumption receipts bind the pack, source closure, memory
+snapshot, consumer, and output with their own `receipt_hash`; tampered receipts
+are not admitted into the semantic event ledger.
 
 Budgets trim optional context only. Target identity, evidence references,
 execution dependencies, and verification rules are a hard closure and are
 never removed to fit a prompt budget.
+
+The same hashes can be projected into Research VCS provenance. The unified
+scientific DAG then connects the exact ARA ContextPack to both the experiment
+node and any evidence/claim object produced from it. Context is evidence about
+what was available to an agent; it is not evidence that the agent's conclusion
+is correct and cannot bypass independent review or reproduction.
 
 ## Bundle profiles
 

@@ -4,11 +4,11 @@
   "title": "ARA ContextPack",
   "description": "A bounded task-specific view compiled from the complete stored record.",
   "type": "object",
-  "required": ["schema_version", "protocol_kind", "intent", "target", "must_read", "source_refs", "source_closure_hash", "complete"],
+  "required": ["schema_version", "protocol_kind", "intent", "target", "must_read", "source_refs", "source_closure_hash", "memory_refs", "memory_snapshot_hash", "pack_hash", "complete"],
   "properties": {
     "schema_version": {"type": "string"},
     "protocol_kind": {"type": "string", "const": "context_pack"},
-    "intent": {"type": "string", "enum": ["continue", "write", "audit", "reproduce"]},
+    "intent": {"type": "string", "enum": ["continue", "write", "audit", "reproduce", "decide"]},
     "target": {"type": "object"},
     "consumer": {"type": "string"},
     "generated_at": {"type": "string"},
@@ -19,14 +19,27 @@
     "open_questions": {"type": "array"},
     "constraints": {"type": "array"},
     "related_claims": {"type": "array"},
+    "decision": {"type": "object"},
     "execution": {"type": "object"},
     "verification_rules": {"type": "array"},
     "source_refs": {
       "type": "array",
-      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "uniqueItems": true
     },
     "source_closure_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "memory_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+      "uniqueItems": true
+    },
+    "memory_snapshot_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "pack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "persisted_ref": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Optional non-identity CAS location added after persistence; excluded from pack_hash to avoid self-reference."
+    },
     "complete": {"type": "boolean"},
     "blockers": {"type": "array"},
     "omitted": {"type": "object"},

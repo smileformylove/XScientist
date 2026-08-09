@@ -41,11 +41,21 @@ class LocalResearchGitTests(unittest.TestCase):
             [
                 {"path": "ara/a", "manifest_hash": "sha256:" + "a" * 64},
                 {"path": "ara/b", "manifest_hash": "sha256:" + "b" * 64},
+                {
+                    "path": "ara/graph",
+                    "manifest_hash": "sha256:" + "e" * 64,
+                    "exploration_graph_hash": "sha256:" + "1" * 64,
+                },
             ],
             [
                 {"path": "ara/a", "manifest_hash": "sha256:" + "c" * 64},
                 {"path": "ara/b", "manifest_hash": "sha256:" + "b" * 64},
                 {"path": "ara/c", "manifest_hash": "sha256:" + "d" * 64},
+                {
+                    "path": "ara/graph",
+                    "manifest_hash": "sha256:" + "e" * 64,
+                    "exploration_graph_hash": "sha256:" + "2" * 64,
+                },
             ],
         )
 
@@ -53,6 +63,10 @@ class LocalResearchGitTests(unittest.TestCase):
         self.assertEqual(delta["removed"], [])
         self.assertEqual(delta["unchanged"], ["ara/b"])
         self.assertEqual(delta["changed"][0]["path"], "ara/a")
+        graph_change = next(
+            item for item in delta["changed"] if item["path"] == "ara/graph"
+        )
+        self.assertEqual(graph_change["changed_fields"], ["exploration_graph_hash"])
 
     def _init(self, root: Path, **kwargs):
         return init_repository(

@@ -79,9 +79,11 @@ DEFAULT_TRACK_PATTERNS = (
     "ara/**/manifest.json",
     "ara/**/manifest.lock",
     "ara/**/manifest.history.jsonl",
+    "ara/**/history/*.json",
     "ara/**/exploration_graph.json",
     "ara/**/claims/*.json",
     "ara/**/events/*.jsonl",
+    "ara/**/context/receipts.jsonl",
     "ara/**/env/*.json",
     "ara/**/env/*.yaml",
     "ara/**/env/*.yml",
@@ -1427,12 +1429,52 @@ def _manifest_refs(repo: Path, paths: Iterable[str]) -> list[dict[str, str]]:
             continue
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ResearchGitError(f"ARA manifest is invalid: {relative}") from exc
         if not isinstance(manifest, dict):
-            continue
-        refs.append({"path": relative, "manifest_hash": hash_manifest(manifest)})
+            raise ResearchGitError(f"ARA manifest is not an object: {relative}")
+        reference = {"path": relative, "manifest_hash": hash_manifest(manifest)}
+        graph_path = path.parent / "exploration_graph.json"
+        if graph_path.is_file():
+            try:
+                graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ResearchGitError(
+                    f"ARA exploration graph is invalid: "
+                    f"{graph_path.relative_to(repo).as_posix()}"
+                ) from exc
+            if not isinstance(graph, dict):
+                raise ResearchGitError(
+                    f"ARA exploration graph is not an object: "
+                    f"{graph_path.relative_to(repo).as_posix()}"
+                )
+            reference["exploration_graph_hash"] = content_hash(graph)
+        refs.append(reference)
     return refs
+
+
+def _touched_ara_manifest_paths(repo: Path, paths: Iterable[str]) -> set[str]:
+    """Resolve changed ARA companion files back to their owning manifest."""
+
+    ara_root = (repo / "ara").resolve()
+    manifests: set[str] = set()
+    for relative in paths:
+        normalized = _normalise_relative(relative)
+        pure = PurePosixPath(normalized)
+        if not pure.parts or pure.parts[0] != "ara":
+            continue
+        if pure.name == "manifest.json":
+            manifests.add(normalized)
+            continue
+        candidate = (repo / normalized).resolve()
+        current = candidate if candidate.is_dir() else candidate.parent
+        while current != ara_root and ara_root in current.parents:
+            manifest = current / "manifest.json"
+            if manifest.is_file():
+                manifests.add(manifest.relative_to(repo).as_posix())
+                break
+            current = current.parent
+    return manifests
 
 
 def _pointer_hash_valid(payload: dict[str, Any]) -> bool:
@@ -1642,7 +1684,14 @@ def _checkpoint_markdown(payload: dict[str, Any]) -> str:
     if payload.get("ara_manifests"):
         lines.extend(["", "## ARA manifests", ""])
         lines.extend(
-            f"- `{item['path']}` — `{item['manifest_hash']}`"
+            (
+                f"- `{item['path']}` — manifest `{item['manifest_hash']}`"
+                + (
+                    f", graph `{item['exploration_graph_hash']}`"
+                    if item.get("exploration_graph_hash")
+                    else ""
+                )
+            )
             for item in payload["ara_manifests"]
         )
     command = (payload.get("reproduce") or {}).get("command")
@@ -1753,7 +1802,19 @@ def _create_checkpoint_locked(
                 f"ARA path is not a manifest or ARA directory: {raw}"
             )
         explicit_ara.append(relative)
-    manifests = _manifest_refs(root, [*selected, *explicit_ara])
+    touched_ara = _touched_ara_manifest_paths(root, selected)
+    touched_ara.update(explicit_ara)
+    previous_manifests = {
+        str(item.get("path")): dict(item)
+        for item in (previous or {}).get("ara_manifests") or []
+        if isinstance(item, dict) and item.get("path")
+    }
+    for manifest_path in touched_ara:
+        previous_manifests.pop(manifest_path, None)
+    previous_manifests.update(
+        {item["path"]: item for item in _manifest_refs(root, touched_ara)}
+    )
+    manifests = [previous_manifests[path] for path in sorted(previous_manifests)]
 
     pointers = _pointer_records(root, strict=True)
     if only_paths is not None:
@@ -2619,6 +2680,7 @@ def verify_research_repository(
         "objects": 0,
         "research_objects": 0,
         "ara_manifests": 0,
+        "ara_graphs": 0,
     }
 
     typed_objects: dict[str, dict[str, Any]] = {}
@@ -2787,6 +2849,30 @@ def verify_research_repository(
                     f"ARA manifest hash mismatch for {manifest_path}: "
                     f"expected {expected_hash}, got {actual_hash}"
                 )
+            expected_graph_hash = str(manifest_ref.get("exploration_graph_hash") or "")
+            if expected_graph_hash:
+                checked["ara_graphs"] += 1
+                graph_path = (
+                    PurePosixPath(manifest_path).parent / "exploration_graph.json"
+                ).as_posix()
+                if graph_path not in tree:
+                    errors.append(
+                        f"ARA manifest references missing exploration graph: {graph_path}"
+                    )
+                    continue
+                try:
+                    graph = json.loads(
+                        _run_git(root, ["show", f"{resolved}:{graph_path}"]).stdout
+                    )
+                except json.JSONDecodeError as exc:
+                    errors.append(f"cannot validate ARA graph {graph_path}: {exc}")
+                    continue
+                actual_graph_hash = content_hash(graph)
+                if actual_graph_hash != expected_graph_hash:
+                    errors.append(
+                        f"ARA exploration graph hash mismatch for {graph_path}: "
+                        f"expected {expected_graph_hash}, got {actual_graph_hash}"
+                    )
 
     if not verify_objects:
         warnings.append("CAS payload verification was skipped by request")
@@ -2857,12 +2943,18 @@ def _set_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, list[st
 
 def _manifest_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, Any]:
     before_map = {
-        str(item.get("path")): str(item.get("manifest_hash"))
+        str(item.get("path")): {
+            "manifest_hash": str(item.get("manifest_hash") or ""),
+            "exploration_graph_hash": str(item.get("exploration_graph_hash") or ""),
+        }
         for item in before
         if isinstance(item, dict)
     }
     after_map = {
-        str(item.get("path")): str(item.get("manifest_hash"))
+        str(item.get("path")): {
+            "manifest_hash": str(item.get("manifest_hash") or ""),
+            "exploration_graph_hash": str(item.get("exploration_graph_hash") or ""),
+        }
         for item in after
         if isinstance(item, dict)
     }
@@ -2873,8 +2965,15 @@ def _manifest_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, An
         "changed": [
             {
                 "path": path,
-                "before": before_map[path],
-                "after": after_map[path],
+                "before": before_map[path]["manifest_hash"],
+                "after": after_map[path]["manifest_hash"],
+                "graph_before": before_map[path]["exploration_graph_hash"] or None,
+                "graph_after": after_map[path]["exploration_graph_hash"] or None,
+                "changed_fields": [
+                    field
+                    for field in ("manifest_hash", "exploration_graph_hash")
+                    if before_map[path][field] != after_map[path][field]
+                ],
             }
             for path in sorted(common)
             if before_map[path] != after_map[path]

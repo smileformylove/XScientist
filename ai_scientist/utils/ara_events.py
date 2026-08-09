@@ -22,6 +22,10 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ai_scientist.utils.atomic_io import durable_append_text
+from ai_scientist.utils.context_receipts import (
+    ContextReceiptError,
+    validate_context_receipt,
+)
 
 EVENTS_RELPATH = Path("events") / "research_events.jsonl"
 _HASH_PREFIX = "sha256:"
@@ -200,6 +204,7 @@ def bootstrap_event_ledger(ara_root: str | Path) -> dict[str, Any]:
     root = Path(ara_root).expanduser().resolve()
     created = 0
     existing = 0
+    invalid_context_receipts = 0
 
     graph = _read_json(root / "exploration_graph.json")
     if isinstance(graph, dict):
@@ -329,11 +334,67 @@ def bootstrap_event_ledger(ara_root: str | Path) -> dict[str, Any]:
             created += int(was_created)
             existing += int(not was_created)
 
+    context_receipts = root / "context" / "receipts.jsonl"
+    if context_receipts.is_file():
+        try:
+            receipt_lines = context_receipts.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            receipt_lines = []
+        for line_number, line in enumerate(receipt_lines, start=1):
+            try:
+                receipt = json.loads(line)
+            except json.JSONDecodeError:
+                invalid_context_receipts += 1
+                continue
+            if not isinstance(receipt, dict):
+                invalid_context_receipts += 1
+                continue
+            try:
+                receipt = validate_context_receipt(receipt)
+            except ContextReceiptError:
+                invalid_context_receipts += 1
+                continue
+            pack_ref = receipt.get("pack_ref")
+            if isinstance(pack_ref, dict):
+                pack_ref = pack_ref.get("hash")
+            output = receipt.get("output") or {}
+            receipt_hash = str(receipt.get("receipt_hash") or "")
+            row, was_created = append_event(
+                root,
+                event_type=(
+                    "context_consumed"
+                    if receipt.get("type") == "consumed"
+                    else "context_compiled"
+                ),
+                actor=str(receipt.get("consumer") or "context_compiler"),
+                subject={
+                    "type": str(output.get("type") or "context_pack"),
+                    "id": str(output.get("id") or pack_ref or line_number),
+                },
+                object_refs=[
+                    pack_ref,
+                    receipt.get("pack_hash"),
+                    receipt.get("source_closure_hash"),
+                    receipt.get("memory_snapshot_hash"),
+                ],
+                attributes={
+                    "intent": receipt.get("intent"),
+                    "receipt_hash": receipt_hash or None,
+                    "output": output,
+                },
+                source_key=f"context:{receipt_hash or line_number}",
+                timestamp=receipt.get("recorded_at") or None,
+            )
+            del row
+            created += int(was_created)
+            existing += int(not was_created)
+
     return {
         "schema": "ara.event.bootstrap.v1",
         "ledger": str(root / EVENTS_RELPATH),
         "created": created,
         "existing": existing,
+        "invalid_context_receipts": invalid_context_receipts,
         "total": sum(1 for _ in iter_events(root)),
     }
 

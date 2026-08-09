@@ -73,12 +73,39 @@ The graph combines:
 - successful, failed, timed-out, and cancelled experiment attempts;
 - supporting, refuting, and contradictory evidence;
 - claims, independent reviews, deterministic gates, and reproductions;
+- exact Research VCS decision-context snapshots and their evidence/memory
+  sources;
 - agent candidates, independent agent evaluations, promotions, deployments,
   and rollback decisions;
-- optional ARA experiment-search nodes and their parent/child evolution paths.
+- committed ARA experiment-search nodes and their parent/child evolution paths,
+  discovered from the selected Research Git ref;
+- optional external ARA roots supplied explicitly for local comparison.
 
-Attach one or more ARA roots when detailed experiment exploration should be
-shown alongside the compact Research VCS argument:
+Context is visible rather than hidden inside prompts. A Research VCS
+`context_snapshot` has dashed context edges from every immutable source it
+consumed; reviews, deterministic gates, and agent evaluations have a context
+edge from that snapshot. ARA `context_pack_refs` appear as content-addressed
+context nodes connected to the experiment that consumed them. When an ARA
+ContextPack hash is propagated into a Research Object, the graph adds the
+cross-system edge too. This makes the chain
+`memory/evidence -> context -> experiment/decision -> claim` inspectable by a
+human or an agent.
+
+Committed ARAs whose current or prior legal manifest revision is referenced by
+a Research Object are discovered automatically. The manifest, revision history,
+and exploration graph are all read from the exact Git commit selected by
+`--ref`, so a historical DAG cannot silently mix an old Research Git state with
+the current ARA worktree. New checkpoints also bind the canonical
+`exploration_graph.json` hash; a raw graph edit outside the checkpointed
+transition blocks ARA verification edges. Older checkpoints remain explicitly
+reported as `commit_bound` because the Git commit still fixes their graph bytes.
+When objects at the selected ref bind older graph revisions, the projection
+rehydrates the matching checkpointed snapshots from reachable Git history and
+shows them as separate versioned ARA sources. Thus earlier evidence stays on
+the graph it actually observed while the newest exploration remains visible.
+
+Attach one or more additional ARA roots only when an external ARA should be
+shown alongside the committed Research VCS argument:
 
 ```bash
 xscientist research dag \
@@ -86,9 +113,23 @@ xscientist research dag \
   --output ./research-dag
 ```
 
-When a Research Object's `ara_manifest_hash` matches an ARA `manifest.lock`,
-the DAG adds an explicit `anchors` edge from the ARA experiment leaves to that
-object. Missing targets and graph cycles block the DAG integrity verdict.
+New Research Objects bind the pair `ara_manifest_hash` plus
+`ara_exploration_graph_hash`. The DAG requires both values to match the same
+versioned ARA source before it adds an `anchors` edge from the referenced
+experiment node, or otherwise from that snapshot's leaves, to the object.
+Manifest-only legacy objects still match any legal manifest revision. External
+worktree ARAs without a checkpoint graph binding are shown as lineage rather
+than verification. Missing or conflicting bindings, missing targets, and graph
+cycles block the DAG integrity verdict.
+
+The selected Git ref controls all three inputs: Research Objects, committed ARA
+snapshots, and ContextPack references. A historical graph therefore retains
+the failures and alternatives known at that commit while excluding later
+memory. A context node is `replayable` only when its context, source-closure,
+selection-policy, and memory hashes recompute and its declared hard closure is
+complete. An old decision without a context binding stays readable with a
+`legacy_decision_context_unbound` warning; a new decision declaring context as
+required is blocked when that binding is missing or invalid.
 
 ## What the verification colors mean
 

@@ -142,6 +142,28 @@ def _parse_assignments(values: Sequence[str], *, label: str) -> dict[str, Any]:
     return parsed
 
 
+def _parse_context_options(
+    values: Sequence[str], *, selected: str
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw in values:
+        option, separator, reason = str(raw).partition("=")
+        option = option.strip()
+        if not option:
+            raise ResearchGitError("context option requires a name")
+        if option != selected and (not separator or not reason.strip()):
+            raise ResearchGitError(
+                f"rejected context option {option!r} requires OPTION=REASON"
+            )
+        rows.append(
+            {
+                "option": option,
+                "rejected_because": "" if option == selected else reason.strip(),
+            }
+        )
+    return rows
+
+
 def _hash_local_file(path_value: str) -> str:
     import hashlib
 
@@ -430,6 +452,34 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     audit_parser.add_argument("--no-objects", action="store_true")
     audit_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    context_parser = subparsers.add_parser(
+        "context",
+        help="Inspect or record the exact evidence and memory visible to a decision.",
+    )
+    context_parser.add_argument("target", nargs="+", help="Research Object selector.")
+    context_parser.add_argument(
+        "--intent",
+        choices=["decide", "continue", "write", "audit", "reproduce"],
+        default="decide",
+    )
+    context_parser.add_argument("--decision-kind", default="research_decision")
+    context_parser.add_argument("--selected", default="")
+    context_parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        help="Decision option; rejected options use OPTION=REJECTION_REASON.",
+    )
+    context_parser.add_argument("--rationale", action="append", default=[])
+    context_parser.add_argument("--constraint", action="append", default=[])
+    context_parser.add_argument("--memory-ref", action="append", default=[])
+    context_parser.add_argument("--ref", default="WORKTREE")
+    context_parser.add_argument("--budget", type=int, default=4000)
+    context_parser.add_argument("--record", action="store_true")
+    context_parser.add_argument("--no-commit", action="store_true")
+    context_parser.add_argument("--repo", default=".")
+    context_parser.add_argument("--json", action="store_true", dest="as_json")
+
     decide_parser = subparsers.add_parser(
         "decide",
         help="Explain whether the next research transition should checkpoint, fork, or merge.",
@@ -482,7 +532,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--ara",
         action="append",
         default=[],
-        help="Optional ARA root whose experiment exploration graph should be linked.",
+        help=(
+            "Additional ARA root whose experiment graph should be linked; "
+            "committed ARAs bound at --ref are discovered automatically."
+        ),
     )
     dag_parser.add_argument(
         "--output",
@@ -1132,6 +1185,87 @@ def main(
                     )
             return 0 if payload["complete"] else 1
 
+        if args.command == "context":
+            from .research_context import (
+                build_research_context_snapshot,
+                record_research_context_snapshot,
+            )
+
+            options = _parse_context_options(args.option, selected=args.selected)
+            if args.record:
+                if args.ref not in {"WORKTREE", "worktree"}:
+                    raise ResearchGitError(
+                        "recorded context must use the current worktree; omit --ref"
+                    )
+                recorded = record_research_context_snapshot(
+                    args.repo,
+                    target_ids=args.target,
+                    intent=args.intent,
+                    decision_kind=args.decision_kind,
+                    selected=args.selected,
+                    options_considered=options,
+                    rationale=args.rationale,
+                    constraints=args.constraint,
+                    memory_refs=args.memory_ref,
+                    budget_tokens=args.budget,
+                )
+                context_payload = load_research_object(args.repo, recorded.object_id)[
+                    "payload"
+                ]
+                checkpoint = (
+                    create_checkpoint(
+                        args.repo,
+                        stage="context",
+                        subject=f"record {args.decision_kind} context",
+                        include=[
+                            recorded.path.relative_to(
+                                recorded.path.parents[3]
+                            ).as_posix(),
+                            *(
+                                f".xscientist/objects/{source['kind']}/"
+                                f"{source['object_id']}.json"
+                                for source in context_payload["source_objects"]
+                            ),
+                        ],
+                    )
+                    if not args.no_commit
+                    else None
+                )
+                payload = {
+                    "object": recorded.to_dict(),
+                    "context": context_payload,
+                    "checkpoint": checkpoint.to_dict() if checkpoint else None,
+                }
+            else:
+                payload = build_research_context_snapshot(
+                    args.repo,
+                    target_ids=args.target,
+                    intent=args.intent,
+                    decision_kind=args.decision_kind,
+                    selected=args.selected,
+                    options_considered=options,
+                    rationale=args.rationale,
+                    constraints=args.constraint,
+                    memory_refs=args.memory_ref,
+                    ref=args.ref,
+                    budget_tokens=args.budget,
+                )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                context = payload.get("context") or payload
+                print(f"Context:          {context['context_hash']}")
+                print(
+                    f"As of:            {context['as_of'].get('commit') or 'worktree'}"
+                )
+                print(f"Sources:          {len(context['source_object_ids'])}")
+                print(f"Memory objects:   {len(context['memory_object_ids'])}")
+                print(f"Negative memory:  {len(context['negative_knowledge_ids'])}")
+                print(f"Complete:         {context['complete']}")
+                for blocker in context["blockers"]:
+                    print(f"  blocker: {_display_text(blocker)}")
+            return 0 if (payload.get("context") or payload)["complete"] else 1
+
         if args.command == "decide":
             from .research_policy import decide_research_transition
 
@@ -1210,6 +1344,28 @@ def main(
                 print(f"DAG integrity:  {payload['integrity']['is_dag']}")
                 print(f"Closure:        {payload['scientific_closure']['status']}")
                 print(f"Verification:   {payload['proof_summary']}")
+                ara_sources = [
+                    source
+                    for source in payload["sources"]
+                    if source.get("name") != "research_vcs"
+                ]
+                print(f"ARA snapshots:  {len(ara_sources)}")
+                for source in ara_sources:
+                    manifest = source.get("manifest_integrity") or {}
+                    graph_binding = source.get("graph_binding") or {}
+                    location = source.get("repository_path") or "external"
+                    print(
+                        f"  {source['name']} [{manifest.get('state') or 'unknown'}] "
+                        f"graph={graph_binding.get('state') or 'unknown'} "
+                        f"bindings={source.get('binding_count', 0)} "
+                        f"source={_display_text(location)}"
+                    )
+                for issue in payload["integrity"].get("issues") or []:
+                    print(
+                        f"  {issue.get('severity', 'warning')}: "
+                        f"{issue.get('code', 'integrity_issue')} — "
+                        f"{_display_text(issue.get('message') or '')}"
+                    )
                 if exported:
                     print(f"JSON:           {_display_path(exported['json'])}")
                     print(f"Browser:        {_display_path(exported['html'])}")
@@ -1602,6 +1758,11 @@ def main(
                 print(f"State:      {checkpoint.get('status')}")
                 print(f"Subject:    {checkpoint.get('subject')}")
                 print(f"Summary:    {checkpoint.get('summary')}")
+                for manifest in checkpoint.get("ara_manifests") or []:
+                    print(f"ARA:        {manifest.get('path')}")
+                    print(f"  manifest: {manifest.get('manifest_hash')}")
+                    if manifest.get("exploration_graph_hash"):
+                        print(f"  graph:    {manifest['exploration_graph_hash']}")
                 if (checkpoint.get("reproduce") or {}).get("command"):
                     print(f"Reproduce:  {checkpoint['reproduce']['command']}")
             return 0
@@ -1646,6 +1807,17 @@ def main(
                     f"relations +{len(typed['relations']['added'])} "
                     f"-{len(typed['relations']['removed'])}"
                 )
+                manifests = semantic["ara_manifests"]
+                print(
+                    "ARA snapshots: "
+                    f"+{len(manifests['added'])} "
+                    f"-{len(manifests['removed'])} "
+                    f"~{len(manifests['changed'])}"
+                )
+                for change in manifests["changed"]:
+                    print(
+                        f"  {change['path']}: " f"{', '.join(change['changed_fields'])}"
+                    )
                 if args.deep:
                     print(
                         "Structured field changes: "

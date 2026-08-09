@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from ai_scientist.apps.project import (
     _record_local_research_handoff_objects,
     _record_local_research_planning_objects,
 )
+from ai_scientist.protocol.hashing import content_hash, hash_manifest
 from ai_scientist.utils.pipeline_contracts import (
     initialize_pipeline_contracts,
     save_contract_artifact,
@@ -141,6 +143,29 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
                 subject="record planning",
                 summary="planning",
             )
+            ara_dir = root / "ara" / "run-0"
+            ara_dir.mkdir(parents=True)
+            ara_manifest = {
+                "schema_version": "ara.v1",
+                "protocol_kind": "manifest",
+                "counts": {"nodes": 1},
+            }
+            ara_graph = {
+                "nodes": [
+                    {
+                        "id": "n0",
+                        "content_hash": "sha256:" + "a" * 64,
+                        "execution_isolation": {"isolated": True},
+                        "context_pack_refs": ["sha256:" + "b" * 64],
+                    }
+                ],
+                "edges": [],
+            }
+            ara_manifest_path = ara_dir / "manifest.json"
+            ara_manifest_path.write_text(json.dumps(ara_manifest), encoding="utf-8")
+            (ara_dir / "exploration_graph.json").write_text(
+                json.dumps(ara_graph), encoding="utf-8"
+            )
             results = [
                 {
                     "idea_idx": 0,
@@ -149,6 +174,7 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
                     "rigor_score": 7.5,
                     "quality_gate_passed": True,
                     "submission_acceptance_passed": True,
+                    "ara_manifest": str(ara_manifest_path),
                 }
             ]
             _record_local_research_attempt_objects(args, results=results)
@@ -169,10 +195,41 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
             objects = list_research_objects(root)
             gate = next(item for item in objects if item["kind"] == "gate_decision")
             manuscript = next(item for item in objects if item["kind"] == "manuscript")
+            attempt = next(
+                item for item in objects if item["kind"] == "experiment_attempt"
+            )
+            evidence = next(item for item in objects if item["kind"] == "evidence")
+            context = next(
+                item for item in objects if item["kind"] == "context_snapshot"
+            )
             self.assertEqual(gate["state"], "rejected")
             self.assertFalse(gate["payload"]["claim_promotion_allowed"])
             self.assertEqual(manuscript["state"], "draft")
             self.assertIn("experiment_attempt", {item["kind"] for item in objects})
+            self.assertEqual(
+                attempt["provenance"]["ara_manifest_hash"],
+                hash_manifest(ara_manifest),
+            )
+            self.assertEqual(
+                attempt["provenance"]["ara_exploration_graph_hash"],
+                content_hash(ara_graph),
+            )
+            self.assertEqual(
+                evidence["payload"]["ara_exploration_graph_hash"],
+                content_hash(ara_graph),
+            )
+            self.assertEqual(
+                attempt["provenance"]["context_hashes"],
+                ["sha256:" + "b" * 64],
+            )
+            self.assertEqual(
+                evidence["payload"]["context_pack_refs"],
+                ["sha256:" + "b" * 64],
+            )
+            self.assertTrue(context["payload"]["complete"])
+            self.assertEqual(
+                gate["payload"]["context_hash"], context["payload"]["context_hash"]
+            )
 
 
 if __name__ == "__main__":

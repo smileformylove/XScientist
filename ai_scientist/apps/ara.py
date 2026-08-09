@@ -2773,12 +2773,19 @@ def cmd_context(args: argparse.Namespace) -> int:
 
     ara_root = _resolve_ara_root(args.ara)
     try:
+        decision = None
+        decision_json = getattr(args, "decision_json", None)
+        if decision_json:
+            decision = json.loads(decision_json)
+            if not isinstance(decision, dict):
+                raise ValueError("--decision-json must contain a JSON object")
         pack = compile_context_pack(
             ara_root,
             intent=args.intent,
             node_id=args.node,
             claim_id=args.claim,
             budget_tokens=args.budget,
+            decision=decision,
         )
     except (ARAContextError, FileNotFoundError, OSError, ValueError) as exc:
         print(f"[ara-context] {exc}", file=sys.stderr)
@@ -3256,16 +3263,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     context_p = sub.add_parser(
         "context",
-        help="Compile a bounded task view for an experiment, writer, reviewer, or executor.",
+        help="Compile a bounded task view for an experiment, decision, writer, reviewer, or executor.",
     )
     context_p.add_argument("--ara", required=True)
     context_p.add_argument(
         "--intent",
         required=True,
-        choices=("continue", "write", "audit", "reproduce"),
+        choices=("continue", "write", "audit", "reproduce", "decide"),
     )
     context_p.add_argument("--node", default=None, help="Target node id.")
     context_p.add_argument("--claim", default=None, help="Target claim id.")
+    context_p.add_argument(
+        "--decision-json",
+        help="Decision inputs as one JSON object; used with --intent decide.",
+    )
     context_p.add_argument(
         "--budget",
         type=int,

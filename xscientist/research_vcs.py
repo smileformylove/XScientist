@@ -244,6 +244,38 @@ class ResearchRepository:
             independent_replication=independent_replication,
         )
 
+    def context(
+        self,
+        *,
+        target_ids: Sequence[str],
+        intent: str = "decide",
+        decision_kind: str = "research_decision",
+        selected: str = "",
+        options_considered: Sequence[Mapping[str, Any] | str] = (),
+        rationale: Sequence[str] = (),
+        constraints: Sequence[str] = (),
+        memory_refs: Sequence[str] = (),
+        ref: str | None = None,
+        budget_tokens: int = 4000,
+    ) -> dict[str, Any]:
+        """Compile a hash-bound view of the evidence and memory for a decision."""
+
+        from .research_context import build_research_context_snapshot
+
+        return build_research_context_snapshot(
+            self,
+            target_ids=target_ids,
+            intent=intent,
+            decision_kind=decision_kind,
+            selected=selected,
+            options_considered=options_considered,
+            rationale=rationale,
+            constraints=constraints,
+            memory_refs=memory_refs,
+            ref=ref,
+            budget_tokens=budget_tokens,
+        )
+
     def technology_tree(self) -> dict[str, Any]:
         from .research_policy import build_research_technology_tree
 

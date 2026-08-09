@@ -674,6 +674,7 @@ xscientist research branch challenge/accuracy -d
 # payload-free long-term research technology tree.
 xscientist research decide contradiction \
   --name alternate-mechanism --contradictory-evidence
+xscientist research context @latest:hypothesis --ref HEAD --json
 xscientist research tree
 
 xscientist research log
@@ -725,6 +726,14 @@ has a stable ID and explicit reasons, so an internal agent can retain the trace
 without silently mutating history. `research tree` exposes object hashes,
 relations, research lines, frontier status, cycles, and missing references but
 never object payloads.
+
+`research context` reconstructs the exact evidence and memory visible at the
+worktree or a historical ref. It retains failures, contradictions, prior gates,
+alternatives, and full source hashes even when summaries are budget-trimmed.
+Pass `--record` to persist a context snapshot; new reviews, gates, and
+self-evolution decisions bind one automatically. In the unified DAG, ARA
+ContextPacks and Research VCS context snapshots are explicit nodes rather than
+hidden prompt state.
 
 `research audit` is the compact consumption surface for accumulated history.
 It does not feed every stored file back into an agent. Instead it traverses
@@ -961,6 +970,8 @@ bounded without discarding claim/evidence lineage. See
 Complete storage is not injected wholesale into agents. Before node expansion,
 writing, review, or reproduction, XScientist compiles an intent-specific
 ContextPack and records its hash on the resulting node, claim, or verify report.
+Decision-time packs also preserve prior memory hashes; hashed compilation and
+consumption receipts show exactly what an agent saw.
 Inspect the derived index with `xscientist ara catalog --ara <ara>` or compile a
 view explicitly with `xscientist ara context --ara <ara> --intent continue
 --node <id>`.

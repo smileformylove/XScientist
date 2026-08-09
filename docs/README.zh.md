@@ -620,6 +620,7 @@ xscientist research claim \
 # 在改变历史前先获得可解释、只读的 checkpoint / fork / merge 建议
 xscientist research decide contradiction \
   --name alternate-mechanism --contradictory-evidence
+xscientist research context @latest:hypothesis --ref HEAD --json
 xscientist research tree
 xscientist research dag --output ./research-dag
 ```
@@ -629,6 +630,12 @@ xscientist research dag --output ./research-dag
 `research-dag.html`，把问题、假设、计划、实验、支持/反驳证据、独立评审、门禁、复现
 和智能体演化放在同一张可搜索图上。节点会分别展示 trace、replay、verify 检查；存在
 反证的对象保持 `contested`，不会被总分掩盖。
+
+`research context` 会按当前工作区或指定历史提交重建“这次决策当时实际看到了什么”。
+失败实验、矛盾证据、旧门禁、备选方案和完整来源哈希属于不可裁剪闭包；上下文预算只
+影响摘要。使用 `--record` 可把它固化成 `context_snapshot`，新的评审、门禁与智能体
+演化决策也会自动绑定快照。在统一 DAG 中，ARA ContextPack 与 Research VCS 上下文
+都是可检查节点，不再是隐藏的 prompt 状态。
 
 使用 `--ara <目录>` 可以把详细实验探索树按 manifest hash 接入同一张图。不同平台则
 通过显式、版本化的 `research adapter` 接口连接；第三方插件只有在用户明确执行
@@ -861,7 +868,7 @@ export AI_SCIENTIST_ARA_REEXEC=1
 详见 [`ARA_STORAGE_LIFECYCLE.md`](ARA_STORAGE_LIFECYCLE.md)。
 
 完整历史仍然保存，但不会整包注入 Agent。节点扩展、写作、审查和复现前，
-系统会分别编译 `continue/write/audit/reproduce` ContextPack，并把 pack 哈希
+系统会分别编译 `continue/write/audit/reproduce/decide` ContextPack，并把 pack 哈希
 绑定到新节点、Claim 或验证报告。可使用 `xscientist ara catalog --ara <ara>`
 检查语义目录，或使用 `xscientist ara context --ara <ara> --intent continue
 --node <id>` 显式生成任务上下文。

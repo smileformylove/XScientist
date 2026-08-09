@@ -14,6 +14,7 @@ from ai_scientist.utils.evolution_gate import (
 from ai_scientist.utils.evolution_deployment import validate_deployment_receipt
 
 from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
+from .research_context import record_research_context_snapshot
 from .research_vcs import ResearchRepository
 
 
@@ -104,11 +105,48 @@ class ResearchEvolution:
         ].get("candidate_hash"):
             raise ResearchGitError("evolution gate targets a different candidate")
         passed = gate_payload.get("decision") == "promote_to_canary"
+        context = record_research_context_snapshot(
+            self.repository,
+            target_ids=[candidate_id],
+            decision_kind="agent_candidate_evaluation",
+            selected="promote_to_canary" if passed else "hold",
+            options_considered=[
+                {
+                    "option": "promote_to_canary",
+                    "rejected_because": (
+                        "independent evolution gate did not pass" if not passed else ""
+                    ),
+                },
+                {
+                    "option": "hold",
+                    "rejected_because": (
+                        "independent evolution gate passed" if passed else ""
+                    ),
+                },
+            ],
+            rationale=[
+                str(gate_payload.get("summary") or gate_payload.get("decision"))
+            ],
+            constraints=[
+                str(value) for value in gate_payload.get("required_failures") or []
+            ],
+            actor_id="agent-evaluation-context-recorder",
+        )
+        context_payload = self.repository.get(context.object_id)["payload"]
+        gate_payload["context_required"] = True
+        gate_payload["context_hash"] = context_payload["context_hash"]
         result = self.repository.record(
             "agent_evaluation",
             gate_payload,
             state="verified" if passed else "rejected",
-            relations=[{"type": "evaluates", "target": candidate_id}],
+            relations=[
+                {"type": "evaluates", "target": candidate_id},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
+            ],
             actor={
                 "actor_id": evaluator_id,
                 "authority": "independent_evaluator",
@@ -123,7 +161,7 @@ class ResearchEvolution:
             if commit
             else None
         )
-        return {"evaluation": result, "checkpoint": checkpoint}
+        return {"context": context, "evaluation": result, "checkpoint": checkpoint}
 
     def promote(
         self,
@@ -169,6 +207,25 @@ class ResearchEvolution:
             raise ResearchGitError(
                 "promotion evidence does not bind the exact candidate"
             )
+        context = record_research_context_snapshot(
+            self.repository,
+            target_ids=[candidate_id, evaluation_id],
+            decision_kind="agent_production_promotion",
+            selected="approved",
+            options_considered=[
+                {"option": "approved", "rejected_because": ""},
+                {
+                    "option": "blocked",
+                    "rejected_because": "candidate and independent evaluation satisfy the fixed promotion gate",
+                },
+            ],
+            rationale=[
+                "Promote only the exact independently evaluated candidate hash."
+            ],
+            constraints=["rollback reference must remain available"],
+            actor_id="agent-promotion-context-recorder",
+        )
+        context_payload = self.repository.get(context.object_id)["payload"]
         promoted = self.repository.record(
             "agent_candidate",
             {
@@ -179,6 +236,11 @@ class ResearchEvolution:
             relations=[
                 {"type": "supersedes", "target": candidate_id},
                 {"type": "evaluates", "target": evaluation_id},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
             ],
             actor={
                 "actor_id": ",".join(promotion_payload.get("approver_ids") or []),
@@ -192,9 +254,18 @@ class ResearchEvolution:
                 "candidate_hash": exact_hash,
                 "promotion_hash": promotion_payload.get("promotion_hash"),
                 "rollback_ref": promotion_payload.get("rollback_ref"),
+                "context_required": True,
+                "context_hash": context_payload["context_hash"],
             },
             state="promoted",
-            relations=[{"type": "promotes", "target": promoted.object_id}],
+            relations=[
+                {"type": "promotes", "target": promoted.object_id},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
+            ],
             actor={
                 "actor_id": "production-promotion-gate",
                 "authority": "deterministic_gate",
@@ -211,6 +282,7 @@ class ResearchEvolution:
         )
         return {
             "promoted_candidate": promoted,
+            "context": context,
             "decision": decision,
             "checkpoint": checkpoint,
             "execution_mode": "semantic_receipt_only",
@@ -246,13 +318,43 @@ class ResearchEvolution:
                 "rollback receipt failed integrity validation: "
                 + ", ".join(validation["errors"])
             )
+        context = record_research_context_snapshot(
+            self.repository,
+            target_ids=[candidate_id, promoted_id],
+            decision_kind="agent_rollback",
+            selected="rollback",
+            options_considered=[
+                {"option": "rollback", "rejected_because": ""},
+                {
+                    "option": "continue_deployment",
+                    "rejected_because": str(
+                        trigger or "verified rollback trigger fired"
+                    ),
+                },
+            ],
+            rationale=[str(trigger or "verified rollback trigger fired")],
+            constraints=["restore the approved baseline artifact"],
+            actor_id="agent-rollback-context-recorder",
+        )
+        context_payload = self.repository.get(context.object_id)["payload"]
         decision = self.repository.record(
             "gate_decision",
-            {"decision": "rollback", "trigger": trigger, "receipt": receipt_payload},
+            {
+                "decision": "rollback",
+                "trigger": trigger,
+                "receipt": receipt_payload,
+                "context_required": True,
+                "context_hash": context_payload["context_hash"],
+            },
             state="superseded",
             relations=[
                 {"type": "supersedes", "target": promoted_id},
                 {"type": "depends_on", "target": candidate_id, "role": "baseline"},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
             ],
             actor={
                 "actor_id": str(receipt_payload.get("executed_by") or "rollback-gate"),
@@ -270,6 +372,7 @@ class ResearchEvolution:
         )
         return {
             "decision": decision,
+            "context": context,
             "checkpoint": checkpoint,
             "execution_mode": (
                 "verified_external_rollback"
@@ -322,6 +425,27 @@ class ResearchEvolution:
             raise ResearchGitError(
                 "Research VCS production deployment requires an applied production receipt"
             )
+        context = record_research_context_snapshot(
+            self.repository,
+            target_ids=[promoted_id],
+            decision_kind="agent_production_deployment",
+            selected="deploy",
+            options_considered=[
+                {"option": "deploy", "rejected_because": ""},
+                {
+                    "option": "hold",
+                    "rejected_because": "verified production receipt confirms the approved artifact was applied",
+                },
+            ],
+            rationale=[
+                "Bind the observed production mutation to the promoted artifact."
+            ],
+            constraints=[
+                "deployment receipt must validate and identify the exact artifact"
+            ],
+            actor_id="agent-deployment-context-recorder",
+        )
+        context_payload = self.repository.get(context.object_id)["payload"]
         decision = self.repository.record(
             "gate_decision",
             {
@@ -329,10 +453,17 @@ class ResearchEvolution:
                 "candidate_hash": candidate_payload.get("candidate_hash"),
                 "candidate_artifact_hash": expected_hash,
                 "deployment_receipt": receipt_payload,
+                "context_required": True,
+                "context_hash": context_payload["context_hash"],
             },
             state="promoted",
             relations=[
-                {"type": "depends_on", "target": promoted_id, "role": "deployment"}
+                {"type": "depends_on", "target": promoted_id, "role": "deployment"},
+                {
+                    "type": "depends_on",
+                    "target": context.object_id,
+                    "role": "decision_context",
+                },
             ],
             actor={
                 "actor_id": str(receipt_payload.get("executed_by")),
@@ -348,7 +479,7 @@ class ResearchEvolution:
             if commit
             else None
         )
-        return {"decision": decision, "checkpoint": checkpoint}
+        return {"context": context, "decision": decision, "checkpoint": checkpoint}
 
 
 __all__ = ["ResearchEvolution"]

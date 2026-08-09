@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,7 +12,12 @@ from pathlib import Path
 from jsonschema import validate
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.protocol.hashing import content_hash, hash_manifest
 from ai_scientist.protocol.schemas import load_schema
+from ai_scientist.utils.ara_manifest_lock import (
+    append_manifest_revision,
+    write_manifest_lock,
+)
 from xscientist import ResearchRepository
 from xscientist.research_cli import main as research_main
 from xscientist.research_dag import (
@@ -47,7 +53,11 @@ class ResearchDagTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _record_lineage(
-        self, *, ara_manifest_hash: str | None = None
+        self,
+        *,
+        ara_manifest_hash: str | None = None,
+        ara_graph_hash: str | None = None,
+        context_pack_hash: str | None = None,
     ) -> dict[str, str]:
         plan = self.repository.record(
             "research_plan",
@@ -69,9 +79,13 @@ class ResearchDagTests(unittest.TestCase):
                 "seeds": [1, 2, 3],
             },
         )
-        evidence_provenance = (
-            {"ara_manifest_hash": ara_manifest_hash} if ara_manifest_hash else None
-        )
+        evidence_provenance = None
+        if ara_manifest_hash:
+            evidence_provenance = {"ara_manifest_hash": ara_manifest_hash}
+            if ara_graph_hash:
+                evidence_provenance["ara_exploration_graph_hash"] = ara_graph_hash
+            if context_pack_hash:
+                evidence_provenance["context_hashes"] = [context_pack_hash]
         evidence = self.repository.record(
             "evidence",
             {
@@ -155,7 +169,11 @@ class ResearchDagTests(unittest.TestCase):
 
     def test_ara_exploration_nodes_link_to_manifest_bound_evidence(self) -> None:
         manifest_hash = "sha256:" + "a" * 64
-        ids = self._record_lineage(ara_manifest_hash=manifest_hash)
+        context_pack_hash = "sha256:" + "d" * 64
+        ids = self._record_lineage(
+            ara_manifest_hash=manifest_hash,
+            context_pack_hash=context_pack_hash,
+        )
         ara = self.root / "ara"
         ara.mkdir()
         (ara / "manifest.lock").write_text(
@@ -179,6 +197,7 @@ class ResearchDagTests(unittest.TestCase):
                             "content_hash": "sha256:" + "c" * 64,
                             "is_buggy": True,
                             "execution_isolation": {"isolated": True},
+                            "context_pack_refs": [context_pack_hash],
                         },
                     ],
                     "edges": [{"parent": "baseline", "child": "candidate"}],
@@ -192,9 +211,373 @@ class ResearchDagTests(unittest.TestCase):
         self.assertTrue(graph["integrity"]["is_dag"], graph["integrity"]["issues"])
         self.assertIn("ara:0:candidate", {node["id"] for node in graph["nodes"]})
         self.assertIn(
+            "context_snapshot",
+            {node["kind"] for node in graph["nodes"] if node["source"] == "ara"},
+        )
+        self.assertIn(
+            "context",
+            {
+                edge["category"]
+                for edge in graph["edges"]
+                if edge["target"] == "ara:0:candidate"
+            },
+        )
+        self.assertIn(
             ("ara:0:candidate", ids["evidence"], "anchors"),
             {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
         )
+        context_node_id = next(
+            node["id"]
+            for node in graph["nodes"]
+            if node.get("content_hash") == context_pack_hash
+        )
+        self.assertIn(
+            (context_node_id, ids["evidence"], "contextualizes"),
+            {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
+        )
+        ara_source = next(
+            source for source in graph["sources"] if source["name"] == "ara:0"
+        )
+        self.assertEqual(ara_source["context_binding_count"], 1)
+        self.assertEqual(ara_source["context_bound_object_ids"], [ids["evidence"]])
+
+    def test_revised_ara_keeps_prior_revision_provenance_links(self) -> None:
+        ara = self.root / "revised-ara"
+        ara.mkdir()
+        manifest = {
+            "schema_version": "ara.v1",
+            "protocol_kind": "manifest",
+            "counts": {"claims": 0},
+        }
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        (ara / "exploration_graph.json").write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "candidate",
+                            "content_hash": "sha256:" + "c" * 64,
+                            "execution_isolation": {"isolated": True},
+                        }
+                    ],
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        base_hash = hash_manifest(manifest)
+        append_manifest_revision(
+            ara / "manifest.json",
+            lambda value: (
+                value["counts"].__setitem__("claims", 1) or ["counts.claims"]
+            ),
+            reason="claim scan",
+            producer="test",
+        )
+        current_manifest = json.loads((ara / "manifest.json").read_text())
+        current_hash = hash_manifest(current_manifest)
+        ids = self._record_lineage(ara_manifest_hash=base_hash)
+
+        graph = build_research_dag(self.repo_path, ara_roots=[ara])
+
+        source = next(item for item in graph["sources"] if item["name"] == "ara:0")
+        self.assertEqual(source["manifest_integrity"]["state"], "revised")
+        self.assertEqual(source["graph_binding"]["state"], "unbound_worktree")
+        self.assertEqual(source["manifest_hash"], current_hash)
+        self.assertEqual(set(source["manifest_hashes"]), {base_hash, current_hash})
+        anchor = next(
+            edge
+            for edge in graph["edges"]
+            if (edge["source"], edge["target"], edge["type"])
+            == ("ara:0:candidate", ids["evidence"], "anchors")
+        )
+        self.assertEqual(anchor["category"], "lineage")
+
+    def test_tampered_ara_cannot_create_verification_anchor(self) -> None:
+        ara = self.root / "tampered-ara"
+        ara.mkdir()
+        manifest = {
+            "schema_version": "ara.v1",
+            "protocol_kind": "manifest",
+            "counts": {"claims": 0},
+        }
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        (ara / "exploration_graph.json").write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "candidate",
+                            "content_hash": "sha256:" + "d" * 64,
+                            "execution_isolation": {"isolated": True},
+                        }
+                    ],
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        base_hash = hash_manifest(manifest)
+        manifest["counts"]["claims"] = 99
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ids = self._record_lineage(ara_manifest_hash=base_hash)
+
+        graph = build_research_dag(self.repo_path, ara_roots=[ara])
+
+        source = next(item for item in graph["sources"] if item["name"] == "ara:0")
+        self.assertEqual(source["manifest_integrity"]["state"], "tampered")
+        self.assertFalse(graph["integrity"]["is_dag"])
+        self.assertNotIn(
+            ("ara:0:candidate", ids["evidence"], "anchors"),
+            {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
+        )
+
+    def test_object_graph_hash_prevents_ambiguous_manifest_binding(self) -> None:
+        ara = self.root / "graph-bound-ara"
+        ara.mkdir()
+        manifest = {
+            "schema_version": "ara.v1",
+            "protocol_kind": "manifest",
+            "counts": {"nodes": 1},
+        }
+        graph_payload = {
+            "nodes": [
+                {
+                    "id": "candidate",
+                    "content_hash": "sha256:" + "6" * 64,
+                    "execution_isolation": {"isolated": True},
+                }
+            ],
+            "edges": [],
+        }
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        (ara / "exploration_graph.json").write_text(
+            json.dumps(graph_payload), encoding="utf-8"
+        )
+        ids = self._record_lineage(
+            ara_manifest_hash=hash_manifest(manifest),
+            ara_graph_hash="sha256:" + "e" * 64,
+        )
+
+        graph = build_research_dag(self.repo_path, ara_roots=[ara])
+
+        self.assertFalse(graph["integrity"]["is_dag"])
+        self.assertNotIn(
+            ("ara:0:candidate", ids["evidence"], "anchors"),
+            {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
+        )
+        issue = next(
+            item
+            for item in graph["integrity"]["issues"]
+            if item["code"] == "unresolved_ara_manifest_binding"
+        )
+        self.assertIn("sha256:" + "e" * 64, issue["message"])
+
+    def test_historical_ref_auto_discovers_exact_committed_ara_snapshot(self) -> None:
+        ara = self.repo_path / "ara" / "demo"
+        ara.mkdir(parents=True)
+        manifest = {
+            "schema_version": "ara.v1",
+            "protocol_kind": "manifest",
+            "counts": {"nodes": 1},
+        }
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        old_graph = {
+            "nodes": [
+                {
+                    "id": "old",
+                    "content_hash": "sha256:" + "8" * 64,
+                    "execution_isolation": {"isolated": True},
+                }
+            ],
+            "edges": [],
+        }
+        (ara / "exploration_graph.json").write_text(
+            json.dumps(old_graph), encoding="utf-8"
+        )
+        base_hash = hash_manifest(manifest)
+        ids = self._record_lineage(
+            ara_manifest_hash=base_hash,
+            ara_graph_hash=content_hash(old_graph),
+        )
+        old_commit = self.repository.show()["commit"]
+        first_manifest_ref = self.repository.show()["checkpoint"]["ara_manifests"][0]
+        self.assertTrue(
+            first_manifest_ref["exploration_graph_hash"].startswith("sha256:")
+        )
+
+        current_graph = {
+            "nodes": [
+                {
+                    "id": "old",
+                    "content_hash": "sha256:" + "8" * 64,
+                    "execution_isolation": {"isolated": True},
+                },
+                {
+                    "id": "new",
+                    "parent_id": "old",
+                    "content_hash": "sha256:" + "9" * 64,
+                    "execution_isolation": {"isolated": True},
+                },
+            ],
+            "edges": [{"parent": "old", "child": "new"}],
+        }
+        (ara / "exploration_graph.json").write_text(
+            json.dumps(current_graph), encoding="utf-8"
+        )
+        append_manifest_revision(
+            ara / "manifest.json",
+            lambda value: (value["counts"].__setitem__("nodes", 2) or ["counts.nodes"]),
+            reason="extend exploration",
+            producer="test",
+        )
+        current_hash = hash_manifest(json.loads((ara / "manifest.json").read_text()))
+        current_evidence = self.repository.record(
+            "evidence",
+            {
+                "result": "The successor ARA adds a second experiment node.",
+                "measurement_hash": "sha256:" + "7" * 64,
+            },
+            state="completed",
+            provenance={
+                "ara_manifest_hash": current_hash,
+                "ara_exploration_graph_hash": content_hash(current_graph),
+            },
+        )
+        self.repository.commit(stage="evidence", subject="extend committed ARA")
+        revised_commit = self.repository.show()["commit"]
+        self.assertTrue(
+            any(
+                "ara/demo/history/" in change
+                for change in self.repository.diff(old_commit, revised_commit)[
+                    "changes"
+                ]
+            )
+        )
+        self.repository.record(
+            "hypothesis",
+            {"statement": "A later checkpoint keeps the ARA binding."},
+        )
+        self.repository.commit(stage="ideation", subject="advance without changing ARA")
+        carried_manifests = self.repository.show()["checkpoint"]["ara_manifests"]
+        self.assertEqual(len(carried_manifests), 1)
+        self.assertTrue(
+            carried_manifests[0]["exploration_graph_hash"].startswith("sha256:")
+        )
+
+        historical = build_research_dag(self.repo_path, ref=old_commit)
+        current = build_research_dag(self.repo_path)
+
+        self.assertEqual(
+            {node["id"] for node in historical["nodes"] if node["source"] == "ara"},
+            {"ara:0:old"},
+        )
+        self.assertEqual(
+            {node["id"] for node in current["nodes"] if node["source"] == "ara"},
+            {"ara:0:old", "ara:0:new", "ara:1:old"},
+        )
+        historical_source = next(
+            item for item in historical["sources"] if item["name"] == "ara:0"
+        )
+        current_source = next(
+            item for item in current["sources"] if item["name"] == "ara:0"
+        )
+        self.assertEqual(historical_source["snapshot_ref"], old_commit)
+        self.assertEqual(historical_source["manifest_hash"], base_hash)
+        self.assertEqual(historical_source["graph_binding"]["state"], "verified")
+        self.assertEqual(current_source["manifest_hash"], current_hash)
+        self.assertEqual(current_source["manifest_integrity"]["state"], "revised")
+        self.assertEqual(current_source["graph_binding"]["state"], "verified")
+        anchors = {
+            (edge["source"], edge["target"], edge["type"], edge["category"])
+            for edge in current["edges"]
+            if edge["type"] == "anchors"
+        }
+        self.assertIn(
+            ("ara:0:new", current_evidence.object_id, "anchors", "verification"),
+            anchors,
+        )
+        self.assertIn(
+            ("ara:1:old", ids["evidence"], "anchors", "verification"),
+            anchors,
+        )
+        historical_version = next(
+            item for item in current["sources"] if item["name"] == "ara:1"
+        )
+        self.assertEqual(historical_version["snapshot_ref"], old_commit)
+
+    def test_graph_changed_outside_checkpoint_cannot_keep_ara_anchors(self) -> None:
+        ara = self.repo_path / "ara" / "tampered-graph"
+        ara.mkdir(parents=True)
+        manifest = {
+            "schema_version": "ara.v1",
+            "protocol_kind": "manifest",
+            "counts": {"nodes": 1},
+        }
+        (ara / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        write_manifest_lock(ara, manifest)
+        graph_path = ara / "exploration_graph.json"
+        original_graph = {
+            "nodes": [
+                {
+                    "id": "bound",
+                    "content_hash": "sha256:" + "4" * 64,
+                    "execution_isolation": {"isolated": True},
+                }
+            ],
+            "edges": [],
+        }
+        graph_path.write_text(json.dumps(original_graph), encoding="utf-8")
+        ids = self._record_lineage(
+            ara_manifest_hash=hash_manifest(manifest),
+            ara_graph_hash=content_hash(original_graph),
+        )
+
+        changed_graph = json.loads(graph_path.read_text())
+        changed_graph["nodes"][0]["analysis"] = "silently changed after checkpoint"
+        graph_path.write_text(json.dumps(changed_graph), encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "ara/tampered-graph/exploration_graph.json"],
+            cwd=self.repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "raw graph edit"],
+            cwd=self.repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        graph = build_research_dag(self.repo_path)
+
+        source = next(item for item in graph["sources"] if item["name"] == "ara:0")
+        self.assertEqual(source["graph_binding"]["state"], "mismatch")
+        self.assertFalse(self.repository.fsck()["ok"])
+        self.assertFalse(graph["integrity"]["is_dag"])
+        self.assertNotIn(
+            ("ara:0:bound", ids["evidence"], "anchors"),
+            {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
+        )
+        self.repository.record(
+            "hypothesis",
+            {
+                "statement": "An unrelated checkpoint must not accept the raw graph edit."
+            },
+        )
+        self.repository.commit(stage="ideation", subject="unrelated later checkpoint")
+        later = build_research_dag(self.repo_path)
+        later_source = next(
+            item for item in later["sources"] if item["name"] == "ara:0"
+        )
+        self.assertEqual(later_source["graph_binding"]["state"], "mismatch")
+        self.assertFalse(later["integrity"]["is_dag"])
 
     def test_invalid_ara_hash_does_not_claim_traceability(self) -> None:
         ara = self.root / "invalid-hash-ara"
@@ -221,6 +604,21 @@ class ResearchDagTests(unittest.TestCase):
         self.assertIsNone(node["content_hash"])
         self.assertEqual(node["proof"]["level"], "recorded")
         self.assertIn("node_content_addressed", node["proof"]["blockers"])
+
+    def test_missing_ara_for_bound_research_object_blocks_integrity(self) -> None:
+        missing_hash = "sha256:" + "f" * 64
+        ids = self._record_lineage(ara_manifest_hash=missing_hash)
+
+        graph = build_research_dag(self.repo_path)
+
+        self.assertFalse(graph["integrity"]["is_dag"])
+        issue = next(
+            item
+            for item in graph["integrity"]["issues"]
+            if item["code"] == "unresolved_ara_manifest_binding"
+        )
+        self.assertIn(ids["evidence"], issue["message"])
+        self.assertIn(missing_hash, issue["message"])
 
     def test_invalid_ara_source_integrity_blocks_unified_dag(self) -> None:
         ara = self.root / "dangling-ara"

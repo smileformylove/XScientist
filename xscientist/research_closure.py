@@ -181,6 +181,43 @@ def _receipt_integrity_issues(
     return issues
 
 
+def _decision_context_issues(
+    item: Mapping[str, Any],
+    objects: Mapping[str, Mapping[str, Any]],
+) -> tuple[bool, list[str], bool]:
+    """Return ``(valid, issues, legacy_unbound)`` for a decision object."""
+
+    payload = item.get("payload") or {}
+    context_ids = _kind_ids(
+        _targets(
+            item,
+            relation_types=("depends_on",),
+            role="decision_context",
+        ),
+        objects,
+        "context_snapshot",
+    )
+    required = payload.get("context_required") is True
+    if not required:
+        return True, [], not context_ids
+    if not context_ids:
+        return False, ["required decision context snapshot is missing"], False
+    from .research_context import research_context_issues
+
+    issues: list[str] = []
+    for context_id in context_ids:
+        context_payload = objects[context_id].get("payload") or {}
+        row_issues = research_context_issues(context_payload, objects=objects)
+        if context_payload.get("context_hash") != payload.get("context_hash"):
+            row_issues.append("decision context hash does not match its consumer")
+        if not row_issues and context_payload.get("complete") is True:
+            return True, [], False
+        issues.extend(f"{context_id}: {issue}" for issue in row_issues)
+        if context_payload.get("complete") is not True:
+            issues.append(f"{context_id}: decision context is incomplete")
+    return False, sorted(set(issues)), False
+
+
 def _claim_closure(
     claim: Mapping[str, Any],
     objects: Mapping[str, Mapping[str, Any]],
@@ -363,12 +400,44 @@ def _claim_closure(
     passing_gates: list[str] = []
     for object_id in gate_ids:
         gate = objects[object_id]
+        gate_context_ok, gate_context_issues, gate_context_legacy = (
+            _decision_context_issues(gate, objects)
+        )
+        if gate_context_legacy:
+            warnings.append(
+                _blocker(
+                    "legacy_decision_context_unbound",
+                    object_id,
+                    "legacy gate does not identify the exact evidence/memory context it consumed",
+                )
+            )
+        if not gate_context_ok:
+            verification_blockers.extend(
+                _blocker("invalid_decision_context", object_id, issue)
+                for issue in gate_context_issues
+            )
         direct_evaluated = set(_targets(gate, relation_types=("evaluates",)))
         evaluated = set(direct_evaluated)
         reviews = _kind_ids(direct_evaluated, objects, "review")
         trusted_review = False
         for review_id in reviews:
             review = objects[review_id]
+            review_context_ok, review_context_issues, review_context_legacy = (
+                _decision_context_issues(review, objects)
+            )
+            if review_context_legacy:
+                warnings.append(
+                    _blocker(
+                        "legacy_decision_context_unbound",
+                        review_id,
+                        "legacy review does not identify the exact evidence/memory context it consumed",
+                    )
+                )
+            if not review_context_ok:
+                verification_blockers.extend(
+                    _blocker("invalid_decision_context", review_id, issue)
+                    for issue in review_context_issues
+                )
             review_targets = set(_targets(review, relation_types=("evaluates",)))
             evaluated.update(review_targets)
             review_actor = review.get("actor") or {}
@@ -377,6 +446,7 @@ def _claim_closure(
                 and review_actor.get("authority") == "independent_evaluator"
                 and str(review_actor.get("actor_id") or "") not in producer_ids
                 and bool(review_targets.intersection({claim_id, *evidence_ids}))
+                and review_context_ok
             )
         bound = bool(evaluated.intersection({claim_id, *evidence_ids}))
         if (
@@ -385,6 +455,7 @@ def _claim_closure(
             and (gate.get("actor") or {}).get("authority") == "deterministic_gate"
             and bound
             and trusted_review
+            and gate_context_ok
         ):
             passing_gates.append(object_id)
         elif gate.get("state") == "verified":

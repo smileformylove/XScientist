@@ -50,7 +50,12 @@
         "required": ["path", "manifest_hash"],
         "properties": {
           "path": {"type": "string"},
-          "manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          "manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "exploration_graph_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Canonical hash of the exploration_graph.json snapshot committed with this manifest. Optional for checkpoints created before graph binding was introduced."
+          }
         }
       }
     },

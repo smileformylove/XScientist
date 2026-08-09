@@ -36,6 +36,9 @@ a filesystem snapshot.
    reachable research object, failure record, evaluation, or provenance link.
 10. Secrets and machine-local paths MUST NOT enter portable objects or
     persistent traces.
+11. A new review, promotion gate, or agent evaluation MUST bind the exact
+    evidence/context/memory snapshot it consumed. Prompt-budget trimming MUST
+    NOT remove identities from that snapshot's hard closure.
 
 ## 3. Logical layers
 
@@ -72,6 +75,7 @@ The initial object kinds are:
 - `reproduction`
 - `agent_candidate`
 - `agent_evaluation`
+- `context_snapshot`
 
 Every object contains a versioned schema identifier, object kind, lifecycle
 state, payload, typed relations, actor receipt, provenance receipt, and content
@@ -80,6 +84,15 @@ hash. Relations include `depends_on`, `supports`, `refutes`, `supersedes`,
 
 Scientific payload schemas MAY be kind-specific, but an implementation MUST
 validate a payload before it can enter the durable object store.
+
+A `context_snapshot` is a first-class scientific object, not a transient prompt
+cache. It records the selected ref/commit, target objects, the complete sorted
+set of source object IDs and content hashes, negative outcomes, prior decisions,
+external memory hashes, options considered, rejection reasons, constraints,
+selection-policy hash, omissions, and a canonical `context_hash`. Token budgets
+MAY trim summaries only. They MUST NOT trim source IDs, hashes, failed attempts,
+contradictions, or decision alternatives. Memory can inform a decision but does
+not gain evaluator or verification authority merely by being remembered.
 
 ## 5. Research commits
 
@@ -131,6 +144,8 @@ The reference implementation exposes backend-independent operations equivalent t
 - `log`, `tree`, `diff`, `blame`, `restore` and `revert`;
 - `merge`, semantic conflict preflight and `tag`;
 - `fsck`, `audit`, `reproduce`, standards `export`, offline `bundle` and bundle restore.
+- `context` for read-only compilation or explicit recording of an exact
+  decision/evidence/memory snapshot.
 
 `bisect`, cross-repository `clone`, policy-level promotion, and safe semantic
 garbage collection remain protocol operations for a later conformance level;
@@ -196,6 +211,9 @@ reported. A privacy-preserving tree view MUST NOT emit object payloads.
 
 A research agent MUST NOT write an evaluation that is treated as independent
 for its own candidate. Evaluator inputs and versions are bound to the decision.
+For decisions created under the context-snapshot policy, the bound snapshot
+MUST be complete and its context/source/memory hashes MUST recompute. Legacy
+unbound decisions remain readable but MUST be diagnosed as weaker evidence.
 
 ## 10. Scientific lifecycle
 
@@ -217,6 +235,13 @@ requires a separate research line; a merge requires a clean working state and
 semantic preflight. The trace records policy version, inputs, current head,
 reasons, recommended operations, and a stable decision identifier. Producing
 the trace itself MUST NOT mutate the repository.
+
+Before an independent review, deterministic promotion gate, or agent-evolution
+evaluation is recorded, the producer MUST compile or record its exact decision
+context. The decision binds that snapshot through a typed `depends_on`
+relation with role `decision_context` and repeats its `context_hash`. A user or
+agent can compile the same view at an older ref; selector resolution and object
+loading MUST occur against that ref, never against the current worktree.
 
 ## 11. Agent self-evolution
 

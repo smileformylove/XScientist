@@ -46,7 +46,8 @@
         "manuscript",
         "reproduction",
         "agent_candidate",
-        "agent_evaluation"
+        "agent_evaluation",
+        "context_snapshot"
       ]
     },
     "state": {
@@ -146,6 +147,30 @@
           "pattern": "^[0-9a-f]{40,64}$"
         },
         "ara_manifest_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "ara_exploration_graph_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "context_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "memory_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "uniqueItems": true
+        },
+        "decision_input_hash": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },

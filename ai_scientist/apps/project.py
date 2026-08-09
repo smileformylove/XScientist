@@ -887,7 +887,7 @@ def _research_attempt_provenance(
     result: dict,
     preregistration_id: str | None,
 ) -> dict:
-    from ai_scientist.protocol.hashing import hash_manifest
+    from ai_scientist.protocol.hashing import content_hash, hash_manifest
     from xscientist.research_git import capture_environment_receipt
 
     environment = capture_environment_receipt(lifecycle.repository.path)
@@ -921,6 +921,23 @@ def _research_attempt_provenance(
         manifest = _safe_load_json(manifest_path, default=None)
         if isinstance(manifest, dict):
             provenance["ara_manifest_hash"] = hash_manifest(manifest)
+        graph = _safe_load_json(
+            Path(str(manifest_path)).expanduser().parent / "exploration_graph.json",
+            default=None,
+        )
+        if isinstance(graph, dict):
+            provenance["ara_exploration_graph_hash"] = content_hash(graph)
+            context_hashes = sorted(
+                {
+                    str(ref)
+                    for node in graph.get("nodes") or []
+                    if isinstance(node, dict)
+                    for ref in node.get("context_pack_refs") or []
+                    if isinstance(ref, str) and ref.startswith("sha256:")
+                }
+            )
+            if context_hashes:
+                provenance["context_hashes"] = context_hashes
     return provenance
 
 
@@ -977,6 +994,7 @@ def _record_local_research_handoff_objects(
 
     try:
         from ai_scientist.protocol.hashing import content_hash, hash_manifest
+        from xscientist.research_context import record_research_context_snapshot
 
         lifecycle = ResearchLifecycle(args.project_dir)
         object_ids = getattr(args, "_research_vcs_ids", {})
@@ -1004,6 +1022,29 @@ def _record_local_research_handoff_objects(
             manifest_hash = (
                 hash_manifest(manifest) if isinstance(manifest, dict) else None
             )
+            exploration_graph = (
+                _safe_load_json(
+                    Path(str(manifest_path)).expanduser().parent
+                    / "exploration_graph.json",
+                    default=None,
+                )
+                if manifest_path
+                else None
+            )
+            exploration_graph_hash = (
+                content_hash(exploration_graph)
+                if isinstance(exploration_graph, dict)
+                else None
+            )
+            context_pack_refs = sorted(
+                {
+                    str(ref)
+                    for node in (exploration_graph or {}).get("nodes") or []
+                    if isinstance(node, dict)
+                    for ref in node.get("context_pack_refs") or []
+                    if isinstance(ref, str) and ref.startswith("sha256:")
+                }
+            )
             evidence_payload: dict[str, object] = {
                 "result": str(result.get("status") or "unknown"),
                 "measurement_hash": content_hash(compact),
@@ -1016,6 +1057,12 @@ def _record_local_research_handoff_objects(
             }
             if manifest_hash:
                 evidence_payload["ara_manifest_hash"] = manifest_hash
+                if exploration_graph_hash:
+                    evidence_payload["ara_exploration_graph_hash"] = (
+                        exploration_graph_hash
+                    )
+                if context_pack_refs:
+                    evidence_payload["context_pack_refs"] = context_pack_refs
                 try:
                     evidence_payload["ara_manifest_path"] = (
                         Path(str(manifest_path))
@@ -1060,17 +1107,25 @@ def _record_local_research_handoff_objects(
                                 "source": claim_payload.get("source") or {},
                             }
                         )
+                    research_claim_payload: dict[str, object] = {
+                        "claim_hash": claim_hash,
+                        "ara_claim_id": ara_claim_id,
+                        "node_id": claim_payload.get("node_id"),
+                        "ara_manifest_hash": manifest_hash,
+                        "resolved": bool(claim_payload.get("resolved")),
+                        "evidence_refs": sorted(
+                            set(claim_payload.get("evidence_refs") or [])
+                        ),
+                        "context_pack_refs": sorted(
+                            set(claim_payload.get("context_pack_refs") or [])
+                        ),
+                    }
+                    if exploration_graph_hash:
+                        research_claim_payload["ara_exploration_graph_hash"] = (
+                            exploration_graph_hash
+                        )
                     claim_record = lifecycle.claim(
-                        {
-                            "claim_hash": claim_hash,
-                            "ara_claim_id": ara_claim_id,
-                            "node_id": claim_payload.get("node_id"),
-                            "ara_manifest_hash": manifest_hash,
-                            "resolved": bool(claim_payload.get("resolved")),
-                            "evidence_refs": sorted(
-                                set(claim_payload.get("evidence_refs") or [])
-                            ),
-                        },
+                        research_claim_payload,
                         evidence_ids=[evidence_record.object_id],
                         verified=False,
                         commit=False,
@@ -1096,6 +1151,25 @@ def _record_local_research_handoff_objects(
                 claim_ids.append(insight_claim.object_id)
                 claim_count += 1
             object_ids.setdefault("claims", {})[idea_index] = claim_ids
+            context = record_research_context_snapshot(
+                lifecycle.repository,
+                target_ids=claim_ids or [evidence_record.object_id],
+                decision_kind="automated_research_handoff",
+                selected="hold",
+                options_considered=[
+                    {
+                        "option": "promote",
+                        "rejected_because": "independent verification is missing",
+                    },
+                    {"option": "hold", "rejected_because": ""},
+                ],
+                rationale=[
+                    "Keep generated claims and manuscript in draft until independent verification."
+                ],
+                constraints=["independent_verification_missing"],
+                actor_id="research-handoff-context-recorder",
+            )
+            context_payload = lifecycle.repository.get(context.object_id)["payload"]
             gate = lifecycle.repository.record(
                 "gate_decision",
                 {
@@ -1106,11 +1180,20 @@ def _record_local_research_handoff_objects(
                     "submission_acceptance_passed": result.get(
                         "submission_acceptance_passed"
                     ),
+                    "context_required": True,
+                    "context_hash": context_payload["context_hash"],
                 },
                 state="rejected",
                 relations=[
                     {"type": "evaluates", "target": target}
                     for target in (claim_ids or [evidence_record.object_id])
+                ]
+                + [
+                    {
+                        "type": "depends_on",
+                        "target": context.object_id,
+                        "role": "decision_context",
+                    }
                 ],
                 actor={
                     "actor_id": "research-handoff-gate",
@@ -1132,6 +1215,7 @@ def _record_local_research_handoff_objects(
                 commit=False,
             )["manuscript"]
             object_ids.setdefault("gates", {})[idea_index] = gate.object_id
+            object_ids.setdefault("contexts", {})[idea_index] = context.object_id
             object_ids.setdefault("manuscripts", {})[idea_index] = manuscript.object_id
         args._research_vcs_ids = object_ids
         print(

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.protocol.hashing import content_hash
 from ai_scientist.utils.pipeline_contracts import (
     append_jsonl_artifact,
     artifact_path,
@@ -31,11 +32,15 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _coerce_options(options_considered: list[Any] | tuple[Any, ...] | None) -> list[dict[str, Any]]:
+def _coerce_options(
+    options_considered: list[Any] | tuple[Any, ...] | None,
+) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     for idx, item in enumerate(options_considered or []):
         if isinstance(item, dict):
-            name = _clean_text(item.get("option") or item.get("name") or item.get("value"))
+            name = _clean_text(
+                item.get("option") or item.get("name") or item.get("value")
+            )
             status = _clean_text(item.get("status"))
             rejected_because = _clean_text(item.get("rejected_because"))
             selected = bool(item.get("selected"))
@@ -45,7 +50,9 @@ def _coerce_options(options_considered: list[Any] | tuple[Any, ...] | None) -> l
             rejected_because = ""
             selected = False
         if not name:
-            raise DecisionLogError(f"options_considered[{idx}] is missing an option name")
+            raise DecisionLogError(
+                f"options_considered[{idx}] is missing an option name"
+            )
         options.append(
             {
                 "option": name,
@@ -69,7 +76,9 @@ def _validate_decision_entry(entry: dict[str, Any]) -> None:
     if not isinstance(options, list) or not options:
         raise DecisionLogError("options_considered must contain at least one option")
     if selected not in {str(option.get("option")) for option in options}:
-        raise DecisionLogError("selected decision value must be present in options_considered")
+        raise DecisionLogError(
+            "selected decision value must be present in options_considered"
+        )
     rejected_map = rejected_because if isinstance(rejected_because, dict) else {}
     if len(options) <= 1:
         raise DecisionLogError(
@@ -83,7 +92,40 @@ def _validate_decision_entry(entry: dict[str, Any]) -> None:
             rejected_map.get(name)
         )
         if not reason:
-            raise DecisionLogError(f"rejected option {name!r} must include rejected_because")
+            raise DecisionLogError(
+                f"rejected option {name!r} must include rejected_because"
+            )
+    for key in ("context_refs", "memory_refs", "evidence_refs"):
+        values = entry.get(key) or []
+        if any(
+            not isinstance(value, str)
+            or len(value) != 71
+            or not value.startswith("sha256:")
+            for value in values
+        ):
+            raise DecisionLogError(f"{key} must contain sha256 content hashes")
+    input_identity = {
+        key: entry.get(key)
+        for key in (
+            "category",
+            "options_considered",
+            "producer",
+            "metadata",
+            "context_refs",
+            "memory_refs",
+            "evidence_refs",
+        )
+    }
+    if entry.get("decision_input_hash") != content_hash(input_identity):
+        raise DecisionLogError("decision input hash mismatch")
+    decision_identity = {
+        **input_identity,
+        "selected": selected,
+        "rejected_because": rejected_map,
+        "decision_input_hash": entry.get("decision_input_hash"),
+    }
+    if entry.get("decision_hash") != content_hash(decision_identity):
+        raise DecisionLogError("decision hash mismatch")
 
 
 def build_decision_entry(
@@ -94,6 +136,9 @@ def build_decision_entry(
     rejected_because: dict[str, str] | None = None,
     producer: str,
     metadata: dict[str, Any] | None = None,
+    context_refs: list[str] | tuple[str, ...] = (),
+    memory_refs: list[str] | tuple[str, ...] = (),
+    evidence_refs: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     selected_text = _clean_text(selected)
     rejected_map = {
@@ -108,15 +153,30 @@ def build_decision_entry(
         option["status"] = "selected" if option["selected"] else "rejected"
         if not option["selected"] and not option["rejected_because"]:
             option["rejected_because"] = rejected_map.get(name, "")
-    entry = {
-        "schema_version": 1,
-        "recorded_at": _now_iso(),
+    input_identity = {
         "category": _clean_text(category),
-        "selected": selected_text,
         "options_considered": options,
-        "rejected_because": rejected_map,
         "producer": _clean_text(producer),
         "metadata": dict(metadata or {}),
+        "context_refs": sorted(set(context_refs)),
+        "memory_refs": sorted(set(memory_refs)),
+        "evidence_refs": sorted(set(evidence_refs)),
+    }
+    decision_input_hash = content_hash(input_identity)
+    decision_identity = {
+        **input_identity,
+        "selected": selected_text,
+        "rejected_because": rejected_map,
+        "decision_input_hash": decision_input_hash,
+    }
+    entry = {
+        "schema_version": 2,
+        "recorded_at": _now_iso(),
+        **input_identity,
+        "selected": selected_text,
+        "rejected_because": rejected_map,
+        "decision_input_hash": decision_input_hash,
+        "decision_hash": content_hash(decision_identity),
     }
     _validate_decision_entry(entry)
     return entry
@@ -131,6 +191,9 @@ def record_decision(
     rejected_because: dict[str, str] | None = None,
     producer: str = "decision_log",
     metadata: dict[str, Any] | None = None,
+    context_refs: list[str] | tuple[str, ...] = (),
+    memory_refs: list[str] | tuple[str, ...] = (),
+    evidence_refs: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     root = Path(project_root).expanduser().resolve()
     entry = build_decision_entry(
@@ -140,6 +203,9 @@ def record_decision(
         rejected_because=rejected_because,
         producer=producer,
         metadata=metadata,
+        context_refs=context_refs,
+        memory_refs=memory_refs,
+        evidence_refs=evidence_refs,
     )
     append_jsonl_artifact(artifact_path(root, "decision_log"), entry)
     update_pipeline_artifact(
@@ -154,7 +220,11 @@ def record_decision(
 
 
 def load_decision_log(project_root: str | Path) -> list[dict[str, Any]]:
-    return load_jsonl_artifact(artifact_path(project_root, "decision_log"))
+    entries = load_jsonl_artifact(artifact_path(project_root, "decision_log"))
+    for entry in entries:
+        if int(entry.get("schema_version") or 1) >= 2:
+            _validate_decision_entry(entry)
+    return entries
 
 
 def build_workflow_strategy_decision_options(
@@ -172,7 +242,9 @@ def build_workflow_strategy_decision_options(
     candidates: list[tuple[str, str]] = []
 
     if requested != "adaptive":
-        candidates.append(("adaptive", "adaptive resolver bypassed by explicit workflow_mode"))
+        candidates.append(
+            ("adaptive", "adaptive resolver bypassed by explicit workflow_mode")
+        )
         candidates.append((requested, "explicit workflow_mode request"))
     else:
         candidates.append(("adaptive", "adaptive resolver entrypoint"))
@@ -186,7 +258,9 @@ def build_workflow_strategy_decision_options(
             )
         elif high_quality_mode:
             candidates.append(("writing_studio", "high_quality_mode=True"))
-        candidates.append(("classic_pipeline", "default candidate when no stronger mode applies"))
+        candidates.append(
+            ("classic_pipeline", "default candidate when no stronger mode applies")
+        )
 
     if selected_text and all(name != selected_text for name, _ in candidates):
         candidates.append((selected_text, "selected by workflow resolver"))
@@ -218,11 +292,15 @@ def build_workflow_strategy_decision_options(
                 "requires high_quality_mode=True and target_venue in {nature,journal}"
             )
         elif option == "writing_studio":
-            rejected_reason = "requires high_quality_mode=True without journal/nature routing"
+            rejected_reason = (
+                "requires high_quality_mode=True without journal/nature routing"
+            )
         elif option == "classic_pipeline":
             rejected_reason = "a more specific workflow condition matched first"
         else:
-            rejected_reason = f"{reason} did not match selected workflow_mode={selected_text}"
+            rejected_reason = (
+                f"{reason} did not match selected workflow_mode={selected_text}"
+            )
         options.append(
             {
                 "option": option,
@@ -234,23 +312,29 @@ def build_workflow_strategy_decision_options(
     return options
 
 
-def build_sample_gate_decision_options(sample_gate_passed: bool) -> list[dict[str, Any]]:
+def build_sample_gate_decision_options(
+    sample_gate_passed: bool,
+) -> list[dict[str, Any]]:
     return [
         {
             "option": "continue_full_generation",
             "selected": bool(sample_gate_passed),
             "status": "selected" if sample_gate_passed else "rejected",
-            "rejected_because": ""
-            if sample_gate_passed
-            else "sample gate did not pass, so full generation remains blocked",
+            "rejected_because": (
+                ""
+                if sample_gate_passed
+                else "sample gate did not pass, so full generation remains blocked"
+            ),
         },
         {
             "option": "block_full_generation",
             "selected": not bool(sample_gate_passed),
             "status": "selected" if not sample_gate_passed else "rejected",
-            "rejected_because": ""
-            if not sample_gate_passed
-            else "sample gate passed, no blocking reason remains",
+            "rejected_because": (
+                ""
+                if not sample_gate_passed
+                else "sample gate passed, no blocking reason remains"
+            ),
         },
     ]
 
@@ -282,7 +366,9 @@ def record_model_provider_decisions(
             rejected_reason = "model has no openai_compat/ prefix, so OpenAI-compatible override was not considered"
         elif prefixed:
             rejected_option = "unprefixed_model_resolution"
-            rejected_reason = f"explicit {spec.provider}/ prefix fixed provider selection"
+            rejected_reason = (
+                f"explicit {spec.provider}/ prefix fixed provider selection"
+            )
         else:
             rejected_option = "provider_prefix_override"
             rejected_reason = "model resolver matched the model family before any provider-prefix override"

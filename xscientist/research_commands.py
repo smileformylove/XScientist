@@ -440,6 +440,7 @@ def save_review(
     )
     gate = recorded["gate"]
     review = recorded["review"]
+    context = recorded["context"]
     return _finish(
         repository,
         gate,
@@ -447,7 +448,9 @@ def save_review(
         subject=message or "record independent evidence gate",
         status=gate.state,
         commit=commit,
-        related=[review],
+        # Preserve the long-standing CLI contract that the review is the first
+        # related object; the exact context snapshot is an additive second item.
+        related=[review, context],
     )
 
 

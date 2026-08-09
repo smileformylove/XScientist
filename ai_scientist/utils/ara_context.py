@@ -21,14 +21,18 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+from jsonschema import ValidationError, validate as validate_json
 
 from ai_scientist.protocol import ObjectStore, content_hash
 from ai_scientist.protocol.llm_trace import active_ara_root
+from ai_scientist.protocol.schemas import load_schema
 from ai_scientist.utils.ara_catalog import CATALOG_RELPATH, ensure_semantic_catalog
 from ai_scientist.utils.atomic_io import durable_append_text
+from ai_scientist.utils.context_receipts import seal_context_receipt
 
-CONTEXT_INTENTS = ("continue", "write", "audit", "reproduce")
+CONTEXT_INTENTS = ("continue", "write", "audit", "reproduce", "decide")
 CONTEXT_RECEIPTS_RELPATH = Path("context") / "receipts.jsonl"
 
 
@@ -221,6 +225,8 @@ def _trim_optional_lists(
         "verification_rules",
         "source_refs",
         "source_closure_hash",
+        "memory_refs",
+        "memory_snapshot_hash",
         "complete",
         "blockers",
     }
@@ -277,16 +283,57 @@ def _finalize_pack(
     pack: dict[str, Any], source_refs: Iterable[str], budget_tokens: int
 ) -> dict[str, Any]:
     refs = sorted({str(ref) for ref in source_refs if ref})
+    memory_refs = sorted(
+        {
+            str(ref)
+            for ref in pack.get("memory_refs") or []
+            if isinstance(ref, str) and ref
+        }
+    )
     pack["source_refs"] = refs
     pack["source_closure_hash"] = content_hash({"source_refs": refs})
+    pack["memory_refs"] = memory_refs
+    pack["memory_snapshot_hash"] = content_hash({"memory_refs": memory_refs})
     pack["complete"] = not bool(pack.get("blockers"))
     _trim_optional_lists(pack, budget_tokens=budget_tokens)
     identity = {
         key: value
         for key, value in pack.items()
-        if key not in {"generated_at", "pack_hash"}
+        if key not in {"generated_at", "pack_hash", "persisted_ref"}
     }
     pack["pack_hash"] = content_hash(identity)
+    validate_context_pack(pack)
+    return pack
+
+
+def validate_context_pack(pack: dict[str, Any]) -> dict[str, Any]:
+    """Validate schema and every internal ContextPack identity."""
+
+    if not isinstance(pack, dict):
+        raise ARAContextError("ContextPack must be an object")
+    try:
+        validate_json(pack, load_schema("context_pack"))
+    except ValidationError as exc:
+        raise ARAContextError(f"ContextPack schema is invalid: {exc.message}") from exc
+    refs = sorted({str(ref) for ref in pack.get("source_refs") or []})
+    if pack.get("source_refs") != refs:
+        raise ARAContextError("ContextPack source refs are not canonical and unique")
+    if pack.get("source_closure_hash") != content_hash({"source_refs": refs}):
+        raise ARAContextError("ContextPack source closure hash mismatch")
+    memory_refs = sorted({str(ref) for ref in pack.get("memory_refs") or []})
+    if pack.get("memory_refs") != memory_refs:
+        raise ARAContextError("ContextPack memory refs are not canonical and unique")
+    if pack.get("memory_snapshot_hash") != content_hash({"memory_refs": memory_refs}):
+        raise ARAContextError("ContextPack memory snapshot hash mismatch")
+    identity = {
+        key: value
+        for key, value in pack.items()
+        if key not in {"generated_at", "pack_hash", "persisted_ref"}
+    }
+    if pack.get("pack_hash") != content_hash(identity):
+        raise ARAContextError("ContextPack identity hash mismatch")
+    if bool(pack.get("complete")) == bool(pack.get("blockers")):
+        raise ARAContextError("ContextPack completeness does not match blockers")
     return pack
 
 
@@ -297,6 +344,7 @@ def compile_context_pack(
     node_id: str | None = None,
     claim_id: str | None = None,
     budget_tokens: int = 12000,
+    decision: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile a bounded ContextPack from the semantic catalog."""
 
@@ -312,7 +360,7 @@ def compile_context_pack(
         raise ARAContextError(f"claim not found: {claim_id}")
     if node_id is None and selected_claim is not None:
         node_id = str(selected_claim.get("node_id") or "") or None
-    if node_id is None and intent in {"continue", "reproduce"}:
+    if node_id is None and intent in {"continue", "reproduce", "decide"}:
         node_id = _best_node_id(nodes)
     selected_node = nodes.get(str(node_id)) if node_id else None
     if node_id and selected_node is None:
@@ -336,6 +384,7 @@ def compile_context_pack(
             "write": "writing_agent",
             "audit": "reviewer_agent",
             "reproduce": "reproduce_agent",
+            "decide": "decision_agent",
         }[intent],
         "must_read": [],
         "decisive_evidence": [],
@@ -346,6 +395,7 @@ def compile_context_pack(
         "related_claims": [],
         "blockers": blockers,
         "omitted": {},
+        "memory_refs": [],
     }
 
     if selected_node is not None:
@@ -353,6 +403,7 @@ def compile_context_pack(
         pack["must_read"].append(selected_view)
         if selected_node.get("content_hash"):
             source_refs.add(str(selected_node["content_hash"]))
+        pack["memory_refs"].extend(selected_node.get("context_pack_refs") or [])
         for ancestor_id in _ancestry(str(node_id), parents):
             ancestor = nodes.get(ancestor_id)
             if ancestor is None:
@@ -360,6 +411,7 @@ def compile_context_pack(
             pack["must_read"].append(_node_view(ancestor, root))
             if ancestor.get("content_hash"):
                 source_refs.add(str(ancestor["content_hash"]))
+            pack["memory_refs"].extend(ancestor.get("context_pack_refs") or [])
 
     if intent == "continue":
         related_failed: list[dict[str, Any]] = []
@@ -404,7 +456,7 @@ def compile_context_pack(
                 {"node_id": node_id, "metric": _plain_metric(selected_node)}
             )
 
-    if intent in {"write", "audit"}:
+    if intent in {"write", "audit", "decide"}:
         selected_claims = (
             [selected_claim] if selected_claim is not None else list(claims.values())
         )
@@ -425,6 +477,7 @@ def compile_context_pack(
             pack["related_claims"].append(claim_view)
             source_refs.add(str(claim.get("claim_hash") or content_hash(claim)))
             source_refs.update(str(ref) for ref in claim_view["evidence_refs"] if ref)
+            pack["memory_refs"].extend(claim.get("context_pack_refs") or [])
             if claim_view["resolved"]:
                 pack["decisive_evidence"].append(claim_view)
             else:
@@ -440,7 +493,7 @@ def compile_context_pack(
                 "rule": "Do not state an unresolved or unanchored claim as an established result.",
             }
         )
-        if intent == "audit":
+        if intent in {"audit", "decide"}:
             pack["failed_attempts"] = [
                 _node_view(node, root)
                 for node in nodes.values()
@@ -464,6 +517,26 @@ def compile_context_pack(
                         if ref:
                             source_refs.add(ref)
             pack["verification_reports"] = verify_reports
+
+    if intent == "decide":
+        decision_payload = dict(decision or {})
+        pack["decision"] = decision_payload
+        if decision_payload:
+            source_refs.add(content_hash({"decision_inputs": decision_payload}))
+        if selected_node is not None:
+            selected_view = _node_view(selected_node, root)
+            if selected_view not in pack["decisive_evidence"]:
+                pack["decisive_evidence"].append(selected_view)
+        pack["constraints"].append(
+            {
+                "kind": "decision_memory",
+                "rule": "Consider retained failures, contradictions, omissions, and prior context before selecting an action.",
+            }
+        )
+        if not pack["decisive_evidence"]:
+            pack["blockers"].append(
+                "decision has no decisive evidence in its hard closure"
+            )
 
     if intent == "reproduce":
         if selected_node is None:
@@ -540,6 +613,7 @@ def _live_base(intent: str, consumer: str, target: dict[str, Any]) -> dict[str, 
         "related_claims": [],
         "blockers": [],
         "omitted": {},
+        "memory_refs": [],
         "live": True,
     }
 
@@ -613,6 +687,14 @@ def compile_live_continue_context(
     ]
     if not source_refs:
         source_refs = [content_hash({"nodes": plain_nodes})]
+    pack["memory_refs"] = sorted(
+        {
+            str(ref)
+            for node in plain_nodes
+            for ref in node.get("context_pack_refs") or []
+            if isinstance(ref, str)
+        }
+    )
     return _finalize_pack(pack, source_refs, budget_tokens)
 
 
@@ -753,6 +835,8 @@ def render_context_pack_for_prompt(pack: dict[str, Any]) -> str:
             "blockers",
             "omitted",
             "source_closure_hash",
+            "memory_refs",
+            "memory_snapshot_hash",
             "pack_hash",
         )
         if pack.get(key) not in (None, [], {}, "")
@@ -784,6 +868,7 @@ def persist_context_pack(
     """Store a pack once and append a compact compilation receipt."""
 
     root = Path(ara_root).expanduser().resolve()
+    validate_context_pack(pack)
     store = ObjectStore(root, shared_root=_shared_root_for(root))
     ref = store.put_json(pack)
     receipt = {
@@ -796,8 +881,10 @@ def persist_context_pack(
         "pack_ref": ref.to_json(),
         "pack_hash": pack.get("pack_hash"),
         "source_closure_hash": pack.get("source_closure_hash"),
+        "memory_snapshot_hash": pack.get("memory_snapshot_hash"),
         "omitted": pack.get("omitted") or {},
     }
+    receipt = seal_context_receipt(receipt)
     durable_append_text(
         root / CONTEXT_RECEIPTS_RELPATH,
         json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -829,6 +916,10 @@ def record_context_consumption(
     output_id: str,
 ) -> None:
     root = Path(ara_root).expanduser().resolve()
+    stored_pack = ObjectStore(root, shared_root=_shared_root_for(root)).get_json(
+        pack_ref
+    )
+    validate_context_pack(stored_pack)
     receipt = {
         "schema": "ara.context.receipt.v1",
         "type": "consumed",
@@ -836,7 +927,11 @@ def record_context_consumption(
         "consumer": consumer,
         "pack_ref": pack_ref,
         "output": {"type": output_type, "id": output_id},
+        "pack_hash": stored_pack.get("pack_hash"),
+        "source_closure_hash": stored_pack.get("source_closure_hash"),
+        "memory_snapshot_hash": stored_pack.get("memory_snapshot_hash"),
     }
+    receipt = seal_context_receipt(receipt)
     durable_append_text(
         root / CONTEXT_RECEIPTS_RELPATH,
         json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -879,4 +974,5 @@ __all__ = [
     "record_active_context_consumption",
     "record_context_consumption",
     "render_context_pack_for_prompt",
+    "validate_context_pack",
 ]

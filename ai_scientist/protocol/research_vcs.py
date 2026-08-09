@@ -27,6 +27,7 @@ RESEARCH_OBJECT_KINDS = (
     "reproduction",
     "agent_candidate",
     "agent_evaluation",
+    "context_snapshot",
 )
 RESEARCH_OBJECT_STATES = (
     "draft",
@@ -107,6 +108,11 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
         "verdict",
         "decision",
         "gate_hash",
+    ),
+    "context_snapshot": (
+        "context_hash",
+        "source_closure_hash",
+        "memory_snapshot_hash",
     ),
 }
 

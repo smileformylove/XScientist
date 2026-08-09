@@ -641,10 +641,27 @@ class ResearchRepositoryTests(unittest.TestCase):
 
             self.assertEqual(manuscript["manuscript"].state, "completed")
             self.assertTrue(repository.fsck()["ok"])
+            context = repository.get(evaluation["context"].object_id)
+            self.assertTrue(context["payload"]["complete"])
+            self.assertEqual(
+                evaluation["gate"].object_id,
+                repository.resolve("@latest:gate_decision"),
+            )
+            self.assertIn(
+                evaluation["context"].object_id,
+                {
+                    relation["target"]
+                    for relation in repository.get(evaluation["gate"].object_id)[
+                        "relations"
+                    ]
+                    if relation.get("role") == "decision_context"
+                },
+            )
             self.assertEqual(
                 {item["kind"] for item in repository.objects()},
                 {
                     "claim",
+                    "context_snapshot",
                     "evidence",
                     "experiment_attempt",
                     "gate_decision",

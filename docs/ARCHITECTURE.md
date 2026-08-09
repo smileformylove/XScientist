@@ -248,12 +248,21 @@ Persistent memory system:
 - Tracks patterns and lessons learned
 - Maintains self-evolution playbook
 - Enables cross-project learning
+- Exposes learned material by immutable hash so a decision can bind the exact
+  memory snapshot it consumed
 
 **Key Features**:
 - Structured artifact storage
 - Similarity search
 - Pattern extraction
 - Playbook management
+
+Scientific decision memory is narrower than the general knowledge base. ARA
+ContextPacks bind task-specific source and prior-memory hashes; Research VCS
+records durable `context_snapshot` objects for reviews, gates, and evolution
+decisions. Negative results and rejected alternatives stay in the hard closure,
+while prompt budgets affect summaries only. The unified DAG exposes these
+context edges, and memory never grants independent-evaluator authority.
 
 ### 8. Daemon Strategy & Scheduling
 **Location**: `ai_scientist/apps/daemon.py`
