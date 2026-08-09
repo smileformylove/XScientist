@@ -7,7 +7,11 @@ from typing import Any, Mapping
 
 from ai_scientist.protocol.hashing import content_hash
 
-CONTEXT_RECEIPT_SCHEMA = "ara.context.receipt.v1"
+CONTEXT_RECEIPT_SCHEMA = "ara.context.receipt.v2"
+SUPPORTED_CONTEXT_RECEIPT_SCHEMAS = {
+    "ara.context.receipt.v1",
+    CONTEXT_RECEIPT_SCHEMA,
+}
 
 
 class ContextReceiptError(ValueError):
@@ -44,7 +48,7 @@ def validate_context_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(receipt, Mapping):
         raise ContextReceiptError("ContextPack receipt must be an object")
     detached = dict(receipt)
-    if detached.get("schema") != CONTEXT_RECEIPT_SCHEMA:
+    if detached.get("schema") not in SUPPORTED_CONTEXT_RECEIPT_SCHEMAS:
         raise ContextReceiptError("ContextPack receipt schema is invalid")
     receipt_type = str(detached.get("type") or "")
     if receipt_type not in {"compiled", "consumed"}:
@@ -57,6 +61,12 @@ def validate_context_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     memory_hash = detached.get("memory_snapshot_hash")
     if memory_hash is not None and not _is_sha256(memory_hash):
         raise ContextReceiptError("ContextPack receipt memory_snapshot_hash is invalid")
+    if detached.get("schema") == CONTEXT_RECEIPT_SCHEMA and not _is_sha256(
+        detached.get("retrieval_receipt_hash")
+    ):
+        raise ContextReceiptError(
+            "ContextPack receipt retrieval_receipt_hash is invalid"
+        )
     if receipt_type == "consumed":
         output = detached.get("output")
         if not isinstance(output, Mapping) or not str(output.get("id") or ""):
@@ -74,6 +84,7 @@ def validate_context_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "CONTEXT_RECEIPT_SCHEMA",
     "ContextReceiptError",
+    "SUPPORTED_CONTEXT_RECEIPT_SCHEMAS",
     "seal_context_receipt",
     "validate_context_receipt",
 ]

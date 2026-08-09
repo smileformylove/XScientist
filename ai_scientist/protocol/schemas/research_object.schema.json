@@ -40,28 +40,52 @@
     },
     "kind": {
       "type": "string",
-      "enum": [
-        "question",
-        "search_plan",
-        "search_receipt",
-        "source_snapshot",
-        "passage_evidence",
-        "hypothesis",
-        "preregistration",
-        "research_plan",
-        "experiment_attempt",
-        "observation",
-        "metric",
-        "evidence",
-        "claim",
-        "review",
-        "gate_decision",
-        "manuscript",
-        "reproduction",
-        "agent_candidate",
-        "agent_evaluation",
-        "context_snapshot"
-      ]
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "semantic_profile": {
+      "type": "object",
+      "required": [
+        "schema",
+        "uri",
+        "version",
+        "kinds",
+        "relations",
+        "schema_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "xscientist.research-semantic-profile.v1"
+        },
+        "uri": {
+          "type": "string",
+          "pattern": "^(https?://|urn:)"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "uniqueItems": true
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "schema_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
     },
     "state": {
       "type": "string",
@@ -91,26 +115,7 @@
         "properties": {
           "type": {
             "type": "string",
-            "enum": [
-              "depends_on",
-              "supports",
-              "refutes",
-              "supersedes",
-              "reproduces",
-              "contradicts",
-              "derived_from",
-              "evaluates",
-              "promotes",
-              "retrieves",
-              "cites",
-              "quotes",
-              "observes",
-              "generated_by",
-              "qualified_supports",
-              "qualified_refutes",
-              "attests",
-              "uses_context"
-            ]
+            "minLength": 1
           },
           "target": {
             "type": "string",

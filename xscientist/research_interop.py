@@ -85,6 +85,27 @@ def _schema_type(kind: str) -> str:
         "agent_candidate": "SoftwareSourceCode",
         "agent_evaluation": "Review",
         "context_snapshot": "DigitalDocument",
+        "inference": "Claim",
+        "warrant": "CreativeWork",
+        "assumption": "CreativeWork",
+        "method": "HowTo",
+        "estimand": "PropertyValue",
+        "effect_estimate": "Observation",
+        "protocol_deviation": "DigitalDocument",
+        "sensitivity_analysis": "Dataset",
+        "risk_of_bias": "Review",
+        "evidence_synthesis": "Review",
+        "challenge": "Comment",
+        "source_update": "UpdateAction",
+        "context_robustness": "Review",
+        "research_goal": "Question",
+        "action_proposal": "PlanAction",
+        "experiment_design": "PlanAction",
+        "resource_budget": "PropertyValue",
+        "stopping_decision": "ChooseAction",
+        "novelty_check": "Review",
+        "evaluation_blinding": "DigitalDocument",
+        "human_escalation": "AskAction",
     }.get(kind, "CreativeWork")
 
 
@@ -108,6 +129,20 @@ def _relation_property(relation_type: str) -> str:
         "qualified_refutes": "xscientist:qualifiedRefutes",
         "attests": "xscientist:attests",
         "uses_context": "prov:used",
+        "has_premise": "xscientist:hasPremise",
+        "uses_method": "xscientist:usesMethod",
+        "under_assumption": "xscientist:underAssumption",
+        "addresses_estimand": "xscientist:addressesEstimand",
+        "has_effect_estimate": "xscientist:hasEffectEstimate",
+        "challenges_inference": "xscientist:challengesInference",
+        "derived_by": "prov:wasGeneratedBy",
+        "qualifies": "xscientist:qualifies",
+        "updates": "prov:wasRevisionOf",
+        "invalidates": "xscientist:invalidates",
+        "selects": "xscientist:selects",
+        "rejects": "xscientist:rejects",
+        "consumes": "prov:used",
+        "produces": "prov:wasGeneratedBy",
     }.get(relation_type, "schema:isRelatedTo")
 
 
@@ -187,6 +222,13 @@ def build_ro_crate(
             "identifier": item.get("qualified_id") or item.get("object_id"),
             "creator": {"@id": agent_urn},
         }
+        semantic_profile = item.get("semantic_profile")
+        if isinstance(semantic_profile, dict):
+            entity["conformsTo"] = {"@id": semantic_profile.get("uri")}
+            entity["xscientist:profileVersion"] = semantic_profile.get("version")
+            entity["xscientist:profileSchemaDigest"] = semantic_profile.get(
+                "schema_digest"
+            )
         for relation in item.get("relations") or []:
             prop = _relation_property(str(relation.get("type") or ""))
             value = {"@id": _object_urn(str(relation.get("target") or ""))}
@@ -235,6 +277,11 @@ def build_prov_json(
             "prov:label": _summary(item),
             "xsc:state": item.get("state"),
             "xsc:contentHash": item.get("content_hash"),
+            "xsc:semanticProfile": (
+                (item.get("semantic_profile") or {}).get("uri")
+                if isinstance(item.get("semantic_profile"), dict)
+                else None
+            ),
         }
         agents[agent_id] = {
             "prov:label": actor_id,

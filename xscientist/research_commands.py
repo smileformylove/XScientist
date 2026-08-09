@@ -24,6 +24,7 @@ from .research_git import (
 from .research_lifecycle import ResearchLifecycle
 from .research_semantics import (
     build_search_receipt_payload,
+    build_text_quote_selector,
     claim_scope_hash,
     normalize_claim_scope,
 )
@@ -226,6 +227,13 @@ def save_search_receipt(
     retrieved_at: str = "",
     corpus_version: str = "",
     errors: Sequence[str] = (),
+    query_rewrites: Sequence[str] = (),
+    filters: Mapping[str, Any] | None = None,
+    retrieval_system: Mapping[str, Any] | None = None,
+    corpus_snapshot_hash: str = "",
+    pagination: Mapping[str, Any] | None = None,
+    transform_lineage: Sequence[Mapping[str, Any]] = (),
+    complete: bool = True,
     message: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
@@ -248,6 +256,13 @@ def save_search_receipt(
             ),
             corpus_version=corpus_version,
             errors=errors,
+            query_rewrites=query_rewrites,
+            filters=filters,
+            retrieval_system=retrieval_system,
+            corpus_snapshot_hash=corpus_snapshot_hash,
+            pagination=pagination,
+            transform_lineage=transform_lineage,
+            complete=complete,
         )
     except ValueError as exc:
         raise ResearchGitError(str(exc)) from exc
@@ -282,6 +297,9 @@ def save_source_snapshot(
     url: str = "",
     license_name: str = "",
     retraction_status: str = "unknown",
+    status_provider: str = "",
+    status_checked_at: str = "",
+    status_notice_id: str = "",
     previous_source_id: str | None = None,
     message: str | None = None,
     commit: bool = True,
@@ -308,6 +326,25 @@ def save_source_snapshot(
         "license": license_name.strip(),
         "retraction_status": retraction_status.strip() or "unknown",
     }
+    if status_provider.strip() or status_checked_at.strip() or status_notice_id.strip():
+        checked_at = status_checked_at.strip()
+        if not checked_at:
+            raise ResearchGitError(
+                "source status provider requires a status checked-at timestamp"
+            )
+        try:
+            parsed_checked_at = datetime.fromisoformat(
+                checked_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ResearchGitError("source status checked-at must be ISO-8601") from exc
+        if parsed_checked_at.tzinfo is None:
+            raise ResearchGitError("source status checked-at must include a timezone")
+        core["status_check"] = {
+            "provider": _required_text(status_provider, label="status provider"),
+            "checked_at": checked_at,
+            "notice_id": status_notice_id.strip(),
+        }
     payload = {**core, "source_hash": canonical_content_hash(core)}
     relations: list[dict[str, str]] = [
         {"type": "derived_from", "target": str(receipt["object_id"])}
@@ -330,12 +367,73 @@ def save_source_snapshot(
     )
 
 
+def save_source_update(
+    repo: str,
+    *,
+    source_id: str,
+    status: str,
+    provider: str,
+    checked_at: str,
+    update_type: str = "status_check",
+    notice_id: str = "",
+    detail: str = "",
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Append an immutable correction/retraction/status event for a source."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    source = repository.get(source_id)
+    if source["kind"] != "source_snapshot":
+        raise ResearchGitError("source update reference has wrong kind")
+    normalized_checked_at = _required_text(checked_at, label="checked-at timestamp")
+    try:
+        parsed_checked_at = datetime.fromisoformat(
+            normalized_checked_at.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ResearchGitError("checked-at timestamp must be ISO-8601") from exc
+    if parsed_checked_at.tzinfo is None:
+        raise ResearchGitError("checked-at timestamp must include a timezone")
+    core = {
+        "source_id": str(source["object_id"]),
+        "status": _required_text(status, label="source status").lower(),
+        "provider": _required_text(provider, label="status provider"),
+        "checked_at": normalized_checked_at,
+        "update_type": _required_text(update_type, label="source update type").lower(),
+        "notice_id": notice_id.strip(),
+        "detail": detail.strip(),
+    }
+    payload = {**core, "update_hash": canonical_content_hash(core)}
+    relations = [{"type": "updates", "target": str(source["object_id"])}]
+    if payload["status"] in {"retracted", "withdrawn", "invalid"} or payload[
+        "update_type"
+    ] in {"retraction", "withdrawal"}:
+        relations.append({"type": "invalidates", "target": str(source["object_id"])})
+    result = repository.record(
+        "source_update", payload, state="completed", relations=relations
+    )
+    return _finish(
+        repository,
+        result,
+        stage="evidence",
+        subject=message or "record literature source status update",
+        status="completed",
+        commit=commit,
+    )
+
+
 def save_passage_evidence(
     repo: str,
     *,
     source_id: str,
     quote: str,
     locator: str,
+    prefix: str = "",
+    suffix: str = "",
+    start: int | None = None,
+    end: int | None = None,
     supports: Sequence[str] = (),
     refutes: Sequence[str] = (),
     context_id: str | None = None,
@@ -354,11 +452,23 @@ def save_passage_evidence(
     normalized_quote = _required_text(quote, label="passage quote")
     normalized_locator = _required_text(locator, label="passage locator")
     quote_hash = canonical_content_hash(normalized_quote)
+    try:
+        selector = build_text_quote_selector(
+            normalized_quote,
+            prefix=prefix,
+            suffix=suffix,
+            start=start,
+            end=end,
+        )
+    except ValueError as exc:
+        raise ResearchGitError(str(exc)) from exc
     core = {
         "source_id": str(source["object_id"]),
         "locator": normalized_locator,
         "quote": normalized_quote,
         "quote_hash": quote_hash,
+        "selector": selector,
+        "selector_hash": selector["selector_hash"],
     }
     payload = {**core, "passage_hash": canonical_content_hash(core)}
     normalized_scope = normalize_claim_scope(structured_scope, legacy_text=scope)
@@ -613,6 +723,199 @@ def save_evidence(
     )
 
 
+def save_estimand(
+    repo: str,
+    *,
+    outcome: str,
+    population: str,
+    intervention: str = "",
+    comparator: str = "",
+    time_window: str = "",
+    summary_measure: str = "",
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Record the precise scientific quantity an analysis intends to estimate."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    core = {
+        "outcome": _required_text(outcome, label="estimand outcome"),
+        "population": _required_text(population, label="estimand population"),
+        "intervention": intervention.strip(),
+        "comparator": comparator.strip(),
+        "time_window": time_window.strip(),
+        "summary_measure": summary_measure.strip(),
+    }
+    payload = {**core, "estimand_hash": canonical_content_hash(core)}
+    result = repository.record("estimand", payload, state="locked")
+    return _finish(
+        repository,
+        result,
+        stage="plan",
+        subject=message or "record target estimand",
+        status="locked",
+        commit=commit,
+    )
+
+
+def save_effect_estimate(
+    repo: str,
+    *,
+    estimand_id: str,
+    estimate: float,
+    metric: str,
+    unit: str = "",
+    confidence_level: float = 0.95,
+    interval_lower: float | None = None,
+    interval_upper: float | None = None,
+    standard_error: float | None = None,
+    derived_from: Sequence[str] = (),
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Record an effect and its uncertainty as a first-class DAG object."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    estimand = repository.get(estimand_id)
+    if estimand["kind"] != "estimand":
+        raise ResearchGitError("effect estimate estimand reference has wrong kind")
+    if (interval_lower is None) != (interval_upper is None):
+        raise ResearchGitError("confidence interval requires both lower and upper")
+    if not 0 < float(confidence_level) < 1:
+        raise ResearchGitError("confidence level must be between zero and one")
+    core: dict[str, Any] = {
+        "estimand_id": str(estimand["object_id"]),
+        "estimate": float(estimate),
+        "metric": _required_text(metric, label="effect metric"),
+        "unit": unit.strip(),
+    }
+    if interval_lower is not None and interval_upper is not None:
+        if interval_lower > interval_upper:
+            raise ResearchGitError(
+                "confidence interval lower bound exceeds upper bound"
+            )
+        core["confidence_interval"] = {
+            "level": float(confidence_level),
+            "lower": float(interval_lower),
+            "upper": float(interval_upper),
+        }
+    if standard_error is not None:
+        if standard_error < 0:
+            raise ResearchGitError("standard error cannot be negative")
+        core["standard_error"] = float(standard_error)
+    if "confidence_interval" not in core and "standard_error" not in core:
+        raise ResearchGitError(
+            "effect estimate requires a confidence interval or standard error"
+        )
+    relations: list[dict[str, str]] = [
+        {"type": "addresses_estimand", "target": str(estimand["object_id"])}
+    ]
+    for selector in derived_from:
+        source = repository.get(selector)
+        if source["kind"] not in {
+            "evidence",
+            "passage_evidence",
+            "experiment_attempt",
+            "observation",
+        }:
+            raise ResearchGitError("effect estimate source reference has wrong kind")
+        relations.append({"type": "derived_from", "target": str(source["object_id"])})
+    payload = {**core, "effect_hash": canonical_content_hash(core)}
+    result = repository.record(
+        "effect_estimate", payload, state="completed", relations=relations
+    )
+    return _finish(
+        repository,
+        result,
+        stage="evidence",
+        subject=message or "record effect estimate and uncertainty",
+        status="completed",
+        commit=commit,
+    )
+
+
+def save_inference(
+    repo: str,
+    *,
+    statement: str,
+    premises: Sequence[str],
+    warrant: str,
+    method_ids: Sequence[str] = (),
+    assumption_ids: Sequence[str] = (),
+    context_id: str | None = None,
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Record the explicit reasoning step from premises to a conclusion."""
+
+    repository = ResearchRepository(repo)
+    _ensure_direct_save_is_safe(repository, commit=commit)
+    if not premises:
+        raise ResearchGitError("inference requires at least one premise")
+    warrant_core = {"statement": _required_text(warrant, label="inference warrant")}
+    warrant_payload = {
+        **warrant_core,
+        "warrant_hash": canonical_content_hash(warrant_core),
+    }
+    warrant_result = repository.record("warrant", warrant_payload, state="locked")
+    relations: list[dict[str, str]] = [
+        {
+            "type": "depends_on",
+            "target": warrant_result.object_id,
+            "role": "warrant",
+        }
+    ]
+    for selector in premises:
+        premise = repository.get(selector)
+        if premise["kind"] not in {
+            "evidence",
+            "passage_evidence",
+            "observation",
+            "effect_estimate",
+            "claim",
+            "inference",
+            "evidence_synthesis",
+        }:
+            raise ResearchGitError("inference premise reference has wrong kind")
+        relations.append({"type": "has_premise", "target": str(premise["object_id"])})
+    for selector in method_ids:
+        method = repository.get(selector)
+        if method["kind"] != "method":
+            raise ResearchGitError("inference method reference has wrong kind")
+        relations.append({"type": "uses_method", "target": str(method["object_id"])})
+    for selector in assumption_ids:
+        assumption = repository.get(selector)
+        if assumption["kind"] != "assumption":
+            raise ResearchGitError("inference assumption reference has wrong kind")
+        relations.append(
+            {"type": "under_assumption", "target": str(assumption["object_id"])}
+        )
+    if context_id:
+        context = repository.get(context_id)
+        if context["kind"] != "context_snapshot":
+            raise ResearchGitError("inference context reference has wrong kind")
+        relations.append({"type": "uses_context", "target": str(context["object_id"])})
+    core = {
+        "statement": _required_text(statement, label="inference statement"),
+        "warrant_id": warrant_result.object_id,
+    }
+    payload = {**core, "inference_hash": canonical_content_hash(core)}
+    result = repository.record(
+        "inference", payload, state="completed", relations=relations
+    )
+    return _finish(
+        repository,
+        result,
+        stage="claim",
+        subject=message or "record evidence-to-claim inference",
+        status="completed",
+        commit=commit,
+        related=[warrant_result],
+    )
+
+
 def save_claim(
     repo: str,
     *,
@@ -702,9 +1005,12 @@ def save_review(
 
 __all__ = [
     "save_claim",
+    "save_effect_estimate",
+    "save_estimand",
     "save_evidence",
     "save_experiment",
     "save_hypothesis",
+    "save_inference",
     "save_passage_evidence",
     "save_preregistration",
     "save_research_plan",
@@ -712,4 +1018,5 @@ __all__ = [
     "save_search_plan",
     "save_search_receipt",
     "save_source_snapshot",
+    "save_source_update",
 ]

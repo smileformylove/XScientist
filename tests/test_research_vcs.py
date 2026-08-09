@@ -10,10 +10,13 @@ from pathlib import Path
 from contextlib import redirect_stdout
 
 from ai_scientist.protocol.research_vcs import (
+    RESEARCH_SEMANTIC_PROFILE_SCHEMA,
     ResearchObjectError,
     build_research_object,
+    research_profile_status,
     validate_research_object,
 )
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.research_integrity import (
     build_preregistration,
     lock_preregistration,
@@ -65,6 +68,45 @@ class ResearchObjectProtocolTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ResearchObjectError, "hash mismatch"):
             validate_research_object(payload)
+
+    def test_builtin_objects_bind_a_validated_semantic_profile(self) -> None:
+        payload = build_research_object(
+            kind="inference",
+            payload={"statement": "The observed effect supports H1."},
+            relations=[{"type": "has_premise", "target": "rso-aaaaaaaaaaaaaaaa"}],
+        )
+
+        status = research_profile_status(payload)
+        self.assertTrue(status["declared"])
+        self.assertTrue(status["validator_available"])
+        self.assertEqual(validate_research_object(payload), payload)
+
+    def test_extension_profile_is_storable_but_not_locally_verified(self) -> None:
+        core = {
+            "schema": RESEARCH_SEMANTIC_PROFILE_SCHEMA,
+            "uri": "urn:example:wet-lab-profile:v1",
+            "version": "1.0.0",
+            "kinds": ["assay_result"],
+            "relations": ["urn:example:usesMaterial"],
+        }
+        profile = {**core, "schema_digest": canonical_content_hash(core)}
+        payload = build_research_object(
+            kind="assay_result",
+            payload={"result": "growth inhibited", "assay": "MIC"},
+            semantic_profile=profile,
+        )
+
+        self.assertEqual(validate_research_object(payload), payload)
+        self.assertFalse(research_profile_status(payload)["validator_available"])
+        with self.assertRaisesRegex(ResearchObjectError, "does not declare relation"):
+            build_research_object(
+                kind="assay_result",
+                payload={"result": "growth inhibited"},
+                relations=[
+                    {"type": "urn:example:other", "target": "rso-aaaaaaaaaaaaaaaa"}
+                ],
+                semantic_profile=profile,
+            )
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for repository tests")

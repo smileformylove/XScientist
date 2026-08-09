@@ -8,6 +8,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+
 from .research_git import ResearchGitError, init_repository
 from .research_vcs import ResearchRepository
 
@@ -132,7 +134,7 @@ def build_research_guide(
                 ),
             )
         )
-    elif not counts["evidence"]:
+    elif not (counts["evidence"] or counts["passage_evidence"]):
         next_steps.append(
             _step(
                 selected_language,
@@ -147,6 +149,26 @@ def build_research_guide(
                 ),
             )
         )
+    elif not counts["inference"]:
+        premise_kind = "evidence" if counts["evidence"] else "passage_evidence"
+        next_steps.append(
+            _step(
+                selected_language,
+                code="record_inference",
+                title_en="State why the evidence supports the conclusion",
+                title_zh="明确证据为何能够支持结论",
+                why_en=(
+                    "Separating evidence from the warrant exposes assumptions and makes "
+                    "the scientific argument reviewable."
+                ),
+                why_zh="把证据和推理依据分开，才能暴露隐藏假设并让科学论证可审查。",
+                command=(
+                    'xscientist research infer "BOUNDED CONCLUSION" '
+                    f"--premise @latest:{premise_kind} "
+                    '--warrant "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION"'
+                ),
+            )
+        )
     elif not counts["review"]:
         next_steps.append(
             _step(
@@ -158,7 +180,7 @@ def build_research_guide(
                 why_zh="证据生产者不能同时成为判断证据是否通过的唯一裁判。",
                 command=(
                     'xscientist research review "REVIEW SUMMARY" '
-                    "--evaluates @latest:evidence --verifier human:REVIEWER --decision hold"
+                    "--evaluates @latest:inference --verifier human:REVIEWER --decision hold"
                 ),
             )
         )
@@ -173,7 +195,7 @@ def build_research_guide(
                 why_zh="结论范围不能超过实际检验的数据、指标和条件。",
                 command=(
                     'xscientist research claim "BOUNDED CLAIM" '
-                    '--evidence @latest:evidence --scope "TESTED CONDITIONS"'
+                    '--evidence @latest:inference --scope "TESTED CONDITIONS"'
                 ),
             )
         )
@@ -229,6 +251,7 @@ def build_research_guide(
             "research_plan",
             "experiment_attempt",
             "evidence",
+            "inference",
             "review",
             "claim",
             "reproduction",
@@ -241,8 +264,8 @@ def build_research_guide(
         "branch": repository.status().get("branch"),
         "progress": {
             "completed_stages": completed_stages,
-            "total_stages": 7,
-            "percent": round(completed_stages / 7 * 100),
+            "total_stages": 8,
+            "percent": round(completed_stages / 8 * 100),
         },
         "counts": dict(sorted(counts.items())),
         "next_steps": next_steps,
@@ -290,10 +313,26 @@ def start_guided_research(
         {"question": question_text},
         actor={"actor_id": actor_id, "authority": "human"},
     )
+    goal_core = {
+        "question": question_text,
+        "objective": "Test the falsifiable hypothesis while retaining negative evidence.",
+        "success_condition": "Reach an independently reviewable evidence-bound conclusion.",
+        "authority_policy": "Independent evaluation is required for verification.",
+    }
+    goal_object = repository.record(
+        "research_goal",
+        {**goal_core, "goal_hash": canonical_content_hash(goal_core)},
+        state="locked",
+        relations=[{"type": "depends_on", "target": question_object.object_id}],
+        actor={"actor_id": actor_id, "authority": "human"},
+    )
     hypothesis_object = repository.record(
         "hypothesis",
         {"statement": hypothesis_text, "falsifier": falsifier_text},
-        relations=[{"type": "depends_on", "target": question_object.object_id}],
+        relations=[
+            {"type": "depends_on", "target": question_object.object_id},
+            {"type": "depends_on", "target": goal_object.object_id, "role": "goal"},
+        ],
         actor={"actor_id": actor_id, "authority": "human"},
     )
     checkpoint = repository.commit(
@@ -305,6 +344,7 @@ def start_guided_research(
         "schema_version": "xscientist.guided-research-start.v1",
         "repository": root.as_posix(),
         "question_id": question_object.object_id,
+        "goal_id": goal_object.object_id,
         "hypothesis_id": hypothesis_object.object_id,
         "checkpoint": checkpoint.to_dict(),
         "guide": build_research_guide(root, language=language),

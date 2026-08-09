@@ -9,7 +9,10 @@ from typing import Any, Iterable, Mapping
 from jsonschema import ValidationError, validate as validate_json
 
 from ai_scientist.protocol.hashing import content_hash
-from ai_scientist.protocol.research_vcs import research_payload_issues
+from ai_scientist.protocol.research_vcs import (
+    research_payload_issues,
+    research_profile_status,
+)
 from ai_scientist.protocol.schemas import load_schema
 
 from .research_git import (
@@ -21,6 +24,30 @@ from .research_git import (
 
 RESEARCH_CLOSURE_SCHEMA = "xscientist.research-closure.v1"
 RESEARCH_CLOSURE_LEVELS = ("trace", "replay", "verify")
+_ARGUMENT_KINDS = {
+    "inference",
+    "warrant",
+    "assumption",
+    "method",
+    "estimand",
+    "effect_estimate",
+    "protocol_deviation",
+    "sensitivity_analysis",
+    "risk_of_bias",
+    "evidence_synthesis",
+    "challenge",
+}
+_ARGUMENT_RELATIONS = {
+    "depends_on",
+    "derived_from",
+    "has_premise",
+    "uses_method",
+    "under_assumption",
+    "addresses_estimand",
+    "has_effect_estimate",
+    "derived_by",
+    "qualifies",
+}
 
 
 def _targets(
@@ -95,7 +122,8 @@ def _claim_identity(
     evidence = tuple(
         target
         for target in _targets(claim, relation_types=("depends_on",), role=None)
-        if objects.get(target, {}).get("kind") in {"evidence", "passage_evidence"}
+        if objects.get(target, {}).get("kind")
+        in {"evidence", "passage_evidence", "inference", "evidence_synthesis"}
     )
     return statement, evidence
 
@@ -226,6 +254,28 @@ def _claim_closure(
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     claim_id = str(claim["object_id"])
     direct = _targets(claim, relation_types=("depends_on",))
+    argument_ids = {
+        target
+        for target in direct
+        if objects.get(target, {}).get("kind") in _ARGUMENT_KINDS
+    }
+    argument_ids.update(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") in {"inference", "evidence_synthesis"}
+        and claim_id in _targets(item, relation_types=("supports", "derived_from"))
+    )
+    queue = list(argument_ids)
+    while queue:
+        current = queue.pop()
+        for target in _targets(objects[current], relation_types=_ARGUMENT_RELATIONS):
+            if (
+                objects.get(target, {}).get("kind") in _ARGUMENT_KINDS
+                and target not in argument_ids
+            ):
+                argument_ids.add(target)
+                queue.append(target)
+    argument_ids = set(argument_ids)
     experimental_evidence_ids = _kind_ids(direct, objects, "evidence")
     passage_ids = _kind_ids(direct, objects, "passage_evidence")
     gate_ids = _kind_ids(direct, objects, "gate_decision")
@@ -252,6 +302,15 @@ def _claim_closure(
             )
         }
     )
+    for argument_id in argument_ids:
+        premises = _targets(objects[argument_id], relation_types=_ARGUMENT_RELATIONS)
+        experimental_evidence_ids = sorted(
+            set(experimental_evidence_ids)
+            | set(_kind_ids(premises, objects, "evidence"))
+        )
+        passage_ids = sorted(
+            set(passage_ids) | set(_kind_ids(premises, objects, "passage_evidence"))
+        )
     evidence_ids = sorted({*experimental_evidence_ids, *passage_ids})
     attempt_ids = sorted(
         {
@@ -287,6 +346,34 @@ def _claim_closure(
             if objects.get(target, {}).get("kind") == "source_snapshot"
         }
     )
+    source_update_ids = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "source_update"
+        and set(source_ids).intersection(
+            _targets(item, relation_types=("updates", "invalidates"))
+        )
+    )
+    effective_source_updates: dict[str, str] = {}
+    for source_id in source_ids:
+        candidates = [
+            update_id
+            for update_id in source_update_ids
+            if source_id
+            in _targets(objects[update_id], relation_types=("updates", "invalidates"))
+        ]
+        if candidates:
+            effective_source_updates[source_id] = max(
+                candidates,
+                key=lambda update_id: (
+                    str(
+                        (objects[update_id].get("payload") or {}).get("checked_at")
+                        or ""
+                    ),
+                    str(objects[update_id].get("created_at") or ""),
+                    update_id,
+                ),
+            )
     search_receipt_ids = sorted(
         {
             target
@@ -310,6 +397,8 @@ def _claim_closure(
         *source_ids,
         *search_receipt_ids,
         *search_plan_ids,
+        *argument_ids,
+        *source_update_ids,
     }
     reproduction_ids = sorted(
         object_id
@@ -332,6 +421,30 @@ def _claim_closure(
     if not evidence_ids:
         blockers.append(
             _blocker("claim_without_evidence", claim_id, "claim has no evidence anchor")
+        )
+    for inference_id in sorted(
+        object_id
+        for object_id in argument_ids
+        if objects[object_id].get("kind") == "inference"
+    ):
+        premises = _targets(
+            objects[inference_id], relation_types=("has_premise", "depends_on")
+        )
+        if not premises:
+            blockers.append(
+                _blocker(
+                    "inference_without_premise",
+                    inference_id,
+                    "inference has no explicit evidence or proposition premise",
+                )
+            )
+    if claim.get("state") == "verified" and not argument_ids:
+        warnings.append(
+            _blocker(
+                "claim_inference_unmodeled",
+                claim_id,
+                "verified claim links evidence directly without an explicit inference/warrant",
+            )
         )
     if experimental_evidence_ids and not attempt_ids:
         blockers.append(
@@ -381,6 +494,45 @@ def _claim_closure(
                     "source selection has no retrieval receipt",
                 )
             )
+        source_payload = objects[source_id].get("payload") or {}
+        if source_payload.get("retraction_status") in {
+            "retracted",
+            "withdrawn",
+            "invalid",
+        }:
+            blockers.append(
+                _blocker(
+                    "source_invalidated",
+                    source_id,
+                    "source snapshot is marked retracted, withdrawn, or invalid",
+                )
+            )
+        if (
+            not source_payload.get("status_check")
+            and source_id not in effective_source_updates
+        ):
+            warnings.append(
+                _blocker(
+                    "source_status_unchecked",
+                    source_id,
+                    "source has no provider-bound correction/retraction status check",
+                )
+            )
+    for update_id in sorted(set(effective_source_updates.values())):
+        update = objects[update_id]
+        update_payload = update.get("payload") or {}
+        if update_payload.get("status") in {
+            "retracted",
+            "withdrawn",
+            "invalid",
+        } or _targets(update, relation_types=("invalidates",)):
+            blockers.append(
+                _blocker(
+                    "source_invalidated",
+                    update_id,
+                    "a source update invalidates literature used by this claim",
+                )
+            )
     for receipt_id in search_receipt_ids:
         bound_plans = [
             target
@@ -405,11 +557,15 @@ def _claim_closure(
         *source_ids,
         *search_receipt_ids,
         *search_plan_ids,
+        *sorted(argument_ids),
+        *source_update_ids,
     ]
     for object_id in semantic_ids:
         item = objects[object_id]
         for issue in research_payload_issues(
-            str(item["kind"]), item.get("payload") or {}
+            str(item["kind"]),
+            item.get("payload") or {},
+            item.get("semantic_profile"),
         ):
             blockers.append(_blocker("underspecified_payload", object_id, issue))
 
@@ -502,7 +658,7 @@ def _claim_closure(
     verification_blockers: list[dict[str, str]] = []
     producer_ids = {
         str((objects[object_id].get("actor") or {}).get("actor_id") or "")
-        for object_id in {claim_id, *evidence_ids, *attempt_ids}
+        for object_id in {claim_id, *evidence_ids, *attempt_ids, *argument_ids}
         if str((objects[object_id].get("actor") or {}).get("actor_id") or "")
     }
     passing_gates: list[str] = []
@@ -553,10 +709,14 @@ def _claim_closure(
                 review.get("state") == "verified"
                 and review_actor.get("authority") == "independent_evaluator"
                 and str(review_actor.get("actor_id") or "") not in producer_ids
-                and bool(review_targets.intersection({claim_id, *evidence_ids}))
+                and bool(
+                    review_targets.intersection(
+                        {claim_id, *evidence_ids, *argument_ids}
+                    )
+                )
                 and review_context_ok
             )
-        bound = bool(evaluated.intersection({claim_id, *evidence_ids}))
+        bound = bool(evaluated.intersection({claim_id, *evidence_ids, *argument_ids}))
         if (
             gate.get("state") == "verified"
             and (gate.get("payload") or {}).get("claim_promotion_allowed") is True
@@ -610,6 +770,18 @@ def _claim_closure(
                 "claim lineage has no verified reproduction receipt",
             )
         )
+    for object_id in semantic_ids:
+        profile_status = research_profile_status(objects[object_id])
+        if profile_status.get("declared") and not profile_status.get(
+            "validator_available"
+        ):
+            verification_blockers.append(
+                _blocker(
+                    "profile_validator_unavailable",
+                    object_id,
+                    "semantic profile is preserved but no trusted local validator is installed",
+                )
+            )
     if target_level == "verify":
         blockers.extend(verification_blockers)
     verified = (
@@ -629,6 +801,8 @@ def _claim_closure(
         "source_snapshot_ids": source_ids,
         "search_receipt_ids": search_receipt_ids,
         "search_plan_ids": search_plan_ids,
+        "argument_ids": sorted(argument_ids),
+        "source_update_ids": source_update_ids,
         "attempt_ids": attempt_ids,
         "plan_ids": plan_ids,
         "preregistration_ids": preregistration_ids,

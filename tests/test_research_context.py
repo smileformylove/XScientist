@@ -96,6 +96,15 @@ class ResearchContextTests(unittest.TestCase):
             self.assertIn(ids["gate"], payload["prior_decision_ids"])
             self.assertIn(ids["evidence"], payload["negative_knowledge_ids"])
             self.assertTrue(payload["budget"]["hard_closure_preserved"])
+            receipt = payload["retrieval_receipt"]
+            self.assertEqual(
+                receipt["profile"], "xscientist.context-retrieval-receipt.v2"
+            )
+            self.assertTrue(receipt["complete_candidate_set"])
+            self.assertEqual(
+                {item["object_id"] for item in receipt["candidate_set"]},
+                set(payload["source_object_ids"]),
+            )
             self.assertFalse(research_context_issues(payload))
 
     def test_recorded_context_is_visible_as_context_edges_on_dag(self) -> None:
@@ -209,6 +218,12 @@ class ResearchContextTests(unittest.TestCase):
             self.assertIn(
                 "context memory object IDs do not match memory objects",
                 research_context_issues(tampered),
+            )
+            tampered_receipt = copy.deepcopy(payload)
+            tampered_receipt["retrieval_receipt"]["candidate_set"].pop()
+            self.assertIn(
+                "context retrieval candidate set hash mismatch",
+                research_context_issues(tampered_receipt),
             )
 
 

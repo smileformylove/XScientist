@@ -43,6 +43,27 @@ _PHASES = {
     "experiment_attempt": 3,
     "agent_evaluation": 3,
     "context_snapshot": 4,
+    "inference": 5,
+    "warrant": 4,
+    "assumption": 2,
+    "method": 2,
+    "estimand": 2,
+    "effect_estimate": 4,
+    "protocol_deviation": 4,
+    "sensitivity_analysis": 5,
+    "risk_of_bias": 5,
+    "evidence_synthesis": 6,
+    "challenge": 6,
+    "source_update": 4,
+    "context_robustness": 5,
+    "research_goal": 0,
+    "action_proposal": 2,
+    "experiment_design": 2,
+    "resource_budget": 2,
+    "stopping_decision": 5,
+    "novelty_check": 5,
+    "evaluation_blinding": 2,
+    "human_escalation": 5,
     "experiment_node": 3,
     "metric": 4,
     "evidence": 4,
@@ -322,6 +343,9 @@ def _object_proof(
             "content_addressed", "Content hash and object ID validate", True, "trace"
         )
     ]
+    from ai_scientist.protocol.research_vcs import research_profile_status
+
+    profile_status = research_profile_status(item)
 
     if kind == "experiment_attempt":
         checks.extend(
@@ -450,6 +474,116 @@ def _object_proof(
                     "replay",
                 ),
             ]
+        )
+    elif kind == "inference":
+        checks.extend(
+            [
+                _check(
+                    "premise_bound",
+                    "Inference names its evidence or proposition premises",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            relations={"has_premise", "depends_on"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "inference_bound",
+                    "Inference payload has an immutable semantic anchor",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind in {"warrant", "assumption", "method"}:
+        checks.append(
+            _check(
+                "semantic_anchor",
+                "Argument component has an immutable semantic anchor",
+                _has_hash_anchor(payload),
+                "replay",
+            )
+        )
+    elif kind == "effect_estimate":
+        checks.extend(
+            [
+                _check(
+                    "estimand_bound",
+                    "Effect estimate identifies its estimand",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"estimand"},
+                            relations={"addresses_estimand", "depends_on"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "uncertainty_recorded",
+                    "Effect estimate records interval, standard error, or posterior",
+                    any(
+                        payload.get(key) not in (None, "", [], {})
+                        for key in (
+                            "confidence_interval",
+                            "credible_interval",
+                            "standard_error",
+                            "posterior",
+                        )
+                    ),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind == "source_update":
+        checks.extend(
+            [
+                _check(
+                    "source_bound",
+                    "Status update points to an immutable source snapshot",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"source_snapshot"},
+                            relations={"updates", "invalidates"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "source_update_bound",
+                    "Status update has an immutable provider receipt",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif kind in {
+        "action_proposal",
+        "stopping_decision",
+        "novelty_check",
+        "human_escalation",
+        "context_robustness",
+    }:
+        checks.append(
+            _check(
+                "decision_context_bound",
+                "Autonomous decision is bound to an exact context snapshot",
+                bool(
+                    _targets(
+                        item,
+                        objects,
+                        kinds={"context_snapshot"},
+                        relations={"uses_context", "depends_on"},
+                    )
+                ),
+                "trace",
+            )
         )
     elif kind == "evidence":
         checks.extend(
@@ -605,6 +739,13 @@ def _object_proof(
     blockers = [check["code"] for check in checks if not check["passed"]]
     blockers.extend(closure_blockers.get(object_id, []))
     proof_warnings = list(closure_warnings.get(object_id, []))
+    if profile_status.get("declared") and not profile_status.get("validator_available"):
+        blockers.append("profile_validator_unavailable")
+        proof_warnings.append(
+            "semantic profile is preserved but has no trusted local validator"
+        )
+        if level == "verified":
+            level = "replayable" if layer_pass["replay"] else "traceable"
     if kind == "context_snapshot":
         from .research_context import research_context_issues
 
@@ -1282,7 +1423,14 @@ def build_research_dag(
         str(relation.get("target"))
         for item in rows
         for relation in item.get("relations") or []
-        if relation.get("type") in {"refutes", "qualified_refutes", "contradicts"}
+        if relation.get("type")
+        in {
+            "refutes",
+            "qualified_refutes",
+            "contradicts",
+            "challenges_inference",
+            "invalidates",
+        }
     }
     nodes = [
         {
@@ -1315,6 +1463,17 @@ def build_research_dag(
         "refutes": "challenge",
         "qualified_refutes": "challenge",
         "contradicts": "challenge",
+        "challenges_inference": "challenge",
+        "invalidates": "challenge",
+        "has_premise": "argument",
+        "uses_method": "argument",
+        "under_assumption": "argument",
+        "addresses_estimand": "argument",
+        "has_effect_estimate": "argument",
+        "qualifies": "argument",
+        "updates": "provenance",
+        "selects": "decision",
+        "rejects": "decision",
         "evaluates": "verification",
         "reproduces": "verification",
         "attests": "verification",
@@ -1346,7 +1505,15 @@ def build_research_dag(
                     "category": (
                         "context"
                         if relation_role in {"context_source", "decision_context"}
-                        else category.get(relation_type, "lineage")
+                        else (
+                            "argument"
+                            if relation_role in {"warrant", "premise", "assumption"}
+                            else (
+                                "decision"
+                                if relation_role in {"goal", "budget", "selection"}
+                                else category.get(relation_type, "lineage")
+                            )
+                        )
                     ),
                 }
             )

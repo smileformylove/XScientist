@@ -30,6 +30,8 @@
           "source_snapshot_ids": {"$ref": "#/$defs/objectIds"},
           "search_receipt_ids": {"$ref": "#/$defs/objectIds"},
           "search_plan_ids": {"$ref": "#/$defs/objectIds"},
+          "argument_ids": {"$ref": "#/$defs/objectIds"},
+          "source_update_ids": {"$ref": "#/$defs/objectIds"},
           "attempt_ids": {"$ref": "#/$defs/objectIds"},
           "plan_ids": {"$ref": "#/$defs/objectIds"},
           "preregistration_ids": {"$ref": "#/$defs/objectIds"},

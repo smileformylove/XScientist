@@ -85,6 +85,7 @@ class ResearchRepository:
         relations: Sequence[Mapping[str, Any]] = (),
         actor: Mapping[str, Any] | None = None,
         provenance: Mapping[str, Any] | None = None,
+        semantic_profile: Mapping[str, Any] | None = None,
     ) -> ResearchObjectResult:
         return record_research_object(
             self.path,
@@ -94,6 +95,9 @@ class ResearchRepository:
             relations=[dict(item) for item in relations],
             actor=dict(actor) if actor is not None else None,
             provenance=dict(provenance) if provenance is not None else None,
+            semantic_profile=(
+                dict(semantic_profile) if semantic_profile is not None else None
+            ),
         )
 
     def get(self, object_id: str) -> dict[str, Any]:

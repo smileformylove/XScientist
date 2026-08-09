@@ -296,6 +296,19 @@ Existing `xscientist.research-repository.v1` repositories and research
 checkpoints remain readable. Migration creates a new migration commit and MUST
 NOT edit an existing commit, checkpoint, object hash, or branch ancestry.
 
+New Research Objects SHOULD bind a content-addressed Semantic Profile. A
+producer MAY store an extension kind only with an absolute profile URI,
+version, declared kind/relation set, and canonical schema digest. Consumers
+MUST preserve unknown profiles, but MUST NOT treat them as verified without a
+trusted validator for the exact bound profile. Extensions MUST NOT grant actor
+authority or weaken core closure and independence rules.
+
+New decision contexts and literature searches SHOULD use retrieval receipt v2,
+including the request, algorithm/index identity, complete candidate set, ranks,
+score semantics, selection decisions, transform lineage, and component hashes.
+Context budgets MAY trim human-readable views but MUST NOT trim the immutable
+candidate set or hard source closure.
+
 The additive identity and evidence migration is documented in
 [`PROTOCOL_MIGRATION_2026.md`](PROTOCOL_MIGRATION_2026.md).
 

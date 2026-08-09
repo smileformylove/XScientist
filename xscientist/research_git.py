@@ -857,6 +857,7 @@ def _record_research_object_locked(
     relations: Sequence[dict[str, Any]] = (),
     actor: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
+    semantic_profile: dict[str, Any] | None = None,
 ) -> ResearchObjectResult:
     normalized_relations: list[dict[str, Any]] = []
     for relation in relations:
@@ -876,6 +877,7 @@ def _record_research_object_locked(
             "relations": normalized_relations,
             "actor": actor or {},
             "provenance": provenance or {},
+            "semantic_profile": semantic_profile or {},
         }
     )
     try:
@@ -886,6 +888,7 @@ def _record_research_object_locked(
             relations=normalized_relations,
             actor=actor,
             provenance=provenance,
+            semantic_profile=semantic_profile,
         )
     except ResearchObjectError as exc:
         raise ResearchGitError(str(exc)) from exc
@@ -940,6 +943,7 @@ def record_research_object(
     relations: Sequence[dict[str, Any]] = (),
     actor: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
+    semantic_profile: dict[str, Any] | None = None,
 ) -> ResearchObjectResult:
     """Record one immutable scientific object in the repository working state.
 
@@ -958,6 +962,7 @@ def record_research_object(
             relations=relations,
             actor=actor,
             provenance=provenance,
+            semantic_profile=semantic_profile,
         )
 
 

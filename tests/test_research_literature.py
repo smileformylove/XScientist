@@ -83,8 +83,19 @@ class ResearchLiteratureJourneyTests(unittest.TestCase):
                 str(self.repo),
             ]
         )["object"]
-        serialized_receipt = json.dumps(receipt)
+        stored_receipt = ResearchRepository(self.repo).get(receipt["object_id"])
+        serialized_receipt = json.dumps(stored_receipt)
         self.assertNotIn("must not persist", serialized_receipt)
+        self.assertEqual(
+            stored_receipt["payload"]["profile"], "xscientist.retrieval-receipt.v2"
+        )
+        self.assertTrue(
+            stored_receipt["payload"]["completeness"]["complete_candidate_set"]
+        )
+        self.assertTrue(stored_receipt["payload"]["request_hash"].startswith("sha256:"))
+        self.assertTrue(
+            stored_receipt["payload"]["candidate_set_hash"].startswith("sha256:")
+        )
         source = self._run_json(
             [
                 "literature",
@@ -111,6 +122,15 @@ class ResearchLiteratureJourneyTests(unittest.TestCase):
                 str(self.repo),
             ]
         )["object"]
+        stored_passage = ResearchRepository(self.repo).get(passage["object_id"])
+        self.assertEqual(
+            stored_passage["payload"]["selector"]["selectors"][0]["type"],
+            "TextQuoteSelector",
+        )
+        self.assertEqual(
+            stored_passage["payload"]["selector"]["selectors"][0]["exact"],
+            "The intervention improved the prespecified outcome.",
+        )
         claim = self._run_json(
             [
                 "claim",
@@ -168,3 +188,51 @@ class ResearchLiteratureJourneyTests(unittest.TestCase):
                 "passage_evidence",
             },
         )
+
+        update = self._run_json(
+            [
+                "literature",
+                "update",
+                source["object_id"],
+                "--status",
+                "retracted",
+                "--provider",
+                "Crossref-Retraction-Watch",
+                "--checked-at",
+                "2026-08-09T12:00:00Z",
+                "--type",
+                "retraction",
+                "--notice-id",
+                "rw-123",
+                "--repo",
+                str(self.repo),
+            ]
+        )["object"]
+        self.assertEqual(update["kind"], "source_update")
+        invalidated = audit_research_closure(self.repo, level="trace")
+        self.assertFalse(invalidated["complete"])
+        self.assertIn(
+            "source_invalidated",
+            {item["code"] for item in invalidated["blockers"]},
+        )
+        self._run_json(
+            [
+                "literature",
+                "update",
+                source["object_id"],
+                "--status",
+                "active",
+                "--provider",
+                "Crossref-Retraction-Watch",
+                "--checked-at",
+                "2026-08-10T12:00:00Z",
+                "--type",
+                "reinstatement",
+                "--notice-id",
+                "rw-124",
+                "--repo",
+                str(self.repo),
+            ]
+        )
+        reinstated = audit_research_closure(self.repo, level="trace")
+        self.assertTrue(reinstated["complete"], reinstated["blockers"])

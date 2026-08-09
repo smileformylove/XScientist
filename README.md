@@ -643,14 +643,26 @@ xscientist research evidence \
   --attempt @latest:experiment_attempt \
   --supports @latest:hypothesis --metric accuracy=0.84
 
+# Quantitative results and the evidence-to-claim reasoning are separate DAG nodes.
+xscientist research estimand "factual accuracy" \
+  --population "benchmark-v1 tasks" --intervention "retrieval reflection" \
+  --comparator "baseline-a" --summary-measure "accuracy difference"
+xscientist research effect @latest:estimand 0.08 \
+  --metric accuracy_difference --lower 0.03 --upper 0.13 \
+  --from @latest:evidence
+xscientist research infer \
+  "Retrieval reflection improves factual accuracy on benchmark-v1." \
+  --premise @latest:effect_estimate \
+  --warrant "The recorded interval excludes a non-positive effect."
+
 xscientist research review \
   "Independent replication and leakage checks passed" \
-  --evaluates @latest:evidence --verifier independent-reviewer \
+  --evaluates @latest:inference --verifier independent-reviewer \
   --decision pass
 
 xscientist research claim \
-  "The method is not evaluable within the fixed budget" \
-  --evidence @latest:evidence --gate @latest:gate_decision --verified \
+  "Retrieval reflection improves factual accuracy on benchmark-v1." \
+  --evidence @latest:inference --gate @latest:gate_decision --verified \
   --population "benchmark-v1 tasks" --intervention "retrieval reflection" \
   --outcome "factual accuracy" --metric accuracy --unit proportion
 ```
@@ -665,6 +677,9 @@ current code commit, environment, dependency-lock hashes and seeds; evidence
 commands add an immutable measurement hash. Use `--no-commit` only when assembling several objects
 into a later manual checkpoint. `--split-file` stores only its SHA-256 digest,
 never the source path or contents; automated workflows may pass `--split-hash`.
+The additive profile, argument, retrieval-receipt, exact-selector, and source
+update rules are documented in
+[`docs/RESEARCH_PROTOCOL_V2.md`](docs/RESEARCH_PROTOCOL_V2.md).
 
 ```bash
 xscientist research init ./my-research \

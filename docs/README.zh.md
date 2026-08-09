@@ -620,14 +620,26 @@ xscientist research evidence \
   --attempt @latest:experiment_attempt \
   --supports @latest:hypothesis --metric accuracy=0.84
 
+# 把目标量、效应与“证据为何支持结论”的推理分别记录为 DAG 节点
+xscientist research estimand "事实准确率" \
+  --population "benchmark-v1 任务" --intervention "检索反思" \
+  --comparator "baseline-a" --summary-measure "准确率差"
+xscientist research effect @latest:estimand 0.08 \
+  --metric accuracy_difference --lower 0.03 --upper 0.13 \
+  --from @latest:evidence
+xscientist research infer \
+  "检索反思提高了 benchmark-v1 上的事实准确率" \
+  --premise @latest:effect_estimate \
+  --warrant "记录的区间排除了非正向效应"
+
 xscientist research review \
   "独立复验和数据泄漏检查均通过" \
-  --evaluates @latest:evidence --verifier independent-reviewer \
+  --evaluates @latest:inference --verifier independent-reviewer \
   --decision pass
 
 xscientist research claim \
   "方法提高了准确率" \
-  --evidence @latest:evidence \
+  --evidence @latest:inference \
   --gate @latest:gate_decision --verified \
   --population "benchmark-v1 任务" --intervention "检索反思" \
   --outcome "事实准确率" --metric accuracy --unit proportion

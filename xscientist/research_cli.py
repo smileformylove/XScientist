@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from ai_scientist.protocol.research_vcs import (
-    RESEARCH_OBJECT_KINDS,
     RESEARCH_OBJECT_STATES,
     RESEARCH_RELATION_TYPES,
 )
@@ -113,11 +112,19 @@ def _read_object_payload(args: argparse.Namespace) -> dict[str, Any]:
 def _parse_relations(values: Sequence[str]) -> list[dict[str, str]]:
     relations: list[dict[str, str]] = []
     for value in values:
-        relation_type, separator, remainder = value.partition(":")
+        if "=" in value:
+            relation_type, separator, remainder = value.partition("=")
+        else:
+            relation_type, separator, remainder = value.partition(":")
         target, role_separator, role = remainder.partition(":")
-        if not separator or relation_type not in RESEARCH_RELATION_TYPES or not target:
+        supported = (
+            relation_type in RESEARCH_RELATION_TYPES
+            or relation_type.startswith(("https://", "http://", "urn:"))
+        )
+        if not separator or not supported or not target:
             raise ResearchGitError(
-                "relation must be TYPE:TARGET[:ROLE] using a supported relation type"
+                "relation must be TYPE:TARGET[:ROLE]; absolute URI types use "
+                "TYPE=TARGET[:ROLE]"
             )
         relation = {"type": relation_type, "target": target}
         if role_separator and role:
@@ -343,6 +350,21 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     literature_receipt.add_argument("--retrieved-at", default="")
     literature_receipt.add_argument("--corpus-version", default="")
+    literature_receipt.add_argument("--corpus-snapshot-hash", default="")
+    literature_receipt.add_argument("--query-rewrite", action="append", default=[])
+    literature_receipt.add_argument(
+        "--filter", action="append", default=[], help="Search filter as NAME=VALUE."
+    )
+    literature_receipt.add_argument("--retriever", default="")
+    literature_receipt.add_argument("--embedding-model", default="")
+    literature_receipt.add_argument("--reranker", default="")
+    literature_receipt.add_argument("--cursor", default="")
+    literature_receipt.add_argument("--page", type=int)
+    literature_receipt.add_argument(
+        "--incomplete",
+        action="store_true",
+        help="Declare that pagination or provider limits prevented a complete candidate set.",
+    )
     literature_receipt.add_argument("--error", action="append", default=[])
     literature_receipt.add_argument("--repo", default=".")
     literature_receipt.add_argument("-m", "--message")
@@ -366,11 +388,29 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     literature_source.add_argument("--url", default="")
     literature_source.add_argument("--license", default="", dest="license_name")
     literature_source.add_argument("--retraction-status", default="unknown")
+    literature_source.add_argument("--status-provider", default="")
+    literature_source.add_argument("--status-checked-at", default="")
+    literature_source.add_argument("--status-notice-id", default="")
     literature_source.add_argument("--supersedes", dest="previous_source_id")
     literature_source.add_argument("--repo", default=".")
     literature_source.add_argument("-m", "--message")
     literature_source.add_argument("--no-commit", action="store_true")
     literature_source.add_argument("--json", action="store_true", dest="as_json")
+
+    literature_update = literature_subparsers.add_parser(
+        "update", help="Append an immutable correction, retraction, or status check."
+    )
+    literature_update.add_argument("source_id")
+    literature_update.add_argument("--status", required=True)
+    literature_update.add_argument("--provider", required=True)
+    literature_update.add_argument("--checked-at", required=True)
+    literature_update.add_argument("--type", default="status_check", dest="update_type")
+    literature_update.add_argument("--notice-id", default="")
+    literature_update.add_argument("--detail", default="")
+    literature_update.add_argument("--repo", default=".")
+    literature_update.add_argument("-m", "--message")
+    literature_update.add_argument("--no-commit", action="store_true")
+    literature_update.add_argument("--json", action="store_true", dest="as_json")
 
     literature_passage = literature_subparsers.add_parser(
         "passage",
@@ -379,6 +419,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     literature_passage.add_argument("source_id")
     literature_passage.add_argument("quote")
     literature_passage.add_argument("--locator", required=True)
+    literature_passage.add_argument("--prefix", default="")
+    literature_passage.add_argument("--suffix", default="")
+    literature_passage.add_argument("--start", type=int)
+    literature_passage.add_argument("--end", type=int)
     literature_passage.add_argument("--supports", action="append", default=[])
     literature_passage.add_argument("--refutes", action="append", default=[])
     literature_passage.add_argument("--context")
@@ -485,6 +529,55 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     evidence_parser.add_argument("-m", "--message")
     evidence_parser.add_argument("--no-commit", action="store_true")
     evidence_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    estimand_parser = subparsers.add_parser(
+        "estimand",
+        help="Define the population, outcome, treatment contrast, and target measure.",
+    )
+    estimand_parser.add_argument("outcome")
+    estimand_parser.add_argument("--population", required=True)
+    estimand_parser.add_argument("--intervention", default="")
+    estimand_parser.add_argument("--comparator", default="")
+    estimand_parser.add_argument("--time-window", default="")
+    estimand_parser.add_argument("--summary-measure", default="")
+    estimand_parser.add_argument("--repo", default=".")
+    estimand_parser.add_argument("-m", "--message")
+    estimand_parser.add_argument("--no-commit", action="store_true")
+    estimand_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    effect_parser = subparsers.add_parser(
+        "effect", help="Record an effect estimate with explicit uncertainty."
+    )
+    effect_parser.add_argument("estimand_id")
+    effect_parser.add_argument("estimate", type=float)
+    effect_parser.add_argument("--metric", required=True)
+    effect_parser.add_argument("--unit", default="")
+    effect_parser.add_argument("--confidence-level", type=float, default=0.95)
+    effect_parser.add_argument("--lower", type=float)
+    effect_parser.add_argument("--upper", type=float)
+    effect_parser.add_argument("--standard-error", type=float)
+    effect_parser.add_argument(
+        "--from", action="append", default=[], dest="derived_from"
+    )
+    effect_parser.add_argument("--repo", default=".")
+    effect_parser.add_argument("-m", "--message")
+    effect_parser.add_argument("--no-commit", action="store_true")
+    effect_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    infer_parser = subparsers.add_parser(
+        "infer",
+        help="Record the explicit reasoning from evidence premises to a conclusion.",
+    )
+    infer_parser.add_argument("statement")
+    infer_parser.add_argument("--premise", action="append", required=True)
+    infer_parser.add_argument("--warrant", required=True)
+    infer_parser.add_argument("--method", action="append", default=[])
+    infer_parser.add_argument("--assumption", action="append", default=[])
+    infer_parser.add_argument("--context")
+    infer_parser.add_argument("--repo", default=".")
+    infer_parser.add_argument("-m", "--message")
+    infer_parser.add_argument("--no-commit", action="store_true")
+    infer_parser.add_argument("--json", action="store_true", dest="as_json")
 
     ingest_parser = subparsers.add_parser(
         "ingest",
@@ -742,13 +835,20 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     record_parser = subparsers.add_parser(
         "record", help="Record one immutable, typed scientific object."
     )
-    record_parser.add_argument("kind", choices=RESEARCH_OBJECT_KINDS)
+    record_parser.add_argument("kind")
     record_parser.add_argument("--repo", default=".")
     record_parser.add_argument(
         "--state", choices=RESEARCH_OBJECT_STATES, default="draft"
     )
     record_parser.add_argument("--data", help="Payload as a JSON object.")
     record_parser.add_argument("--file", help="Read the JSON payload from a file.")
+    record_parser.add_argument(
+        "--profile-file",
+        help=(
+            "Semantic Profile descriptor JSON; required for extension kinds and "
+            "content-bound into the object."
+        ),
+    )
     record_parser.add_argument(
         "--relation",
         action="append",
@@ -762,7 +862,7 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     objects_parser.add_argument("object_id", nargs="?")
     objects_parser.add_argument("--repo", default=".")
-    objects_parser.add_argument("--kind", choices=RESEARCH_OBJECT_KINDS)
+    objects_parser.add_argument("--kind")
     objects_parser.add_argument("--state", choices=RESEARCH_OBJECT_STATES)
     objects_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1141,6 +1241,7 @@ def main(
                 save_search_plan,
                 save_search_receipt,
                 save_source_snapshot,
+                save_source_update,
             )
 
             if args.literature_command == "plan":
@@ -1187,6 +1288,27 @@ def main(
                     candidates=candidates,
                     retrieved_at=args.retrieved_at,
                     corpus_version=args.corpus_version,
+                    corpus_snapshot_hash=args.corpus_snapshot_hash,
+                    query_rewrites=args.query_rewrite,
+                    filters=_parse_assignments(args.filter, label="literature filter"),
+                    retrieval_system={
+                        key: value
+                        for key, value in {
+                            "retriever": args.retriever,
+                            "embedding_model": args.embedding_model,
+                            "reranker": args.reranker,
+                        }.items()
+                        if value
+                    },
+                    pagination={
+                        key: value
+                        for key, value in {
+                            "cursor": args.cursor,
+                            "page": args.page,
+                        }.items()
+                        if value not in (None, "")
+                    },
+                    complete=not args.incomplete,
                     errors=args.error,
                     message=args.message,
                     commit=not args.no_commit,
@@ -1208,17 +1330,41 @@ def main(
                     url=args.url,
                     license_name=args.license_name,
                     retraction_status=args.retraction_status,
+                    status_provider=args.status_provider,
+                    status_checked_at=args.status_checked_at,
+                    status_notice_id=args.status_notice_id,
                     previous_source_id=args.previous_source_id,
                     message=args.message,
                     commit=not args.no_commit,
                 )
                 _print_saved_object("literature source", result, as_json=args.as_json)
                 return 0
+            if args.literature_command == "update":
+                result = save_source_update(
+                    args.repo,
+                    source_id=args.source_id,
+                    status=args.status,
+                    provider=args.provider,
+                    checked_at=args.checked_at,
+                    update_type=args.update_type,
+                    notice_id=args.notice_id,
+                    detail=args.detail,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "literature source update", result, as_json=args.as_json
+                )
+                return 0
             result = save_passage_evidence(
                 args.repo,
                 source_id=args.source_id,
                 quote=args.quote,
                 locator=args.locator,
+                prefix=args.prefix,
+                suffix=args.suffix,
+                start=args.start,
+                end=args.end,
                 supports=args.supports,
                 refutes=args.refutes,
                 context_id=args.context,
@@ -1295,6 +1441,60 @@ def main(
                 commit=not args.no_commit,
             )
             _print_saved_object("evidence", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "estimand":
+            from .research_commands import save_estimand
+
+            result = save_estimand(
+                args.repo,
+                outcome=args.outcome,
+                population=args.population,
+                intervention=args.intervention,
+                comparator=args.comparator,
+                time_window=args.time_window,
+                summary_measure=args.summary_measure,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("estimand", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "effect":
+            from .research_commands import save_effect_estimate
+
+            result = save_effect_estimate(
+                args.repo,
+                estimand_id=args.estimand_id,
+                estimate=args.estimate,
+                metric=args.metric,
+                unit=args.unit,
+                confidence_level=args.confidence_level,
+                interval_lower=args.lower,
+                interval_upper=args.upper,
+                standard_error=args.standard_error,
+                derived_from=args.derived_from,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("effect estimate", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "infer":
+            from .research_commands import save_inference
+
+            result = save_inference(
+                args.repo,
+                statement=args.statement,
+                premises=args.premise,
+                warrant=args.warrant,
+                method_ids=args.method,
+                assumption_ids=args.assumption,
+                context_id=args.context,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("scientific inference", result, as_json=args.as_json)
             return 0
 
         if args.command == "ingest":
@@ -1717,12 +1917,28 @@ def main(
                     "raw record cannot create verified or promoted objects; "
                     "use the evidence/review/claim/reproduce lifecycle commands"
                 )
+            semantic_profile = None
+            if args.profile_file:
+                profile_path = Path(args.profile_file).expanduser()
+                if not profile_path.is_file():
+                    raise ResearchGitError("semantic profile file was not found")
+                try:
+                    semantic_profile = json.loads(
+                        profile_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ResearchGitError(
+                        "semantic profile file is invalid JSON"
+                    ) from exc
+                if not isinstance(semantic_profile, dict):
+                    raise ResearchGitError("semantic profile must be a JSON object")
             result = record_research_object(
                 args.repo,
                 kind=args.kind,
                 state=args.state,
                 payload=_read_object_payload(args),
                 relations=_parse_relations(args.relation),
+                semantic_profile=semantic_profile,
             )
             if args.as_json:
                 _print_json(result.to_dict())

@@ -114,7 +114,10 @@ class ResearchDagTests(unittest.TestCase):
 
     def test_guided_start_is_atomic_and_guide_uses_plain_next_step(self) -> None:
         objects = self.repository.objects()
-        self.assertEqual({item["kind"] for item in objects}, {"question", "hypothesis"})
+        self.assertEqual(
+            {item["kind"] for item in objects},
+            {"question", "research_goal", "hypothesis"},
+        )
         guide = build_research_guide(self.repo_path, language="zh")
 
         self.assertEqual(guide["progress"]["completed_stages"], 1)

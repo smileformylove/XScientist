@@ -30,7 +30,10 @@ from ai_scientist.protocol.llm_trace import active_ara_root
 from ai_scientist.protocol.schemas import load_schema
 from ai_scientist.utils.ara_catalog import CATALOG_RELPATH, ensure_semantic_catalog
 from ai_scientist.utils.atomic_io import durable_append_text
-from ai_scientist.utils.context_receipts import seal_context_receipt
+from ai_scientist.utils.context_receipts import (
+    CONTEXT_RECEIPT_SCHEMA,
+    seal_context_receipt,
+)
 
 CONTEXT_INTENTS = ("continue", "write", "audit", "reproduce", "decide")
 CONTEXT_RECEIPTS_RELPATH = Path("context") / "receipts.jsonl"
@@ -294,6 +297,40 @@ def _finalize_pack(
     pack["source_closure_hash"] = content_hash({"source_refs": refs})
     pack["memory_refs"] = memory_refs
     pack["memory_snapshot_hash"] = content_hash({"memory_refs": memory_refs})
+    retrieval_request = {
+        "intent": pack.get("intent"),
+        "target": pack.get("target") or {},
+        "consumer": pack.get("consumer"),
+        "budget_tokens": int(budget_tokens),
+    }
+    retrieval_algorithm = {
+        "name": "ara_context_compiler",
+        "version": "2.0",
+        "ranking": "intent-specific hard closure before optional views",
+    }
+    retrieval_candidates = [
+        {
+            "source_ref": ref,
+            "rank": rank,
+            "selected": True,
+            "selection_reason": "member of immutable task source closure",
+        }
+        for rank, ref in enumerate(refs, start=1)
+    ]
+    retrieval_core = {
+        "profile": "ara.context.retrieval-receipt.v2",
+        "request": retrieval_request,
+        "request_hash": content_hash(retrieval_request),
+        "algorithm": retrieval_algorithm,
+        "algorithm_hash": content_hash(retrieval_algorithm),
+        "candidate_set": retrieval_candidates,
+        "candidate_set_hash": content_hash(retrieval_candidates),
+        "complete_candidate_set": True,
+    }
+    pack["retrieval_receipt"] = {
+        **retrieval_core,
+        "receipt_hash": content_hash(retrieval_core),
+    }
     pack["complete"] = not bool(pack.get("blockers"))
     _trim_optional_lists(pack, budget_tokens=budget_tokens)
     identity = {
@@ -325,6 +362,30 @@ def validate_context_pack(pack: dict[str, Any]) -> dict[str, Any]:
         raise ARAContextError("ContextPack memory refs are not canonical and unique")
     if pack.get("memory_snapshot_hash") != content_hash({"memory_refs": memory_refs}):
         raise ARAContextError("ContextPack memory snapshot hash mismatch")
+    retrieval = pack.get("retrieval_receipt")
+    if retrieval is not None:
+        if not isinstance(retrieval, dict):
+            raise ARAContextError("ContextPack retrieval receipt must be an object")
+        retrieval_core = {
+            key: value for key, value in retrieval.items() if key != "receipt_hash"
+        }
+        if retrieval.get("receipt_hash") != content_hash(retrieval_core):
+            raise ARAContextError("ContextPack retrieval receipt hash mismatch")
+        if retrieval.get("request_hash") != content_hash(
+            retrieval.get("request") or {}
+        ):
+            raise ARAContextError("ContextPack retrieval request hash mismatch")
+        if retrieval.get("algorithm_hash") != content_hash(
+            retrieval.get("algorithm") or {}
+        ):
+            raise ARAContextError("ContextPack retrieval algorithm hash mismatch")
+        candidates = retrieval.get("candidate_set") or []
+        if retrieval.get("candidate_set_hash") != content_hash(candidates):
+            raise ARAContextError("ContextPack retrieval candidate set hash mismatch")
+        if [item.get("source_ref") for item in candidates] != refs:
+            raise ARAContextError(
+                "ContextPack retrieval candidates do not match sources"
+            )
     identity = {
         key: value
         for key, value in pack.items()
@@ -872,7 +933,7 @@ def persist_context_pack(
     store = ObjectStore(root, shared_root=_shared_root_for(root))
     ref = store.put_json(pack)
     receipt = {
-        "schema": "ara.context.receipt.v1",
+        "schema": CONTEXT_RECEIPT_SCHEMA,
         "type": "compiled",
         "recorded_at": _now_iso(),
         "consumer": consumer or pack.get("consumer"),
@@ -883,6 +944,9 @@ def persist_context_pack(
         "source_closure_hash": pack.get("source_closure_hash"),
         "memory_snapshot_hash": pack.get("memory_snapshot_hash"),
         "omitted": pack.get("omitted") or {},
+        "retrieval_receipt_hash": (pack.get("retrieval_receipt") or {}).get(
+            "receipt_hash"
+        ),
     }
     receipt = seal_context_receipt(receipt)
     durable_append_text(
@@ -921,7 +985,7 @@ def record_context_consumption(
     )
     validate_context_pack(stored_pack)
     receipt = {
-        "schema": "ara.context.receipt.v1",
+        "schema": CONTEXT_RECEIPT_SCHEMA,
         "type": "consumed",
         "recorded_at": _now_iso(),
         "consumer": consumer,
@@ -930,6 +994,9 @@ def record_context_consumption(
         "pack_hash": stored_pack.get("pack_hash"),
         "source_closure_hash": stored_pack.get("source_closure_hash"),
         "memory_snapshot_hash": stored_pack.get("memory_snapshot_hash"),
+        "retrieval_receipt_hash": (stored_pack.get("retrieval_receipt") or {}).get(
+            "receipt_hash"
+        ),
     }
     receipt = seal_context_receipt(receipt)
     durable_append_text(

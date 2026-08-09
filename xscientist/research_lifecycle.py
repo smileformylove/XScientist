@@ -359,7 +359,12 @@ class ResearchLifecycle:
         resolved_evidence_ids: list[str] = []
         for object_id in evidence_ids:
             evidence = self.repository.get(object_id)
-            if evidence["kind"] not in {"evidence", "passage_evidence"}:
+            if evidence["kind"] not in {
+                "evidence",
+                "passage_evidence",
+                "inference",
+                "evidence_synthesis",
+            }:
                 raise ResearchGitError("claim evidence reference has wrong kind")
             resolved_id = str(evidence["object_id"])
             resolved_evidence_ids.append(resolved_id)

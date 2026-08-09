@@ -17,7 +17,8 @@ from .research_git import (
 )
 from .research_vcs import ResearchRepository
 
-RESEARCH_CONTEXT_POLICY_VERSION = "1.0"
+RESEARCH_CONTEXT_POLICY_VERSION = "2.0"
+RESEARCH_CONTEXT_RECEIPT_PROFILE = "xscientist.context-retrieval-receipt.v2"
 RESEARCH_CONTEXT_INTENTS = ("decide", "continue", "write", "audit", "reproduce")
 
 _DECISION_KINDS = {"review", "gate_decision", "agent_evaluation"}
@@ -304,7 +305,13 @@ def build_research_context_snapshot(
         raise ResearchGitError("memory refs must use sha256:<64 lowercase hex>")
 
     max_views = max(4, int(budget_tokens) // 180)
-    ranked_ids = [*resolved_targets, *sorted(negative_ids), *source_object_ids]
+    ranked_ids = [
+        *resolved_targets,
+        *sorted(negative_ids),
+        *sorted(prior_decision_ids),
+        *sorted(prior_context_ids),
+        *source_object_ids,
+    ]
     seen: set[str] = set()
     source_views = []
     for object_id in ranked_ids:
@@ -321,6 +328,74 @@ def build_research_context_snapshot(
             }
         )
     omitted_count = max(0, len(source_object_ids) - len(source_views))
+    selected_view_ids = {str(item["object_id"]) for item in source_views}
+    role_scores = {
+        "target": 100,
+        "negative_knowledge": 90,
+        "prior_decision": 80,
+        "prior_context": 70,
+        "lineage": 50,
+    }
+    retrieval_candidates = []
+    for source in source_objects:
+        object_id = str(source["object_id"])
+        selected_for_view = object_id in selected_view_ids
+        retrieval_candidates.append(
+            {
+                **source,
+                "score": role_scores.get(str(source.get("role") or ""), 0),
+                "score_semantics": "higher_is_more_decision_relevant",
+                "selected": selected_for_view,
+                "selection_reason": (
+                    "required closure priority and available summary budget"
+                    if selected_for_view
+                    else "summary budget exhausted; immutable ID/hash retained"
+                ),
+            }
+        )
+    retrieval_candidates.sort(
+        key=lambda row: (-int(row["score"]), str(row["object_id"]))
+    )
+    for rank, candidate in enumerate(retrieval_candidates, start=1):
+        candidate["rank"] = rank
+    retrieval_request = {
+        "intent": normalized_intent,
+        "decision_kind": str(decision_kind or "research_decision"),
+        "target_ids": resolved_targets,
+        "as_of": as_of,
+        "budget_tokens": int(budget_tokens),
+    }
+    retrieval_algorithm = {
+        "name": "deterministic_relation_closure",
+        "version": RESEARCH_CONTEXT_POLICY_VERSION,
+        "ranking": "target > negative > prior decision > prior context > lineage",
+        "model": None,
+        "index": "research_object_relations_at_ref",
+    }
+    transform_lineage = [
+        {
+            "type": "deterministic_summary_projection",
+            "version": "1.0",
+            "input_hash": content_hash(source_objects),
+            "output_hash": content_hash(source_views),
+            "omitted_count": omitted_count,
+        }
+    ]
+    retrieval_receipt_core = {
+        "profile": RESEARCH_CONTEXT_RECEIPT_PROFILE,
+        "request": retrieval_request,
+        "request_hash": content_hash(retrieval_request),
+        "algorithm": retrieval_algorithm,
+        "algorithm_hash": content_hash(retrieval_algorithm),
+        "candidate_set": retrieval_candidates,
+        "candidate_set_hash": content_hash(retrieval_candidates),
+        "transform_lineage": transform_lineage,
+        "complete_candidate_set": True,
+    }
+    retrieval_receipt = {
+        **retrieval_receipt_core,
+        "receipt_hash": content_hash(retrieval_receipt_core),
+    }
     options = _normalize_options(options_considered, selected=selected)
     policy = {
         "version": RESEARCH_CONTEXT_POLICY_VERSION,
@@ -345,6 +420,7 @@ def build_research_context_snapshot(
         "source_object_ids": source_object_ids,
         "source_objects": source_objects,
         "source_views": source_views,
+        "retrieval_receipt": retrieval_receipt,
         "source_refs": sorted(item["content_hash"] for item in source_objects),
         "source_closure_hash": source_closure_hash,
         "memory_object_ids": memory_object_ids,
@@ -424,6 +500,43 @@ def research_context_issues(
         payload.get("selection_policy") or {}
     ):
         issues.append("context selection policy hash mismatch")
+    retrieval_receipt = payload.get("retrieval_receipt")
+    if retrieval_receipt is not None:
+        if not isinstance(retrieval_receipt, Mapping):
+            issues.append("context retrieval receipt must be an object")
+        else:
+            receipt_core = {
+                key: value
+                for key, value in retrieval_receipt.items()
+                if key != "receipt_hash"
+            }
+            if retrieval_receipt.get("receipt_hash") != content_hash(receipt_core):
+                issues.append("context retrieval receipt hash mismatch")
+            request = retrieval_receipt.get("request") or {}
+            if retrieval_receipt.get("request_hash") != content_hash(request):
+                issues.append("context retrieval request hash mismatch")
+            algorithm = retrieval_receipt.get("algorithm") or {}
+            if retrieval_receipt.get("algorithm_hash") != content_hash(algorithm):
+                issues.append("context retrieval algorithm hash mismatch")
+            candidates = retrieval_receipt.get("candidate_set") or []
+            if retrieval_receipt.get("candidate_set_hash") != content_hash(candidates):
+                issues.append("context retrieval candidate set hash mismatch")
+            candidate_ids = sorted(
+                str(item.get("object_id") or "")
+                for item in candidates
+                if isinstance(item, Mapping)
+            )
+            if candidate_ids != source_ids:
+                issues.append(
+                    "context retrieval candidates do not cover source closure"
+                )
+            ranks = [
+                item.get("rank") for item in candidates if isinstance(item, Mapping)
+            ]
+            if any(not isinstance(rank, int) for rank in ranks) or sorted(
+                rank for rank in ranks if isinstance(rank, int)
+            ) != list(range(1, len(candidates) + 1)):
+                issues.append("context retrieval candidate ranks are invalid")
     identity = {key: value for key, value in payload.items() if key != "context_hash"}
     if payload.get("context_hash") != content_hash(identity):
         issues.append("context hash mismatch")

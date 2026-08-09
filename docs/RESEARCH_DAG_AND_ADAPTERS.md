@@ -27,7 +27,7 @@ cd my-study
 xscientist research guide --lang en
 ```
 
-`start` creates the question and falsifiable hypothesis in one initial
+`start` creates the question, a locked research goal, and falsifiable hypothesis in one initial
 checkpoint. `guide` inspects actual repository state and prints one safe next
 step (or an explicit exploratory/confirmatory choice), why it matters, and a
 copy/paste command. It never asks a beginner to
@@ -75,6 +75,8 @@ The graph combines:
 - claims, independent reviews, deterministic gates, and reproductions;
 - exact Research VCS decision-context snapshots and their evidence/memory
   sources;
+- estimands, effect estimates, explicit inferences, warrants, assumptions,
+  methods, challenges, and source correction/retraction events;
 - agent candidates, independent agent evaluations, promotions, deployments,
   and rollback decisions;
 - committed ARA experiment-search nodes and their parent/child evolution paths,
@@ -90,6 +92,13 @@ ContextPack hash is propagated into a Research Object, the graph adds the
 cross-system edge too. This makes the chain
 `memory/evidence -> context -> experiment/decision -> claim` inspectable by a
 human or an agent.
+
+New context snapshots also carry a retrieval receipt with the complete
+candidate set, deterministic ranks, score semantics, selection/rejection
+reasons, algorithm hash, and summary-transform lineage. A token budget can hide
+a readable summary, but it cannot erase the candidate or its immutable hash.
+See [Research Protocol v2](RESEARCH_PROTOCOL_V2.md) for the compatibility and
+extension rules.
 
 Committed ARAs whose current or prior legal manifest revision is referenced by
 a Research Object are discovered automatically. The manifest, revision history,

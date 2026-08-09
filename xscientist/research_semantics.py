@@ -5,13 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime
+import re
 from typing import Any
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.privacy import redact_sensitive_payload
 
 CLAIM_SCOPE_PROFILE = "xscientist.claim-scope.v1"
-LITERATURE_RECEIPT_PROFILE = "xscientist.literature-receipt.v1"
+LITERATURE_RECEIPT_PROFILE = "xscientist.retrieval-receipt.v2"
+WEB_ANNOTATION_SELECTOR_PROFILE = "http://www.w3.org/ns/oa#"
 
 _SCALAR_SCOPE_FIELDS = (
     "population",
@@ -120,8 +122,15 @@ def build_search_receipt_payload(
     retrieved_at: str,
     corpus_version: str = "",
     errors: Sequence[str] = (),
+    query_rewrites: Sequence[str] = (),
+    filters: Mapping[str, Any] | None = None,
+    retrieval_system: Mapping[str, Any] | None = None,
+    corpus_snapshot_hash: str = "",
+    pagination: Mapping[str, Any] | None = None,
+    transform_lineage: Sequence[Mapping[str, Any]] = (),
+    complete: bool = True,
 ) -> dict[str, Any]:
-    """Build an auditable retrieval receipt without credentials or raw bodies."""
+    """Build a replay-oriented retrieval receipt without secrets or raw bodies."""
 
     normalized_candidates: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates, start=1):
@@ -146,6 +155,9 @@ def build_search_receipt_payload(
         if selected is False and not str(row.get("selection_reason") or "").strip():
             raise ValueError("rejected literature candidate requires selection_reason")
         normalized_candidates.append(row)
+    ranks = [int(row.get("rank") or 0) for row in normalized_candidates]
+    if any(rank <= 0 for rank in ranks) or len(ranks) != len(set(ranks)):
+        raise ValueError("literature candidate ranks must be unique positive integers")
     try:
         parsed_retrieved_at = datetime.fromisoformat(
             str(retrieved_at).replace("Z", "+00:00")
@@ -154,13 +166,60 @@ def build_search_receipt_payload(
         raise ValueError("retrieved_at must be ISO-8601") from exc
     if parsed_retrieved_at.tzinfo is None:
         raise ValueError("retrieved_at must include a timezone")
+    normalized_query = redact_sensitive_payload(" ".join(str(query).split()))
+    normalized_rewrites = list(
+        dict.fromkeys(
+            redact_sensitive_payload(" ".join(str(value).split()))
+            for value in query_rewrites
+            if str(value).strip()
+        )
+    )
+    request = {
+        "query": normalized_query,
+        "query_rewrites": normalized_rewrites,
+        "filters": _safe_receipt_value(dict(filters or {})),
+    }
+    normalized_retrieval_system = _safe_receipt_value(dict(retrieval_system or {}))
+    normalized_pagination = _safe_receipt_value(dict(pagination or {}))
+    normalized_transforms = [
+        _safe_receipt_value(dict(item)) for item in transform_lineage
+    ]
+    corpus: dict[str, Any] = {}
+    if corpus_version.strip():
+        corpus["version"] = corpus_version.strip()
+    if corpus_snapshot_hash.strip():
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", corpus_snapshot_hash.strip()):
+            raise ValueError("corpus snapshot hash must use sha256:<64 hex>")
+        corpus["snapshot_hash"] = corpus_snapshot_hash.strip()
     core: dict[str, Any] = {
         "profile": LITERATURE_RECEIPT_PROFILE,
         "provider": redact_sensitive_payload(" ".join(str(provider).split())),
-        "query": redact_sensitive_payload(" ".join(str(query).split())),
+        "query": normalized_query,
         "retrieved_at": str(retrieved_at),
         "candidates": normalized_candidates,
+        "request": request,
+        "request_hash": canonical_content_hash(request),
+        "candidate_set_hash": canonical_content_hash(normalized_candidates),
+        "retrieval_system": normalized_retrieval_system,
+        "pagination": normalized_pagination,
+        "transform_lineage": normalized_transforms,
+        "completeness": {
+            "complete_candidate_set": bool(complete),
+            "candidate_count": len(normalized_candidates),
+            "selected_count": sum(
+                row["selection_status"] == "selected" for row in normalized_candidates
+            ),
+            "rejected_count": sum(
+                row["selection_status"] == "rejected" for row in normalized_candidates
+            ),
+            "pending_count": sum(
+                row["selection_status"] == "pending" for row in normalized_candidates
+            ),
+        },
     }
+    if corpus:
+        core["corpus"] = corpus
+    # Retain the v1 convenience field for older readers.
     if corpus_version.strip():
         core["corpus_version"] = corpus_version.strip()
     if errors:
@@ -172,10 +231,45 @@ def build_search_receipt_payload(
     return {**core, "receipt_hash": canonical_content_hash(core)}
 
 
+def build_text_quote_selector(
+    quote: str,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+    start: int | None = None,
+    end: int | None = None,
+) -> dict[str, Any]:
+    """Return deterministic W3C Web Annotation selectors for exact evidence."""
+
+    exact = str(quote or "").strip()
+    if not exact:
+        raise ValueError("text selector requires an exact quote")
+    selectors: list[dict[str, Any]] = [
+        {
+            "type": "TextQuoteSelector",
+            "exact": exact,
+            **({"prefix": str(prefix)} if prefix else {}),
+            **({"suffix": str(suffix)} if suffix else {}),
+        }
+    ]
+    if start is not None or end is not None:
+        if start is None or end is None or start < 0 or end <= start:
+            raise ValueError("text position selector requires 0 <= start < end")
+        selectors.append(
+            {"type": "TextPositionSelector", "start": int(start), "end": int(end)}
+        )
+    core = {
+        "profile": WEB_ANNOTATION_SELECTOR_PROFILE,
+        "selectors": selectors,
+    }
+    return {**core, "selector_hash": canonical_content_hash(core)}
+
+
 __all__ = [
     "CLAIM_SCOPE_PROFILE",
     "LITERATURE_RECEIPT_PROFILE",
     "build_search_receipt_payload",
+    "build_text_quote_selector",
     "claim_scope_hash",
     "normalize_claim_scope",
     "scopes_compatible",
