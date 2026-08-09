@@ -124,7 +124,11 @@ class ResearchDagTests(unittest.TestCase):
         self.assertEqual(guide["next_steps"][0]["code"], "choose_study_mode")
         self.assertEqual(
             {step["code"] for step in guide["next_steps"]},
-            {"choose_study_mode", "preregister_confirmatory"},
+            {
+                "choose_study_mode",
+                "preregister_confirmatory",
+                "lock_method_discovery",
+            },
         )
         self.assertIn("探索", guide["next_steps"][0]["title"])
         self.assertIn("@latest:hypothesis", guide["next_steps"][0]["command"])

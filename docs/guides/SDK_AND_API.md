@@ -146,6 +146,35 @@ metadata_graph = repository.dag(disclose_summaries=False)
 repository.export_dag("./research-dag")
 ```
 
+Method-discovery contracts use the same local repository from Python:
+
+```python
+from xscientist import (
+    discovery_contract_template,
+    save_discovery_contract,
+    save_generalization_assessment,
+)
+
+spec = discovery_contract_template()
+# Replace every REPLACE_* value, then lock before running experiments.
+contract = save_discovery_contract(
+    "./study",
+    hypothesis_id="@latest:hypothesis",
+    spec=spec,
+)
+
+assessment = save_generalization_assessment(
+    "./study",
+    contract_id=contract["object"].object_id,
+    results=condition_results,
+    evidence_ids=["@latest:evidence"],
+)
+```
+
+The builders are deterministic and platform-neutral; notebooks, schedulers,
+and third-party agents can create the same contract and assessment objects
+without shelling out to the CLI.
+
 The CLI provides both research-native and familiar version-control verbs:
 
 ```bash

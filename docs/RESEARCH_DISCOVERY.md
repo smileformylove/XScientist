@@ -78,3 +78,20 @@ discovery](https://arxiv.org/abs/2606.26722), while keeping the progressive
 experiment-manager search used by [AI Scientist
 v2](https://arxiv.org/abs/2504.08066). Negative and boundary results remain
 first-class outputs rather than failed attempts to hide.
+
+## Generalization is a separate gate
+
+Hypothesis diversity and self-critique can find promising mechanisms, but they
+do not establish that a visible-condition score improvement is a method. For a
+`method_discovery` claim, XScientist now locks the target edit boundary, fixed
+variables, compute budget, evaluation runner, at least three strong baselines,
+multiple conditions, and sealed feedback before execution. A deterministic
+assessment then separates `engineering_gain_only` from
+`method_discovery_supported`.
+
+This follows the evaluation lessons of
+[MLS-Bench](https://arxiv.org/abs/2605.08678): constrain the research variable,
+reproduce human methods under one pipeline, test multiple conditions, validate
+proxy fidelity, and do not assume that more sampling or context creates
+scientific judgment. Full contract and CLI examples are in
+[METHOD_DISCOVERY_PROTOCOL.md](METHOD_DISCOVERY_PROTOCOL.md).

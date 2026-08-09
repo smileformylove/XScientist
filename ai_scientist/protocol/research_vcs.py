@@ -326,6 +326,214 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _discovery_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
+    """Validate the built-in subtypes that gate generalizable method claims."""
+
+    protocol_kind = payload.get("protocol_kind")
+    issues: list[str] = []
+    if kind == "experiment_design" and protocol_kind == "method_discovery_contract":
+        required = (
+            "summary",
+            "hypothesis_id",
+            "contribution_level",
+            "target_component",
+            "mechanism",
+            "metric",
+            "edit_scope",
+            "fixed_variables",
+            "baselines",
+            "conditions",
+            "runner",
+            "runner_hash",
+            "resource_budget_hash",
+            "evaluation_blinding_hash",
+            "success_rule",
+            "design_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"method discovery contract requires {field}")
+        contribution = payload.get("contribution_level")
+        if contribution not in {
+            "execution",
+            "engineering_optimization",
+            "method_discovery",
+        }:
+            issues.append("method discovery contract has invalid contribution_level")
+        metric = payload.get("metric")
+        if not isinstance(metric, Mapping) or metric.get("direction") not in {
+            "maximize",
+            "minimize",
+        }:
+            issues.append("method discovery contract requires a directed metric")
+        edit_scope = payload.get("edit_scope")
+        if (
+            not isinstance(edit_scope, Mapping)
+            or not isinstance(edit_scope.get("allowed_paths"), list)
+            or not edit_scope.get("allowed_paths")
+        ):
+            issues.append("method discovery contract requires allowed edit paths")
+        baselines = payload.get("baselines")
+        conditions = payload.get("conditions")
+        if not isinstance(baselines, list):
+            issues.append("method discovery contract baselines must be an array")
+            baselines = []
+        if not isinstance(conditions, list):
+            issues.append("method discovery contract conditions must be an array")
+            conditions = []
+        baseline_ids = [
+            str(item.get("id") or "") for item in baselines if isinstance(item, Mapping)
+        ]
+        condition_ids = [
+            str(item.get("id") or "")
+            for item in conditions
+            if isinstance(item, Mapping)
+        ]
+        if not all(baseline_ids) or len(set(baseline_ids)) != len(baseline_ids):
+            issues.append("method discovery baseline ids must be present and unique")
+        if not all(condition_ids) or len(set(condition_ids)) != len(condition_ids):
+            issues.append("method discovery condition ids must be present and unique")
+        if contribution == "method_discovery":
+            strong_count = sum(
+                item.get("strong") is True
+                for item in baselines
+                if isinstance(item, Mapping)
+            )
+            roles = {
+                item.get("role") for item in conditions if isinstance(item, Mapping)
+            }
+            if len(baselines) < 3 or strong_count < 3:
+                issues.append(
+                    "method discovery requires at least three strong baselines"
+                )
+            if any(
+                not isinstance(item, Mapping) or not item.get("source")
+                for item in baselines
+            ):
+                issues.append("method discovery baselines require source identities")
+            if len(conditions) < 3:
+                issues.append(
+                    "method discovery requires at least three evaluation conditions"
+                )
+            if "development" not in roles or not roles.intersection(
+                {"transfer", "heldout", "scale"}
+            ):
+                issues.append(
+                    "method discovery requires development and generalization conditions"
+                )
+            if not any(
+                isinstance(item, Mapping) and item.get("visibility") == "sealed"
+                for item in conditions
+            ):
+                issues.append("method discovery requires a sealed condition")
+            if not isinstance(edit_scope, Mapping) or not edit_scope.get(
+                "protected_paths"
+            ):
+                issues.append("method discovery requires protected edit paths")
+            if not isinstance(
+                payload.get("fixed_variables"), Mapping
+            ) or not payload.get("fixed_variables"):
+                issues.append("method discovery requires fixed non-target variables")
+        if payload.get("runner_hash") and isinstance(payload.get("runner"), Mapping):
+            if payload.get("runner_hash") != canonical_content_hash(payload["runner"]):
+                issues.append("method discovery runner_hash mismatch")
+        if payload.get("context_required") is True and not (
+            payload.get("context_id") and payload.get("context_hash")
+        ):
+            issues.append("method discovery required context binding is incomplete")
+        if payload.get("design_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "design_hash"}
+            )
+            if payload.get("design_hash") != expected:
+                issues.append("method discovery design_hash mismatch")
+
+    if kind == "resource_budget" and protocol_kind == "method_discovery_budget":
+        if not isinstance(payload.get("limits"), Mapping) or not payload.get("limits"):
+            issues.append("method discovery budget requires numeric limits")
+        else:
+            for name, value in payload["limits"].items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    issues.append(
+                        f"method discovery budget limit {name} must be numeric"
+                    )
+        if payload.get("information_value_required") is not True:
+            issues.append("method discovery budget must prioritize information value")
+        if payload.get("budget_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "budget_hash"}
+            )
+            if payload.get("budget_hash") != expected:
+                issues.append("method discovery budget_hash mismatch")
+
+    if kind == "evaluation_blinding" and protocol_kind == "method_discovery_blinding":
+        if payload.get("leakage_prohibited") is not True:
+            issues.append("method discovery blinding must prohibit feedback leakage")
+        if not isinstance(payload.get("sealed_condition_ids"), list):
+            issues.append(
+                "method discovery blinding sealed_condition_ids must be an array"
+            )
+        if payload.get("blinding_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "blinding_hash"}
+            )
+            if payload.get("blinding_hash") != expected:
+                issues.append("method discovery blinding_hash mismatch")
+
+    if kind == "evidence_synthesis" and protocol_kind == "generalization_assessment":
+        required = (
+            "summary",
+            "contract_id",
+            "contract_hash",
+            "evidence_ids",
+            "candidate_id",
+            "condition_assessments",
+            "checks",
+            "verdict",
+            "method_discovery_supported",
+            "synthesis_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"generalization assessment requires {field}")
+        verdict = payload.get("verdict")
+        if verdict not in {
+            "method_discovery_supported",
+            "engineering_gain_only",
+            "invalid_protocol_execution",
+            "inconclusive",
+        }:
+            issues.append("generalization assessment verdict is invalid")
+        if payload.get("method_discovery_supported") is not (
+            verdict == "method_discovery_supported"
+        ):
+            issues.append(
+                "generalization assessment support flag disagrees with verdict"
+            )
+        if not isinstance(payload.get("evidence_ids"), list) or not payload.get(
+            "evidence_ids"
+        ):
+            issues.append("generalization assessment requires evidence ids")
+        if not isinstance(payload.get("checks"), list) or not payload.get("checks"):
+            issues.append("generalization assessment requires deterministic checks")
+        elif verdict == "method_discovery_supported" and any(
+            not isinstance(item, Mapping) or item.get("passed") is not True
+            for item in payload["checks"]
+        ):
+            issues.append("supported method discovery has a failing protocol check")
+        if payload.get("synthesis_hash"):
+            expected = canonical_content_hash(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "synthesis_hash"
+                }
+            )
+            if payload.get("synthesis_hash") != expected:
+                issues.append("generalization assessment synthesis_hash mismatch")
+    return issues
+
+
 def research_payload_issues(
     kind: str,
     payload: Mapping[str, Any],
@@ -359,6 +567,7 @@ def research_payload_issues(
             f"{normalized_kind} payload requires one of: " + ", ".join(identity_fields)
         ]
     issues: list[str] = []
+    issues.extend(_discovery_protocol_issues(normalized_kind, payload))
     required_fields: dict[str, tuple[str, ...]] = {
         "search_plan": ("question", "queries", "search_plan_hash"),
         "search_receipt": (
@@ -473,6 +682,15 @@ def research_payload_issues(
         "candidate_set_hash",
         "selector_hash",
         "update_hash",
+        "design_hash",
+        "budget_hash",
+        "blinding_hash",
+        "synthesis_hash",
+        "runner_hash",
+        "resource_budget_hash",
+        "evaluation_blinding_hash",
+        "contract_hash",
+        "context_hash",
     ):
         value = payload.get(field)
         if value not in (None, "") and not _is_sha256(value):

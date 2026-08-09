@@ -119,6 +119,25 @@ def build_research_guide(
                 ),
             )
         )
+        next_steps.append(
+            _step(
+                selected_language,
+                code="lock_method_discovery",
+                title_en="Option C — test a transferable method",
+                title_zh="选项 C — 检验可迁移的新方法",
+                why_en=(
+                    "Use a generated contract to prevent a local score gain or "
+                    "larger resource budget from being mislabeled as discovery."
+                ),
+                why_zh=(
+                    "用生成的契约隔离变量、锁定资源和盲测条件，避免把局部分数提升"
+                    "或扩大算力误称为方法发现。"
+                ),
+                command=(
+                    "xscientist research discovery template --output discovery.json"
+                ),
+            )
+        )
     elif not counts["experiment_attempt"]:
         next_steps.append(
             _step(

@@ -923,6 +923,7 @@ def save_claim(
     evidence_ids: Sequence[str],
     scope: str = "",
     structured_scope: Mapping[str, Any] | None = None,
+    contribution_level: str = "",
     gate_id: str | None = None,
     verified: bool = False,
     message: str | None = None,
@@ -937,6 +938,15 @@ def save_claim(
     if normalized_scope:
         payload["scope"] = normalized_scope
         payload["scope_hash"] = claim_scope_hash(normalized_scope)
+    normalized_contribution = str(contribution_level or "").strip()
+    if normalized_contribution:
+        if normalized_contribution not in {
+            "execution",
+            "engineering_optimization",
+            "method_discovery",
+        }:
+            raise ResearchGitError("claim contribution_level is invalid")
+        payload["contribution_level"] = normalized_contribution
     lifecycle = ResearchLifecycle(repository)
     recorded = lifecycle.claim(
         payload,

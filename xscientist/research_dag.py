@@ -563,6 +563,185 @@ def _object_proof(
                 ),
             ]
         )
+    elif (
+        kind == "experiment_design"
+        and payload.get("protocol_kind") == "method_discovery_contract"
+    ):
+        conditions = payload.get("conditions") or []
+        baselines = payload.get("baselines") or []
+        checks.extend(
+            [
+                _check(
+                    "discovery_contract_locked",
+                    "Method-discovery scope was locked before evaluation",
+                    state == "locked" and _has_hash_anchor(payload),
+                    "trace",
+                ),
+                _check(
+                    "target_variable_isolated",
+                    "Allowed and protected edit scopes isolate the target variable",
+                    bool((payload.get("edit_scope") or {}).get("allowed_paths"))
+                    and bool((payload.get("edit_scope") or {}).get("protected_paths")),
+                    "replay",
+                ),
+                _check(
+                    "strong_comparators_bound",
+                    "At least three strong comparison methods are committed",
+                    len(baselines) >= 3
+                    and sum(
+                        isinstance(row, Mapping) and row.get("strong") is True
+                        for row in baselines
+                    )
+                    >= 3,
+                    "replay",
+                ),
+                _check(
+                    "generalization_conditions_bound",
+                    "Multiple conditions include sealed transfer, heldout, or scale evaluation",
+                    len(conditions) >= 3
+                    and any(
+                        isinstance(row, Mapping)
+                        and row.get("visibility") == "sealed"
+                        and row.get("role") in {"transfer", "heldout", "scale"}
+                        for row in conditions
+                    ),
+                    "replay",
+                ),
+                _check(
+                    "budget_and_blinding_bound",
+                    "Resource budget and feedback blinding are explicit DAG parents",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"resource_budget"},
+                            relations={"depends_on"},
+                        )
+                    )
+                    and bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"evaluation_blinding"},
+                            relations={"depends_on"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "discovery_context_bound",
+                    "Method selection is bound to the exact evidence and memory context",
+                    (
+                        bool(
+                            _targets(
+                                item,
+                                objects,
+                                kinds={"context_snapshot"},
+                                relations={"uses_context"},
+                            )
+                        )
+                        if payload.get("context_required") is True
+                        else True
+                    ),
+                    "trace",
+                ),
+            ]
+        )
+    elif (
+        kind == "resource_budget"
+        and payload.get("protocol_kind") == "method_discovery_budget"
+    ):
+        checks.extend(
+            [
+                _check(
+                    "resource_budget_locked",
+                    "Resource limits were locked before candidate evaluation",
+                    state == "locked" and bool(payload.get("limits")),
+                    "trace",
+                ),
+                _check(
+                    "information_value_policy",
+                    "Adaptive compute must be allocated by expected information value",
+                    payload.get("information_value_required") is True,
+                    "replay",
+                ),
+            ]
+        )
+    elif (
+        kind == "evaluation_blinding"
+        and payload.get("protocol_kind") == "method_discovery_blinding"
+    ):
+        checks.extend(
+            [
+                _check(
+                    "sealed_feedback_locked",
+                    "Held-out feedback remains sealed until final candidate commitment",
+                    state == "locked"
+                    and payload.get("leakage_prohibited") is True
+                    and bool(payload.get("sealed_condition_ids")),
+                    "trace",
+                ),
+                _check(
+                    "blinding_bound",
+                    "Blinding policy has an immutable commitment",
+                    _has_hash_anchor(payload),
+                    "replay",
+                ),
+            ]
+        )
+    elif (
+        kind == "evidence_synthesis"
+        and payload.get("protocol_kind") == "generalization_assessment"
+    ):
+        checks.extend(
+            [
+                _check(
+                    "discovery_contract_bound",
+                    "Assessment points to its locked method-discovery contract",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={"experiment_design"},
+                            relations={"depends_on"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "condition_evidence_bound",
+                    "Assessment is derived from recorded condition evidence",
+                    bool(
+                        _targets(
+                            item,
+                            objects,
+                            kinds={
+                                "evidence",
+                                "effect_estimate",
+                                "passage_evidence",
+                            },
+                            relations={"derived_from"},
+                        )
+                    ),
+                    "trace",
+                ),
+                _check(
+                    "generalization_protocol_valid",
+                    "Every scope, resource, baseline, condition, and proxy check passed",
+                    all(
+                        isinstance(row, Mapping) and row.get("passed") is True
+                        for row in payload.get("checks") or []
+                    ),
+                    "replay",
+                ),
+                _check(
+                    "method_generalizes",
+                    "Candidate improves sealed generalization conditions, not only development",
+                    payload.get("verdict") == "method_discovery_supported",
+                    "replay",
+                ),
+            ]
+        )
     elif kind in {
         "action_proposal",
         "stopping_decision",

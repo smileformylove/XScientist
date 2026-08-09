@@ -8,6 +8,11 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- A locked method-discovery protocol that isolates the target edit surface,
+  fixes resources and non-target variables, binds strong baselines and sealed
+  cross-condition evaluation, checks proxy-to-target ranking fidelity, and
+  blocks `method_discovery` claims without a passing generalization synthesis.
+
 - A guarded `xscientist start` journey that creates or reuses one workspace,
   validates credentials/login/isolation/paper tooling, and runs Autopilot in
   the same local Research VCS from a plain-language question.

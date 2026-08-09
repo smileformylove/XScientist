@@ -23,6 +23,7 @@
 <p align="center">
   <a href="#two-minute-local-demo">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous run</a> ·
+  <a href="#from-a-better-score-to-a-transferable-method">Method discovery</a> ·
   <a href="#research-git-for-humans-and-agents">Research Git</a> ·
   <a href="docs/RESEARCH_PROTOCOL_V2.md">Protocol</a> ·
   <a href="docs/README.zh.md">中文</a>
@@ -229,6 +230,48 @@ These levels are intentionally not interchangeable. See the
 [protocol v2 specification](docs/RESEARCH_PROTOCOL_V2.md),
 [DAG and adapter guide](docs/RESEARCH_DAG_AND_ADAPTERS.md), and
 [research integrity policy](docs/RESEARCH_INTEGRITY.md).
+
+## From a better score to a transferable method
+
+XScientist does not treat benchmark improvement as automatic method discovery.
+Before evaluation, `research discovery plan` locks the target component,
+allowed and protected code scope, fixed variables, resource limits, strong
+baselines, multiple conditions, and sealed feedback. After evaluation,
+`research discovery assess` distinguishes a local engineering gain from a
+method that survives transfer or scale.
+
+```bash
+xscientist research discovery plan \
+  @latest:hypothesis discovery.json
+
+xscientist research discovery assess \
+  @latest:experiment_design results.json \
+  --evidence @latest:evidence
+
+xscientist research claim \
+  "The mechanism transfers across locked conditions." \
+  --evidence @latest:evidence_synthesis \
+  --contribution-level method_discovery
+```
+
+The resulting DAG makes the proof obligation visible:
+
+```mermaid
+flowchart LR
+  H["Hypothesis"] --> D["Locked target + conditions"]
+  B["Resource budget"] --> D
+  L["Sealed feedback"] --> D
+  D --> E["Condition evidence"]
+  E --> S["Generalization assessment"]
+  S --> C["Method claim"]
+```
+
+Claims at `method_discovery` strength are blocked unless a passing
+cross-condition assessment is linked. The assessment also rejects improvements
+caused by protected-file edits, resource expansion, runner changes, missing
+baselines, incomplete conditions, or broken proxy-to-target ranking. See the
+[method discovery protocol](docs/METHOD_DISCOVERY_PROTOCOL.md) for complete
+JSON examples and verdict semantics.
 
 ## Research Git for humans and agents
 
@@ -447,6 +490,7 @@ See [SDK and API](docs/guides/SDK_AND_API.md),
 | Research Git commands and mental model | [Local Research Git](docs/LOCAL_RESEARCH_GIT.md) |
 | Protocol guarantees and migration | [Research protocol v2](docs/RESEARCH_PROTOCOL_V2.md) · [migration](docs/PROTOCOL_MIGRATION_2026.md) |
 | Evidence DAG and integrations | [DAG and adapters](docs/RESEARCH_DAG_AND_ADAPTERS.md) |
+| Engineering gain vs. method discovery | [Method discovery protocol](docs/METHOD_DISCOVERY_PROTOCOL.md) |
 | Context and memory invariants | [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md) · [science constitution](docs/SCIENCE_CONSTITUTION.md) |
 | Scientific integrity and evaluation | [Research integrity](docs/RESEARCH_INTEGRITY.md) · [evaluation governance](docs/EVALUATION_GOVERNANCE.md) |
 | Controlled self-evolution | [Self-evolution architecture](docs/SELF_EVOLUTION_ARCHITECTURE.md) · [evolution gate](docs/EVOLUTION_GATE.md) |

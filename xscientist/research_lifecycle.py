@@ -369,6 +369,23 @@ class ResearchLifecycle:
             resolved_id = str(evidence["object_id"])
             resolved_evidence_ids.append(resolved_id)
             relations.append({"type": "depends_on", "target": resolved_id})
+        if payload.get("contribution_level") == "method_discovery" and verified:
+            supported = any(
+                item["kind"] == "evidence_synthesis"
+                and (item.get("payload") or {}).get("protocol_kind")
+                == "generalization_assessment"
+                and (item.get("payload") or {}).get("verdict")
+                == "method_discovery_supported"
+                for item in (
+                    self.repository.get(object_id)
+                    for object_id in resolved_evidence_ids
+                )
+            )
+            if not supported:
+                raise ResearchGitError(
+                    "verified method-discovery claim requires a passing "
+                    "generalization assessment"
+                )
         if verified:
             if not gate_id:
                 raise ResearchGitError("verified claim requires a gate decision")

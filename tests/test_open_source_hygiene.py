@@ -150,8 +150,12 @@ class OpenSourceHygieneTests(unittest.TestCase):
                 text,
             )
             self.assertIn("PyPI", text)
-        self.assertIn("pip install xscientist", self.readme_path.read_text())
-        self.assertIn("从 PyPI 安装稳定版本", self.chinese_readme_path.read_text())
+        english = self.readme_path.read_text(encoding="utf-8")
+        chinese = self.chinese_readme_path.read_text(encoding="utf-8")
+        self.assertIn("xscientist==0.1.1", english)
+        self.assertIn("The latest stable PyPI package is `0.1.1`", english)
+        self.assertIn("xscientist==0.1.1", chinese)
+        self.assertIn("PyPI 最新稳定版为 `0.1.1`", chinese)
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (
@@ -172,13 +176,17 @@ class OpenSourceHygieneTests(unittest.TestCase):
 
     def test_chinese_readme_toc_tracks_quick_start_sections(self) -> None:
         text = self.chinese_readme_path.read_text(encoding="utf-8")
-        self.assertIn("[1) 安装](#1-安装)", text)
-        self.assertNotIn("#1-安装推荐-conda", text)
-        self.assertIn(
-            "[5) 隔离 AI 生成的实验代码](#5-隔离-ai-生成的实验代码)",
-            text,
-        )
-        self.assertIn("### 5) 隔离 AI 生成的实验代码", text)
+        expected_navigation = {
+            '<a href="#两分钟本地体验">快速开始</a>': "## 两分钟本地体验",
+            '<a href="#运行一次全自动研究">全自动研究</a>': "## 运行一次全自动研究",
+            '<a href="#从分数提升到可迁移方法">方法发现</a>': "## 从分数提升到可迁移方法",
+            '<a href="#人和-agent-都能用的科研-git">科研 Git</a>': (
+                "## 人和 Agent 都能用的科研 Git"
+            ),
+        }
+        for navigation, heading in expected_navigation.items():
+            self.assertIn(navigation, text)
+            self.assertIn(heading, text)
 
     def test_readme_local_markdown_links_exist(self) -> None:
         for source in (self.readme_path, self.chinese_readme_path):

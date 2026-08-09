@@ -410,6 +410,32 @@ def _claim_closure(
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     claim_payload = claim.get("payload") or {}
+    discovery_assessment_ids = sorted(
+        object_id
+        for object_id in argument_ids
+        if objects[object_id].get("kind") == "evidence_synthesis"
+        and (objects[object_id].get("payload") or {}).get("protocol_kind")
+        == "generalization_assessment"
+    )
+    supported_discovery_assessment_ids = sorted(
+        object_id
+        for object_id in discovery_assessment_ids
+        if (objects[object_id].get("payload") or {}).get("verdict")
+        == "method_discovery_supported"
+        and (objects[object_id].get("payload") or {}).get("method_discovery_supported")
+        is True
+    )
+    if (
+        claim_payload.get("contribution_level") == "method_discovery"
+        and not supported_discovery_assessment_ids
+    ):
+        blockers.append(
+            _blocker(
+                "method_discovery_without_generalization",
+                claim_id,
+                "method-discovery claim lacks a passing cross-condition assessment",
+            )
+        )
     if claim.get("state") == "verified" and not claim_payload.get("scope_hash"):
         warnings.append(
             _blocker(

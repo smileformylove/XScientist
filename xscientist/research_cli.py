@@ -187,6 +187,19 @@ def _hash_local_file(path_value: str) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _read_json_mapping(path_value: str, *, label: str) -> dict[str, Any]:
+    path = Path(path_value).expanduser()
+    if not path.is_file():
+        raise ResearchGitError(f"{label} file was not found")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ResearchGitError(f"{label} file is invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise ResearchGitError(f"{label} must be a JSON object")
+    return value
+
+
 def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) -> None:
     recorded = result["object"]
     related = result.get("related") or []
@@ -316,6 +329,65 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     plan_parser.add_argument("-m", "--message")
     plan_parser.add_argument("--no-commit", action="store_true")
     plan_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    discovery_parser = subparsers.add_parser(
+        "discovery",
+        help=(
+            "Lock a method-discovery contract and distinguish transferable "
+            "methods from local engineering gains."
+        ),
+    )
+    discovery_subparsers = discovery_parser.add_subparsers(
+        dest="discovery_command", required=True
+    )
+    discovery_template = discovery_subparsers.add_parser(
+        "template",
+        help="Print or safely write a complete editable discovery contract.",
+    )
+    discovery_template.add_argument("--output")
+    discovery_template.add_argument("--json", action="store_true", dest="as_json")
+    discovery_plan = discovery_subparsers.add_parser(
+        "plan",
+        help=(
+            "Lock target edit scope, strong baselines, multiple conditions, "
+            "resource limits, and sealed feedback."
+        ),
+    )
+    discovery_plan.add_argument("hypothesis_id")
+    discovery_plan.add_argument(
+        "spec",
+        help="JSON method-discovery contract; see docs/METHOD_DISCOVERY_PROTOCOL.md.",
+    )
+    discovery_plan.add_argument(
+        "--context",
+        help="Complete context snapshot visible when selecting this mechanism and design.",
+    )
+    discovery_plan.add_argument("--repo", default=".")
+    discovery_plan.add_argument("-m", "--message")
+    discovery_plan.add_argument("--no-commit", action="store_true")
+    discovery_plan.add_argument("--json", action="store_true", dest="as_json")
+
+    discovery_assess = discovery_subparsers.add_parser(
+        "assess",
+        help=(
+            "Score a committed candidate on every condition and record the "
+            "generalization verdict."
+        ),
+    )
+    discovery_assess.add_argument("contract_id")
+    discovery_assess.add_argument(
+        "results", help="JSON candidate and per-condition measurements."
+    )
+    discovery_assess.add_argument(
+        "--evidence",
+        action="append",
+        required=True,
+        help="Condition evidence selector.",
+    )
+    discovery_assess.add_argument("--repo", default=".")
+    discovery_assess.add_argument("-m", "--message")
+    discovery_assess.add_argument("--no-commit", action="store_true")
+    discovery_assess.add_argument("--json", action="store_true", dest="as_json")
 
     literature_parser = subparsers.add_parser(
         "literature",
@@ -615,6 +687,12 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     _add_scope_arguments(claim_parser, metric_flag="--metric")
     claim_parser.add_argument("--gate")
     claim_parser.add_argument("--verified", action="store_true")
+    claim_parser.add_argument(
+        "--contribution-level",
+        choices=["execution", "engineering_optimization", "method_discovery"],
+        default="",
+        help="Declare how strong the scientific contribution is intended to be.",
+    )
     claim_parser.add_argument("--repo", default=".")
     claim_parser.add_argument("-m", "--message")
     claim_parser.add_argument("--no-commit", action="store_true")
@@ -1235,6 +1313,86 @@ def main(
             _print_saved_object("research plan", result, as_json=args.as_json)
             return 0
 
+        if args.command == "discovery":
+            from .research_discovery import (
+                discovery_contract_template,
+                save_discovery_contract,
+                save_generalization_assessment,
+            )
+
+            if args.discovery_command == "template":
+                payload = discovery_contract_template()
+                if args.output:
+                    from ai_scientist.utils.atomic_io import atomic_write_json
+
+                    destination = Path(args.output).expanduser()
+                    if destination.exists():
+                        raise ResearchGitError(
+                            "discovery template output already exists; choose a new path"
+                        )
+                    atomic_write_json(destination, payload, ensure_ascii=False)
+                    if args.as_json:
+                        _print_json({"output": str(destination), "template": payload})
+                    else:
+                        print(
+                            "Discovery contract template: "
+                            f"{_display_path(destination)}"
+                        )
+                        print("Replace every REPLACE_* value before locking the plan.")
+                else:
+                    _print_json(payload)
+                return 0
+            if args.discovery_command == "plan":
+                result = save_discovery_contract(
+                    args.repo,
+                    hypothesis_id=args.hypothesis_id,
+                    spec=_read_json_mapping(
+                        args.spec, label="method discovery specification"
+                    ),
+                    context_id=args.context,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "method discovery contract", result, as_json=args.as_json
+                )
+                return 0
+            result = save_generalization_assessment(
+                args.repo,
+                contract_id=args.contract_id,
+                results=_read_json_mapping(
+                    args.results, label="method discovery results"
+                ),
+                evidence_ids=args.evidence,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            if args.as_json:
+                recorded = result["object"]
+                checkpoint = result.get("checkpoint")
+                _print_json(
+                    {
+                        "object": recorded.to_dict(),
+                        "assessment": result["assessment"],
+                        "checkpoint": (
+                            checkpoint.to_dict() if checkpoint is not None else None
+                        ),
+                    }
+                )
+            else:
+                _print_saved_object("generalization assessment", result, as_json=False)
+                assessment = result["assessment"]
+                print(f"Verdict:    {assessment['verdict']}")
+                passed = sum(
+                    row.get("passed") is True
+                    for row in assessment["condition_assessments"]
+                )
+                print(
+                    "Conditions: "
+                    f"{passed}/{len(assessment['condition_assessments'])} passed"
+                )
+            return 0
+
         if args.command == "literature":
             from .research_commands import (
                 save_passage_evidence,
@@ -1521,6 +1679,7 @@ def main(
                 evidence_ids=args.evidence,
                 scope=args.scope,
                 structured_scope=_scope_from_args(args),
+                contribution_level=args.contribution_level,
                 gate_id=args.gate,
                 verified=args.verified,
                 message=args.message,

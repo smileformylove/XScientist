@@ -22,6 +22,7 @@
 <p align="center">
   <a href="#两分钟本地体验">快速开始</a> ·
   <a href="#运行一次全自动研究">全自动研究</a> ·
+  <a href="#从分数提升到可迁移方法">方法发现</a> ·
   <a href="#人和-agent-都能用的科研-git">科研 Git</a> ·
   <a href="RESEARCH_PROTOCOL_V2.md">科研协议</a> ·
   <a href="../README.md">English</a>
@@ -209,6 +210,34 @@ flowchart LR
 三者不能互相替代。详见[科研协议 v2](RESEARCH_PROTOCOL_V2.md)、
 [科研 DAG 与适配器](RESEARCH_DAG_AND_ADAPTERS.md)和
 [科研完整性协议](RESEARCH_INTEGRITY.md)。
+
+## 从分数提升到可迁移方法
+
+XScientist 不会把单个基准分数提升直接称为“方法发现”。实验前，
+`research discovery plan` 会锁定目标组件、允许与禁止修改的代码范围、固定变量、
+资源上限、强基线、多种评测条件和盲测反馈；实验后，
+`research discovery assess` 会判断结果只是开发条件上的工程优化，还是能够通过
+迁移或尺度验证的新方法。
+
+```bash
+# 先生成完整模板，不需要从空白 JSON 开始。
+xscientist research discovery template --output discovery.json
+
+# 替换模板中的 REPLACE_* 字段后，在实验前锁定契约。
+xscientist research discovery plan \
+  @latest:hypothesis discovery.json
+
+# 所有条件完成后，综合真实证据并产生确定性 verdict。
+xscientist research discovery assess \
+  @latest:experiment_design results.json \
+  --evidence @latest:evidence
+```
+
+方法发现 DAG 会显式包含“资源预算 → 锁定实验设计 ← 盲测策略”，再连接各条件证据、
+泛化评估和结论。若候选方法修改了受保护文件、扩大资源、替换评测器、漏跑基线或
+条件，或只在可见开发集上提升，协议都不会允许它以 `method_discovery` 强度晋级。
+完整 JSON 结构、归一化评分和四种 verdict 见
+[方法发现协议](METHOD_DISCOVERY_PROTOCOL.md)。
 
 ## 人和 Agent 都能用的科研 Git
 
@@ -408,6 +437,7 @@ print(result.returncode)
 | 科研 Git 命令与心智模型 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) |
 | 协议保证与迁移 | [科研协议 v2](RESEARCH_PROTOCOL_V2.md) · [迁移指南](PROTOCOL_MIGRATION_2026.md) |
 | 证据 DAG 与平台集成 | [科研 DAG 与适配器](RESEARCH_DAG_AND_ADAPTERS.md) |
+| 工程提升与方法发现门禁 | [方法发现协议](METHOD_DISCOVERY_PROTOCOL.md) |
 | Context、Memory 与科学不变量 | [认识图谱](EPISTEMIC_GRAPH_SPEC.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 科研完整性与独立评估 | [科研完整性](RESEARCH_INTEGRITY.md) · [评估治理](EVALUATION_GOVERNANCE.md) |
 | 受控自进化 | [自进化架构](SELF_EVOLUTION_ARCHITECTURE.md) · [进化门禁](EVOLUTION_GATE.md) |
