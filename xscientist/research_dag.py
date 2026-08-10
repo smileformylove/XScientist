@@ -37,6 +37,15 @@ _PHASES = {
     "source_snapshot": 3,
     "passage_evidence": 4,
     "hypothesis": 1,
+    "hypothesis_portfolio": 1,
+    "discriminating_prediction": 2,
+    "experiment_priority": 2,
+    "anomaly": 5,
+    "research_review": 6,
+    "mechanism_model": 5,
+    "evidence_quality": 5,
+    "boundary_condition": 6,
+    "transfer_matrix": 6,
     "research_plan": 2,
     "preregistration": 2,
     "agent_candidate": 2,
@@ -75,6 +84,75 @@ _PHASES = {
     "manuscript": 8,
 }
 
+_LAYER_KINDS = {
+    "strategy": {
+        "question",
+        "research_goal",
+        "search_plan",
+        "hypothesis",
+        "hypothesis_portfolio",
+        "discriminating_prediction",
+        "experiment_priority",
+        "action_proposal",
+        "research_review",
+        "stopping_decision",
+        "human_escalation",
+    },
+    "execution": {
+        "research_plan",
+        "preregistration",
+        "experiment_design",
+        "resource_budget",
+        "evaluation_blinding",
+        "experiment_attempt",
+        "experiment_node",
+    },
+    "evidence": {
+        "search_receipt",
+        "source_snapshot",
+        "passage_evidence",
+        "observation",
+        "metric",
+        "evidence",
+        "effect_estimate",
+        "reproduction",
+        "evidence_quality",
+        "risk_of_bias",
+    },
+    "theory": {
+        "inference",
+        "warrant",
+        "assumption",
+        "method",
+        "estimand",
+        "mechanism_model",
+        "sensitivity_analysis",
+        "evidence_synthesis",
+        "boundary_condition",
+        "transfer_matrix",
+        "anomaly",
+        "challenge",
+        "claim",
+    },
+    "decision_memory": {
+        "context_snapshot",
+        "review",
+        "gate_decision",
+        "context_robustness",
+        "novelty_check",
+        "protocol_deviation",
+        "source_update",
+    },
+    "evolution": {"agent_candidate", "agent_evaluation", "manuscript"},
+}
+
+
+def _epistemic_layer(kind: str) -> str:
+    for layer, kinds in _LAYER_KINDS.items():
+        if kind in kinds:
+            return layer
+    return "evidence"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -105,6 +183,258 @@ def _summary(item: Mapping[str, Any], *, disclose: bool) -> str:
             compact = " ".join(str(value).split())
             return compact[:157] + ("..." if len(compact) > 157 else "")
     return f"{item.get('kind')} {item.get('object_id')}"
+
+
+def _strategy_projection(
+    objects: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    """Project current theory, claim drill-down, and research-depth coverage."""
+
+    def targets(
+        item: Mapping[str, Any], relation_types: set[str] | None = None
+    ) -> set[str]:
+        return {
+            str(relation.get("target") or "")
+            for relation in item.get("relations") or []
+            if str(relation.get("target") or "")
+            and (not relation_types or relation.get("type") in relation_types)
+        }
+
+    def latest(kind: str) -> Mapping[str, Any] | None:
+        rows = [item for item in objects.values() if item.get("kind") == kind]
+        return (
+            max(
+                rows,
+                key=lambda item: (
+                    str(item.get("created_at") or ""),
+                    str(item.get("object_id") or ""),
+                ),
+            )
+            if rows
+            else None
+        )
+
+    superseded = {
+        target for item in objects.values() for target in targets(item, {"supersedes"})
+    }
+    active_hypotheses = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "hypothesis"
+        and item.get("state") != "superseded"
+        and object_id not in superseded
+    )
+    open_anomalies = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "anomaly"
+        and (item.get("payload") or {}).get("status") == "open"
+        and object_id not in superseded
+    )
+    mechanisms = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "mechanism_model"
+        and (item.get("payload") or {}).get("status")
+        in {"proposed", "tested", "validated"}
+        and object_id not in superseded
+    )
+    latest_priority = latest("experiment_priority")
+    next_experiment = None
+    if latest_priority is not None:
+        priority_payload = latest_priority.get("payload") or {}
+        selected_id = priority_payload.get("selected_candidate_id")
+        selected = next(
+            (
+                row
+                for row in priority_payload.get("candidate_set") or []
+                if row.get("candidate_id") == selected_id
+            ),
+            None,
+        )
+        if selected:
+            next_experiment = {
+                "priority_object_id": latest_priority["object_id"],
+                "candidate_id": selected_id,
+                "summary": selected.get("summary"),
+                "expected_information_gain": selected.get("expected_information_gain"),
+                "utility_score": selected.get("utility_score"),
+            }
+    latest_review = latest("research_review")
+    open_questions = list((latest_review or {}).get("payload", {}).get("gaps") or [])
+    for item in objects.values():
+        if item.get("kind") != "boundary_condition":
+            continue
+        payload = item.get("payload") or {}
+        if payload.get("status") == "untested":
+            open_questions.append(
+                {
+                    "code": "untested_boundary",
+                    "message": f"{payload.get('dimension')}: {payload.get('condition')}",
+                    "object_id": item["object_id"],
+                }
+            )
+    frontier_core = {
+        "active_hypothesis_ids": active_hypotheses,
+        "portfolio_ids": sorted(
+            object_id
+            for object_id, item in objects.items()
+            if item.get("kind") == "hypothesis_portfolio"
+            and object_id not in superseded
+        ),
+        "prediction_ids": sorted(
+            object_id
+            for object_id, item in objects.items()
+            if item.get("kind") == "discriminating_prediction"
+            and object_id not in superseded
+        ),
+        "mechanism_ids": mechanisms,
+        "open_anomaly_ids": open_anomalies,
+        "open_questions": open_questions,
+        "next_experiment": next_experiment,
+    }
+    theory_frontier = {
+        **frontier_core,
+        "frontier_hash": canonical_content_hash(frontier_core),
+    }
+
+    claim_insights: list[dict[str, Any]] = []
+    for claim_id, claim in sorted(objects.items()):
+        if claim.get("kind") != "claim":
+            continue
+        direct = targets(claim)
+        supporting = sorted(
+            {
+                object_id
+                for object_id in direct
+                if objects.get(object_id, {}).get("kind")
+                in {"evidence", "passage_evidence", "inference", "evidence_synthesis"}
+            }
+            | {
+                object_id
+                for object_id, item in objects.items()
+                if claim_id in targets(item, {"supports", "qualified_supports"})
+            }
+        )
+        refuting = sorted(
+            object_id
+            for object_id, item in objects.items()
+            if claim_id
+            in targets(
+                item,
+                {"refutes", "qualified_refutes", "contradicts", "challenges_inference"},
+            )
+        )
+        mechanism_ids = sorted(
+            object_id
+            for object_id in direct
+            if objects.get(object_id, {}).get("kind") == "mechanism_model"
+        )
+        quality_ids = sorted(
+            object_id
+            for object_id, item in objects.items()
+            if item.get("kind") == "evidence_quality"
+            and set(supporting).intersection(targets(item, {"evaluates"}))
+        )
+        boundary_ids = sorted(
+            {
+                object_id
+                for object_id, item in objects.items()
+                if item.get("kind") in {"boundary_condition", "transfer_matrix"}
+                and claim_id in targets(item)
+            }
+            | {
+                object_id
+                for object_id in direct
+                if objects.get(object_id, {}).get("kind")
+                in {"boundary_condition", "transfer_matrix"}
+            }
+        )
+        depth_level = str(
+            (claim.get("payload") or {}).get("depth_level") or "descriptive"
+        )
+        supporting_set = set(supporting)
+        valid_mechanisms = [
+            object_id
+            for object_id in mechanism_ids
+            if objects[object_id].get("state") == "verified"
+            and (objects[object_id].get("payload") or {}).get("status") == "validated"
+            and supporting_set.intersection(
+                (objects[object_id].get("payload") or {}).get("evidence_ids") or []
+            )
+        ]
+        valid_quality = [
+            object_id
+            for object_id in quality_ids
+            if objects[object_id].get("state") == "verified"
+            and (objects[object_id].get("payload") or {}).get("independent") is True
+            and (objects[object_id].get("payload") or {}).get("overall_grade")
+            in {"strong", "moderate"}
+        ]
+        claim_payload = claim.get("payload") or {}
+        valid_transfer = []
+        for object_id in boundary_ids:
+            item = objects[object_id]
+            if item.get("kind") != "transfer_matrix":
+                continue
+            matrix_payload = item.get("payload") or {}
+            matrix_claim = objects.get(str(matrix_payload.get("claim_id") or ""), {})
+            matrix_claim_payload = matrix_claim.get("payload") or {}
+            if (
+                item.get("state") == "verified"
+                and matrix_payload.get("transfer_ready") is True
+                and " ".join(str(matrix_claim_payload.get("statement") or "").split())
+                == " ".join(str(claim_payload.get("statement") or "").split())
+                and matrix_claim_payload.get("scope_hash")
+                == claim_payload.get("scope_hash")
+            ):
+                valid_transfer.append(object_id)
+        gaps = []
+        if not supporting:
+            gaps.append("supporting_evidence_missing")
+        if depth_level in {"causal", "transferable"} and not valid_mechanisms:
+            gaps.append("validated_mechanism_missing")
+        if depth_level in {"causal", "transferable"} and not valid_quality:
+            gaps.append("evidence_quality_missing")
+        if depth_level == "transferable" and not valid_transfer:
+            gaps.append("transfer_matrix_missing")
+        claim_insights.append(
+            {
+                "claim_id": claim_id,
+                "depth_level": depth_level,
+                "supporting_ids": supporting,
+                "refuting_ids": refuting,
+                "mechanism_ids": mechanism_ids,
+                "quality_assessment_ids": quality_ids,
+                "boundary_ids": boundary_ids,
+                "next_experiment": next_experiment,
+                "gaps": gaps,
+                "decision_ready": not gaps and not refuting,
+            }
+        )
+    strategy_summary = {
+        "profile": "xscientist.deep-research-strategy.v1",
+        "layer_counts": dict(
+            sorted(
+                Counter(
+                    _epistemic_layer(str(item.get("kind") or ""))
+                    for item in objects.values()
+                ).items()
+            )
+        ),
+        "review_due": bool(
+            not latest_review
+            or (latest_review.get("payload") or {}).get("review_due") is True
+        ),
+        "latest_review_id": (
+            str(latest_review["object_id"]) if latest_review is not None else None
+        ),
+        "open_anomaly_count": len(open_anomalies),
+        "claim_depth_counts": dict(
+            sorted(Counter(item["depth_level"] for item in claim_insights).items())
+        ),
+    }
+    return theory_frontier, claim_insights, strategy_summary
 
 
 def _has_hash_anchor(payload: Any) -> bool:
@@ -1618,6 +1948,7 @@ def build_research_dag(
             "kind": str(item["kind"]),
             "state": str(item["state"]),
             "phase": _PHASES.get(str(item["kind"]), 4),
+            "layer": _epistemic_layer(str(item["kind"])),
             "summary": _summary(item, disclose=disclose_summaries),
             "content_hash": str(item["content_hash"]),
             "actor": dict(item.get("actor") or {}),
@@ -1690,7 +2021,23 @@ def build_research_dag(
                             else (
                                 "decision"
                                 if relation_role in {"goal", "budget", "selection"}
-                                else category.get(relation_type, "lineage")
+                                else (
+                                    "theory"
+                                    if relation_role
+                                    in {
+                                        "primary",
+                                        "alternative",
+                                        "null",
+                                        "predictor",
+                                        "rival",
+                                        "mechanism",
+                                    }
+                                    else (
+                                        "boundary"
+                                        if relation_role in {"transfer", "boundary"}
+                                        else category.get(relation_type, "lineage")
+                                    )
+                                )
                             )
                         )
                     ),
@@ -1856,6 +2203,9 @@ def build_research_dag(
         if (object_id, manifest_hash, graph_hash) not in resolved_bindings
     )
 
+    for node in nodes:
+        node.setdefault("layer", _epistemic_layer(str(node.get("kind") or "")))
+
     graph_for_analysis = {
         "nodes": [{"id": node["id"]} for node in nodes],
         "edges": [
@@ -1942,6 +2292,7 @@ def build_research_dag(
             for object_id, manifest_hash, graph_hash in unresolved_ara_bindings
         )
     proof_counts = Counter(node["proof"]["level"] for node in nodes)
+    theory_frontier, claim_insights, strategy_summary = _strategy_projection(objects)
     base = {
         "schema_version": RESEARCH_DAG_SCHEMA,
         "ref": ref,
@@ -1959,6 +2310,9 @@ def build_research_dag(
             ),
         ),
         "proof_summary": dict(sorted(proof_counts.items())),
+        "theory_frontier": theory_frontier,
+        "claim_insights": claim_insights,
+        "strategy_summary": strategy_summary,
         "scientific_closure": {
             "status": (closure or {}).get("status", "not_applicable"),
             "claim_count": len(claims),
@@ -1987,7 +2341,7 @@ def render_research_dag_html(
     *,
     title: str = "XScientist Scientific Evidence DAG",
 ) -> str:
-    """Render a self-contained, searchable evidence and evolution browser."""
+    """Render a self-contained browser with epistemic layers and claim drill-down."""
 
     payload = json.dumps(graph, ensure_ascii=False, separators=(",", ":"), default=str)
     payload = payload.replace("<", "\\u003c").replace(">", "\\u003e")
@@ -1995,20 +2349,21 @@ def render_research_dag_html(
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title_text}</title><style>
-:root{{color-scheme:light dark;--bg:light-dark(#f7f8fb,#10131a);--panel:light-dark(#fff,#181d27);--ink:light-dark(#18202f,#eef2f8);--muted:light-dark(#667085,#9aa4b5);--line:light-dark(#c9d0dc,#3a4353);--support:#16855b;--challenge:#d14b43;--verify:#7657c8;--evolve:#2f70c9;--context:#b56a13;--warn:#c07818}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}}header{{padding:18px 22px;background:var(--panel);border-bottom:1px solid var(--line)}}h1{{font-size:22px;margin:0 0 8px}}.stats,.controls{{display:flex;gap:8px;flex-wrap:wrap;align-items:center}}.stat{{color:var(--muted)}}.controls{{padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}}label{{font-weight:500}}input,select{{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px}}input{{min-width:220px}}main{{display:grid;grid-template-columns:minmax(0,1fr) 340px;min-height:680px}}#canvas{{overflow:auto;padding:18px}}svg{{display:block;background:var(--panel);border:1px solid var(--line);border-radius:8px}}aside{{background:var(--panel);border-left:1px solid var(--line);padding:18px;overflow-wrap:anywhere}}aside h2{{font-size:17px;margin:0 0 10px}}.edge{{fill:none;stroke:var(--line);stroke-width:1.5}}.edge.support{{stroke:var(--support)}}.edge.challenge{{stroke:var(--challenge);stroke-dasharray:5 4}}.edge.verification{{stroke:var(--verify)}}.edge.evolution{{stroke:var(--evolve)}}.edge.context{{stroke:var(--context);stroke-dasharray:2 3}}.node rect{{fill:var(--panel);stroke:var(--line);stroke-width:1.5;rx:8}}.node.verified rect{{stroke:var(--support)}}.node.replayable rect{{stroke:var(--evolve)}}.node.contested rect{{stroke:var(--challenge);stroke-width:2}}.node.recorded rect{{stroke:var(--warn)}}.node text{{fill:var(--ink);font-size:12px;pointer-events:none}}.node .muted{{fill:var(--muted)}}.node:focus{{outline:none}}.node:focus rect{{stroke-width:3}}table{{width:100%;border-collapse:collapse}}td{{padding:7px 0;border-bottom:1px solid var(--line);vertical-align:top}}td:first-child{{width:96px;color:var(--muted)}}code{{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}}ul{{padding-left:20px}}.pass{{color:var(--support)}}.fail{{color:var(--challenge)}}.legend{{margin-top:10px;color:var(--muted)}}.legend span{{white-space:nowrap;margin-right:12px}}.dot{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}}.empty{{padding:28px;color:var(--muted)}}@media(max-width:900px){{main{{grid-template-columns:1fr}}aside{{border-left:0;border-top:1px solid var(--line)}}}}
-</style></head><body><header><h1>{title_text}</h1><div class="stats" id="stats"></div><div class="legend"><span><i class="dot" style="background:var(--support)"></i>support/verified</span><span><i class="dot" style="background:var(--challenge)"></i>refute/contested</span><span><i class="dot" style="background:var(--verify)"></i>review/reproduce</span><span><i class="dot" style="background:var(--evolve)"></i>evolution</span><span><i class="dot" style="background:var(--context)"></i>context/memory</span></div></header>
-<section class="controls" aria-label="Graph filters"><label for="search">Search</label><input id="search" type="search" placeholder="statement, ID, or kind"><label for="kind">Kind</label><select id="kind"><option value="">All kinds</option></select><label for="proof">Verification</label><select id="proof"><option value="">All levels</option><option>verified</option><option>replayable</option><option>traceable</option><option>recorded</option><option>contested</option></select></section>
-<main><section id="canvas" aria-label="Scientific evidence graph"></section><aside><h2>Selected scientific object</h2><div id="details">Select a node to inspect its evidence checks.</div></aside></main>
+:root{{color-scheme:light dark;--bg:light-dark(#f7f8fb,#10131a);--panel:light-dark(#fff,#181d27);--ink:light-dark(#18202f,#eef2f8);--muted:light-dark(#667085,#9aa4b5);--line:light-dark(#c9d0dc,#3a4353);--support:#16855b;--challenge:#d14b43;--verify:#7657c8;--evolve:#2f70c9;--context:#b56a13;--theory:#0089a8;--boundary:#9a5b16;--warn:#c07818}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}}header{{padding:18px 22px;background:var(--panel);border-bottom:1px solid var(--line)}}h1{{font-size:22px;margin:0 0 8px}}.stats,.controls{{display:flex;gap:8px;flex-wrap:wrap;align-items:center}}.stat{{color:var(--muted)}}.controls{{padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}}label{{font-weight:500}}input,select{{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px}}input{{min-width:220px}}main{{display:grid;grid-template-columns:minmax(0,1fr) 360px;min-height:680px}}#canvas{{overflow:auto;padding:18px}}svg{{display:block;background:var(--panel);border:1px solid var(--line);border-radius:8px}}aside{{background:var(--panel);border-left:1px solid var(--line);padding:18px;overflow-wrap:anywhere}}aside h2{{font-size:17px;margin:0 0 10px}}.edge{{fill:none;stroke:var(--line);stroke-width:1.5}}.edge.support{{stroke:var(--support)}}.edge.challenge{{stroke:var(--challenge);stroke-dasharray:5 4}}.edge.verification{{stroke:var(--verify)}}.edge.evolution{{stroke:var(--evolve)}}.edge.context{{stroke:var(--context);stroke-dasharray:2 3}}.edge.theory{{stroke:var(--theory)}}.edge.boundary{{stroke:var(--boundary);stroke-dasharray:7 3}}.node rect{{fill:var(--panel);stroke:var(--line);stroke-width:1.5;rx:8}}.node.verified rect{{stroke:var(--support)}}.node.replayable rect{{stroke:var(--evolve)}}.node.contested rect{{stroke:var(--challenge);stroke-width:2}}.node.recorded rect{{stroke:var(--warn)}}.node text{{fill:var(--ink);font-size:12px;pointer-events:none}}.node .muted{{fill:var(--muted)}}.node:focus{{outline:none}}.node:focus rect{{stroke-width:3}}table{{width:100%;border-collapse:collapse}}td{{padding:7px 0;border-bottom:1px solid var(--line);vertical-align:top}}td:first-child{{width:96px;color:var(--muted)}}code{{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}}ul{{padding-left:20px}}.pass{{color:var(--support)}}.fail{{color:var(--challenge)}}.empty{{padding:28px;color:var(--muted)}}@media(max-width:900px){{main{{grid-template-columns:1fr}}aside{{border-left:0;border-top:1px solid var(--line)}}}}
+</style></head><body><header><h1>{title_text}</h1><div class="stats" id="stats"></div></header>
+<section class="controls" aria-label="Graph filters"><label for="search">Search</label><input id="search" type="search" placeholder="statement, ID, or kind"><label for="layer">Layer</label><select id="layer"><option value="">All layers</option><option>strategy</option><option>execution</option><option>evidence</option><option>theory</option><option>decision_memory</option><option>evolution</option></select><label for="kind">Kind</label><select id="kind"><option value="">All kinds</option></select><label for="proof">Verification</label><select id="proof"><option value="">All levels</option><option>verified</option><option>replayable</option><option>traceable</option><option>recorded</option><option>contested</option></select></section>
+<main><section id="canvas" aria-label="Scientific evidence graph"></section><aside><h2>Selected scientific object</h2><div id="details">Select a node to inspect its reasoning.</div></aside></main>
 <script id="dag-data" type="application/json">{payload}</script><script>
-const graph=JSON.parse(document.getElementById('dag-data').textContent),allNodes=graph.nodes||[],allEdges=graph.edges||[],byId=new Map(allNodes.map(n=>[n.id,n]));
+const graph=JSON.parse(document.getElementById('dag-data').textContent),allNodes=graph.nodes||[],allEdges=graph.edges||[],byId=new Map(allNodes.map(n=>[n.id,n])),claimInsights=new Map((graph.claim_insights||[]).map(x=>[x.claim_id,x]));
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
-const kind=document.getElementById('kind'),proof=document.getElementById('proof'),search=document.getElementById('search');
+const kind=document.getElementById('kind'),layer=document.getElementById('layer'),proof=document.getElementById('proof'),search=document.getElementById('search');
 [...new Set(allNodes.map(n=>n.kind))].sort().forEach(v=>kind.insertAdjacentHTML('beforeend',`<option>${{esc(v)}}</option>`));
-document.getElementById('stats').innerHTML=`<span class="stat">${{allNodes.length}} nodes</span><span class="stat">${{allEdges.length}} relations</span><span class="stat">DAG ${{graph.integrity.is_dag?'valid':'blocked'}}</span><span class="stat">closure ${{esc(graph.scientific_closure.status)}}</span><span class="stat"><code>${{esc(graph.commit.slice(0,12))}}</code></span>`;
-function detail(n){{const checks=(n.proof.checks||[]).map(c=>`<li class="${{c.passed?'pass':'fail'}}">${{c.passed?'✓':'✗'}} ${{esc(c.label)}} <small>(${{esc(c.layer)}})</small></li>`).join('');document.getElementById('details').innerHTML=`<table><tr><td>Summary</td><td>${{esc(n.summary)}}</td></tr><tr><td>ID</td><td><code>${{esc(n.id)}}</code></td></tr><tr><td>Type</td><td>${{esc(n.kind)}} / ${{esc(n.state)}}</td></tr><tr><td>Source</td><td>${{esc(n.source)}}</td></tr><tr><td>Snapshot</td><td><code>${{esc(n.source_ref||'-')}}</code></td></tr><tr><td>Proof</td><td><strong>${{esc(n.proof.level)}}</strong></td></tr><tr><td>Hash</td><td><code>${{esc(n.content_hash||'-')}}</code></td></tr><tr><td>Actor</td><td>${{esc((n.actor||{{}}).actor_id||'-')}}</td></tr></table><h3>Verification checks</h3><ul>${{checks||'<li>No specialized checks.</li>'}}</ul>`}}
-function render(){{const q=search.value.trim().toLowerCase();const nodes=allNodes.filter(n=>(!kind.value||n.kind===kind.value)&&(!proof.value||n.proof.level===proof.value)&&(!q||`${{n.id}} ${{n.kind}} ${{n.summary}}`.toLowerCase().includes(q)));const ids=new Set(nodes.map(n=>n.id)),edges=allEdges.filter(e=>ids.has(e.source)&&ids.has(e.target));const buckets=new Map();nodes.forEach(n=>{{if(!buckets.has(n.phase))buckets.set(n.phase,[]);buckets.get(n.phase).push(n)}});[...buckets.values()].forEach(v=>v.sort((a,b)=>a.id.localeCompare(b.id)));const phases=[...buckets.keys()].sort((a,b)=>a-b),boxW=220,boxH=82,gapX=92,gapY=28,pad=34,maxRows=Math.max(1,...[...buckets.values()].map(v=>v.length)),width=Math.max(720,pad*2+phases.length*boxW+Math.max(0,phases.length-1)*gapX),height=Math.max(220,pad*2+maxRows*boxH+Math.max(0,maxRows-1)*gapY),pos=new Map();phases.forEach((p,col)=>buckets.get(p).forEach((n,row)=>pos.set(n.id,{{x:pad+col*(boxW+gapX),y:pad+row*(boxH+gapY)}})));const edgeSvg=edges.map(e=>{{const a=pos.get(e.source),b=pos.get(e.target);if(!a||!b)return'';const x1=a.x+boxW,y1=a.y+boxH/2,x2=b.x,y2=b.y+boxH/2,m=x1+(x2-x1)/2;return`<path class="edge ${{esc(e.category)}}" d="M${{x1}} ${{y1}} C${{m}} ${{y1}},${{m}} ${{y2}},${{x2}} ${{y2}}" marker-end="url(#arrow)"/>`}}).join('');const nodeSvg=nodes.map(n=>{{const p=pos.get(n.id),summary=n.summary.length>29?n.summary.slice(0,29)+'…':n.summary;return`<g class="node ${{esc(n.proof.level)}}" data-id="${{esc(n.id)}}" tabindex="0" role="button" aria-label="${{esc(n.kind+' '+n.summary)}}" transform="translate(${{p.x}},${{p.y}})"><rect width="${{boxW}}" height="${{boxH}}"/><text x="12" y="20"><tspan font-weight="600">${{esc(n.kind)}}</tspan></text><text class="muted" x="12" y="40">${{esc(summary)}}</text><text class="muted" x="12" y="60">${{esc(n.state)}} · ${{esc(n.proof.level)}}</text><text class="muted" x="12" y="76">${{esc(n.id.slice(0,25))}}</text></g>`}}).join('');const canvas=document.getElementById('canvas');canvas.innerHTML=nodes.length?`<svg width="${{width}}" height="${{height}}" viewBox="0 0 ${{width}} ${{height}}"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>${{edgeSvg}}${{nodeSvg}}</svg>`:'<div class="empty">No nodes match these filters.</div>';canvas.querySelectorAll('.node').forEach(el=>{{const show=()=>detail(byId.get(el.dataset.id));el.addEventListener('click',show);el.addEventListener('keydown',e=>{{if(e.key==='Enter'||e.key===' '){{e.preventDefault();show()}}}})}});if(nodes[0])detail(nodes[0])}}
-[search,kind,proof].forEach(el=>el.addEventListener(el===search?'input':'change',render));render();
+document.getElementById('stats').innerHTML=`<span class="stat">${{allNodes.length}} nodes</span><span class="stat">${{allEdges.length}} relations</span><span class="stat">DAG ${{graph.integrity.is_dag?'valid':'blocked'}}</span><span class="stat">closure ${{esc(graph.scientific_closure.status)}}</span><span class="stat">open anomalies ${{graph.strategy_summary.open_anomaly_count||0}}</span><span class="stat"><code>${{esc(graph.commit.slice(0,12))}}</code></span>`;
+const idList=xs=>(xs&&xs.length?`<ul>${{xs.map(x=>`<li><code>${{esc(x)}}</code></li>`).join('')}}</ul>`:'None');
+function detail(n){{const checks=(n.proof.checks||[]).map(c=>`<li class="${{c.passed?'pass':'fail'}}">${{c.passed?'✓':'✗'}} ${{esc(c.label)}} <small>(${{esc(c.layer)}})</small></li>`).join(''),insight=claimInsights.get(n.id);let drill='';if(insight){{const next=insight.next_experiment;drill=`<h3>Claim reasoning</h3><table><tr><td>Depth</td><td>${{esc(insight.depth_level)}}</td></tr><tr><td>Decision</td><td class="${{insight.decision_ready?'pass':'fail'}}">${{insight.decision_ready?'ready':'blocked'}}</td></tr><tr><td>Support</td><td>${{idList(insight.supporting_ids)}}</td></tr><tr><td>Refutation</td><td>${{idList(insight.refuting_ids)}}</td></tr><tr><td>Mechanism</td><td>${{idList(insight.mechanism_ids)}}</td></tr><tr><td>Quality</td><td>${{idList(insight.quality_assessment_ids)}}</td></tr><tr><td>Boundaries</td><td>${{idList(insight.boundary_ids)}}</td></tr><tr><td>Next experiment</td><td>${{next?esc(next.summary||next.candidate_id):'None ranked'}}</td></tr><tr><td>Open gaps</td><td>${{insight.gaps.length?esc(insight.gaps.join(', ')):'None'}}</td></tr></table>`}}document.getElementById('details').innerHTML=`<table><tr><td>Summary</td><td>${{esc(n.summary)}}</td></tr><tr><td>ID</td><td><code>${{esc(n.id)}}</code></td></tr><tr><td>Type</td><td>${{esc(n.kind)}} / ${{esc(n.state)}}</td></tr><tr><td>Layer</td><td>${{esc(n.layer)}}</td></tr><tr><td>Source</td><td>${{esc(n.source)}}</td></tr><tr><td>Snapshot</td><td><code>${{esc(n.source_ref||'-')}}</code></td></tr><tr><td>Proof</td><td><strong>${{esc(n.proof.level)}}</strong></td></tr><tr><td>Hash</td><td><code>${{esc(n.content_hash||'-')}}</code></td></tr><tr><td>Actor</td><td>${{esc((n.actor||{{}}).actor_id||'-')}}</td></tr></table>${{drill}}<h3>Verification checks</h3><ul>${{checks||'<li>No specialized checks.</li>'}}</ul>`}}
+function render(){{const q=search.value.trim().toLowerCase();const nodes=allNodes.filter(n=>(!layer.value||n.layer===layer.value)&&(!kind.value||n.kind===kind.value)&&(!proof.value||n.proof.level===proof.value)&&(!q||`${{n.id}} ${{n.kind}} ${{n.summary}}`.toLowerCase().includes(q)));const ids=new Set(nodes.map(n=>n.id)),edges=allEdges.filter(e=>ids.has(e.source)&&ids.has(e.target));const buckets=new Map();nodes.forEach(n=>{{if(!buckets.has(n.phase))buckets.set(n.phase,[]);buckets.get(n.phase).push(n)}});[...buckets.values()].forEach(v=>v.sort((a,b)=>a.id.localeCompare(b.id)));const phases=[...buckets.keys()].sort((a,b)=>a-b),boxW=220,boxH=82,gapX=92,gapY=28,pad=34,maxRows=Math.max(1,...[...buckets.values()].map(v=>v.length)),width=Math.max(720,pad*2+phases.length*boxW+Math.max(0,phases.length-1)*gapX),height=Math.max(220,pad*2+maxRows*boxH+Math.max(0,maxRows-1)*gapY),pos=new Map();phases.forEach((p,col)=>buckets.get(p).forEach((n,row)=>pos.set(n.id,{{x:pad+col*(boxW+gapX),y:pad+row*(boxH+gapY)}})));const edgeSvg=edges.map(e=>{{const a=pos.get(e.source),b=pos.get(e.target);if(!a||!b)return'';const x1=a.x+boxW,y1=a.y+boxH/2,x2=b.x,y2=b.y+boxH/2,m=x1+(x2-x1)/2;return`<path class="edge ${{esc(e.category)}}" d="M${{x1}} ${{y1}} C${{m}} ${{y1}},${{m}} ${{y2}},${{x2}} ${{y2}}" marker-end="url(#arrow)"/>`}}).join('');const nodeSvg=nodes.map(n=>{{const p=pos.get(n.id),summary=n.summary.length>29?n.summary.slice(0,29)+'…':n.summary;return`<g class="node ${{esc(n.proof.level)}}" data-id="${{esc(n.id)}}" tabindex="0" role="button" aria-label="${{esc(n.kind+' '+n.summary)}}" transform="translate(${{p.x}},${{p.y}})"><rect width="${{boxW}}" height="${{boxH}}"/><text x="12" y="20"><tspan font-weight="600">${{esc(n.kind)}}</tspan></text><text class="muted" x="12" y="40">${{esc(summary)}}</text><text class="muted" x="12" y="60">${{esc(n.layer)}} · ${{esc(n.proof.level)}}</text><text class="muted" x="12" y="76">${{esc(n.id.slice(0,25))}}</text></g>`}}).join('');const canvas=document.getElementById('canvas');canvas.innerHTML=nodes.length?`<svg width="${{width}}" height="${{height}}" viewBox="0 0 ${{width}} ${{height}}"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>${{edgeSvg}}${{nodeSvg}}</svg>`:'<div class="empty">No nodes match these filters.</div>';canvas.querySelectorAll('.node').forEach(el=>{{const show=()=>detail(byId.get(el.dataset.id));el.addEventListener('click',show);el.addEventListener('keydown',e=>{{if(e.key==='Enter'||e.key===' '){{e.preventDefault();show()}}}})}});if(nodes[0])detail(nodes[0])}}
+[search,layer,kind,proof].forEach(el=>el.addEventListener(el===search?'input':'change',render));render();
 </script></body></html>"""
 
 

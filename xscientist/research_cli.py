@@ -187,14 +187,18 @@ def _hash_local_file(path_value: str) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _read_json_mapping(path_value: str, *, label: str) -> dict[str, Any]:
+def _read_json_value(path_value: str, *, label: str) -> Any:
     path = Path(path_value).expanduser()
     if not path.is_file():
         raise ResearchGitError(f"{label} file was not found")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ResearchGitError(f"{label} file is invalid JSON") from exc
+
+
+def _read_json_mapping(path_value: str, *, label: str) -> dict[str, Any]:
+    value = _read_json_value(path_value, label=label)
     if not isinstance(value, dict):
         raise ResearchGitError(f"{label} must be a JSON object")
     return value
@@ -258,6 +262,13 @@ def _scope_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "time_window": args.time_window,
         "estimand": args.estimand,
     }
+
+
+def _add_program_save_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", default=".")
+    parser.add_argument("-m", "--message")
+    parser.add_argument("--no-commit", action="store_true")
+    parser.add_argument("--json", action="store_true", dest="as_json")
 
 
 def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentParser:
@@ -388,6 +399,98 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     discovery_assess.add_argument("-m", "--message")
     discovery_assess.add_argument("--no-commit", action="store_true")
     discovery_assess.add_argument("--json", action="store_true", dest="as_json")
+
+    program_parser = subparsers.add_parser(
+        "program",
+        help="Run the competitive-hypothesis, information-value, and theory-depth loop.",
+    )
+    program_subparsers = program_parser.add_subparsers(
+        dest="program_command", required=True
+    )
+    program_template = program_subparsers.add_parser(
+        "template", help="Print or write editable deep-research JSON templates."
+    )
+    program_template.add_argument("--output")
+    program_template.add_argument("--json", action="store_true", dest="as_json")
+
+    program_portfolio = program_subparsers.add_parser(
+        "portfolio", help="Lock primary, alternative, and optional null hypotheses."
+    )
+    program_portfolio.add_argument("primary_id")
+    program_portfolio.add_argument("--alternative", action="append", required=True)
+    program_portfolio.add_argument("--null", dest="null_id")
+    program_portfolio.add_argument("--question", required=True)
+    program_portfolio.add_argument(
+        "--prior", action="append", default=[], help="Hypothesis selector=weight."
+    )
+    _add_program_save_arguments(program_portfolio)
+
+    program_prediction = program_subparsers.add_parser(
+        "prediction", help="Lock an outcome that distinguishes competing hypotheses."
+    )
+    program_prediction.add_argument("portfolio_id")
+    program_prediction.add_argument("hypothesis_id")
+    program_prediction.add_argument("--when", required=True)
+    program_prediction.add_argument("--expect", required=True)
+    program_prediction.add_argument("--distinguishes", action="append", required=True)
+    program_prediction.add_argument("--falsifier", required=True)
+    _add_program_save_arguments(program_prediction)
+
+    program_priority = program_subparsers.add_parser(
+        "prioritize", help="Rank candidate experiments by expected information value."
+    )
+    program_priority.add_argument("portfolio_id")
+    program_priority.add_argument(
+        "candidates", help="JSON array or object with experiment_candidates."
+    )
+    _add_program_save_arguments(program_priority)
+
+    program_mechanism = program_subparsers.add_parser(
+        "mechanism", help="Record an intervention-testable causal mechanism."
+    )
+    program_mechanism.add_argument("hypothesis_id")
+    program_mechanism.add_argument("statement")
+    program_mechanism.add_argument("--mediator", action="append", required=True)
+    program_mechanism.add_argument("--intervention", action="append", required=True)
+    program_mechanism.add_argument("--rival", action="append", default=[])
+    program_mechanism.add_argument("--evidence", action="append", default=[])
+    program_mechanism.add_argument(
+        "--status",
+        choices=["proposed", "tested", "validated", "refuted"],
+        default="proposed",
+    )
+    _add_program_save_arguments(program_mechanism)
+
+    program_quality = program_subparsers.add_parser(
+        "quality", help="Assess evidence quality and bias across fixed domains."
+    )
+    program_quality.add_argument("evidence_id")
+    program_quality.add_argument("assessment", help="JSON object with domains/notes.")
+    program_quality.add_argument("--assessor", required=True)
+    program_quality.add_argument("--independent", action="store_true")
+    _add_program_save_arguments(program_quality)
+
+    program_boundary = program_subparsers.add_parser(
+        "boundary", help="Map claim applicability and held-out transfer conditions."
+    )
+    program_boundary.add_argument("claim_id")
+    program_boundary.add_argument(
+        "matrix", help="JSON array or object with boundary_rows."
+    )
+    _add_program_save_arguments(program_boundary)
+
+    program_review = program_subparsers.add_parser(
+        "review", help="Inspect or checkpoint structural gaps and anomalies."
+    )
+    program_review.add_argument("--record", action="store_true")
+    _add_program_save_arguments(program_review)
+
+    program_claim = program_subparsers.add_parser(
+        "claim", help="Explain one claim's support, refutation, mechanism, and gaps."
+    )
+    program_claim.add_argument("claim_id")
+    program_claim.add_argument("--repo", default=".")
+    program_claim.add_argument("--json", action="store_true", dest="as_json")
 
     literature_parser = subparsers.add_parser(
         "literature",
@@ -693,6 +796,15 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         default="",
         help="Declare how strong the scientific contribution is intended to be.",
     )
+    claim_parser.add_argument(
+        "--depth-level",
+        choices=["descriptive", "causal", "transferable"],
+        default="descriptive",
+        help="Opt into mechanism, quality, and transfer promotion gates.",
+    )
+    claim_parser.add_argument("--mechanism", action="append", default=[])
+    claim_parser.add_argument("--quality", action="append", default=[])
+    claim_parser.add_argument("--transfer", action="append", default=[])
     claim_parser.add_argument("--repo", default=".")
     claim_parser.add_argument("-m", "--message")
     claim_parser.add_argument("--no-commit", action="store_true")
@@ -1399,6 +1511,215 @@ def main(
                 )
             return 0
 
+        if args.command == "program":
+            from .research_strategy import (
+                inspect_claim_depth,
+                rank_experiment_candidates,
+                research_strategy_template,
+                review_research_program,
+                save_discriminating_prediction,
+                save_evidence_quality_assessment,
+                save_hypothesis_portfolio,
+                save_mechanism_model,
+                save_transfer_matrix,
+            )
+
+            if args.program_command == "template":
+                payload = research_strategy_template()
+                if args.output:
+                    from ai_scientist.utils.atomic_io import atomic_write_json
+
+                    destination = Path(args.output).expanduser()
+                    if destination.exists():
+                        raise ResearchGitError(
+                            "research strategy template output already exists"
+                        )
+                    atomic_write_json(destination, payload, ensure_ascii=False)
+                    response = {"output": str(destination), "template": payload}
+                    if args.as_json:
+                        _print_json(response)
+                    else:
+                        print(
+                            "Deep-research template: " f"{_display_path(destination)}"
+                        )
+                else:
+                    _print_json(payload)
+                return 0
+            if args.program_command == "portfolio":
+                raw_priors = _parse_assignments(args.prior, label="prior")
+                try:
+                    priors = {key: float(value) for key, value in raw_priors.items()}
+                except (TypeError, ValueError) as exc:
+                    raise ResearchGitError(
+                        "prior weights must be numeric NAME=VALUE assignments"
+                    ) from exc
+                result = save_hypothesis_portfolio(
+                    args.repo,
+                    question=args.question,
+                    primary_id=args.primary_id,
+                    alternative_ids=args.alternative,
+                    null_id=args.null_id,
+                    prior_weights=priors,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "hypothesis portfolio", result, as_json=args.as_json
+                )
+                return 0
+            if args.program_command == "prediction":
+                result = save_discriminating_prediction(
+                    args.repo,
+                    portfolio_id=args.portfolio_id,
+                    hypothesis_id=args.hypothesis_id,
+                    when=args.when,
+                    expected_outcome=args.expect,
+                    distinguishes_from=args.distinguishes,
+                    falsifier=args.falsifier,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "discriminating prediction", result, as_json=args.as_json
+                )
+                return 0
+            if args.program_command == "prioritize":
+                raw_candidates = _read_json_value(
+                    args.candidates, label="experiment candidates"
+                )
+                if isinstance(raw_candidates, dict):
+                    raw_candidates = raw_candidates.get("experiment_candidates")
+                if not isinstance(raw_candidates, list):
+                    raise ResearchGitError(
+                        "experiment candidates must be a JSON array or contain experiment_candidates"
+                    )
+                result = rank_experiment_candidates(
+                    args.repo,
+                    portfolio_id=args.portfolio_id,
+                    candidates=raw_candidates,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("experiment priority", result, as_json=args.as_json)
+                if not args.as_json:
+                    selected = result["ranking"]["candidate_set"][0]
+                    print(
+                        f"Next experiment: {selected['candidate_id']} "
+                        f"(EIG={selected['expected_information_gain']}, "
+                        f"utility={selected['utility_score']})"
+                    )
+                return 0
+            if args.program_command == "mechanism":
+                result = save_mechanism_model(
+                    args.repo,
+                    hypothesis_id=args.hypothesis_id,
+                    statement=args.statement,
+                    mediators=args.mediator,
+                    interventions=args.intervention,
+                    rival_hypothesis_ids=args.rival,
+                    evidence_ids=args.evidence,
+                    status=args.status,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("mechanism model", result, as_json=args.as_json)
+                return 0
+            if args.program_command == "quality":
+                assessment = _read_json_mapping(
+                    args.assessment, label="evidence quality assessment"
+                )
+                domains = assessment.get("domains", assessment)
+                if not isinstance(domains, dict):
+                    raise ResearchGitError(
+                        "quality assessment domains must be an object"
+                    )
+                notes = assessment.get("notes") or {}
+                if not isinstance(notes, dict):
+                    raise ResearchGitError("quality assessment notes must be an object")
+                result = save_evidence_quality_assessment(
+                    args.repo,
+                    evidence_id=args.evidence_id,
+                    domains=domains,
+                    notes=notes,
+                    independent=args.independent,
+                    assessor_id=args.assessor,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("evidence quality", result, as_json=args.as_json)
+                return 0
+            if args.program_command == "boundary":
+                raw_rows = _read_json_value(args.matrix, label="boundary matrix")
+                if isinstance(raw_rows, dict):
+                    raw_rows = raw_rows.get("boundary_rows")
+                if not isinstance(raw_rows, list):
+                    raise ResearchGitError(
+                        "boundary matrix must be a JSON array or contain boundary_rows"
+                    )
+                result = save_transfer_matrix(
+                    args.repo,
+                    claim_id=args.claim_id,
+                    rows=raw_rows,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("transfer matrix", result, as_json=args.as_json)
+                return 0
+            if args.program_command == "claim":
+                payload = inspect_claim_depth(args.repo, args.claim_id)
+                if args.as_json:
+                    _print_json(payload)
+                else:
+                    print(f"Claim:         {payload['claim_id']}")
+                    print(f"Depth:         {payload['depth_level']}")
+                    print(
+                        f"Decision ready:{' yes' if payload['decision_ready'] else ' no'}"
+                    )
+                    print(f"Support:       {len(payload['supporting_ids'])}")
+                    print(f"Refutation:    {len(payload['refuting_ids'])}")
+                    print(f"Mechanisms:    {len(payload['mechanism_ids'])}")
+                    print(f"Quality audits:{len(payload['quality_assessment_ids'])}")
+                    print(f"Boundaries:    {len(payload['boundary_ids'])}")
+                    for gap in payload["gaps"]:
+                        print(f"  gap: {gap}")
+                    if payload["next_experiment"]:
+                        print(
+                            "Next experiment: "
+                            f"{payload['next_experiment']['summary']}"
+                        )
+                return 0
+            result = review_research_program(
+                args.repo,
+                record=args.record,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            if args.as_json:
+                _print_json(
+                    {
+                        "report": result["report"],
+                        "object": (
+                            result["object"].to_dict()
+                            if result["object"] is not None
+                            else None
+                        ),
+                        "checkpoint": (
+                            result["checkpoint"].to_dict()
+                            if result["checkpoint"] is not None
+                            else None
+                        ),
+                    }
+                )
+            else:
+                report = result["report"]
+                print(report["summary"])
+                print(f"Review due: {report['review_due']}")
+                for gap in report["gaps"]:
+                    print(f"  {gap['code']}: {_display_text(gap['message'])}")
+                if result["object"] is not None:
+                    print(f"Recorded review: {result['object'].object_id}")
+            return 0
+
         if args.command == "literature":
             from .research_commands import (
                 save_passage_evidence,
@@ -1686,6 +2007,10 @@ def main(
                 scope=args.scope,
                 structured_scope=_scope_from_args(args),
                 contribution_level=args.contribution_level,
+                depth_level=args.depth_level,
+                mechanism_ids=args.mechanism,
+                quality_ids=args.quality,
+                transfer_ids=args.transfer,
                 gate_id=args.gate,
                 verified=args.verified,
                 message=args.message,

@@ -14,13 +14,14 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "source", "kind", "state", "phase", "summary", "content_hash", "actor", "created_at", "proof", "source_ref"],
+        "required": ["id", "source", "kind", "state", "phase", "layer", "summary", "content_hash", "actor", "created_at", "proof", "source_ref"],
         "properties": {
           "id": {"type": "string", "minLength": 1},
           "source": {"enum": ["research_vcs", "ara"]},
           "kind": {"type": "string", "minLength": 1},
           "state": {"type": "string", "minLength": 1},
           "phase": {"type": "integer", "minimum": 0},
+          "layer": {"enum": ["strategy", "execution", "evidence", "theory", "decision_memory", "evolution"]},
           "summary": {"type": "string"},
           "content_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
           "actor": {"type": ["object", "null"]},
@@ -52,12 +53,15 @@
           "target": {"type": "string", "minLength": 1},
           "type": {"type": "string", "minLength": 1},
           "role": {"type": "string"},
-          "category": {"enum": ["lineage", "support", "challenge", "verification", "evolution", "context", "argument", "provenance", "decision"]}
+          "category": {"enum": ["lineage", "support", "challenge", "verification", "evolution", "context", "argument", "provenance", "decision", "theory", "boundary", "strategy"]}
         },
         "additionalProperties": false
       }
     },
     "proof_summary": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "theory_frontier": {"type": "object"},
+    "claim_insights": {"type": "array", "items": {"type": "object"}},
+    "strategy_summary": {"type": "object"},
     "scientific_closure": {"type": "object"},
     "integrity": {"type": "object"},
     "generated_at": {"type": "string"},

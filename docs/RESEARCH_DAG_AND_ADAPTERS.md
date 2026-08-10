@@ -65,7 +65,7 @@ open ./research-dag/research-dag.html       # macOS
 The command writes deterministic `research-dag.json` and a self-contained,
 offline `research-dag.html`. The browser requires no server, CDN, account, or
 JavaScript package installation. It is searchable, keyboard accessible, and
-can filter by scientific object kind and verification level.
+can filter by epistemic layer, scientific object kind, and verification level.
 
 The graph combines:
 
@@ -82,6 +82,16 @@ The graph combines:
 - committed ARA experiment-search nodes and their parent/child evolution paths,
   discovered from the selected Research Git ref;
 - optional external ARA roots supplied explicitly for local comparison.
+
+The epistemic layer is a view, not a second history. Strategy contains
+questions, competitive portfolios, predictions, experiment priorities and
+periodic reviews; execution contains plans and attempts; evidence contains
+measurements and quality assessments; theory contains arguments, mechanisms,
+anomalies, boundaries and claims; decision memory contains context and gates;
+evolution contains agent candidates and evaluations. Selecting a claim reveals
+its direct support/refutation, mechanism, quality audits, applicability
+boundaries, structural gaps and next ranked experiment. The graph also exports
+a content-hashed `theory_frontier`, `claim_insights`, and `strategy_summary`.
 
 Context is visible rather than hidden inside prompts. A Research VCS
 `context_snapshot` has dashed context edges from every immutable source it

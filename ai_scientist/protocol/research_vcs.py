@@ -64,10 +64,22 @@ AUTONOMOUS_RESEARCH_OBJECT_KINDS = (
     "evaluation_blinding",
     "human_escalation",
 )
+STRATEGY_RESEARCH_OBJECT_KINDS = (
+    "hypothesis_portfolio",
+    "discriminating_prediction",
+    "experiment_priority",
+    "anomaly",
+    "research_review",
+    "mechanism_model",
+    "evidence_quality",
+    "boundary_condition",
+    "transfer_matrix",
+)
 RESEARCH_OBJECT_KINDS = (
     *CORE_RESEARCH_OBJECT_KINDS,
     *EPISTEMIC_RESEARCH_OBJECT_KINDS,
     *AUTONOMOUS_RESEARCH_OBJECT_KINDS,
+    *STRATEGY_RESEARCH_OBJECT_KINDS,
 )
 RESEARCH_OBJECT_STATES = (
     "draft",
@@ -156,9 +168,20 @@ _AUTONOMOUS_PROFILE = _profile_descriptor(
     AUTONOMOUS_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
+_STRATEGY_PROFILE = _profile_descriptor(
+    "https://xscientist.io/profiles/research-strategy/v1",
+    "1.0.0",
+    STRATEGY_RESEARCH_OBJECT_KINDS,
+    RESEARCH_RELATION_TYPES,
+)
 BUILTIN_RESEARCH_PROFILES = {
     profile["uri"]: profile
-    for profile in (_CORE_PROFILE, _EPISTEMIC_PROFILE, _AUTONOMOUS_PROFILE)
+    for profile in (
+        _CORE_PROFILE,
+        _EPISTEMIC_PROFILE,
+        _AUTONOMOUS_PROFILE,
+        _STRATEGY_PROFILE,
+    )
 }
 
 
@@ -169,6 +192,8 @@ def _default_profile_for_kind(kind: str) -> dict[str, Any] | None:
         return deepcopy(_EPISTEMIC_PROFILE)
     if kind in AUTONOMOUS_RESEARCH_OBJECT_KINDS:
         return deepcopy(_AUTONOMOUS_PROFILE)
+    if kind in STRATEGY_RESEARCH_OBJECT_KINDS:
+        return deepcopy(_STRATEGY_PROFILE)
     return None
 
 
@@ -323,7 +348,278 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "novelty_check": ("verdict", "summary", "check_hash"),
     "evaluation_blinding": ("policy", "summary", "blinding_hash"),
     "human_escalation": ("reason", "question", "escalation_hash"),
+    "hypothesis_portfolio": ("question", "portfolio_hash"),
+    "discriminating_prediction": ("expected_outcome", "prediction_hash"),
+    "experiment_priority": ("selected_candidate_id", "priority_hash"),
+    "anomaly": ("summary", "anomaly_hash"),
+    "research_review": ("summary", "review_hash"),
+    "mechanism_model": ("statement", "mechanism_hash"),
+    "evidence_quality": ("evidence_id", "assessment_hash"),
+    "boundary_condition": ("condition", "boundary_hash"),
+    "transfer_matrix": ("claim_id", "matrix_hash"),
 }
+
+
+def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
+    """Validate the deeper-research strategy profile without model judgment."""
+
+    issues: list[str] = []
+    required: dict[str, tuple[str, ...]] = {
+        "hypothesis_portfolio": ("question", "members", "portfolio_hash"),
+        "discriminating_prediction": (
+            "portfolio_id",
+            "hypothesis_id",
+            "when",
+            "expected_outcome",
+            "distinguishes_from",
+            "falsifier",
+            "prediction_hash",
+        ),
+        "experiment_priority": (
+            "portfolio_id",
+            "policy",
+            "candidate_set",
+            "selected_candidate_id",
+            "priority_hash",
+        ),
+        "anomaly": (
+            "anomaly_type",
+            "summary",
+            "severity",
+            "source_ids",
+            "status",
+            "anomaly_hash",
+        ),
+        "research_review": (
+            "summary",
+            "review_due",
+            "gaps",
+            "recommended_actions",
+            "review_hash",
+        ),
+        "mechanism_model": (
+            "statement",
+            "target_hypothesis_id",
+            "mediators",
+            "interventions",
+            "rival_hypothesis_ids",
+            "evidence_ids",
+            "status",
+            "mechanism_hash",
+        ),
+        "evidence_quality": (
+            "evidence_id",
+            "domains",
+            "overall_grade",
+            "independent",
+            "assessment_hash",
+        ),
+        "boundary_condition": (
+            "claim_id",
+            "dimension",
+            "condition",
+            "status",
+            "evidence_ids",
+            "boundary_hash",
+        ),
+        "transfer_matrix": (
+            "claim_id",
+            "rows",
+            "coverage",
+            "transfer_ready",
+            "matrix_hash",
+        ),
+    }
+    for field in required.get(kind, ()):
+        if field not in payload or payload.get(field) in (None, ""):
+            issues.append(f"{kind} requires {field}")
+
+    if kind == "hypothesis_portfolio":
+        members = payload.get("members")
+        if not isinstance(members, list) or len(members) < 2:
+            issues.append("hypothesis portfolio requires at least two members")
+        else:
+            ids = [
+                str(item.get("hypothesis_id") or "")
+                for item in members
+                if isinstance(item, Mapping)
+            ]
+            roles = [
+                str(item.get("role") or "")
+                for item in members
+                if isinstance(item, Mapping)
+            ]
+            weights = [
+                item.get("prior_weight")
+                for item in members
+                if isinstance(item, Mapping)
+            ]
+            if len(ids) != len(members) or not all(ids) or len(set(ids)) != len(ids):
+                issues.append(
+                    "hypothesis portfolio member ids must be present and unique"
+                )
+            if roles.count("primary") != 1:
+                issues.append(
+                    "hypothesis portfolio requires exactly one primary member"
+                )
+            if any(role not in {"primary", "alternative", "null"} for role in roles):
+                issues.append("hypothesis portfolio member role is invalid")
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+                for value in weights
+            ):
+                issues.append(
+                    "hypothesis portfolio prior weights must be positive numbers"
+                )
+            elif abs(sum(float(value) for value in weights) - 1.0) > 1e-6:
+                issues.append("hypothesis portfolio prior weights must sum to one")
+
+    if kind == "discriminating_prediction":
+        rivals = payload.get("distinguishes_from")
+        if not isinstance(rivals, list) or not rivals:
+            issues.append("discriminating prediction requires a rival hypothesis")
+
+    if kind == "experiment_priority":
+        candidates = payload.get("candidate_set")
+        if not isinstance(candidates, list) or not candidates:
+            issues.append("experiment priority requires candidates")
+        else:
+            ids = [
+                str(item.get("candidate_id") or "")
+                for item in candidates
+                if isinstance(item, Mapping)
+            ]
+            ranks = [
+                item.get("rank") for item in candidates if isinstance(item, Mapping)
+            ]
+            if len(ids) != len(candidates) or not all(ids) or len(set(ids)) != len(ids):
+                issues.append("experiment candidate ids must be present and unique")
+            if sorted(rank for rank in ranks if isinstance(rank, int)) != list(
+                range(1, len(candidates) + 1)
+            ):
+                issues.append("experiment candidate ranks are invalid")
+            if payload.get("selected_candidate_id") not in ids:
+                issues.append("selected experiment candidate is unavailable")
+
+    if kind == "anomaly":
+        if payload.get("severity") not in {"low", "medium", "high", "critical"}:
+            issues.append("anomaly severity is invalid")
+        if payload.get("status") not in {"open", "explained", "resolved"}:
+            issues.append("anomaly status is invalid")
+        if not isinstance(payload.get("source_ids"), list) or not payload.get(
+            "source_ids"
+        ):
+            issues.append("anomaly requires source ids")
+
+    if kind == "mechanism_model":
+        if payload.get("status") not in {"proposed", "tested", "validated", "refuted"}:
+            issues.append("mechanism status is invalid")
+        if payload.get("status") == "validated":
+            if (
+                not payload.get("mediators")
+                or not payload.get("interventions")
+                or not payload.get("evidence_ids")
+            ):
+                issues.append(
+                    "validated mechanism requires mediators, interventions, and evidence"
+                )
+            if not payload.get("rival_hypothesis_ids"):
+                issues.append("validated mechanism requires a tested rival explanation")
+
+    if kind == "evidence_quality":
+        domains = payload.get("domains")
+        domain_names = {
+            "internal_validity",
+            "measurement_reliability",
+            "confounding",
+            "statistical_power",
+            "multiplicity",
+            "preregistration_fidelity",
+            "independence",
+            "external_validity",
+        }
+        allowed = {"low_risk", "some_concerns", "high_risk", "not_assessed"}
+        if not isinstance(domains, Mapping) or set(domains) != domain_names:
+            issues.append("evidence quality requires every fixed assessment domain")
+        elif any(value not in allowed for value in domains.values()):
+            issues.append("evidence quality domain verdict is invalid")
+        else:
+            values = list(domains.values())
+            expected_grade = (
+                "critical"
+                if "high_risk" in values
+                else (
+                    "weak"
+                    if "not_assessed" in values or values.count("some_concerns") >= 3
+                    else "moderate" if "some_concerns" in values else "strong"
+                )
+            )
+            if payload.get("overall_grade") != expected_grade:
+                issues.append("evidence quality grade does not match domain verdicts")
+        if payload.get("overall_grade") not in {
+            "strong",
+            "moderate",
+            "weak",
+            "critical",
+        }:
+            issues.append("evidence quality grade is invalid")
+
+    if kind == "boundary_condition" and payload.get("status") not in {
+        "supported",
+        "refuted",
+        "mixed",
+        "untested",
+    }:
+        issues.append("boundary condition status is invalid")
+
+    if kind == "transfer_matrix":
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            issues.append("transfer matrix requires boundary rows")
+        elif any(not isinstance(row, Mapping) for row in rows):
+            issues.append("transfer matrix boundary rows must be objects")
+        else:
+            tested = [row for row in rows if row.get("status") != "untested"]
+            dimensions = {str(row.get("dimension") or "") for row in tested}
+            transfer_rows = [
+                row
+                for row in tested
+                if row.get("role") in {"transfer", "heldout", "scale"}
+            ]
+            expected_ready = bool(
+                len(tested) >= 3
+                and len(dimensions) >= 2
+                and any(row.get("status") == "supported" for row in transfer_rows)
+                and all(row.get("status") == "supported" for row in tested)
+            )
+            if payload.get("transfer_ready") is not expected_ready:
+                issues.append(
+                    "transfer matrix readiness does not match boundary coverage"
+                )
+        if not isinstance(payload.get("coverage"), Mapping):
+            issues.append("transfer matrix coverage must be an object")
+
+    hash_fields = {
+        "hypothesis_portfolio": "portfolio_hash",
+        "discriminating_prediction": "prediction_hash",
+        "experiment_priority": "priority_hash",
+        "anomaly": "anomaly_hash",
+        "research_review": "review_hash",
+        "mechanism_model": "mechanism_hash",
+        "evidence_quality": "assessment_hash",
+        "boundary_condition": "boundary_hash",
+        "transfer_matrix": "matrix_hash",
+    }
+    hash_field = hash_fields.get(kind)
+    if hash_field and payload.get(hash_field):
+        expected = canonical_content_hash(
+            {key: value for key, value in payload.items() if key != hash_field}
+        )
+        if payload.get(hash_field) != expected:
+            issues.append(f"{kind} {hash_field} mismatch")
+    return issues
 
 
 def _discovery_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
@@ -567,7 +863,16 @@ def research_payload_issues(
             f"{normalized_kind} payload requires one of: " + ", ".join(identity_fields)
         ]
     issues: list[str] = []
+    if normalized_kind == "claim" and payload.get("depth_level") not in {
+        None,
+        "descriptive",
+        "causal",
+        "transferable",
+    }:
+        issues.append("claim depth_level is invalid")
     issues.extend(_discovery_protocol_issues(normalized_kind, payload))
+    if normalized_kind in STRATEGY_RESEARCH_OBJECT_KINDS:
+        issues.extend(_strategy_protocol_issues(normalized_kind, payload))
     required_fields: dict[str, tuple[str, ...]] = {
         "search_plan": ("question", "queries", "search_plan_hash"),
         "search_receipt": (
@@ -908,6 +1213,7 @@ __all__ = [
     "RESEARCH_OBJECT_STATES",
     "RESEARCH_RELATION_TYPES",
     "RESEARCH_SEMANTIC_PROFILE_SCHEMA",
+    "STRATEGY_RESEARCH_OBJECT_KINDS",
     "ResearchObjectError",
     "build_research_object",
     "research_payload_issues",

@@ -329,6 +329,31 @@ class ResearchRepository:
 
         return build_research_guide(self.path, language=language)
 
+    def review_program(
+        self,
+        *,
+        record: bool = False,
+        message: str | None = None,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Review hypothesis competition, anomalies, mechanisms, and transfer gaps."""
+
+        from .research_strategy import review_research_program
+
+        return review_research_program(
+            self.path,
+            record=record,
+            message=message,
+            commit=commit,
+        )
+
+    def inspect_claim(self, claim_id: str) -> dict[str, Any]:
+        """Explain one claim's evidence, refutation, mechanism, and next experiment."""
+
+        from .research_strategy import inspect_claim_depth
+
+        return inspect_claim_depth(self.path, claim_id)
+
     def dag(
         self,
         *,

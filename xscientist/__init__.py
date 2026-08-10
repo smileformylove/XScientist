@@ -19,6 +19,18 @@ if TYPE_CHECKING:
         save_generalization_assessment,
     )
     from .research_journey import build_research_guide, start_guided_research
+    from .research_strategy import (
+        inspect_claim_depth,
+        rank_experiment_candidates,
+        research_strategy_template,
+        review_research_program,
+        save_discriminating_prediction,
+        save_evidence_quality_assessment,
+        save_hypothesis_portfolio,
+        save_mechanism_model,
+        save_transfer_matrix,
+        scan_research_anomalies,
+    )
     from .research_context import (
         build_research_context_snapshot,
         render_research_context_for_prompt,
@@ -33,6 +45,18 @@ _DISCOVERY_EXPORTS = {
     "discovery_contract_template",
     "save_discovery_contract",
     "save_generalization_assessment",
+}
+_STRATEGY_EXPORTS = {
+    "inspect_claim_depth",
+    "rank_experiment_candidates",
+    "research_strategy_template",
+    "review_research_program",
+    "save_discriminating_prediction",
+    "save_evidence_quality_assessment",
+    "save_hypothesis_portfolio",
+    "save_mechanism_model",
+    "save_transfer_matrix",
+    "scan_research_anomalies",
 }
 
 
@@ -71,6 +95,10 @@ def __getattr__(name: str) -> Any:
         from . import research_discovery
 
         value = getattr(research_discovery, name)
+    elif name in _STRATEGY_EXPORTS:
+        from . import research_strategy
+
+        value = getattr(research_strategy, name)
     elif name in {"build_research_guide", "start_guided_research"}:
         from . import research_journey
 
@@ -125,8 +153,18 @@ __all__ = [
     "render_research_context_for_prompt",
     "start_guided_research",
     "ingest_tool_evidence",
+    "inspect_claim_depth",
+    "rank_experiment_candidates",
+    "research_strategy_template",
+    "review_research_program",
     "save_discovery_contract",
+    "save_discriminating_prediction",
+    "save_evidence_quality_assessment",
     "save_generalization_assessment",
+    "save_hypothesis_portfolio",
+    "save_mechanism_model",
+    "save_transfer_matrix",
+    "scan_research_anomalies",
     "__version__",
     "create_app",
 ]

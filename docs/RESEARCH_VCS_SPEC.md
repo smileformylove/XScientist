@@ -39,6 +39,15 @@ a filesystem snapshot.
 11. A new review, promotion gate, or agent evaluation MUST bind the exact
     evidence/context/memory snapshot it consumed. Prompt-budget trimming MUST
     NOT remove identities from that snapshot's hard closure.
+12. A verified causal claim MUST bind an intervention-tested, validated
+    mechanism and an independent acceptable-quality assessment of the evidence
+    used by the claim.
+13. A verified transferable claim MUST additionally bind a passing,
+    multi-condition transfer matrix that includes a held-out, transfer, or
+    scale condition.
+14. An automated experiment-priority decision MUST preserve the complete
+    candidate set, per-hypothesis predicted outcomes, versioned scoring policy,
+    selected and rejected alternatives, and deterministic reasons.
 
 ## 3. Logical layers
 
@@ -81,6 +90,13 @@ The initial object kinds are:
 - `agent_candidate`
 - `agent_evaluation`
 - `context_snapshot`
+
+The additive deep-research strategy profile also defines
+`hypothesis_portfolio`, `discriminating_prediction`, `experiment_priority`,
+`anomaly`, `research_review`, `mechanism_model`, `evidence_quality`,
+`boundary_condition`, and `transfer_matrix`. Implementations MUST NOT mutate a
+historical built-in profile declaration merely to add these kinds; the strategy
+profile has its own URI, version, and digest.
 
 Every object contains a versioned schema identifier, object kind, lifecycle
 state, payload, typed relations, actor receipt, provenance receipt, and content
@@ -173,6 +189,9 @@ The reference implementation exposes backend-independent operations equivalent t
 - `fsck`, `audit`, `reproduce`, standards `export`, offline `bundle` and bundle restore.
 - `context` for read-only compilation or explicit recording of an exact
   decision/evidence/memory snapshot.
+- `program portfolio`, `program prediction`, `program prioritize`, `program
+  mechanism`, `program quality`, `program boundary`, `program review`, and
+  `program claim` for the deep-research strategy loop.
 
 `bisect`, cross-repository `clone`, policy-level promotion, and safe semantic
 garbage collection remain protocol operations for a later conformance level;

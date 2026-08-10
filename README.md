@@ -23,6 +23,7 @@
 <p align="center">
   <a href="#two-minute-local-demo">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous run</a> ·
+  <a href="#go-deeper-than-one-hypothesis">Deep research</a> ·
   <a href="#from-a-better-score-to-a-transferable-method">Method discovery</a> ·
   <a href="#research-git-for-humans-and-agents">Research Git</a> ·
   <a href="docs/RESEARCH_PROTOCOL_V2.md">Protocol</a> ·
@@ -52,6 +53,7 @@ before choosing a release channel.
 | --- | --- | --- | --- |
 | Learn the protocol and visualize a research DAG | A few minutes | No | [Two-minute local demo](#two-minute-local-demo) |
 | Run a question through the autonomous pipeline | Setup plus model/experiment runtime | Yes | [Run an autonomous study](#run-an-autonomous-study) |
+| Compare explanations and choose the most informative next experiment | Minutes after hypotheses exist | No for deterministic ranking | [Deep research loop](#go-deeper-than-one-hypothesis) |
 | Review, branch, diff, or reproduce past work | Immediate for an existing repository or ARA | No for inspection | [Research Git](#research-git-for-humans-and-agents) |
 | Embed XScientist in another tool | Depends on the integration | Only for model-backed actions | [SDK, API, and adapters](#sdk-api-and-adapters) |
 
@@ -189,6 +191,7 @@ and reusable.
 | Capability | What XScientist records |
 | --- | --- |
 | Scientific reasoning | Questions, hypotheses, premises, assumptions, warrants, estimands, effect estimates, and inference decisions |
+| Research strategy | Competitive portfolios, discriminating predictions, expected-information-value ranking, anomalies, mechanisms, evidence-quality audits, and transfer boundaries |
 | Exact context and memory | An immutable audit closure plus a budgeted, frontier-aware working set that keeps current evidence, contradictions, failures, and prior decisions visible to the agent |
 | Experiments | Plans, locked preregistrations, code, environment, data hashes, attempts, failures, metrics, plots, and protocol deviations |
 | Evidence and claims | Supporting, refuting, qualified, contested, superseded, reviewed, reproduced, and promoted relations |
@@ -218,8 +221,11 @@ flowchart LR
   V["Agent candidate + sealed evaluation"] --> G
 ```
 
-The offline browser distinguishes support, refutation, verification,
-self-evolution, and context/memory edges. Every node carries integrity and
+The offline browser filters six epistemic layers—strategy, execution, evidence,
+theory, decision memory, and evolution—and distinguishes support, refutation,
+verification, theory, boundary, self-evolution, and context edges. Selecting a
+claim shows its strongest support and refutation, mechanism, quality audits,
+applicability boundaries, open gaps, and ranked next experiment. Every node carries integrity and
 closure information, enabling three different claims about a result:
 
 - **Traceable**: the provenance path exists.
@@ -230,6 +236,73 @@ These levels are intentionally not interchangeable. See the
 [protocol v2 specification](docs/RESEARCH_PROTOCOL_V2.md),
 [DAG and adapter guide](docs/RESEARCH_DAG_AND_ADAPTERS.md), and
 [research integrity policy](docs/RESEARCH_INTEGRITY.md).
+
+## Go deeper than one hypothesis
+
+A productive autonomous loop should try to distinguish explanations, not just
+accumulate support for its first idea. XScientist records that strategy as a
+separate, content-addressed profile while keeping old Research Objects valid.
+
+```mermaid
+flowchart LR
+  Q["Question"] --> HP["Competitive hypothesis portfolio"]
+  HP --> DP["Discriminating predictions"]
+  DP --> IV["Rank experiments by information value"]
+  IV --> X["Run / fail / contradict"]
+  X --> A["Anomaly review"]
+  A --> M["Mechanism + evidence-quality audit"]
+  M --> B["Boundary / transfer matrix"]
+  B --> C["Descriptive, causal, or transferable claim"]
+  C --> HP
+```
+
+Start by generating the editable JSON examples, then lock at least a primary
+and rival hypothesis. Candidate experiments must predict an outcome for every
+portfolio member; their expected entropy reduction is combined with declared
+novelty, impact, transfer value, cost, risk, and redundancy by a versioned,
+deterministic policy.
+
+```bash
+xscientist research program template --output deep-research.json
+
+xscientist research program portfolio PRIMARY_ID \
+  --alternative RIVAL_ID --null NULL_ID \
+  --question "Which mechanism best predicts held-out behavior?" \
+  --prior PRIMARY_ID=2 --prior RIVAL_ID=1 --prior NULL_ID=1
+
+xscientist research program prediction @latest:hypothesis_portfolio PRIMARY_ID \
+  --when "The proposed mediator is ablated" \
+  --expect "The effect disappears" \
+  --distinguishes RIVAL_ID --distinguishes NULL_ID \
+  --falsifier "The effect remains unchanged"
+
+# Edit experiment_candidates in the generated file, then rank the whole set.
+xscientist research program prioritize \
+  @latest:hypothesis_portfolio deep-research.json
+
+# Read-only review, or append a review plus newly detected anomalies.
+xscientist research program review
+xscientist research program review --record
+```
+
+Verified `causal` claims require a validated intervention-tested mechanism and
+an independent, strong or moderate evidence-quality assessment. Verified
+`transferable` claims additionally require a passing multi-condition transfer
+matrix. These are opt-in depth levels, so existing descriptive workflows stay
+compatible while stronger language fails closed:
+
+```bash
+xscientist research claim "M causes the effect across held-out domains." \
+  --evidence EVIDENCE_ID --verified --gate GATE_ID \
+  --depth-level transferable \
+  --mechanism MECHANISM_ID --quality QUALITY_ID --transfer MATRIX_ID
+
+xscientist research program claim @latest:claim
+xscientist research dag --output ./research-dag
+```
+
+See the [deep research protocol](docs/DEEP_RESEARCH_PROTOCOL.md) for object
+semantics, scoring, fail-closed gates, and automation boundaries.
 
 ## From a better score to a transferable method
 
@@ -502,6 +575,7 @@ See [SDK and API](docs/guides/SDK_AND_API.md),
 | Research Git commands and mental model | [Local Research Git](docs/LOCAL_RESEARCH_GIT.md) |
 | Protocol guarantees and migration | [Research protocol v2](docs/RESEARCH_PROTOCOL_V2.md) · [migration](docs/PROTOCOL_MIGRATION_2026.md) |
 | Evidence DAG and integrations | [DAG and adapters](docs/RESEARCH_DAG_AND_ADAPTERS.md) |
+| Competitive hypotheses and deeper claim gates | [Deep research protocol](docs/DEEP_RESEARCH_PROTOCOL.md) |
 | Engineering gain vs. method discovery | [Method discovery protocol](docs/METHOD_DISCOVERY_PROTOCOL.md) |
 | Context and memory invariants | [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md) · [science constitution](docs/SCIENCE_CONSTITUTION.md) |
 | Scientific integrity and evaluation | [Research integrity](docs/RESEARCH_INTEGRITY.md) · [evaluation governance](docs/EVALUATION_GOVERNANCE.md) |

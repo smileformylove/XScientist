@@ -8,6 +8,13 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- An additive deep-research strategy profile with competitive hypothesis
+  portfolios, discriminating predictions, deterministic expected-information-
+  value experiment ranking, anomaly scans, periodic program reviews, causal
+  mechanism models, structured evidence-quality audits, and transfer matrices.
+- Fail-closed `causal` and `transferable` claim depths, plus a six-layer
+  scientific DAG, content-hashed theory frontier, claim reasoning drill-down,
+  and `research program` CLI/Python surfaces.
 - Frontier-aware semantic working memory shared by Research VCS, ARA, and the
   cross-project learning layer. Context receipt v3 separates complete audit
   closure from bounded prompt input, preserves current evidence and failures,

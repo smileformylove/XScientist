@@ -338,6 +338,21 @@ ARA experiment nodes through `manifest.lock`. Selecting a node reveals its
 trace, replay, and verify checks. The output is both schema-valid JSON and a
 self-contained offline HTML browser.
 
+For a deeper strategy review, use:
+
+```bash
+xscientist research program template --output deep-research.json
+xscientist research program review
+xscientist research program review --record
+xscientist research program claim @latest:claim
+```
+
+These commands add or inspect competitive hypotheses, discriminating
+predictions, information-value experiment priorities, anomalies, mechanisms,
+quality audits, and transfer boundaries. They use the same immutable object
+store and branch history; [the deep research protocol](DEEP_RESEARCH_PROTOCOL.md)
+defines their gates and automation boundary.
+
 Committed exchange packages can be published through an explicit adapter:
 
 ```bash

@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="#两分钟本地体验">快速开始</a> ·
+  <a href="#不要只验证第一个假设">深度科研</a> ·
   <a href="#运行一次全自动研究">全自动研究</a> ·
   <a href="#从分数提升到可迁移方法">方法发现</a> ·
   <a href="#人和-agent-都能用的科研-git">科研 Git</a> ·
@@ -174,6 +175,7 @@ xscientist start ./ood-reflection \
 | 能力 | 被保存的内容 |
 | --- | --- |
 | 科学推理 | 问题、假设、前提、假定、论证依据、估计目标、效应估计和推断决策 |
+| 科研策略 | 竞争假设组合、区分性预测、信息价值排序、异常、机制、证据质量审计和迁移边界 |
 | 精确 Context 与 Memory | 不丢失的审计闭包，加上受 token 预算约束、感知当前科研前沿的工作记忆；关键证据、反证、失败和历史决策不会被长上下文静默淹没 |
 | 实验 | 计划、锁定预注册、代码、环境、数据哈希、尝试、失败、指标、图表和方案偏离 |
 | 证据与结论 | 支持、反驳、条件支持、争议、取代、评审、复现和晋级关系 |
@@ -200,7 +202,9 @@ flowchart LR
   V["Agent 候选 + 密封评估"] --> G
 ```
 
-离线浏览器会区分支持、反驳、验证、自进化和 context/memory 边。每个节点携带
+离线浏览器可以按策略、执行、证据、理论、决策记忆和进化六层筛选，并区分支持、
+反驳、验证、理论、边界、自进化和 context/memory 边。点开一个 Claim，会直接看到
+支持、反证、机制、质量审计、适用边界、未补齐缺口和下一项高信息价值实验。每个节点携带
 完整性和闭包状态，因此系统严格区分：
 
 - **可追溯（traceable）**：来源路径存在；
@@ -210,6 +214,65 @@ flowchart LR
 三者不能互相替代。详见[科研协议 v2](RESEARCH_PROTOCOL_V2.md)、
 [科研 DAG 与适配器](RESEARCH_DAG_AND_ADAPTERS.md)和
 [科研完整性协议](RESEARCH_INTEGRITY.md)。
+
+## 不要只验证第一个假设
+
+真正有深度的自动科研，应该主动区分竞争解释，而不是围绕第一个想法不断累积支持。
+XScientist 把这条策略链也记录为内容寻址、不可变的科研对象，同时保持旧对象兼容。
+
+```mermaid
+flowchart LR
+  Q["问题"] --> HP["竞争假设组合"]
+  HP --> DP["区分性预测"]
+  DP --> IV["按信息价值排序实验"]
+  IV --> X["执行 / 失败 / 矛盾"]
+  X --> A["异常复盘"]
+  A --> M["机制 + 证据质量审计"]
+  M --> B["边界 / 迁移矩阵"]
+  B --> C["描述、因果或可迁移结论"]
+  C --> HP
+```
+
+```bash
+# 先生成候选实验、质量评估和边界矩阵模板。
+xscientist research program template --output deep-research.json
+
+# PRIMARY_ID、RIVAL_ID、NULL_ID 是已记录的假设选择器或完整 ID。
+xscientist research program portfolio PRIMARY_ID \
+  --alternative RIVAL_ID --null NULL_ID \
+  --question "哪个机制最能预测留出条件？" \
+  --prior PRIMARY_ID=2 --prior RIVAL_ID=1 --prior NULL_ID=1
+
+xscientist research program prediction @latest:hypothesis_portfolio PRIMARY_ID \
+  --when "对候选中介变量做消融" \
+  --expect "效应消失" \
+  --distinguishes RIVAL_ID --distinguishes NULL_ID \
+  --falsifier "效应保持不变"
+
+xscientist research program prioritize \
+  @latest:hypothesis_portfolio deep-research.json
+
+# 只读检查结构性短板，或把复盘和新异常写入科研历史。
+xscientist research program review
+xscientist research program review --record
+```
+
+已验证的 `causal` 结论必须绑定经过干预检验的有效机制，以及独立完成、等级至少为
+moderate 的证据质量评估；`transferable` 结论还必须通过多条件迁移矩阵。普通旧流程
+默认仍是 `descriptive`，只有用户或 Agent 主动声明更强结论时才启用更强门槛：
+
+```bash
+xscientist research claim "机制 M 在留出域中仍然成立。" \
+  --evidence EVIDENCE_ID --verified --gate GATE_ID \
+  --depth-level transferable \
+  --mechanism MECHANISM_ID --quality QUALITY_ID --transfer MATRIX_ID
+
+xscientist research program claim @latest:claim
+xscientist research dag --output ./research-dag
+```
+
+完整对象语义、排序公式、阻断规则与自动化边界见
+[深度科研协议](DEEP_RESEARCH_PROTOCOL.md)。
 
 ## 从分数提升到可迁移方法
 
@@ -446,6 +509,7 @@ print(result.returncode)
 | 科研 Git 命令与心智模型 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) |
 | 协议保证与迁移 | [科研协议 v2](RESEARCH_PROTOCOL_V2.md) · [迁移指南](PROTOCOL_MIGRATION_2026.md) |
 | 证据 DAG 与平台集成 | [科研 DAG 与适配器](RESEARCH_DAG_AND_ADAPTERS.md) |
+| 竞争假设、信息价值与深度结论门禁 | [深度科研协议](DEEP_RESEARCH_PROTOCOL.md) |
 | 工程提升与方法发现门禁 | [方法发现协议](METHOD_DISCOVERY_PROTOCOL.md) |
 | Context、Memory 与科学不变量 | [认识图谱](EPISTEMIC_GRAPH_SPEC.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 科研完整性与独立评估 | [科研完整性](RESEARCH_INTEGRITY.md) · [评估治理](EVALUATION_GOVERNANCE.md) |

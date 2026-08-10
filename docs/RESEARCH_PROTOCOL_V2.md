@@ -16,11 +16,18 @@ namespace. The bound profile contains:
 - a canonical `schema_digest` over that declaration.
 
 Built-in profiles cover the original Research VCS objects, epistemic arguments,
-and autonomous-research decisions. An object using an unknown profile remains
+autonomous-research decisions, and the additive deep-research strategy profile.
+An object using an unknown profile remains
 storable, hashable, exportable, and inspectable. It cannot reach `verified`
 until a trusted validator for that exact URI/version/digest is installed.
 Profile extensions never grant actor authority and cannot redefine closure,
 independence, or promotion rules.
+
+The strategy profile adds competitive hypothesis portfolios, discriminating
+predictions, information-value experiment ranking, anomaly/review objects,
+mechanism models, evidence-quality assessments, and boundary/transfer matrices.
+It deliberately reuses the stable relation vocabulary, preserving historical
+profile digests. See [Deep Research Strategy Protocol](DEEP_RESEARCH_PROTOCOL.md).
 
 Use `research record --profile-file PROFILE.json` for a domain extension.
 Absolute-URI relation types use `TYPE=TARGET[:ROLE]` because URIs contain
@@ -153,6 +160,10 @@ success condition, and authority policy from the first commit.
   and ARA ContextPack retrieval receipts use v3, while literature uses v2.
 - Direct evidence-to-claim links remain traceable, but verified legacy claims
   receive an `claim_inference_unmodeled` warning.
+- Claims without `depth_level` remain `descriptive`. New verified `causal`
+  claims require a validated evidence-bound mechanism plus an independent
+  strong/moderate quality assessment; `transferable` also requires a passing
+  transfer matrix. Draft hypotheses about deeper claims remain recordable.
 - Source status checks are advisory until an invalidating update exists; an
   explicit retraction/withdrawal is a closure blocker.
 - Exporters retain native qualified IDs and Semantic Profile metadata. Formats

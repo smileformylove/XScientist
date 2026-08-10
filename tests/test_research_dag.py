@@ -706,6 +706,8 @@ class ResearchDagTests(unittest.TestCase):
         self.assertNotIn("</script><script>alert", page)
         self.assertIn("\\u003c/script\\u003e", page)
         self.assertIn('aria-label="Graph filters"', page)
+        self.assertIn('id="layer"', page)
+        self.assertIn("Claim reasoning", page)
         self.assertIn("Verification checks", page)
         self.assertNotIn("https://", page)
 

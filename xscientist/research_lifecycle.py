@@ -349,6 +349,7 @@ class ResearchLifecycle:
         payload: Mapping[str, Any],
         *,
         evidence_ids: Sequence[str],
+        qualification_ids: Sequence[str] = (),
         gate_id: str | None = None,
         verified: bool = False,
         commit: bool = True,
@@ -369,6 +370,91 @@ class ResearchLifecycle:
             resolved_id = str(evidence["object_id"])
             resolved_evidence_ids.append(resolved_id)
             relations.append({"type": "depends_on", "target": resolved_id})
+        qualifications: dict[str, list[dict[str, Any]]] = {
+            "mechanism_model": [],
+            "evidence_quality": [],
+            "transfer_matrix": [],
+        }
+        role_by_kind = {
+            "mechanism_model": "mechanism",
+            "evidence_quality": "quality",
+            "transfer_matrix": "transfer",
+        }
+        for object_id in qualification_ids:
+            qualification = self.repository.get(object_id)
+            kind = str(qualification.get("kind") or "")
+            if kind not in qualifications:
+                raise ResearchGitError("claim qualification reference has wrong kind")
+            qualifications[kind].append(qualification)
+            relations.append(
+                {
+                    "type": "depends_on",
+                    "target": str(qualification["object_id"]),
+                    "role": role_by_kind[kind],
+                }
+            )
+        depth_level = str(payload.get("depth_level") or "descriptive")
+        if depth_level not in {"descriptive", "causal", "transferable"}:
+            raise ResearchGitError("claim depth_level is invalid")
+        if verified and depth_level in {"causal", "transferable"}:
+            valid_mechanisms = [
+                item
+                for item in qualifications["mechanism_model"]
+                if item.get("state") == "verified"
+                and (item.get("payload") or {}).get("status") == "validated"
+                and set(
+                    (item.get("payload") or {}).get("evidence_ids") or []
+                ).intersection(resolved_evidence_ids)
+            ]
+            valid_quality = [
+                item
+                for item in qualifications["evidence_quality"]
+                if item.get("state") == "verified"
+                and (item.get("payload") or {}).get("independent") is True
+                and (item.get("payload") or {}).get("overall_grade")
+                in {"strong", "moderate"}
+                and (item.get("payload") or {}).get("evidence_id")
+                in resolved_evidence_ids
+            ]
+            if not valid_mechanisms:
+                raise ResearchGitError(
+                    "verified causal claim requires a validated intervention-tested "
+                    "mechanism bound to its evidence"
+                )
+            if not valid_quality:
+                raise ResearchGitError(
+                    "verified causal claim requires an independent strong/moderate "
+                    "quality assessment of its evidence"
+                )
+            if depth_level == "transferable":
+                valid_transfer = []
+                claim_scope_hash = payload.get("scope_hash")
+                claim_statement = " ".join(str(payload.get("statement") or "").split())
+                for item in qualifications["transfer_matrix"]:
+                    matrix_payload = item.get("payload") or {}
+                    if (
+                        item.get("state") != "verified"
+                        or matrix_payload.get("transfer_ready") is not True
+                    ):
+                        continue
+                    matrix_claim = self.repository.get(
+                        str(matrix_payload.get("claim_id") or "")
+                    )
+                    matrix_claim_payload = matrix_claim.get("payload") or {}
+                    matrix_statement = " ".join(
+                        str(matrix_claim_payload.get("statement") or "").split()
+                    )
+                    if (
+                        matrix_statement != claim_statement
+                        or matrix_claim_payload.get("scope_hash") != claim_scope_hash
+                    ):
+                        continue
+                    valid_transfer.append(item)
+                if not valid_transfer:
+                    raise ResearchGitError(
+                        "verified transferable claim requires a passing transfer matrix "
+                        "for the same statement and scope"
+                    )
         if payload.get("contribution_level") == "method_discovery" and verified:
             supported = any(
                 item["kind"] == "evidence_synthesis"

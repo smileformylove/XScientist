@@ -36,6 +36,10 @@ _ARGUMENT_KINDS = {
     "risk_of_bias",
     "evidence_synthesis",
     "challenge",
+    "mechanism_model",
+    "evidence_quality",
+    "boundary_condition",
+    "transfer_matrix",
 }
 _ARGUMENT_RELATIONS = {
     "depends_on",
@@ -410,6 +414,82 @@ def _claim_closure(
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     claim_payload = claim.get("payload") or {}
+    qualification_ids = {
+        kind: sorted(
+            object_id
+            for object_id in direct
+            if objects.get(object_id, {}).get("kind") == kind
+        )
+        for kind in ("mechanism_model", "evidence_quality", "transfer_matrix")
+    }
+    depth_level = str(claim_payload.get("depth_level") or "descriptive")
+    if depth_level in {"causal", "transferable"}:
+        valid_mechanisms = [
+            object_id
+            for object_id in qualification_ids["mechanism_model"]
+            if objects[object_id].get("state") == "verified"
+            and (objects[object_id].get("payload") or {}).get("status") == "validated"
+            and set(
+                (objects[object_id].get("payload") or {}).get("evidence_ids") or []
+            ).intersection(evidence_ids)
+        ]
+        valid_quality = [
+            object_id
+            for object_id in qualification_ids["evidence_quality"]
+            if objects[object_id].get("state") == "verified"
+            and (objects[object_id].get("payload") or {}).get("independent") is True
+            and (objects[object_id].get("payload") or {}).get("overall_grade")
+            in {"strong", "moderate"}
+            and (objects[object_id].get("payload") or {}).get("evidence_id")
+            in evidence_ids
+        ]
+        if not valid_mechanisms:
+            blockers.append(
+                _blocker(
+                    "causal_claim_without_validated_mechanism",
+                    claim_id,
+                    "causal claim lacks a validated intervention-tested mechanism",
+                )
+            )
+        if not valid_quality:
+            blockers.append(
+                _blocker(
+                    "causal_claim_without_quality_assessment",
+                    claim_id,
+                    "causal claim lacks an independent strong/moderate evidence-quality assessment",
+                )
+            )
+        valid_transfer = []
+        for object_id in qualification_ids["transfer_matrix"]:
+            matrix = objects[object_id]
+            matrix_payload = matrix.get("payload") or {}
+            matrix_claim = objects.get(str(matrix_payload.get("claim_id") or ""), {})
+            matrix_claim_payload = matrix_claim.get("payload") or {}
+            if (
+                matrix.get("state") == "verified"
+                and matrix_payload.get("transfer_ready") is True
+                and " ".join(str(matrix_claim_payload.get("statement") or "").split())
+                == " ".join(str(claim_payload.get("statement") or "").split())
+                and matrix_claim_payload.get("scope_hash")
+                == claim_payload.get("scope_hash")
+            ):
+                valid_transfer.append(object_id)
+        if depth_level == "transferable" and not valid_transfer:
+            blockers.append(
+                _blocker(
+                    "transferable_claim_without_transfer_matrix",
+                    claim_id,
+                    "transferable claim lacks a passing same-scope boundary and transfer matrix",
+                )
+            )
+    elif claim_payload.get("contribution_level") == "method_discovery":
+        warnings.append(
+            _blocker(
+                "method_discovery_depth_undeclared",
+                claim_id,
+                "method-discovery claim should opt into transferable depth gates",
+            )
+        )
     discovery_assessment_ids = sorted(
         object_id
         for object_id in argument_ids

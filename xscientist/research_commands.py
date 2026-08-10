@@ -924,6 +924,10 @@ def save_claim(
     scope: str = "",
     structured_scope: Mapping[str, Any] | None = None,
     contribution_level: str = "",
+    depth_level: str = "descriptive",
+    mechanism_ids: Sequence[str] = (),
+    quality_ids: Sequence[str] = (),
+    transfer_ids: Sequence[str] = (),
     gate_id: str | None = None,
     verified: bool = False,
     message: str | None = None,
@@ -947,10 +951,15 @@ def save_claim(
         }:
             raise ResearchGitError("claim contribution_level is invalid")
         payload["contribution_level"] = normalized_contribution
+    normalized_depth = str(depth_level or "descriptive").strip()
+    if normalized_depth not in {"descriptive", "causal", "transferable"}:
+        raise ResearchGitError("claim depth_level is invalid")
+    payload["depth_level"] = normalized_depth
     lifecycle = ResearchLifecycle(repository)
     recorded = lifecycle.claim(
         payload,
         evidence_ids=evidence_ids,
+        qualification_ids=[*mechanism_ids, *quality_ids, *transfer_ids],
         gate_id=gate_id,
         verified=verified,
         commit=False,
