@@ -42,7 +42,9 @@ class LearningEngineRegressionTests(unittest.TestCase):
             self.assertTrue(history_path.exists())
 
             latest_payload = json.loads(latest_path.read_text(encoding="utf-8"))
-            self.assertEqual(latest_payload.get("idea_name"), "Learning based optimizer")
+            self.assertEqual(
+                latest_payload.get("idea_name"), "Learning based optimizer"
+            )
             self.assertIn("recommendation", latest_payload)
 
             history_lines = [
@@ -157,6 +159,88 @@ class LearningEngineRegressionTests(unittest.TestCase):
             self.assertIn(
                 "verification_path_gap",
                 recommendation["common_pitfalls"],
+            )
+
+    def test_contextual_memory_includes_failures_and_avoids_success_only_bias(
+        self,
+    ) -> None:
+        (
+            AdaptiveLearningEngine,
+            PatternAnalyzer,
+            SelfLearningKnowledgeBase,
+        ) = self._import_learning_modules()
+        with tempfile.TemporaryDirectory() as td:
+            kb = SelfLearningKnowledgeBase(research_dir=td)
+            kb.success_patterns = [
+                {
+                    "idea_name": "Calibrated transfer success",
+                    "paper_type": "neurips",
+                    "outcome": "accepted",
+                    "idea": {
+                        "Title": "Calibration for transfer learning",
+                        "Method": "temperature calibration",
+                    },
+                }
+            ]
+            kb.failure_patterns = [
+                {
+                    "idea_name": "Calibration under shift failure",
+                    "paper_type": "neurips",
+                    "outcome": "rejected",
+                    "idea": {
+                        "Title": "Calibration for transfer learning",
+                        "Method": "temperature calibration under domain shift",
+                    },
+                    "reviews": [{"review": {"main_issues": ["domain shift leakage"]}}],
+                }
+            ]
+
+            matches = kb.find_similar_papers(
+                {
+                    "Title": "Calibration for transfer learning",
+                    "Method": "temperature calibration",
+                },
+                "neurips",
+                context={"risk": "domain shift leakage"},
+            )
+            probability = PatternAnalyzer(kb).predict_success_probability(
+                {
+                    "idea": {
+                        "Title": "Calibration for transfer learning",
+                        "Method": "temperature calibration",
+                    },
+                    "paper_type": "neurips",
+                }
+            )
+            recommendation = AdaptiveLearningEngine(
+                knowledge_base=kb,
+                research_dir=td,
+            ).recommend_strategy(
+                {
+                    "Name": "Shift-aware calibration",
+                    "Title": "Calibration for transfer learning",
+                    "Method": "temperature calibration",
+                },
+                "neurips",
+                context={"risk": "domain shift leakage"},
+            )
+
+            self.assertEqual(
+                {item["memory_class"] for item in matches},
+                {"success", "failure"},
+            )
+            self.assertTrue(
+                all(item["memory_ref"].startswith("sha256:") for item in matches)
+            )
+            self.assertGreater(probability, 0.0)
+            self.assertLess(probability, 1.0)
+            self.assertEqual(recommendation["memory_evidence"]["success_count"], 1)
+            self.assertEqual(recommendation["memory_evidence"]["failure_count"], 1)
+            self.assertTrue(recommendation["memory_evidence"]["context_used"])
+            self.assertEqual(len(recommendation["memory_evidence"]["matches"]), 2)
+            self.assertLessEqual(
+                len(str(recommendation["memory_evidence"]["context_view"])),
+                1600,
             )
 
 

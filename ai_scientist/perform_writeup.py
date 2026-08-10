@@ -717,6 +717,12 @@ def perform_writeup(
             )
         except Exception as exc:
             print(f"Warning: ARA writing context unavailable: {exc}")
+            structured_context = (
+                structured_context
+                + "\n\n## Context fallback (degraded_unbound)\n"
+                + "No source-bound ARA ContextPack was available. Keep all "
+                + "unsupported result statements as hypotheses or limitations."
+            )
         big_model_system_message = (
             writeup_system_message_template.format(page_limit=page_limit)
             + "\n\n"
@@ -821,7 +827,9 @@ def perform_writeup(
                 reflection_page_info = "\nCould not detect 'Impact Statement' page (compilation or detection failed).\n"
 
             check_output = run_chktex(writeup_file)
-            citation_consistency_report = build_citation_consistency_report(current_latex)
+            citation_consistency_report = build_citation_consistency_report(
+                current_latex
+            )
             submission_guardrail_report = build_submission_guardrail_report(
                 current_latex, target_venue
             )
@@ -908,9 +916,7 @@ If you believe you are done, simply say: "I am done".
             final_pdf_exists = osp.exists(base_pdf_file + ".pdf")
         with open(writeup_file, "r", encoding="utf-8", errors="ignore") as f_final:
             final_latex = f_final.read()
-        final_guardrail_findings = collect_guardrail_findings(
-            final_latex, target_venue
-        )
+        final_guardrail_findings = collect_guardrail_findings(final_latex, target_venue)
         final_guardrail_report = build_submission_guardrail_report(
             final_latex, target_venue
         )
@@ -986,7 +992,9 @@ Hard requirements:
                     target_venue,
                 )
                 with open(
-                    osp.join(audits_dir, f"guardrail_repair_round_{repair_idx + 1}.json"),
+                    osp.join(
+                        audits_dir, f"guardrail_repair_round_{repair_idx + 1}.json"
+                    ),
                     "w",
                     encoding="utf-8",
                 ) as f_repair:
@@ -1012,7 +1020,9 @@ Hard requirements:
             "w",
             encoding="utf-8",
         ) as f_report_json:
-            json.dump(final_guardrail_findings, f_report_json, indent=2, ensure_ascii=False)
+            json.dump(
+                final_guardrail_findings, f_report_json, indent=2, ensure_ascii=False
+            )
         with open(
             osp.join(audits_dir, "final_guardrail_report.txt"),
             "w",
@@ -1096,9 +1106,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--writing-profile",
         type=str,
-        default=os.environ.get(
-            "AI_SCIENTIST_WRITING_PROFILE", DEFAULT_WRITING_PROFILE
-        ),
+        default=os.environ.get("AI_SCIENTIST_WRITING_PROFILE", DEFAULT_WRITING_PROFILE),
         choices=list_writing_profiles(),
         help="Prompt writing profile used to guide style and self-checks.",
     )

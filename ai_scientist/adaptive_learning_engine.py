@@ -17,6 +17,10 @@ from ai_scientist.self_learning_knowledge_base import (
     PatternAnalyzer,
 )
 from ai_scientist.llm import create_client, get_response_from_llm
+from ai_scientist.utils.semantic_memory import (
+    bounded_semantic_view,
+    semantic_overlap,
+)
 
 
 class AdaptiveLearningEngine:
@@ -42,7 +46,7 @@ class AdaptiveLearningEngine:
         self.analyzer = PatternAnalyzer(self.kb)
         self.adaptation_threshold = 0.7  # 适应阈值
 
-    def _load_self_evolution_guidance(self) -> Dict:
+    def _load_self_evolution_guidance(self, context: Dict | None = None) -> Dict:
         """加载跨项目 self-evolution playbook，并转成当前推荐可消费的摘要。"""
         playbook = {}
         if hasattr(self.kb, "get_self_evolution_playbook"):
@@ -50,22 +54,31 @@ class AdaptiveLearningEngine:
         if not isinstance(playbook, dict) or not playbook:
             return {}
         defaults = [
-            f"{item.get('stage')}: {item.get('action')}"
+            {
+                "text": f"{item.get('stage')}: {item.get('action')}",
+                "relevance": semantic_overlap(context or {}, item),
+            }
             for item in (playbook.get("top_agentic_defaults") or [])
             if isinstance(item, dict)
             and str(item.get("stage") or "").strip()
             and str(item.get("action") or "").strip()
         ]
         risks = [
-            str(item.get("risk") or "").strip()
+            {
+                "text": str(item.get("risk") or "").strip(),
+                "relevance": semantic_overlap(context or {}, item),
+            }
             for item in (playbook.get("top_recurring_risks") or [])
             if isinstance(item, dict) and str(item.get("risk") or "").strip()
         ]
+        defaults.sort(key=lambda item: (-item["relevance"], item["text"]))
+        risks.sort(key=lambda item: (-item["relevance"], item["text"]))
         return {
             "project_count": int(playbook.get("project_count") or 0),
             "status_counts": playbook.get("status_counts") or {},
-            "top_agentic_defaults": defaults[:5],
-            "top_recurring_risks": risks[:5],
+            "top_agentic_defaults": [item["text"] for item in defaults[:5]],
+            "top_recurring_risks": [item["text"] for item in risks[:5]],
+            "context_ranked": bool(context),
         }
 
     def recommend_strategy(
@@ -87,28 +100,49 @@ class AdaptiveLearningEngine:
         """
         print("\n🧠 自适应学习引擎分析中...")
 
+        working_context = bounded_semantic_view(
+            context or {},
+            query={"idea": idea, "paper_type": paper_type},
+            budget_tokens=256,
+        )
+
         # 查找相似论文
         similar_papers = self.kb.find_similar_papers(
             idea,
             paper_type,
             top_k=5,
+            context={"working_context": working_context},
         )
+        similar_successes = [
+            paper
+            for paper in similar_papers
+            if paper.get("outcome") in ["accepted", "minor_revision"]
+        ]
 
         # 分析成功因素
         success_factors = self.analyzer.analyze_success_factors()
 
         # 预测成功概率
-        success_prob = self.analyzer.predict_success_probability({
-            "idea": idea,
-            "paper_type": paper_type,
-        })
+        success_prob = self.analyzer.predict_success_probability(
+            {
+                "idea": idea,
+                "paper_type": paper_type,
+            },
+            context={"working_context": working_context},
+        )
 
         # 获取有效策略
         effective_strategies = self.kb.get_effective_strategies(min_success_rate=0.7)
 
         # 获取分数阈值
         score_thresholds = self.kb.get_score_thresholds()
-        self_evolution_guidance = self._load_self_evolution_guidance()
+        self_evolution_guidance = self._load_self_evolution_guidance(
+            {
+                "idea": idea,
+                "paper_type": paper_type,
+                "working_context": working_context,
+            }
+        )
 
         # 构建推荐
         recommendation = {
@@ -118,7 +152,7 @@ class AdaptiveLearningEngine:
             "writing_strategy": self._recommend_writing_strategy(
                 idea,
                 paper_type,
-                similar_papers,
+                similar_successes,
                 success_factors,
             ),
             "review_strategy": self._recommend_review_strategy(
@@ -139,6 +173,23 @@ class AdaptiveLearningEngine:
             ),
             "confidence": self._calculate_confidence(similar_papers, success_factors),
             "self_evolution_guidance": self_evolution_guidance,
+            "memory_evidence": {
+                "matched_count": len(similar_papers),
+                "success_count": len(similar_successes),
+                "failure_count": len(similar_papers) - len(similar_successes),
+                "context_used": bool(context),
+                "context_view": working_context,
+                "matches": [
+                    {
+                        "paper_id": paper.get("paper_id"),
+                        "memory_ref": paper.get("memory_ref"),
+                        "memory_class": paper.get("memory_class"),
+                        "outcome": paper.get("outcome"),
+                        "similarity": paper.get("similarity"),
+                    }
+                    for paper in similar_papers
+                ],
+            },
         }
         if self_evolution_guidance.get("top_agentic_defaults"):
             recommendation["improvement_strategy"]["agentic_defaults"] = list(
@@ -207,15 +258,12 @@ class AdaptiveLearningEngine:
             traits = success_factors["common_traits"]
 
             if traits.get("top_paper_types"):
-                strategy["writing_tips"].append(
-                    f"参考最成功的论文类型"
-                )
+                strategy["writing_tips"].append(f"参考最成功的论文类型")
 
             if traits.get("average_scores"):
                 avg_scores = traits["average_scores"]
                 weak_sections = [
-                    section for section, score in avg_scores.items()
-                    if score < 4.0
+                    section for section, score in avg_scores.items() if score < 4.0
                 ]
                 if weak_sections:
                     strategy["writing_tips"].append(
@@ -281,9 +329,7 @@ class AdaptiveLearningEngine:
         # 使用有效策略
         if effective_strategies:
             top_strategies = effective_strategies[:5]
-            strategy["preferred_strategies"] = [
-                s["strategy"] for s in top_strategies
-            ]
+            strategy["preferred_strategies"] = [s["strategy"] for s in top_strategies]
 
         # 基于相似论文
         if similar_papers:
@@ -311,7 +357,9 @@ class AdaptiveLearningEngine:
                     for s, scores in strategy_impact.items()
                 }
 
-                top_impact = sorted(avg_impact.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_impact = sorted(
+                    avg_impact.items(), key=lambda x: x[1], reverse=True
+                )[:3]
 
                 strategy["preferred_strategies"] = [s[0] for s in top_impact]
 
@@ -358,23 +406,29 @@ class AdaptiveLearningEngine:
 
         # 基于论文类型的常见问题
         if paper_type == "neurips":
-            pitfalls.extend([
-                "理论分析不够深入",
-                "缺少更广泛影响声明",
-                "实验验证不充分",
-            ])
+            pitfalls.extend(
+                [
+                    "理论分析不够深入",
+                    "缺少更广泛影响声明",
+                    "实验验证不充分",
+                ]
+            )
         elif paper_type == "iclr":
-            pitfalls.extend([
-                "表示学习的理论分析不足",
-                "收敛性分析缺失",
-                "可视化表示不清楚",
-            ])
+            pitfalls.extend(
+                [
+                    "表示学习的理论分析不足",
+                    "收敛性分析缺失",
+                    "可视化表示不清楚",
+                ]
+            )
         elif paper_type == "cvpr":
-            pitfalls.extend([
-                "架构图不够清晰",
-                "定性结果不足",
-                "效率分析缺失",
-            ])
+            pitfalls.extend(
+                [
+                    "架构图不够清晰",
+                    "定性结果不足",
+                    "效率分析缺失",
+                ]
+            )
 
         return pitfalls[:5]
 
@@ -384,20 +438,31 @@ class AdaptiveLearningEngine:
         success_factors: Dict,
     ) -> float:
         """计算推荐置信度"""
-        confidence = 0.5
+        confidence = 0.35
 
-        # 基于相似论文数量
+        # Confidence requires both sample support and counterexamples. A cohort
+        # containing only successes must not imply near-certain transfer.
         if similar_papers:
-            confidence += min(len(similar_papers) * 0.1, 0.3)
+            confidence += min(len(similar_papers) * 0.05, 0.25)
+        outcome_classes = {
+            (
+                "success"
+                if paper.get("outcome") in ["accepted", "minor_revision"]
+                else "failure"
+            )
+            for paper in similar_papers
+        }
+        if len(outcome_classes) >= 2:
+            confidence += 0.15
 
         # 基于成功因素完整性
         if success_factors.get("common_traits"):
-            confidence += 0.1
+            confidence += 0.08
 
         if success_factors.get("score_patterns"):
-            confidence += 0.1
+            confidence += 0.07
 
-        return min(confidence, 1.0)
+        return min(confidence, 0.9)
 
     def _save_recommendation(self, recommendation: Dict, idea: Dict):
         """保存推荐记录"""
@@ -410,7 +475,9 @@ class AdaptiveLearningEngine:
             or idea.get("idea_name")
             or "untitled_idea"
         ).strip()
-        idea_slug = re.sub(r"[^a-zA-Z0-9]+", "_", idea_name).strip("_") or "untitled_idea"
+        idea_slug = (
+            re.sub(r"[^a-zA-Z0-9]+", "_", idea_name).strip("_") or "untitled_idea"
+        )
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         payload = {
@@ -424,7 +491,9 @@ class AdaptiveLearningEngine:
         with open(latest_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
-        snapshot_file = recommendation_dir / f"recommendation_{idea_slug}_{timestamp}.json"
+        snapshot_file = (
+            recommendation_dir / f"recommendation_{idea_slug}_{timestamp}.json"
+        )
         with open(snapshot_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
@@ -455,7 +524,9 @@ class AdaptiveLearningEngine:
         writing_strategy = recommendation.get("writing_strategy", {})
 
         if writing_strategy.get("emphasis_sections"):
-            adapted_prompt += f"\n\n**重点章节**: {', '.join(writing_strategy['emphasis_sections'])}"
+            adapted_prompt += (
+                f"\n\n**重点章节**: {', '.join(writing_strategy['emphasis_sections'])}"
+            )
 
         if writing_strategy.get("writing_tips"):
             adapted_prompt += "\n\n**写作建议**:\n"
@@ -473,7 +544,9 @@ class AdaptiveLearningEngine:
         target_scores = recommendation.get("target_scores", {})
         if target_scores and section:
             if section in target_scores:
-                adapted_prompt += f"\n\n**目标分数**: 该章节应达到 {target_scores[section]} 分"
+                adapted_prompt += (
+                    f"\n\n**目标分数**: 该章节应达到 {target_scores[section]} 分"
+                )
 
         return adapted_prompt
 
@@ -555,14 +628,20 @@ class AdaptiveLearningEngine:
 
             # 优先处理低分维度
             for dimension, score in sorted(low_scores, key=lambda x: x[1]):
-                plan["priority_improvements"].append({
-                    "dimension": dimension,
-                    "current_score": score,
-                    "target_score": recommendation.get("target_scores", {}).get(dimension, 4.0),
-                })
+                plan["priority_improvements"].append(
+                    {
+                        "dimension": dimension,
+                        "current_score": score,
+                        "target_score": recommendation.get("target_scores", {}).get(
+                            dimension, 4.0
+                        ),
+                    }
+                )
 
             # 使用推荐的策略
-            preferred_strategies = recommendation.get("improvement_strategy", {}).get("preferred_strategies", [])
+            preferred_strategies = recommendation.get("improvement_strategy", {}).get(
+                "preferred_strategies", []
+            )
 
             if preferred_strategies:
                 plan["suggested_strategies"] = preferred_strategies[:3]
@@ -634,12 +713,28 @@ class AdaptiveWriter:
             section,
         )
 
-        # 添加相似论文示例
+        # 添加有对照的相似历史：成功经验可供迁移，失败经验只用于风险约束。
         similar_papers = recommendation.get("similar_papers", [])
-        if similar_papers:
+        successful_papers = [
+            paper
+            for paper in similar_papers
+            if paper.get("outcome") in ["accepted", "minor_revision"]
+        ]
+        failed_papers = [
+            paper
+            for paper in similar_papers
+            if paper.get("outcome") not in ["accepted", "minor_revision"]
+        ]
+        if successful_papers:
             adapted_prompt += "\n\n**参考成功论文**:\n"
-            for paper in similar_papers[:2]:
+            for paper in successful_papers[:2]:
                 adapted_prompt += f"- {paper.get('idea_name', 'Unknown')}: "
+                adapted_prompt += f"相似度 {paper.get('similarity', 0):.2f}\n"
+        if failed_papers:
+            adapted_prompt += "\n\n**相关失败经验（仅作为风险约束）**:\n"
+            for paper in failed_papers[:2]:
+                adapted_prompt += f"- {paper.get('idea_name', 'Unknown')}: "
+                adapted_prompt += f"结果 {paper.get('outcome', 'unknown')}，"
                 adapted_prompt += f"相似度 {paper.get('similarity', 0):.2f}\n"
 
         # 使用LLM生成
@@ -666,6 +761,11 @@ class AdaptiveWriter:
 
     def _build_base_prompt(self, section: str, idea: Dict, context: Dict) -> str:
         """构建基础提示"""
+        context_view = bounded_semantic_view(
+            context or {},
+            query={"section": section, "idea": idea},
+            budget_tokens=250,
+        )
         prompt = f"""
 请为以下研究想法撰写 **{section}** 章节。
 
@@ -675,6 +775,6 @@ class AdaptiveWriter:
 方法: {idea.get('Method', '')}
 
 **上下文**:
-{json.dumps(context, indent=2, ensure_ascii=False)[:1000]}
+{json.dumps(context_view, indent=2, ensure_ascii=False)}
 """
         return prompt

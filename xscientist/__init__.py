@@ -19,6 +19,10 @@ if TYPE_CHECKING:
         save_generalization_assessment,
     )
     from .research_journey import build_research_guide, start_guided_research
+    from .research_context import (
+        build_research_context_snapshot,
+        render_research_context_for_prompt,
+    )
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
 
@@ -71,6 +75,13 @@ def __getattr__(name: str) -> Any:
         from . import research_journey
 
         value = getattr(research_journey, name)
+    elif name in {
+        "build_research_context_snapshot",
+        "render_research_context_for_prompt",
+    }:
+        from . import research_context
+
+        value = getattr(research_context, name)
     elif name == "ingest_tool_evidence":
         from .research_tools import ingest_tool_evidence
 
@@ -107,9 +118,11 @@ __all__ = [
     "assess_generalization",
     "build_discovery_contract",
     "build_research_dag",
+    "build_research_context_snapshot",
     "build_research_guide",
     "discovery_contract_template",
     "export_research_dag",
+    "render_research_context_for_prompt",
     "start_guided_research",
     "ingest_tool_evidence",
     "save_discovery_contract",

@@ -303,11 +303,14 @@ MUST preserve unknown profiles, but MUST NOT treat them as verified without a
 trusted validator for the exact bound profile. Extensions MUST NOT grant actor
 authority or weaken core closure and independence rules.
 
-New decision contexts and literature searches SHOULD use retrieval receipt v2,
-including the request, algorithm/index identity, complete candidate set, ranks,
-score semantics, selection decisions, transform lineage, and component hashes.
-Context budgets MAY trim human-readable views but MUST NOT trim the immutable
-candidate set or hard source closure.
+New literature searches SHOULD use retrieval receipt v2. New decision contexts
+SHOULD use receipt v3, including the request, algorithm/index identity,
+complete candidate set, ranks, score semantics, selection decisions, transform
+lineage, component hashes, effective-frontier state, and a sealed semantic
+working set. Context budgets MAY trim human-readable views but MUST NOT trim the
+immutable candidate set or hard source closure. A producer MUST mark the
+context incomplete when current decisive evidence, an active contradiction, or
+another intent-required semantic lane cannot fit the agent-facing budget.
 
 The additive identity and evidence migration is documented in
 [`PROTOCOL_MIGRATION_2026.md`](PROTOCOL_MIGRATION_2026.md).

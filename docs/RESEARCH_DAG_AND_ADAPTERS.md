@@ -97,6 +97,18 @@ New context snapshots also carry a retrieval receipt with the complete
 candidate set, deterministic ranks, score semantics, selection/rejection
 reasons, algorithm hash, and summary-transform lineage. A token budget can hide
 a readable summary, but it cannot erase the candidate or its immutable hash.
+Receipt v3 adds an explicitly sealed working set. The working set uses graph
+distance, task relevance, recency, actor authority, and frontier state; objects
+targeted by `supersedes` remain in the audit DAG but cannot outrank active
+evidence merely because they were historically salient. At least one decisive
+evidence/contradiction lane and, for decisions, one prior-decision lane are
+reserved. Post-render token estimation is validated, so an oversized prompt
+fails closed rather than reporting a misleading complete context.
+
+Repeated context snapshots form a compact hash chain to the latest relevant
+snapshot. They do not recursively copy every older snapshot into each new
+prompt. This keeps long-running branches reviewable without turning the
+decision input into an ever-growing echo of its own summaries.
 See [Research Protocol v2](RESEARCH_PROTOCOL_V2.md) for the compatibility and
 extension rules.
 

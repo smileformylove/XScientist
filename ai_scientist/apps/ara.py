@@ -2829,7 +2829,7 @@ def cmd_context(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(pack, indent=2, ensure_ascii=False, default=str))
     else:
-        print(render_context_pack_for_prompt(pack))
+        print(render_context_pack_for_prompt(pack, allow_incomplete=True))
     return 0 if pack.get("complete") or args.allow_incomplete else 3
 
 

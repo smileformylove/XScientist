@@ -67,7 +67,7 @@ xscientist research claim "Spaced practice improves one-week recall." \
 through inference and effect-estimate nodes to the underlying evidence,
 attempt, plan, source, and context.
 
-## Retrieval and memory receipts v2
+## Retrieval and memory receipts v2/v3
 
 Literature and decision-context retrieval now record more than the final
 selection. A receipt binds the request, algorithm, complete candidate set,
@@ -89,8 +89,21 @@ An incomplete or truncated result set must use `--incomplete`. Context summary
 budgets may omit readable views, but never omit source IDs, hashes, candidates,
 negative knowledge, or prior decisions.
 
-ARA ContextPack receipts v1 remain valid. New packs and compilation/consumption
-receipts use v2 and bind the retrieval-receipt hash.
+Literature receipts remain on v2. Research decision contexts and ARA
+ContextPacks now emit retrieval receipt v3. The v3 receipt keeps the complete
+audit candidate set while binding a separate semantic working set with:
+
+- an effective-frontier status that demotes, but does not delete, superseded
+  history;
+- task relevance, DAG distance, recency, and authority score components;
+- required semantic lanes for decisive evidence, active contradiction,
+  failure/do-not-repeat memory, open questions, and prior decisions;
+- a conservative post-render token estimate and `decision_usable` verdict;
+- a compact previous-context hash chain instead of recursive snapshot copying.
+
+If a required lane cannot fit the declared budget, the pack is incomplete and
+promotion must stop. ContextPack receipts v1/v2 and Research Context receipt v2
+remain readable; newly compiled packs use v3.
 
 ## Exact passages and source updates
 
@@ -136,7 +149,8 @@ success condition, and authority policy from the first commit.
 
 - v1 core objects without `semantic_profile` remain valid.
 - New objects always bind a built-in or explicitly supplied profile.
-- Context receipt validators accept v1 and v2; new receipts use v2.
+- Context receipt validators retain legacy compatibility; new Research Context
+  and ARA ContextPack retrieval receipts use v3, while literature uses v2.
 - Direct evidence-to-claim links remain traceable, but verified legacy claims
   receive an `claim_inference_unmodeled` warning.
 - Source status checks are advisory until an invalidating update exists; an

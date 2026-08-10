@@ -19,12 +19,14 @@ from ai_scientist.utils.ara_catalog import (
 )
 from ai_scientist.utils.ara_context import (
     ARAContextError,
+    MIN_CONTEXT_BUDGET_TOKENS,
     compile_context_pack,
     compile_live_continue_context,
     compile_live_write_context,
     persist_active_context_pack,
     persist_context_pack,
     record_context_consumption,
+    render_context_pack_for_prompt,
     validate_context_pack,
 )
 from ai_scientist.utils.ara_events import bootstrap_event_ledger, iter_events
@@ -200,6 +202,106 @@ class ARAContextTests(unittest.TestCase):
             self.assertTrue(pack["memory_snapshot_hash"].startswith("sha256:"))
             self.assertTrue(pack["budget"]["hard_closure_preserved"])
             self.assertIs(validate_context_pack(pack), pack)
+
+    def test_long_failure_history_retains_recent_failure_and_decisive_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ara = self._build_ara(Path(tmp) / "ara")
+            graph_path = ara / "exploration_graph.json"
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            for index in range(80):
+                graph["nodes"].append(
+                    {
+                        "id": f"failure-{index:02d}",
+                        "content_hash": "sha256:" + f"{index + 100:064x}"[-64:],
+                        "stage": "improve",
+                        "step": index + 3,
+                        "is_buggy": True,
+                        "metric": {
+                            "name": "accuracy",
+                            "value": 0.1,
+                            "maximize": True,
+                        },
+                        "plan_excerpt": (
+                            "latest critical calibration failure"
+                            if index == 79
+                            else f"historical failed configuration {index}"
+                        ),
+                        "artifacts_dir": f"nodes/failure-{index:02d}",
+                    }
+                )
+            graph["counts"]["nodes"] = len(graph["nodes"])
+            graph["counts"]["buggy"] = 81
+            graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+            pack = compile_context_pack(
+                ara,
+                intent="continue",
+                node_id="good",
+                budget_tokens=1000,
+            )
+            rendered = render_context_pack_for_prompt(pack)
+
+            self.assertTrue(pack["complete"])
+            self.assertTrue(pack["budget"]["decision_usable"])
+            self.assertLessEqual(pack["budget"]["prompt_estimated_tokens"], 1000)
+            self.assertIn("latest critical calibration failure", rendered)
+            self.assertIn("accuracy", rendered)
+            self.assertGreater(pack["omitted"]["failed_attempts"], 0)
+            self.assertIs(validate_context_pack(pack), pack)
+
+    def test_context_budget_has_a_safe_minimum_and_working_memory_is_sealed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ara = self._build_ara(Path(tmp) / "ara")
+            with self.assertRaisesRegex(
+                ARAContextError,
+                str(MIN_CONTEXT_BUDGET_TOKENS),
+            ):
+                compile_context_pack(
+                    ara,
+                    intent="continue",
+                    node_id="good",
+                    budget_tokens=MIN_CONTEXT_BUDGET_TOKENS - 1,
+                )
+
+            pack = compile_context_pack(
+                ara,
+                intent="continue",
+                node_id="good",
+                budget_tokens=1000,
+            )
+            pack["working_memory"]["visible_semantic_lanes"] = []
+            with self.assertRaisesRegex(
+                ARAContextError,
+                "working memory hash mismatch",
+            ):
+                validate_context_pack(pack)
+
+    def test_incomplete_pack_cannot_be_rendered_as_agent_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ara = self._build_ara(Path(tmp) / "ara")
+            pack = compile_context_pack(
+                ara,
+                intent="audit",
+                budget_tokens=MIN_CONTEXT_BUDGET_TOKENS,
+            )
+            if pack["complete"]:
+                pack["complete"] = False
+                pack["blockers"] = ["forced test blocker"]
+                identity = {
+                    key: value
+                    for key, value in pack.items()
+                    if key not in {"generated_at", "pack_hash", "persisted_ref"}
+                }
+                from ai_scientist.protocol import content_hash
+
+                pack["pack_hash"] = content_hash(identity)
+
+            with self.assertRaisesRegex(ARAContextError, "not decision-usable"):
+                render_context_pack_for_prompt(pack)
+            self.assertIn(
+                "ARA task context",
+                render_context_pack_for_prompt(pack, allow_incomplete=True),
+            )
 
     def test_write_audit_and_reproduce_are_distinct_consumption_views(self):
         with tempfile.TemporaryDirectory() as tmp:

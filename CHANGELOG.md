@@ -8,6 +8,12 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Frontier-aware semantic working memory shared by Research VCS, ARA, and the
+  cross-project learning layer. Context receipt v3 separates complete audit
+  closure from bounded prompt input, preserves current evidence and failures,
+  archives superseded history, seals token/usability verdicts, and prevents
+  recursive context-snapshot growth. `research context --prompt` exposes the
+  exact agent-facing view.
 - A locked method-discovery protocol that isolates the target edit surface,
   fixes resources and non-target variables, binds strong baselines and sealed
   cross-condition evaluation, checks proxy-to-target ranking fidelity, and

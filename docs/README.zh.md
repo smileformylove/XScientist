@@ -174,7 +174,7 @@ xscientist start ./ood-reflection \
 | 能力 | 被保存的内容 |
 | --- | --- |
 | 科学推理 | 问题、假设、前提、假定、论证依据、估计目标、效应估计和推断决策 |
-| 精确 Context 与 Memory | 可见证据、负结果、历史决策、政策、来源闭包和外部 memory ref 的哈希快照 |
+| 精确 Context 与 Memory | 不丢失的审计闭包，加上受 token 预算约束、感知当前科研前沿的工作记忆；关键证据、反证、失败和历史决策不会被长上下文静默淹没 |
 | 实验 | 计划、锁定预注册、代码、环境、数据哈希、尝试、失败、指标、图表和方案偏离 |
 | 证据与结论 | 支持、反驳、条件支持、争议、取代、评审、复现和晋级关系 |
 | 协作 | 语义分支、diff、blame、merge 预览、冲突指导、tag、bundle、restore 和 revert |
@@ -262,6 +262,15 @@ xscientist research context @latest:claim \
 
 被记录的 context receipt 可以回答：这次决策发生时，Agent 究竟看到了哪些证据、
 负知识、政策和记忆？有限 token 的上下文可以压缩，但硬证据闭包不能被裁掉。
+系统会把“完整审计快照”和“真正送入模型的工作记忆”分开：`--json` 用于审计和
+回放，`--prompt` 只输出带来源绑定的紧凑工作集。被新证据取代的对象仍可检查，
+但会进入 archived history；当前前沿、仍然有效的反证和最近相关决策优先。如果
+这些必要语义放不进声明的预算，Context 会明确标为 incomplete，而不会假装完整。
+
+```bash
+xscientist research context @latest:claim \
+  --intent continue --budget 2000 --prompt
+```
 
 ### 建立挑战分支
 

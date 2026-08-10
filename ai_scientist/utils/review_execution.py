@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +12,8 @@ from ai_scientist.utils.review_jobs import (
     finalize_review_job,
 )
 from ai_scientist.utils.token_tracker import token_tracker
+
+logger = logging.getLogger(__name__)
 
 
 def execute_review_pass(
@@ -77,9 +80,17 @@ def execute_review_pass(
             f"{effective_review_plan['review_instruction']}\n\n"
             f"{render_context_pack_for_prompt(review_context_pack)}"
         )
-    except Exception:
-        # Review must still work for library consumers without an active ARA.
-        pass
+    except Exception as exc:
+        # Library consumers may run without an active ARA, but the downgrade is
+        # explicit to both the reviewer and the persisted review plan.
+        logger.warning("Review context is degraded: %s", exc)
+        effective_review_plan["context_status"] = "degraded_unbound"
+        effective_review_plan["context_fallback_reason"] = type(exc).__name__
+        effective_review_plan["review_instruction"] = (
+            f"{effective_review_plan['review_instruction']}\n\n"
+            "Context status: degraded_unbound. No source-bound ContextPack was "
+            "available; treat unsupported conclusions as blockers."
+        )
     if persist_job and project_root is not None:
         job = begin_review_job(
             project_root,

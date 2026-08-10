@@ -189,7 +189,7 @@ and reusable.
 | Capability | What XScientist records |
 | --- | --- |
 | Scientific reasoning | Questions, hypotheses, premises, assumptions, warrants, estimands, effect estimates, and inference decisions |
-| Exact context and memory | A hash-bound snapshot of visible evidence, negative results, prior decisions, policy, source closure, and external memory refs |
+| Exact context and memory | An immutable audit closure plus a budgeted, frontier-aware working set that keeps current evidence, contradictions, failures, and prior decisions visible to the agent |
 | Experiments | Plans, locked preregistrations, code, environment, data hashes, attempts, failures, metrics, plots, and protocol deviations |
 | Evidence and claims | Supporting, refuting, qualified, contested, superseded, reviewed, reproduced, and promoted relations |
 | Collaboration | Semantic branches, diffs, blame, merge previews, conflict guidance, tags, bundles, restore, and revert |
@@ -298,6 +298,18 @@ xscientist research context @latest:claim \
 The recorded context receipt makes later review answerable: *which evidence,
 negative knowledge, policy, and memory were visible when this decision was
 made?* Agents can request bounded views without losing hard evidence closure.
+The durable snapshot and prompt view are intentionally separate: use
+`--json` for audit/replay and `--prompt` for the compact source-bound input an
+agent should actually consume. Superseded evidence stays inspectable but is
+ranked as archived history; the current frontier, active contradictions, and
+the newest relevant prior decision take precedence. If those semantics cannot
+fit the declared budget, the context is incomplete instead of silently
+dropping them.
+
+```bash
+xscientist research context @latest:claim \
+  --intent continue --budget 2000 --prompt
+```
 
 ### Challenge work on a branch
 

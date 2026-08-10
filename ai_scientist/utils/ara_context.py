@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -34,9 +35,29 @@ from ai_scientist.utils.context_receipts import (
     CONTEXT_RECEIPT_SCHEMA,
     seal_context_receipt,
 )
+from ai_scientist.utils.semantic_memory import (
+    SEMANTIC_MEMORY_POLICY_VERSION,
+    estimate_text_tokens,
+    semantic_overlap,
+    truncate_text_to_tokens,
+)
 
 CONTEXT_INTENTS = ("continue", "write", "audit", "reproduce", "decide")
 CONTEXT_RECEIPTS_RELPATH = Path("context") / "receipts.jsonl"
+MIN_CONTEXT_BUDGET_TOKENS = 256
+
+logger = logging.getLogger(__name__)
+
+_PROMPT_LIST_KEYS = (
+    "must_read",
+    "decisive_evidence",
+    "failed_attempts",
+    "do_not_repeat",
+    "open_questions",
+    "constraints",
+    "related_claims",
+    "verification_reports",
+)
 
 
 class ARAContextError(RuntimeError):
@@ -209,60 +230,213 @@ def _best_node_id(nodes: dict[str, dict[str, Any]]) -> str | None:
     return str(max(candidates, key=score).get("id") or "") or None
 
 
+def _compact_prompt_item(value: Any, *, max_tokens: int = 56) -> Any:
+    """Compact one semantic item without reducing it to an opaque hash."""
+
+    if isinstance(value, str):
+        return truncate_text_to_tokens(value, max_tokens)
+    if isinstance(value, list):
+        compacted = [
+            _compact_prompt_item(item, max_tokens=max(8, max_tokens // 3))
+            for item in value[:4]
+        ]
+        return compacted
+    if not isinstance(value, dict):
+        return value
+    priority = (
+        "node_id",
+        "claim_id",
+        "id",
+        "status",
+        "state",
+        "metric",
+        "assertion",
+        "question",
+        "reason",
+        "rule",
+        "attempt",
+        "plan",
+        "plan_excerpt",
+        "path",
+        "kind",
+    )
+    ordered_keys = list(dict.fromkeys([*priority, *sorted(value)]))
+    compacted: dict[str, Any] = {}
+    for key in ordered_keys:
+        if key not in value or key in {"context_pack_refs", "evidence_refs"}:
+            continue
+        nested = value[key]
+        if isinstance(nested, str):
+            nested = truncate_text_to_tokens(nested, max(8, max_tokens // 2))
+        elif isinstance(nested, (dict, list)):
+            nested = _compact_prompt_item(nested, max_tokens=max(12, max_tokens // 2))
+        candidate = {**compacted, key: nested}
+        if estimate_text_tokens(candidate) <= max_tokens:
+            compacted = candidate
+    return compacted or {"summary": truncate_text_to_tokens(value, max_tokens)}
+
+
+def _prompt_visible_payload(
+    pack: Mapping[str, Any], *, pack_hash_placeholder: bool = False
+) -> dict[str, Any]:
+    budget = pack.get("budget") if isinstance(pack.get("budget"), dict) else {}
+    visible: dict[str, Any] = {
+        key: pack.get(key)
+        for key in (
+            "intent",
+            "target",
+            "consumer",
+            "must_read",
+            "decisive_evidence",
+            "failed_attempts",
+            "do_not_repeat",
+            "open_questions",
+            "constraints",
+            "related_claims",
+            "verification_reports",
+            "decision",
+            "execution",
+            "verification_rules",
+            "blockers",
+            "omitted",
+            "working_memory",
+            "source_closure_hash",
+            "memory_snapshot_hash",
+            "complete",
+        )
+        if pack.get(key) not in (None, [], {}, "")
+    }
+    if budget:
+        visible["budget"] = {
+            key: budget.get(key)
+            for key in (
+                "requested_tokens",
+                "hard_closure_preserved",
+                "decision_usable",
+            )
+            if budget.get(key) is not None
+        }
+    pack_hash = pack.get("pack_hash")
+    if pack_hash_placeholder and not pack_hash:
+        pack_hash = "sha256:" + ("0" * 64)
+    if pack_hash:
+        visible["pack_hash"] = pack_hash
+    return visible
+
+
+def _prompt_token_estimate(pack: Mapping[str, Any]) -> int:
+    return estimate_text_tokens(
+        "## ARA task context (source-bound)\n"
+        + json.dumps(
+            _prompt_visible_payload(pack, pack_hash_placeholder=True),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+
+def _required_semantic_lanes(pack: Mapping[str, Any]) -> list[str]:
+    intent = str(pack.get("intent") or "")
+    required: list[str] = []
+    if pack.get("must_read"):
+        required.append("must_read")
+    if pack.get("decisive_evidence"):
+        required.append("decisive_evidence")
+    if intent in {"continue", "audit", "decide"} and pack.get("failed_attempts"):
+        required.append("failed_attempts")
+    if intent in {"continue", "decide"} and pack.get("do_not_repeat"):
+        required.append("do_not_repeat")
+    if intent in {"write", "audit", "decide"} and pack.get("open_questions"):
+        required.append("open_questions")
+    if pack.get("constraints"):
+        required.append("constraints")
+    if intent in {"write", "audit", "decide"} and pack.get("related_claims"):
+        required.append("related_claims")
+    if intent == "audit" and pack.get("verification_reports"):
+        required.append("verification_reports")
+    return required
+
+
 def _trim_optional_lists(
     pack: dict[str, Any],
     *,
     budget_tokens: int,
 ) -> None:
-    """Apply a deterministic budget while preserving hard closure fields."""
+    """Build a bounded semantic working set while retaining audit hashes."""
 
-    budget_chars = max(1000, int(budget_tokens) * 4)
-    mandatory_keys = {
-        "schema_version",
-        "protocol_kind",
-        "intent",
-        "target",
-        "generated_at",
-        "must_read",
-        "execution",
-        "verification_rules",
-        "source_refs",
-        "source_closure_hash",
-        "memory_refs",
-        "memory_snapshot_hash",
-        "complete",
-        "blockers",
+    if int(budget_tokens) < MIN_CONTEXT_BUDGET_TOKENS:
+        raise ARAContextError(
+            f"ContextPack budget must be at least {MIN_CONTEXT_BUDGET_TOKENS} tokens"
+        )
+    originals = {
+        key: list(pack.get(key) or [])
+        for key in _PROMPT_LIST_KEYS
+        if isinstance(pack.get(key), list)
     }
-    mandatory_size = sum(
-        _json_size({key: pack[key]}) for key in mandatory_keys if key in pack
-    )
-    remaining = max(0, budget_chars - mandatory_size)
-    omitted = dict(pack.get("omitted") or {})
-    for key in (
-        "decisive_evidence",
-        "failed_attempts",
-        "do_not_repeat",
-        "open_questions",
-        "constraints",
-        "related_claims",
-    ):
-        values = pack.get(key)
-        if not isinstance(values, list):
+    required_lanes = _required_semantic_lanes(pack)
+    for key in originals:
+        pack[key] = []
+
+    # First reserve one compact, intelligible item for each required semantic
+    # lane. Hash-only presence never satisfies decision usability.
+    for key in required_lanes:
+        values = originals.get(key) or []
+        if not values:
             continue
-        kept = []
-        for item in values:
-            size = _json_size(item)
-            if size <= remaining:
-                kept.append(item)
-                remaining -= size
+        compacted = _compact_prompt_item(values[0])
+        pack[key] = [compacted]
+
+    # Fill remaining budget deterministically by lane priority. A reserve keeps
+    # room for the usability verdict and budget metadata added below.
+    fill_limit = max(128, int(budget_tokens) - 256)
+    progress = True
+    while progress:
+        progress = False
+        for key in _PROMPT_LIST_KEYS:
+            values = originals.get(key) or []
+            current = pack.get(key) or []
+            if len(current) >= len(values):
+                continue
+            candidate = _compact_prompt_item(values[len(current)], max_tokens=72)
+            pack[key] = [*current, candidate]
+            if _prompt_token_estimate(pack) <= fill_limit:
+                progress = True
             else:
-                omitted[key] = int(omitted.get(key) or 0) + 1
-        pack[key] = kept
+                pack[key] = current
+
+    omitted = dict(pack.get("omitted") or {})
+    for key, values in originals.items():
+        count = max(0, len(values) - len(pack.get(key) or []))
+        if count:
+            omitted[key] = int(omitted.get(key) or 0) + count
     pack["omitted"] = omitted
+    visible_lanes = [key for key in required_lanes if pack.get(key)]
+    missing_lanes = sorted(set(required_lanes) - set(visible_lanes))
+    working_core = {
+        "policy_version": SEMANTIC_MEMORY_POLICY_VERSION,
+        "required_semantic_lanes": required_lanes,
+        "visible_semantic_lanes": visible_lanes,
+        "missing_semantic_lanes": missing_lanes,
+        "source_count": len(pack.get("source_refs") or []),
+        "memory_count": len(pack.get("memory_refs") or []),
+    }
+    pack["working_memory"] = {
+        **working_core,
+        "working_memory_hash": content_hash(working_core),
+    }
+    estimated_tokens = _prompt_token_estimate(pack)
+    decision_usable = not missing_lanes and estimated_tokens <= int(budget_tokens)
+    if not decision_usable:
+        blocker = "bounded working memory is not decision-usable"
+        if blocker not in pack.setdefault("blockers", []):
+            pack["blockers"].append(blocker)
     pack["budget"] = {
         "requested_tokens": int(budget_tokens),
-        "estimated_chars": _json_size(pack),
+        "prompt_estimated_tokens": estimated_tokens,
+        "audit_source_count": len(pack.get("source_refs") or []),
         "hard_closure_preserved": True,
+        "decision_usable": decision_usable,
     }
 
 
@@ -305,8 +479,8 @@ def _finalize_pack(
     }
     retrieval_algorithm = {
         "name": "ara_context_compiler",
-        "version": "2.0",
-        "ranking": "intent-specific hard closure before optional views",
+        "version": "3.0",
+        "ranking": "intent-specific semantic lanes with recency and relevance before audit-only history",
     }
     retrieval_candidates = [
         {
@@ -318,7 +492,7 @@ def _finalize_pack(
         for rank, ref in enumerate(refs, start=1)
     ]
     retrieval_core = {
-        "profile": "ara.context.retrieval-receipt.v2",
+        "profile": "ara.context.retrieval-receipt.v3",
         "request": retrieval_request,
         "request_hash": content_hash(retrieval_request),
         "algorithm": retrieval_algorithm,
@@ -331,8 +505,19 @@ def _finalize_pack(
         **retrieval_core,
         "receipt_hash": content_hash(retrieval_core),
     }
-    pack["complete"] = not bool(pack.get("blockers"))
     _trim_optional_lists(pack, budget_tokens=budget_tokens)
+    pack["complete"] = not bool(pack.get("blockers")) and bool(
+        (pack.get("budget") or {}).get("decision_usable")
+    )
+    estimated_tokens = _prompt_token_estimate(pack)
+    pack["budget"]["prompt_estimated_tokens"] = estimated_tokens
+    if estimated_tokens > int(budget_tokens):
+        blocker = "rendered context exceeds the requested prompt budget"
+        if blocker not in pack.setdefault("blockers", []):
+            pack["blockers"].append(blocker)
+        pack["budget"]["decision_usable"] = False
+        pack["complete"] = False
+    pack["budget"]["prompt_estimated_tokens"] = _prompt_token_estimate(pack)
     identity = {
         key: value
         for key, value in pack.items()
@@ -386,6 +571,35 @@ def validate_context_pack(pack: dict[str, Any]) -> dict[str, Any]:
             raise ARAContextError(
                 "ContextPack retrieval candidates do not match sources"
             )
+    working_memory = pack.get("working_memory")
+    if working_memory is not None:
+        if not isinstance(working_memory, dict):
+            raise ARAContextError("ContextPack working memory must be an object")
+        working_core = {
+            key: value
+            for key, value in working_memory.items()
+            if key != "working_memory_hash"
+        }
+        if working_memory.get("working_memory_hash") != content_hash(working_core):
+            raise ARAContextError("ContextPack working memory hash mismatch")
+        required_lanes = list(working_memory.get("required_semantic_lanes") or [])
+        visible_lanes = [key for key in required_lanes if pack.get(key)]
+        missing_lanes = sorted(set(required_lanes) - set(visible_lanes))
+        if working_memory.get("visible_semantic_lanes") != visible_lanes:
+            raise ARAContextError("ContextPack visible semantic lanes mismatch")
+        if working_memory.get("missing_semantic_lanes") != missing_lanes:
+            raise ARAContextError("ContextPack missing semantic lanes mismatch")
+        budget = pack.get("budget") or {}
+        estimated_tokens = _prompt_token_estimate(pack)
+        if budget.get("prompt_estimated_tokens") != estimated_tokens:
+            raise ARAContextError("ContextPack prompt token estimate mismatch")
+        usable = not missing_lanes and estimated_tokens <= int(
+            budget.get("requested_tokens") or 0
+        )
+        if budget.get("decision_usable") is not usable:
+            raise ARAContextError("ContextPack usability verdict mismatch")
+        if pack.get("complete") is True and not usable:
+            raise ARAContextError("complete ContextPack is not decision-usable")
     identity = {
         key: value
         for key, value in pack.items()
@@ -524,9 +738,23 @@ def compile_context_pack(
         selected_claims = [
             claim for claim in selected_claims if isinstance(claim, dict)
         ]
-        for claim in sorted(
-            selected_claims, key=lambda item: str(item.get("claim_id") or "")
-        ):
+        decision_query = {
+            "decision": dict(decision or {}),
+            "node_plan": str((selected_node or {}).get("plan") or ""),
+            "node_stage": str((selected_node or {}).get("stage") or ""),
+        }
+        selected_claims.sort(
+            key=lambda item: (
+                -semantic_overlap(decision_query, item.get("context") or item),
+                (
+                    not bool(item.get("resolved"))
+                    if intent == "write"
+                    else bool(item.get("resolved"))
+                ),
+                str(item.get("claim_id") or ""),
+            )
+        )
+        for claim in selected_claims:
             claim_view = {
                 "claim_id": claim.get("claim_id"),
                 "assertion": claim.get("context") or "",
@@ -557,7 +785,13 @@ def compile_context_pack(
         if intent in {"audit", "decide"}:
             pack["failed_attempts"] = [
                 _node_view(node, root)
-                for node in nodes.values()
+                for node in sorted(
+                    nodes.values(),
+                    key=lambda item: (
+                        -int(item.get("step") or 0),
+                        str(item.get("id") or ""),
+                    ),
+                )
                 if node.get("is_buggy")
             ]
             verify_root = root / "verify"
@@ -725,9 +959,15 @@ def compile_live_continue_context(
                 "plan": str(best.get("plan") or "")[:300],
             }
         )
-    for node in plain_nodes:
-        if not node.get("is_buggy"):
-            continue
+    failed_nodes = sorted(
+        (node for node in plain_nodes if node.get("is_buggy")),
+        key=lambda node: (
+            str(node.get("stage") or "") != str(stage or ""),
+            -int(node.get("step") or 0),
+            str(node.get("id") or ""),
+        ),
+    )
+    for node in failed_nodes:
         item = {
             "node_id": node.get("id"),
             "attempt": str(node.get("plan") or "")[:300],
@@ -878,32 +1118,22 @@ def compile_live_audit_context(
     return _finalize_pack(pack, source_refs, budget_tokens)
 
 
-def render_context_pack_for_prompt(pack: dict[str, Any]) -> str:
-    """Stable, compact prompt block. Raw logs are deliberately absent."""
+def render_context_pack_for_prompt(
+    pack: dict[str, Any], *, allow_incomplete: bool = False
+) -> str:
+    """Render the sealed working set, rejecting unsafe agent input by default."""
 
-    visible = {
-        key: pack.get(key)
-        for key in (
-            "intent",
-            "target",
-            "must_read",
-            "decisive_evidence",
-            "failed_attempts",
-            "do_not_repeat",
-            "open_questions",
-            "constraints",
-            "related_claims",
-            "blockers",
-            "omitted",
-            "source_closure_hash",
-            "memory_refs",
-            "memory_snapshot_hash",
-            "pack_hash",
+    validate_context_pack(pack)
+    if not allow_incomplete and (
+        pack.get("complete") is not True
+        or (pack.get("budget") or {}).get("decision_usable") is not True
+    ):
+        raise ARAContextError(
+            "ContextPack is incomplete or not decision-usable; inspect JSON instead"
         )
-        if pack.get(key) not in (None, [], {}, "")
-    }
+
     return "## ARA task context (source-bound)\n" + json.dumps(
-        visible, indent=2, ensure_ascii=False, default=str
+        _prompt_visible_payload(pack), indent=2, ensure_ascii=False, default=str
     )
 
 
@@ -961,13 +1191,17 @@ def persist_active_context_pack(
     pack: dict[str, Any],
     *,
     consumer: str | None = None,
+    strict: bool = False,
 ) -> str | None:
     root = active_ara_root()
     if not root:
         return None
     try:
         return persist_context_pack(root, pack, consumer=consumer)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not persist active ContextPack: %s", exc)
+        if strict:
+            raise
         return None
 
 
@@ -1012,6 +1246,7 @@ def record_active_context_consumption(
     consumer: str,
     output_type: str,
     output_id: str,
+    strict: bool = False,
 ) -> None:
     root = active_ara_root()
     if not root:
@@ -1024,7 +1259,10 @@ def record_active_context_consumption(
             output_type=output_type,
             output_id=output_id,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not record active context consumption: %s", exc)
+        if strict:
+            raise
         return
 
 
@@ -1032,6 +1270,7 @@ __all__ = [
     "ARAContextError",
     "CONTEXT_INTENTS",
     "CONTEXT_RECEIPTS_RELPATH",
+    "MIN_CONTEXT_BUDGET_TOKENS",
     "compile_context_pack",
     "compile_live_audit_context",
     "compile_live_continue_context",

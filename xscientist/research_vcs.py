@@ -280,6 +280,43 @@ class ResearchRepository:
             budget_tokens=budget_tokens,
         )
 
+    def context_prompt(
+        self,
+        *,
+        target_ids: Sequence[str],
+        intent: str = "decide",
+        decision_kind: str = "research_decision",
+        selected: str = "",
+        options_considered: Sequence[Mapping[str, Any] | str] = (),
+        rationale: Sequence[str] = (),
+        constraints: Sequence[str] = (),
+        memory_refs: Sequence[str] = (),
+        ref: str | None = None,
+        budget_tokens: int = 4000,
+    ) -> str:
+        """Render the bounded, decision-usable view intended for an agent prompt.
+
+        ``context()`` remains the complete auditable snapshot.  This method
+        deliberately returns only the hash-bound working set, preventing an
+        agent from accidentally ingesting the entire historical closure.
+        """
+
+        from .research_context import render_research_context_for_prompt
+
+        snapshot = self.context(
+            target_ids=target_ids,
+            intent=intent,
+            decision_kind=decision_kind,
+            selected=selected,
+            options_considered=options_considered,
+            rationale=rationale,
+            constraints=constraints,
+            memory_refs=memory_refs,
+            ref=ref,
+            budget_tokens=budget_tokens,
+        )
+        return render_research_context_for_prompt(snapshot)
+
     def technology_tree(self) -> dict[str, Any]:
         from .research_policy import build_research_technology_tree
 

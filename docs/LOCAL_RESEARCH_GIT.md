@@ -166,14 +166,20 @@ closure. It does not replace signatures, external custody, peer review, or a
 third-party scientific attestation.
 
 `research context` answers a third question: “which exact evidence and memory
-did this decision consume?” Its hard closure retains full object IDs and hashes
+did this decision consume?” Its audit closure retains full object IDs and hashes
 for supporting and negative evidence, failed attempts, prior reviews/gates, and
-earlier context snapshots. Only short display summaries are budgeted. Recorded
+the latest related context-chain link. The agent-facing working set is a
+separate, budgeted projection. It ranks the effective frontier before
+superseded history, reserves current evidence or active contradiction and a
+relevant prior decision, and reports `decision_usable=false` when those required
+semantics do not fit. Recorded
 reviews and gates bind this snapshot using a `decision_context` DAG edge and a
 matching `context_hash`; closure verification fails closed if a required
 snapshot is missing or changed. Historical `--ref` reads objects and resolves
 `@latest:<kind>` at that ref, so old decisions cannot accidentally see today's
-worktree memory.
+worktree memory. Use `research context ... --json` for the full auditable
+snapshot and `research context ... --prompt` for the bounded source-bound view
+that should be injected into an agent.
 
 For ecosystem exchange, export one committed ref without exposing payloads by
 default:

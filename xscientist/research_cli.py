@@ -761,7 +761,13 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     context_parser.add_argument("--record", action="store_true")
     context_parser.add_argument("--no-commit", action="store_true")
     context_parser.add_argument("--repo", default=".")
-    context_parser.add_argument("--json", action="store_true", dest="as_json")
+    context_output = context_parser.add_mutually_exclusive_group()
+    context_output.add_argument("--json", action="store_true", dest="as_json")
+    context_output.add_argument(
+        "--prompt",
+        action="store_true",
+        help="Print only the bounded, source-bound working memory for an agent.",
+    )
 
     decide_parser = subparsers.add_parser(
         "decide",
@@ -1767,6 +1773,7 @@ def main(
             from .research_context import (
                 build_research_context_snapshot,
                 record_research_context_snapshot,
+                render_research_context_for_prompt,
             )
 
             options = _parse_context_options(args.option, selected=args.selected)
@@ -1828,10 +1835,12 @@ def main(
                     ref=args.ref,
                     budget_tokens=args.budget,
                 )
-            if args.as_json:
+            context = payload.get("context") or payload
+            if args.prompt:
+                print(render_research_context_for_prompt(context))
+            elif args.as_json:
                 _print_json(payload)
             else:
-                context = payload.get("context") or payload
                 print(f"Context:          {context['context_hash']}")
                 print(
                     f"As of:            {context['as_of'].get('commit') or 'worktree'}"
@@ -1842,7 +1851,7 @@ def main(
                 print(f"Complete:         {context['complete']}")
                 for blocker in context["blockers"]:
                     print(f"  blocker: {_display_text(blocker)}")
-            return 0 if (payload.get("context") or payload)["complete"] else 1
+            return 0 if context["complete"] else 1
 
         if args.command == "decide":
             from .research_policy import decide_research_transition

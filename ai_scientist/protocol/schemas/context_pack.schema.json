@@ -22,6 +22,7 @@
     "decision": {"type": "object"},
     "execution": {"type": "object"},
     "verification_rules": {"type": "array"},
+    "verification_reports": {"type": "array"},
     "source_refs": {
       "type": "array",
       "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -43,7 +44,47 @@
     "complete": {"type": "boolean"},
     "blockers": {"type": "array"},
     "omitted": {"type": "object"},
-    "budget": {"type": "object"}
+    "retrieval_receipt": {
+      "type": "object",
+      "required": ["profile", "request", "request_hash", "algorithm", "algorithm_hash", "candidate_set", "candidate_set_hash", "complete_candidate_set", "receipt_hash"],
+      "properties": {
+        "profile": {"type": "string"},
+        "request": {"type": "object"},
+        "request_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "algorithm": {"type": "object"},
+        "algorithm_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "candidate_set": {"type": "array"},
+        "candidate_set_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "complete_candidate_set": {"type": "boolean"},
+        "receipt_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "working_memory": {
+      "type": "object",
+      "required": ["policy_version", "required_semantic_lanes", "visible_semantic_lanes", "missing_semantic_lanes", "source_count", "memory_count", "working_memory_hash"],
+      "properties": {
+        "policy_version": {"type": "string"},
+        "required_semantic_lanes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "visible_semantic_lanes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "missing_semantic_lanes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "source_count": {"type": "integer", "minimum": 0},
+        "memory_count": {"type": "integer", "minimum": 0},
+        "working_memory_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "requested_tokens": {"type": "integer", "minimum": 1},
+        "prompt_estimated_tokens": {"type": "integer", "minimum": 0},
+        "audit_source_count": {"type": "integer", "minimum": 0},
+        "hard_closure_preserved": {"type": "boolean"},
+        "decision_usable": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

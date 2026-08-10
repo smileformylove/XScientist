@@ -60,9 +60,7 @@ def _sandbox_policy_for_workspace(cfg: Config):
 
 
 def _experiment_execution_env() -> dict[str, str | None]:
-    allowed = (
-        "CUDA_VISIBLE_DEVICES",
-    )
+    allowed = ("CUDA_VISIBLE_DEVICES",)
     return {name: os.getenv(name) for name in allowed}
 
 
@@ -1156,7 +1154,10 @@ class MinimalAgent:
 
         # Prefer dataset names extracted from parsed metrics (deterministic).
         # Fall back to inferring from plot analyses only when missing.
-        if not node.datasets_successfully_tested or node.datasets_successfully_tested == [""]:
+        if (
+            not node.datasets_successfully_tested
+            or node.datasets_successfully_tested == [""]
+        ):
             node.datasets_successfully_tested = (
                 self._determine_datasets_successfully_tested(node)
             )
@@ -1432,23 +1433,21 @@ class ParallelAgent:
             seed_eval = True
             memory_summary = ""
             print("[yellow]Starting multi-seed eval...[/yellow]")
-            future = (
-                self.executor.submit(
-                    self._process_node_wrapper,
-                    node_data,
-                    self.task_desc,
-                    self.cfg,
-                    gpu_id,
-                    memory_summary,
-                    self.evaluation_metrics,
-                    self.stage_name,
-                    new_ablation_idea,
-                    new_hyperparam_idea,
-                    best_stage1_plot_code,
-                    best_stage2_plot_code,
-                    best_stage3_plot_code,
-                    seed_eval,
-                )
+            future = self.executor.submit(
+                self._process_node_wrapper,
+                node_data,
+                self.task_desc,
+                self.cfg,
+                gpu_id,
+                memory_summary,
+                self.evaluation_metrics,
+                self.stage_name,
+                new_ablation_idea,
+                new_hyperparam_idea,
+                best_stage1_plot_code,
+                best_stage2_plot_code,
+                best_stage3_plot_code,
+                seed_eval,
             )
             futures.append(future)
             future_to_process_id[future] = process_id
@@ -1693,7 +1692,9 @@ class ParallelAgent:
             )
 
             # Add check for saved data files
-            data_files = ["experiment_data.npy"] if experiment_data_path.is_file() else []
+            data_files = (
+                ["experiment_data.npy"] if experiment_data_path.is_file() else []
+            )
             if not data_files:
                 logger.warning(
                     "No .npy files found in working directory. Data may not have been saved properly."
@@ -1872,7 +1873,9 @@ class ParallelAgent:
                         + str(e)
                     )
                     child_node.datasets_successfully_tested = []
-            elif data_files and child_node.metric_provenance != "deterministic_verified":
+            elif (
+                data_files and child_node.metric_provenance != "deterministic_verified"
+            ):
                 child_node.metric = WorstMetricValue()
                 child_node.metric_provenance = "unavailable"
                 child_node.is_buggy = True
@@ -2167,7 +2170,9 @@ class ParallelAgent:
         nodes_to_process = []
         processed_trees = set()
         search_cfg = self.cfg.agent.search
-        search_mode = str(os.environ.get("AI_SCIENTIST_SEARCH_MODE") or "").strip().lower()
+        search_mode = (
+            str(os.environ.get("AI_SCIENTIST_SEARCH_MODE") or "").strip().lower()
+        )
         print(f"[cyan]self.num_workers: {self.num_workers}, [/cyan]")
 
         while len(nodes_to_process) < self.num_workers:
@@ -2310,11 +2315,11 @@ class ParallelAgent:
 
         if self.cfg.agent.get("summary", None) is not None:
             memory_summary = self.journal.generate_summary(
-                include_code=False, 
+                include_code=False,
                 **{
-                    "model": self.cfg.agent.summary.model, 
-                    "temp": self.cfg.agent.summary.temp
-                }
+                    "model": self.cfg.agent.summary.model,
+                    "temp": self.cfg.agent.summary.temp,
+                },
             )
         else:
             memory_summary = self.journal.generate_summary(include_code=False)
@@ -2353,6 +2358,14 @@ class ParallelAgent:
                 # Live context is best-effort for old/ad-hoc runners. The final
                 # ARA catalog still provides deterministic post-run contexts.
                 logger.warning("Could not compile live ARA context: %s", exc)
+                legacy_summary = str(memory_summary or "")[:6000]
+                worker_memory_summary = (
+                    "## Context fallback (degraded, not source-bound)\n"
+                    f"reason={type(exc).__name__}\n"
+                    "The semantic ContextPack was unavailable. Treat this journal "
+                    "synopsis as advisory and do not promote claims from it.\n\n"
+                    f"{legacy_summary}"
+                )
             gpu_id = None
             if self.gpu_manager is not None:
                 try:
@@ -2634,9 +2647,7 @@ class ParallelAgent:
                         self.gpu_manager.release_gpu(process_id)
 
                 executor = getattr(self, "executor", None)
-                processes = list(
-                    (getattr(executor, "_processes", None) or {}).values()
-                )
+                processes = list((getattr(executor, "_processes", None) or {}).values())
                 if executor is not None:
                     executor.shutdown(wait=False, cancel_futures=True)
 

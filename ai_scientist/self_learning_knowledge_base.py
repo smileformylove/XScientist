@@ -11,10 +11,20 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+except ModuleNotFoundError:  # Optional acceleration in lightweight installs.
+    TfidfVectorizer = None
+    cosine_similarity = None
 
 from ai_scientist.config.paths import OUTPUT_PATH
+from ai_scientist.protocol import content_hash
+from ai_scientist.utils.semantic_memory import (
+    bounded_semantic_view,
+    semantic_overlap,
+)
 
 
 class SelfLearningKnowledgeBase:
@@ -132,7 +142,9 @@ class SelfLearningKnowledgeBase:
             improvements: 改进记录
         """
         experience = {
-            "paper_id": paper_data.get("paper_id", f"paper_{datetime.now().timestamp()}"),
+            "paper_id": paper_data.get(
+                "paper_id", f"paper_{datetime.now().timestamp()}"
+            ),
             "idea_name": paper_data.get("idea_name", ""),
             "paper_type": paper_data.get("paper_type", ""),
             "timestamp": datetime.now().isoformat(),
@@ -193,7 +205,9 @@ class SelfLearningKnowledgeBase:
             # 计算平均改进分数
             scores = self.improvement_strategies[key]["improvement_scores"]
             if scores:
-                self.improvement_strategies[key]["avg_improvement"] = sum(scores) / len(scores)
+                self.improvement_strategies[key]["avg_improvement"] = sum(scores) / len(
+                    scores
+                )
 
     def _update_review_insights(self, reviews: List[Dict], outcome: str):
         """更新审查洞察"""
@@ -219,6 +233,8 @@ class SelfLearningKnowledgeBase:
         current_idea: Dict,
         paper_type: str = None,
         top_k: int = 5,
+        context: Dict | None = None,
+        include_failures: bool = True,
     ) -> List[Dict]:
         """
         查找相似的历史论文
@@ -231,17 +247,28 @@ class SelfLearningKnowledgeBase:
         Returns:
             相似论文列表
         """
-        if not self.success_patterns:
+        experiences = [
+            {**paper, "memory_class": "success"}
+            for paper in self.success_patterns
+            if isinstance(paper, dict)
+        ]
+        if include_failures:
+            experiences.extend(
+                {**paper, "memory_class": "failure"}
+                for paper in self.failure_patterns
+                if isinstance(paper, dict)
+            )
+        if not experiences:
             return []
 
         # 构建文本表示
-        current_text = self._idea_to_text(current_idea)
+        current_text = self._idea_to_text(current_idea, context=context)
 
         # 构建历史论文文本
         historical_texts = []
         historical_papers = []
 
-        for paper in self.success_patterns:
+        for paper in experiences:
             if paper_type and paper.get("paper_type") != paper_type:
                 continue
 
@@ -252,12 +279,19 @@ class SelfLearningKnowledgeBase:
             return []
 
         # 使用TF-IDF计算相似度
-        vectorizer = TfidfVectorizer()
         all_texts = [current_text] + historical_texts
-        tfidf_matrix = vectorizer.fit_transform(all_texts)
-
-        # 计算相似度
-        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+        if TfidfVectorizer is not None and cosine_similarity is not None:
+            try:
+                tfidf_matrix = TfidfVectorizer().fit_transform(all_texts)
+                similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+            except ValueError:
+                similarities = np.array(
+                    [semantic_overlap(current_text, text) for text in historical_texts]
+                )
+        else:
+            similarities = np.array(
+                [semantic_overlap(current_text, text) for text in historical_texts]
+            )
 
         # 排序并返回top-k
         sorted_indices = np.argsort(similarities)[::-1][:top_k]
@@ -265,14 +299,17 @@ class SelfLearningKnowledgeBase:
         similar_papers = []
         for idx in sorted_indices:
             if similarities[idx] > 0.1:  # 相似度阈值
-                similar_papers.append({
-                    **historical_papers[idx],
-                    "similarity": float(similarities[idx]),
-                })
+                similar_papers.append(
+                    {
+                        **historical_papers[idx],
+                        "similarity": float(similarities[idx]),
+                        "memory_ref": content_hash(historical_papers[idx]),
+                    }
+                )
 
         return similar_papers
 
-    def _idea_to_text(self, idea: Dict) -> str:
+    def _idea_to_text(self, idea: Dict, *, context: Dict | None = None) -> str:
         """将想法转换为文本"""
         parts = [
             idea.get("Title", ""),
@@ -281,6 +318,13 @@ class SelfLearningKnowledgeBase:
             idea.get("Field", ""),
             idea.get("Task", ""),
         ]
+        if context:
+            context_view = bounded_semantic_view(
+                context,
+                query=idea,
+                budget_tokens=256,
+            )
+            parts.append(json.dumps(context_view, ensure_ascii=False, sort_keys=True))
         return " ".join(parts)
 
     def get_success_patterns(
@@ -305,7 +349,8 @@ class SelfLearningKnowledgeBase:
 
         if min_score:
             patterns = [
-                p for p in patterns
+                p
+                for p in patterns
                 if p.get("final_scores", {}).get("overall", 0) >= min_score
             ]
 
@@ -350,10 +395,12 @@ class SelfLearningKnowledgeBase:
             if total > 0:
                 success_rate = success_count / total
                 if success_rate >= min_success_rate:
-                    effective.append({
-                        **stats,
-                        "success_rate": success_rate,
-                    })
+                    effective.append(
+                        {
+                            **stats,
+                            "success_rate": success_rate,
+                        }
+                    )
 
         # 按成功率排序
         effective.sort(key=lambda x: x["success_rate"], reverse=True)
@@ -375,7 +422,9 @@ class SelfLearningKnowledgeBase:
 
                 for threshold in np.arange(2.0, 5.0, 0.1):
                     predictions = [1 if s >= threshold else 0 for s in scores]
-                    accuracy = sum(p == o for p, o in zip(predictions, outcomes)) / len(outcomes)
+                    accuracy = sum(p == o for p, o in zip(predictions, outcomes)) / len(
+                        outcomes
+                    )
 
                     if accuracy > best_accuracy:
                         best_accuracy = accuracy
@@ -392,11 +441,20 @@ class SelfLearningKnowledgeBase:
             "total_papers": len(self.success_patterns) + len(self.failure_patterns),
             "success_count": len(self.success_patterns),
             "failure_count": len(self.failure_patterns),
-            "success_rate": len(self.success_patterns) / (len(self.success_patterns) + len(self.failure_patterns)) if (len(self.success_patterns) + len(self.failure_patterns)) > 0 else 0,
+            "success_rate": (
+                len(self.success_patterns)
+                / (len(self.success_patterns) + len(self.failure_patterns))
+                if (len(self.success_patterns) + len(self.failure_patterns)) > 0
+                else 0
+            ),
             "common_issues": self.get_common_issues(),
             "effective_strategies": self.get_effective_strategies(min_success_rate=0.7),
             "score_thresholds": self.get_score_thresholds(),
-            "recent_successes": self.success_patterns[-5:] if len(self.success_patterns) >= 5 else self.success_patterns,
+            "recent_successes": (
+                self.success_patterns[-5:]
+                if len(self.success_patterns) >= 5
+                else self.success_patterns
+            ),
             "self_evolution_playbook": self_evolution_playbook,
         }
 
@@ -408,13 +466,15 @@ class SelfLearningKnowledgeBase:
 
         # 清理成功模式
         self.success_patterns = [
-            p for p in self.success_patterns
+            p
+            for p in self.success_patterns
             if datetime.fromisoformat(p["timestamp"]) > cutoff
         ]
 
         # 清理失败模式
         self.failure_patterns = [
-            p for p in self.failure_patterns
+            p
+            for p in self.failure_patterns
             if datetime.fromisoformat(p["timestamp"]) > cutoff
         ]
 
@@ -603,13 +663,19 @@ class PatternAnalyzer:
 
         return effective_improvements
 
-    def predict_success_probability(self, paper_data: Dict) -> float:
+    def predict_success_probability(
+        self,
+        paper_data: Dict,
+        *,
+        context: Dict | None = None,
+    ) -> float:
         """预测成功概率"""
         # 基于相似论文的成功率
         similar_papers = self.kb.find_similar_papers(
             paper_data.get("idea", {}),
             paper_data.get("paper_type"),
             top_k=10,
+            context=context,
         )
 
         if not similar_papers:
