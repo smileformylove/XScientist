@@ -392,10 +392,55 @@ class PublicSdkTests(unittest.TestCase):
 
         app = xscientist.create_app(ServiceSettings(max_workers=1, api_key="secret"))
         with TestClient(app) as client:
-            self.assertEqual(client.get("/health").status_code, 401)
-            response = client.get("/health", headers={"X-API-Key": "secret"})
+            self.assertEqual(client.get("/health").status_code, 200)
+            self.assertEqual(client.get("/v1/jobs").status_code, 401)
+            response = client.get("/v1/jobs", headers={"X-API-Key": "secret"})
 
         self.assertEqual(response.status_code, 200)
+
+    def test_non_loopback_service_requires_auth_or_explicit_override(self) -> None:
+        uvicorn = mock.Mock()
+        with mock.patch.dict("sys.modules", {"uvicorn": uvicorn}):
+            with self.assertRaisesRegex(ValueError, "Non-loopback"):
+                run_server(host="0.0.0.0")
+        uvicorn.run.assert_not_called()
+
+        app = mock.Mock()
+        with (
+            mock.patch.dict("sys.modules", {"uvicorn": uvicorn}),
+            mock.patch("xscientist.service.create_app", return_value=app),
+        ):
+            run_server(host="0.0.0.0", allow_unauthenticated=True)
+        uvicorn.run.assert_called_once_with(app, host="0.0.0.0", port=8000)
+
+    def test_client_bounded_capture_retains_only_tail(self) -> None:
+        client = XScientist()
+        result = client.run_command(
+            [sys.executable, "-c", "print('x' * 10000)"],
+            max_output_chars=64,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.stdout), 64)
+        self.assertTrue(result.stdout_truncated)
+
+    def test_client_workspace_quota_terminates_process(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = XScientist(work_dir=root).run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('large.bin').write_bytes(b'x' * 4096)",
+                ],
+                max_output_chars=256,
+                workspace=root,
+                max_workspace_bytes=64,
+                max_workspace_files=10,
+            )
+
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("ResourceLimitError", result.stderr)
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS API")
     def test_http_service_exposes_payload_free_research_audit(self) -> None:

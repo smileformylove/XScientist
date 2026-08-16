@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 from contextlib import asynccontextmanager
+from dataclasses import replace
 import hmac
+import ipaddress
 import os
 import re
 from pathlib import Path
@@ -25,21 +27,6 @@ except ModuleNotFoundError:
     Field = None  # type: ignore[assignment]
 
 
-_RESERVED_PROJECT_ARGS = {
-    "--output-root",
-    "--question",
-    "--topic",
-    "--ideas",
-    "--bfts-config",
-    "--autopilot",
-    "--resume",
-    "--data-dir",
-    "--allow-synthetic-data",
-    "--max-project-tokens",
-    "--max-project-hours",
-    "--max-cost-usd",
-    "--seed-from-ara",
-}
 _PACKAGED_CONFIG_ALIASES = {
     "default",
     "deep",
@@ -104,15 +91,32 @@ def _validate_research_ref(ref: str) -> str:
 
 def _validate_extra_args(extra_args: list[str]) -> tuple[str, ...]:
     normalized = tuple(str(arg) for arg in extra_args)
-    for arg in normalized:
-        if any(
-            arg == reserved or arg.startswith(f"{reserved}=")
-            for reserved in _RESERVED_PROJECT_ARGS
-        ):
-            raise ValueError(
-                f"extra_args cannot override service-controlled option {arg!r}"
-            )
+    if normalized:
+        raise ValueError(
+            "extra_args are not accepted over HTTP; use the typed request fields"
+        )
     return normalized
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = str(host or "").strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_service_auth(settings: ServiceSettings) -> None:
+    if _is_loopback_host(settings.bind_host):
+        return
+    if settings.api_key or settings.allow_unauthenticated:
+        return
+    raise ValueError(
+        "Non-loopback HTTP binding requires XSCIENTIST_API_KEY or the explicit "
+        "--allow-unauthenticated override"
+    )
 
 
 def _service_output_view(value: Any, *, output_root: Path) -> Any:
@@ -239,7 +243,15 @@ def create_app(settings: ServiceSettings | None = None):
         raise ModuleNotFoundError(
             "Pydantic is not installed. Install `xscientist[service]`."
         )
-    resolved = settings or ServiceSettings(api_key=os.environ.get("XSCIENTIST_API_KEY"))
+    resolved = settings or ServiceSettings(
+        bind_host=os.environ.get("XSCIENTIST_BIND_HOST", "127.0.0.1"),
+        allow_unauthenticated=(
+            os.environ.get("XSCIENTIST_ALLOW_UNAUTHENTICATED", "0") == "1"
+        ),
+    )
+    if not resolved.api_key and os.environ.get("XSCIENTIST_API_KEY"):
+        resolved = replace(resolved, api_key=os.environ["XSCIENTIST_API_KEY"])
+    _validate_service_auth(resolved)
     output_root = (
         Path(resolved.output_root).expanduser().resolve()
         if resolved.output_root is not None
@@ -260,6 +272,8 @@ def create_app(settings: ServiceSettings | None = None):
         client,
         max_workers=resolved.max_workers,
         max_output_chars=resolved.max_output_chars,
+        max_workspace_bytes=resolved.max_workspace_bytes,
+        max_workspace_files=resolved.max_workspace_files,
         state_dir=state_dir,
         write_json=lambda path, payload: atomic_write_json(path, payload),
     )
@@ -284,6 +298,8 @@ def create_app(settings: ServiceSettings | None = None):
 
         @app.middleware("http")
         async def require_api_key(request: Request, call_next):
+            if request.url.path == "/health":
+                return await call_next(request)
             supplied = request.headers.get("x-api-key", "")
             if not hmac.compare_digest(supplied, resolved.api_key or ""):
                 return JSONResponse(
@@ -531,9 +547,12 @@ def run_server(
     output_root: str | None = None,
     max_workers: int = 2,
     max_output_chars: int = 200_000,
+    max_workspace_bytes: int = 10 * 1024 * 1024 * 1024,
+    max_workspace_files: int = 100_000,
     api_key: str | None = None,
     state_dir: str | None = None,
     reload: bool = False,
+    allow_unauthenticated: bool = False,
 ) -> None:
     try:
         import uvicorn
@@ -543,7 +562,28 @@ def run_server(
         ) from exc
     if reload and any(value is not None for value in (work_dir, output_root)):
         raise ValueError("reload mode does not support custom work_dir/output_root")
+    if reload and api_key and not os.environ.get("XSCIENTIST_API_KEY"):
+        raise ValueError(
+            "reload mode requires XSCIENTIST_API_KEY in the environment instead "
+            "of the api_key argument"
+        )
+    resolved_api_key = api_key or os.environ.get("XSCIENTIST_API_KEY")
+    _validate_service_auth(
+        ServiceSettings(
+            bind_host=host,
+            api_key=resolved_api_key,
+            allow_unauthenticated=allow_unauthenticated,
+            max_workers=max_workers,
+            max_output_chars=max_output_chars,
+            max_workspace_bytes=max_workspace_bytes,
+            max_workspace_files=max_workspace_files,
+        )
+    )
     if reload:
+        if not _is_loopback_host(host):
+            os.environ["XSCIENTIST_BIND_HOST"] = host
+        if allow_unauthenticated:
+            os.environ["XSCIENTIST_ALLOW_UNAUTHENTICATED"] = "1"
         uvicorn.run(
             "xscientist.service:create_app",
             factory=True,
@@ -558,8 +598,12 @@ def run_server(
             output_root=output_root,
             max_workers=max_workers,
             max_output_chars=max_output_chars,
-            api_key=api_key or os.environ.get("XSCIENTIST_API_KEY"),
+            max_workspace_bytes=max_workspace_bytes,
+            max_workspace_files=max_workspace_files,
+            api_key=resolved_api_key,
             state_dir=state_dir,
+            bind_host=host,
+            allow_unauthenticated=allow_unauthenticated,
         )
     )
     uvicorn.run(app, host=host, port=port)
@@ -573,8 +617,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--max-output-chars", type=int, default=200_000)
+    parser.add_argument("--max-workspace-bytes", type=int, default=10 * 1024**3)
+    parser.add_argument("--max-workspace-files", type=int, default=100_000)
     parser.add_argument("--state-dir", default=None)
     parser.add_argument("--reload", action="store_true")
+    parser.add_argument("--allow-unauthenticated", action="store_true")
     args = parser.parse_args(argv)
     run_server(
         host=args.host,
@@ -583,8 +630,11 @@ def main(argv: list[str] | None = None) -> int:
         output_root=args.output_root,
         max_workers=args.max_workers,
         max_output_chars=args.max_output_chars,
+        max_workspace_bytes=args.max_workspace_bytes,
+        max_workspace_files=args.max_workspace_files,
         state_dir=args.state_dir,
         reload=args.reload,
+        allow_unauthenticated=args.allow_unauthenticated,
     )
     return 0
 

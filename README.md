@@ -247,9 +247,13 @@ separate, content-addressed profile while keeping old Research Objects valid.
 flowchart LR
   Q["Question"] --> HP["Competitive hypothesis portfolio"]
   HP --> DP["Discriminating predictions"]
-  DP --> IV["Rank experiments by information value"]
-  IV --> X["Run / fail / contradict"]
-  X --> A["Anomaly review"]
+  DP --> D["Locked candidate designs"]
+  D --> IV["Rank by information value"]
+  IV --> X["Selected attempt"]
+  X --> O["Observation + evidence"]
+  O --> P["Draft posterior update"]
+  P --> HP
+  X --> A["Failure / anomaly review"]
   A --> M["Mechanism + evidence-quality audit"]
   M --> B["Boundary / transfer matrix"]
   B --> C["Descriptive, causal, or transferable claim"]
@@ -266,30 +270,45 @@ deterministic policy.
 xscientist research program template --output deep-research.json
 
 xscientist research program portfolio PRIMARY_ID \
-  --alternative RIVAL_ID --null NULL_ID \
+  --alternative RIVAL_ID \
   --question "Which mechanism best predicts held-out behavior?" \
-  --prior PRIMARY_ID=2 --prior RIVAL_ID=1 --prior NULL_ID=1
+  --prior PRIMARY_ID=2 --prior RIVAL_ID=1
 
 xscientist research program prediction @latest:hypothesis_portfolio PRIMARY_ID \
   --when "The proposed mediator is ablated" \
   --expect "The effect disappears" \
-  --distinguishes RIVAL_ID --distinguishes NULL_ID \
+  --distinguishes RIVAL_ID \
   --falsifier "The effect remains unchanged"
+
+# Record the same-condition outcome for every rival/null member as well.
+xscientist research program prediction @latest:hypothesis_portfolio RIVAL_ID \
+  --when "The proposed mediator is ablated" \
+  --expect "The effect remains" \
+  --distinguishes PRIMARY_ID --falsifier "The effect disappears"
 
 # Edit experiment_candidates in the generated file, then rank the whole set.
 xscientist research program prioritize \
   @latest:hypothesis_portfolio deep-research.json
+
+# The attempt must consume the design selected by that priority.
+xscientist research experiment "Run selected ablation" --status completed \
+  --plan SELECTED_DESIGN_ID --priority PRIORITY_ID
+xscientist research evidence "The effect disappeared" --attempt ATTEMPT_ID
+xscientist research program posterior PORTFOLIO_ID PRIORITY_ID ATTEMPT_ID EVIDENCE_ID \
+  --observed "The effect disappeared" \
+  --likelihood PRIMARY_ID=0.9 --likelihood RIVAL_ID=0.1
 
 # Read-only review, or append a review plus newly detected anomalies.
 xscientist research program review
 xscientist research program review --record
 ```
 
-Verified `causal` claims require a validated intervention-tested mechanism and
-an independent, strong or moderate evidence-quality assessment. Verified
-`transferable` claims additionally require a passing multi-condition transfer
-matrix. These are opt-in depth levels, so existing descriptive workflows stay
-compatible while stronger language fails closed:
+Verified `causal` claims require a mechanism whose verified evidence traces to
+a completed intervention attempt, plus a strong/moderate quality assessment by
+an actor absent from the full producer lineage. `transferable` additionally
+requires separate attempts/evidence for each condition and distinct
+development/held-out dataset hashes. Existing v1 history remains readable;
+new strategy objects use the fail-closed v2 profile:
 
 ```bash
 xscientist research claim "M causes the effect across held-out domains." \

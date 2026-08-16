@@ -64,7 +64,7 @@ AUTONOMOUS_RESEARCH_OBJECT_KINDS = (
     "evaluation_blinding",
     "human_escalation",
 )
-STRATEGY_RESEARCH_OBJECT_KINDS = (
+STRATEGY_RESEARCH_OBJECT_KINDS_V1 = (
     "hypothesis_portfolio",
     "discriminating_prediction",
     "experiment_priority",
@@ -74,6 +74,10 @@ STRATEGY_RESEARCH_OBJECT_KINDS = (
     "evidence_quality",
     "boundary_condition",
     "transfer_matrix",
+)
+STRATEGY_RESEARCH_OBJECT_KINDS = (
+    *STRATEGY_RESEARCH_OBJECT_KINDS_V1,
+    "posterior_update",
 )
 RESEARCH_OBJECT_KINDS = (
     *CORE_RESEARCH_OBJECT_KINDS,
@@ -168,9 +172,15 @@ _AUTONOMOUS_PROFILE = _profile_descriptor(
     AUTONOMOUS_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
-_STRATEGY_PROFILE = _profile_descriptor(
+_STRATEGY_PROFILE_V1 = _profile_descriptor(
     "https://xscientist.io/profiles/research-strategy/v1",
     "1.0.0",
+    STRATEGY_RESEARCH_OBJECT_KINDS_V1,
+    RESEARCH_RELATION_TYPES,
+)
+_STRATEGY_PROFILE = _profile_descriptor(
+    "https://xscientist.io/profiles/research-strategy/v2",
+    "2.0.0",
     STRATEGY_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
@@ -180,6 +190,7 @@ BUILTIN_RESEARCH_PROFILES = {
         _CORE_PROFILE,
         _EPISTEMIC_PROFILE,
         _AUTONOMOUS_PROFILE,
+        _STRATEGY_PROFILE_V1,
         _STRATEGY_PROFILE,
     )
 }
@@ -357,13 +368,22 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "evidence_quality": ("evidence_id", "assessment_hash"),
     "boundary_condition": ("condition", "boundary_hash"),
     "transfer_matrix": ("claim_id", "matrix_hash"),
+    "posterior_update": ("portfolio_id", "update_hash"),
 }
 
 
-def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
+def _strategy_protocol_issues(
+    kind: str,
+    payload: Mapping[str, Any],
+    semantic_profile: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Validate the deeper-research strategy profile without model judgment."""
 
     issues: list[str] = []
+    legacy_v1 = (
+        str((semantic_profile or {}).get("uri") or "")
+        == "https://xscientist.io/profiles/research-strategy/v1"
+    )
     required: dict[str, tuple[str, ...]] = {
         "hypothesis_portfolio": ("question", "members", "portfolio_hash"),
         "discriminating_prediction": (
@@ -429,7 +449,33 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
             "transfer_ready",
             "matrix_hash",
         ),
+        "posterior_update": (
+            "portfolio_id",
+            "priority_id",
+            "selected_design_id",
+            "attempt_id",
+            "observation_id",
+            "evidence_id",
+            "observed_outcome",
+            "prior_weights",
+            "likelihoods",
+            "posterior_weights",
+            "update_hash",
+        ),
     }
+    if not legacy_v1:
+        required["experiment_priority"] = (
+            *required["experiment_priority"][:-1],
+            "selected_design_id",
+            "prior_weights",
+            "priority_hash",
+        )
+        required["transfer_matrix"] = (
+            *required["transfer_matrix"][:-2],
+            "independence_checks",
+            "transfer_ready",
+            "matrix_hash",
+        )
     for field in required.get(kind, ()):
         if field not in payload or payload.get(field) in (None, ""):
             issues.append(f"{kind} requires {field}")
@@ -502,6 +548,55 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
                 issues.append("experiment candidate ranks are invalid")
             if payload.get("selected_candidate_id") not in ids:
                 issues.append("selected experiment candidate is unavailable")
+            design_ids = [
+                str(item.get("design_object_id") or "")
+                for item in candidates
+                if isinstance(item, Mapping)
+            ]
+            if not legacy_v1 and (
+                not all(design_ids) or len(set(design_ids)) != len(design_ids)
+            ):
+                issues.append("experiment candidates require unique design objects")
+            selected_rows = [
+                item
+                for item in candidates
+                if isinstance(item, Mapping) and item.get("selected") is True
+            ]
+            if not legacy_v1 and len(selected_rows) != 1:
+                issues.append("experiment priority requires exactly one selected row")
+            elif not legacy_v1 and payload.get("selected_design_id") != selected_rows[
+                0
+            ].get("design_object_id"):
+                issues.append("selected experiment design does not match selected row")
+            for item in candidates:
+                if not isinstance(item, Mapping):
+                    continue
+                predictions = item.get("predictions")
+                prediction_ids = item.get("prediction_ids")
+                if not legacy_v1 and (
+                    not isinstance(predictions, Mapping)
+                    or not isinstance(prediction_ids, Mapping)
+                    or set(predictions) != set(prediction_ids)
+                ):
+                    issues.append(
+                        "experiment candidate predictions must bind locked prediction ids"
+                    )
+                    break
+        priors = payload.get("prior_weights")
+        if not legacy_v1 and (
+            not isinstance(priors, Mapping)
+            or not priors
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+                for value in priors.values()
+            )
+            or abs(sum(float(value) for value in priors.values()) - 1.0) > 1e-6
+        ):
+            issues.append(
+                "experiment priority requires normalized positive prior weights"
+            )
 
     if kind == "anomaly":
         if payload.get("severity") not in {"low", "medium", "high", "critical"}:
@@ -527,6 +622,37 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
                 )
             if not payload.get("rival_hypothesis_ids"):
                 issues.append("validated mechanism requires a tested rival explanation")
+            validation = payload.get("validation")
+            if legacy_v1:
+                validation = {"legacy": True}
+            if not isinstance(validation, Mapping):
+                issues.append("validated mechanism requires an intervention receipt")
+            elif not legacy_v1:
+                if validation.get("policy") != "xscientist.intervention-lineage.v1":
+                    issues.append("validated mechanism intervention policy is invalid")
+                if set(validation.get("evidence_ids") or []) != set(
+                    payload.get("evidence_ids") or []
+                ):
+                    issues.append("mechanism receipt evidence does not match the model")
+                if not validation.get("attempt_ids") or not validation.get(
+                    "protocol_ids"
+                ):
+                    issues.append(
+                        "validated mechanism receipt requires attempts and protocols"
+                    )
+                if not validation.get("locked_protocol_ids"):
+                    issues.append(
+                        "validated mechanism receipt requires a locked protocol"
+                    )
+                expected_receipt_hash = canonical_content_hash(
+                    {
+                        key: value
+                        for key, value in validation.items()
+                        if key != "receipt_hash"
+                    }
+                )
+                if validation.get("receipt_hash") != expected_receipt_hash:
+                    issues.append("validated mechanism receipt hash mismatch")
 
     if kind == "evidence_quality":
         domains = payload.get("domains")
@@ -565,14 +691,79 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
             "critical",
         }:
             issues.append("evidence quality grade is invalid")
+        receipt = payload.get("independence_receipt")
+        if payload.get("independent") is True and not legacy_v1:
+            if not isinstance(receipt, Mapping):
+                issues.append(
+                    "independent evidence quality requires an authority receipt"
+                )
+            else:
+                if receipt.get("policy") != "xscientist.provenance-actor-disjoint.v1":
+                    issues.append("evidence quality independence policy is invalid")
+                if payload.get("evidence_id") not in (receipt.get("target_ids") or []):
+                    issues.append(
+                        "evidence quality receipt does not cover its evidence"
+                    )
+                expected_receipt_hash = canonical_content_hash(
+                    {
+                        key: value
+                        for key, value in receipt.items()
+                        if key != "receipt_hash"
+                    }
+                )
+                if receipt.get("receipt_hash") != expected_receipt_hash:
+                    issues.append("evidence quality authority receipt hash mismatch")
 
-    if kind == "boundary_condition" and payload.get("status") not in {
-        "supported",
-        "refuted",
-        "mixed",
-        "untested",
-    }:
-        issues.append("boundary condition status is invalid")
+    if kind == "boundary_condition":
+        if payload.get("status") not in {
+            "supported",
+            "refuted",
+            "mixed",
+            "untested",
+        }:
+            issues.append("boundary condition status is invalid")
+        if payload.get("role") not in {
+            "development",
+            "transfer",
+            "heldout",
+            "scale",
+        }:
+            issues.append("boundary condition role is invalid")
+        validation = payload.get("validation")
+        if payload.get("status") != "untested" and not legacy_v1:
+            if not isinstance(validation, Mapping):
+                issues.append("tested boundary requires a lineage receipt")
+            else:
+                if (
+                    validation.get("policy")
+                    != "xscientist.disjoint-boundary-evidence.v1"
+                ):
+                    issues.append("boundary evidence policy is invalid")
+                if set(validation.get("evidence_ids") or []) != set(
+                    payload.get("evidence_ids") or []
+                ):
+                    issues.append("boundary receipt evidence mismatch")
+                if not validation.get("attempt_ids") or not validation.get(
+                    "dataset_hashes"
+                ):
+                    issues.append(
+                        "tested boundary requires attempt and dataset lineage"
+                    )
+                expected_receipt_hash = canonical_content_hash(
+                    {
+                        key: value
+                        for key, value in validation.items()
+                        if key != "receipt_hash"
+                    }
+                )
+                if validation.get("receipt_hash") != expected_receipt_hash:
+                    issues.append("boundary lineage receipt hash mismatch")
+        elif (
+            payload.get("status") == "untested"
+            and not legacy_v1
+            and (payload.get("evidence_ids") or validation)
+        ):
+            issues.append("untested boundary cannot contain result evidence")
 
     if kind == "transfer_matrix":
         rows = payload.get("rows")
@@ -593,6 +784,24 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
                 and len(dimensions) >= 2
                 and any(row.get("status") == "supported" for row in transfer_rows)
                 and all(row.get("status") == "supported" for row in tested)
+                and (
+                    legacy_v1
+                    or (
+                        isinstance(payload.get("independence_checks"), Mapping)
+                        and payload["independence_checks"].get(
+                            "evidence_sets_pairwise_disjoint"
+                        )
+                        is True
+                        and payload["independence_checks"].get(
+                            "attempt_sets_pairwise_disjoint"
+                        )
+                        is True
+                        and payload["independence_checks"].get(
+                            "development_heldout_datasets_disjoint"
+                        )
+                        is True
+                    )
+                )
             )
             if payload.get("transfer_ready") is not expected_ready:
                 issues.append(
@@ -600,6 +809,58 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
                 )
         if not isinstance(payload.get("coverage"), Mapping):
             issues.append("transfer matrix coverage must be an object")
+        checks = payload.get("independence_checks")
+        if not legacy_v1 and (
+            not isinstance(checks, Mapping)
+            or checks.get("policy") != "xscientist.disjoint-boundary-evidence.v1"
+        ):
+            issues.append("transfer matrix requires independence checks")
+
+    if kind == "posterior_update":
+        priors = payload.get("prior_weights")
+        likelihoods = payload.get("likelihoods")
+        posteriors = payload.get("posterior_weights")
+        if not all(
+            isinstance(value, Mapping) for value in (priors, likelihoods, posteriors)
+        ):
+            issues.append("posterior update weights must be objects")
+        elif (
+            not priors
+            or set(priors) != set(likelihoods)
+            or set(priors) != set(posteriors)
+        ):
+            issues.append("posterior update hypothesis sets do not match")
+        else:
+            valid_numbers = all(
+                not isinstance(value, bool) and isinstance(value, (int, float))
+                for mapping in (priors, likelihoods, posteriors)
+                for value in mapping.values()
+            )
+            if not valid_numbers:
+                issues.append("posterior update weights must be numeric")
+            else:
+                prior_total = sum(float(value) for value in priors.values())
+                posterior_total = sum(float(value) for value in posteriors.values())
+                if abs(prior_total - 1.0) > 1e-6 or abs(posterior_total - 1.0) > 1e-6:
+                    issues.append(
+                        "posterior prior and posterior weights must sum to one"
+                    )
+                if any(not 0 <= float(value) <= 1 for value in likelihoods.values()):
+                    issues.append("posterior likelihoods must be between zero and one")
+                denominator = sum(
+                    float(priors[key]) * float(likelihoods[key]) for key in priors
+                )
+                if denominator <= 0:
+                    issues.append("posterior likelihoods assign zero total probability")
+                elif any(
+                    abs(
+                        float(posteriors[key])
+                        - float(priors[key]) * float(likelihoods[key]) / denominator
+                    )
+                    > 1e-6
+                    for key in priors
+                ):
+                    issues.append("posterior weights do not match Bayes' rule")
 
     hash_fields = {
         "hypothesis_portfolio": "portfolio_hash",
@@ -611,6 +872,7 @@ def _strategy_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[str
         "evidence_quality": "assessment_hash",
         "boundary_condition": "boundary_hash",
         "transfer_matrix": "matrix_hash",
+        "posterior_update": "update_hash",
     }
     hash_field = hash_fields.get(kind)
     if hash_field and payload.get(hash_field):
@@ -627,6 +889,57 @@ def _discovery_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[st
 
     protocol_kind = payload.get("protocol_kind")
     issues: list[str] = []
+    if kind == "experiment_design" and protocol_kind == (
+        "competitive_experiment_candidate"
+    ):
+        required = (
+            "portfolio_id",
+            "candidate_id",
+            "summary",
+            "condition",
+            "predictions",
+            "prediction_ids",
+            "design_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"competitive experiment design requires {field}")
+        predictions = payload.get("predictions")
+        prediction_ids = payload.get("prediction_ids")
+        if (
+            not isinstance(predictions, Mapping)
+            or len(predictions) < 2
+            or not isinstance(prediction_ids, Mapping)
+            or set(predictions) != set(prediction_ids)
+            or not all(str(value or "") for value in prediction_ids.values())
+        ):
+            issues.append(
+                "competitive experiment design must bind predictions for every hypothesis"
+            )
+        if payload.get("design_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "design_hash"}
+            )
+            if payload.get("design_hash") != expected:
+                issues.append("competitive experiment design_hash mismatch")
+
+    if kind == "observation" and protocol_kind == (
+        "competitive_experiment_observation"
+    ):
+        for field in ("measurement", "attempt_id", "evidence_id", "observation_hash"):
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"competitive observation requires {field}")
+        if payload.get("observation_hash"):
+            expected = canonical_content_hash(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "observation_hash"
+                }
+            )
+            if payload.get("observation_hash") != expected:
+                issues.append("competitive observation_hash mismatch")
+
     if kind == "experiment_design" and protocol_kind == "method_discovery_contract":
         required = (
             "summary",
@@ -872,7 +1185,9 @@ def research_payload_issues(
         issues.append("claim depth_level is invalid")
     issues.extend(_discovery_protocol_issues(normalized_kind, payload))
     if normalized_kind in STRATEGY_RESEARCH_OBJECT_KINDS:
-        issues.extend(_strategy_protocol_issues(normalized_kind, payload))
+        issues.extend(
+            _strategy_protocol_issues(normalized_kind, payload, semantic_profile)
+        )
     required_fields: dict[str, tuple[str, ...]] = {
         "search_plan": ("question", "queries", "search_plan_hash"),
         "search_receipt": (

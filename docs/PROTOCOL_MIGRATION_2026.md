@@ -40,6 +40,26 @@ Nanopublication JSON-LD alongside the existing PROV, CWL, DVC, and MLflow
 views. Export is local, atomic, and metadata-only unless payload inclusion is
 explicitly requested.
 
+## Research strategy v2
+
+The original `https://xscientist.io/profiles/research-strategy/v1` descriptor
+is frozen and remains a registered validator. New strategy records use
+`research-strategy/v2`; existing object bytes, hashes, commits, and bundles are
+not rewritten.
+
+Version 2 adds `posterior_update` and binds each priority row to an immutable
+`experiment_design` plus one locked prediction per portfolio hypothesis. A
+selected attempt consumes the priority/design, and a posterior binds the
+attempt, observation, evidence, prior, and declared likelihoods. Version 2 also
+adds provenance-disjoint independent-assessor receipts, intervention-lineage
+receipts for validated mechanisms, and disjoint evidence/attempt/dataset gates
+for transfer-ready matrices.
+
+To upgrade an active v1 program, append v2 objects from the current effective
+frontier and use `supersedes` where one v2 object replaces a v1 decision. Do not
+edit v1 JSON. A historical v1 priority remains inspectable but is not treated
+as satisfying v2 executable-closure gates.
+
 Normative upstream references:
 
 - [Process Run Crate 0.5](https://www.researchobject.org/workflow-run-crate/profiles/process_run_crate/)

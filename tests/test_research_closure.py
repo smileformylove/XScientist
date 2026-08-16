@@ -13,6 +13,7 @@ from jsonschema import validate
 from ai_scientist.protocol import content_hash
 from ai_scientist.protocol.schemas import load_schema
 from xscientist import ResearchRepository
+from xscientist.research_authority import require_independent_evaluator
 from xscientist.research_cli import main as research_main
 
 
@@ -104,12 +105,23 @@ class ResearchClosureTests(unittest.TestCase):
             claim_id, evidence_id, attempt_id = self._record_lineage(
                 repository, replay_ready=True
             )
+            review_independence = require_independent_evaluator(
+                repository,
+                evaluator_id="independent-reviewer",
+                target_ids=[evidence_id],
+                label="test review",
+            )
+            self.assertEqual(
+                review_independence["assurance"], "declared_actor_disjointness"
+            )
+            self.assertFalse(review_independence["identity_verified"])
             review = repository.record(
                 "review",
                 {
                     "summary": "Independent verification passed",
                     "status": "verified",
                     "report_hash": "sha256:" + "9" * 64,
+                    "independence": review_independence,
                 },
                 state="verified",
                 relations=[{"type": "evaluates", "target": evidence_id}],
@@ -168,6 +180,12 @@ class ResearchClosureTests(unittest.TestCase):
                 "receipt_id": f"rr-{receipt_hash.split(':', 1)[1][:16]}",
                 "content_hash": receipt_hash,
             }
+            reproduction_independence = require_independent_evaluator(
+                repository,
+                evaluator_id="independent-reproducer",
+                target_ids=[attempt_id, verified_claim.object_id],
+                label="test reproduction",
+            )
             repository.record(
                 "reproduction",
                 {
@@ -175,6 +193,7 @@ class ResearchClosureTests(unittest.TestCase):
                     "verdict": "passed",
                     "receipt_hash": receipt_hash,
                     "receipt": receipt,
+                    "independence": reproduction_independence,
                 },
                 state="verified",
                 relations=[

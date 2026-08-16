@@ -211,13 +211,17 @@ Direct compatibility commands (`xscientist-project`, `xscientist-batch`,
 ## HTTP API
 
 ```bash
+export XSCIENTIST_API_KEY="replace-with-a-secret"
 xscientist serve --host 0.0.0.0 --port 8000 --output-root ./research-output
 ```
 
 FastAPI exposes interactive documentation at `/docs` and the OpenAPI schema at
 `/openapi.json`.
 
-For shared environments, enable the built-in API-key check:
+Non-loopback bindings fail closed unless an API key is configured. For a
+deliberately unauthenticated private network, the operator must pass
+`--allow-unauthenticated` explicitly. The health endpoint remains public;
+all `/v1` endpoints require the key when configured:
 
 ```bash
 export XSCIENTIST_API_KEY="replace-with-a-secret"
@@ -272,8 +276,9 @@ The service owns its filesystem boundary:
 - `project` must be a single directory name;
 - `topic`, `ideas`, `data_dir`, and custom BFTS configs must resolve inside
   `work_dir`; plain-language `question` values contain no host path;
-- the request cannot override the configured `output_root` through fields or
-  `extra_args`.
+- the request cannot override the configured `output_root` through fields;
+- free-form `extra_args` are rejected by the HTTP adapter. Add a typed field
+  when the service needs to expose another workflow option.
 
 These restrictions apply to the HTTP adapter only. Trusted local Python SDK and
 CLI callers retain their normal path flexibility.
@@ -340,3 +345,8 @@ The HTTP layer deliberately submits the heavy workflow through the same
 environment mutations isolated in child processes. For larger deployments,
 replace the in-process executor with a durable queue while preserving
 `ProjectRequest` and `CommandResult` as the adapter boundary.
+
+Service jobs retain at most `--max-output-chars` characters per output stream
+while continuously draining the child process. `--max-workspace-bytes` and
+`--max-workspace-files` terminate a job that exceeds its project quota; the
+defaults are 10 GiB and 100,000 files.

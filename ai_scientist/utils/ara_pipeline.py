@@ -47,6 +47,7 @@ from ai_scientist.utils.ara_seed import (
 from ai_scientist.protocol.llm_trace import (
     ENV_ACTIVE_ROOT as LLM_TRACE_ROOT_ENV,
     ENV_STAGE as LLM_TRACE_STAGE_ENV,
+    ENV_STRICT as LLM_TRACE_STRICT_ENV,
 )
 from ai_scientist.utils.claim_coverage import (
     ClaimCoverageReport,
@@ -115,9 +116,7 @@ def stage_seed_from_cli(
     os.environ[SEED_ENV_VAR] = str(seed_path)
     provenance = manifest.get("provenance") or {}
     os.environ[SEED_PROVENANCE_ENV_VAR] = json.dumps(provenance)
-    return SeedStageResult(
-        seed_used=True, seed_path=seed_path, provenance=provenance
-    )
+    return SeedStageResult(seed_used=True, seed_path=seed_path, provenance=provenance)
 
 
 def _read_provenance_env() -> dict[str, Any] | None:
@@ -139,6 +138,7 @@ def activate_llm_tracing(
     exp_dir: str | Path | None = None,
     timestamp: str | None = None,
     stage: str | None = None,
+    strict: bool = False,
 ) -> Path | None:
     """Point the LLM tracer at the ARA directory this idea will write into.
 
@@ -155,7 +155,9 @@ def activate_llm_tracing(
     """
     idea = idea or {}
     exp_path = Path(exp_dir).expanduser().resolve() if exp_dir else None
-    name = str(idea.get("Name") or idea.get("name") or (exp_path.name if exp_path else "")).strip()
+    name = str(
+        idea.get("Name") or idea.get("name") or (exp_path.name if exp_path else "")
+    ).strip()
     if not name:
         return None
 
@@ -163,17 +165,25 @@ def activate_llm_tracing(
     if ts is None and exp_path is not None:
         # Same regex ``export_ara`` uses when extracting the timestamp segment.
         import re as _re
-        m = _re.match(r"^(\d{4}-\d{2}-\d{2}[_T-]?\d{2}[:_-]?\d{2}(?:[:_-]?\d{2})?)", exp_path.name)
+
+        m = _re.match(
+            r"^(\d{4}-\d{2}-\d{2}[_T-]?\d{2}[:_-]?\d{2}(?:[:_-]?\d{2})?)", exp_path.name
+        )
         ts = m.group(1) if m else None
 
     try:
-        ara_dir = ara_dir_for_idea(Path(project_dir).expanduser().resolve(),
-                                   name, timestamp=ts)
+        ara_dir = ara_dir_for_idea(
+            Path(project_dir).expanduser().resolve(), name, timestamp=ts
+        )
     except Exception:  # pragma: no cover - defensive
         return None
 
     ara_dir.mkdir(parents=True, exist_ok=True)
     os.environ[LLM_TRACE_ROOT_ENV] = str(ara_dir)
+    if strict:
+        os.environ[LLM_TRACE_STRICT_ENV] = "1"
+    else:
+        os.environ.pop(LLM_TRACE_STRICT_ENV, None)
     if stage is not None:
         os.environ[LLM_TRACE_STAGE_ENV] = stage
     return ara_dir
@@ -183,6 +193,7 @@ def deactivate_llm_tracing() -> None:
     """Unset tracer env vars. Idempotent; safe to call from ``finally`` blocks."""
     os.environ.pop(LLM_TRACE_ROOT_ENV, None)
     os.environ.pop(LLM_TRACE_STAGE_ENV, None)
+    os.environ.pop(LLM_TRACE_STRICT_ENV, None)
 
 
 def _find_tex_files(exp_dir: Path) -> list[str]:

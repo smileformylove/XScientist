@@ -93,6 +93,9 @@ class ExecConfig:
     pids_limit: int = 256
     read_only_root: bool = True
     read_only_mounts: list[str] = field(default_factory=list)
+    max_output_chars: int = 200_000
+    max_workspace_bytes: int = 10 * 1024 * 1024 * 1024
+    max_workspace_files: int = 100_000
 
 
 @dataclass

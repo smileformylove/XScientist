@@ -9,6 +9,7 @@ from ai_scientist.utils.research_integrity import validate_preregistration
 
 from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
 from .research_vcs import ResearchRepository
+from .research_authority import require_independent_evaluator
 
 
 class ResearchLifecycle:
@@ -94,6 +95,7 @@ class ResearchLifecycle:
         *,
         preregistration_id: str | None = None,
         plan_id: str | None = None,
+        priority_id: str | None = None,
         provenance: Mapping[str, Any] | None = None,
         commit: bool = True,
     ) -> dict[str, Any]:
@@ -139,9 +141,45 @@ class ResearchLifecycle:
             )
         if plan_id:
             plan = self.repository.get(plan_id)
-            if plan["kind"] != "research_plan":
+            if plan["kind"] not in {"research_plan", "experiment_design"}:
                 raise ResearchGitError("experiment plan reference has wrong kind")
-            relations.append({"type": "depends_on", "target": plan_id, "role": "plan"})
+            plan_id = str(plan["object_id"])
+            plan_role = "design" if plan["kind"] == "experiment_design" else "plan"
+            relations.append(
+                {"type": "depends_on", "target": plan_id, "role": plan_role}
+            )
+            if (
+                plan["kind"] == "experiment_design"
+                and (plan.get("payload") or {}).get("protocol_kind")
+                == "competitive_experiment_candidate"
+            ):
+                if not priority_id:
+                    raise ResearchGitError(
+                        "competitive experiment design requires its locked priority"
+                    )
+                priority = self.repository.get(priority_id)
+                priority_payload = priority.get("payload") or {}
+                if (
+                    priority.get("kind") != "experiment_priority"
+                    or priority.get("state") != "locked"
+                    or priority_payload.get("selected_design_id") != plan_id
+                ):
+                    raise ResearchGitError(
+                        "experiment priority does not select the supplied design"
+                    )
+                relations.append(
+                    {
+                        "type": "consumes",
+                        "target": str(priority["object_id"]),
+                        "role": "selected_priority",
+                    }
+                )
+                payload["priority_id"] = str(priority["object_id"])
+                payload["design_id"] = plan_id
+        elif priority_id:
+            raise ResearchGitError(
+                "experiment priority requires a selected plan/design"
+            )
         result = self.repository.record(
             "experiment_attempt",
             payload,
@@ -176,18 +214,20 @@ class ResearchLifecycle:
         if verified and not str(verifier_id or "").strip():
             raise ResearchGitError("verified evidence requires verifier_id")
         relations: list[dict[str, str]] = []
-        producer_ids: set[str] = set()
         for object_id in attempt_ids:
             attempt = self.repository.get(object_id)
             if attempt["kind"] != "experiment_attempt":
                 raise ResearchGitError("evidence attempt reference has wrong kind")
-            actor_id = str((attempt.get("actor") or {}).get("actor_id") or "")
-            if actor_id:
-                producer_ids.add(actor_id)
-            relations.append({"type": "derived_from", "target": object_id})
-        if verified and str(verifier_id) in producer_ids:
-            raise ResearchGitError(
-                "verified evidence requires a verifier independent of the experiment producer"
+            relations.append(
+                {"type": "derived_from", "target": str(attempt["object_id"])}
+            )
+        independence = None
+        if verified:
+            independence = require_independent_evaluator(
+                self.repository,
+                evaluator_id=str(verifier_id or ""),
+                target_ids=attempt_ids,
+                label="verified evidence",
             )
         for object_id in supports:
             self.repository.get(object_id)
@@ -195,9 +235,12 @@ class ResearchLifecycle:
         for object_id in refutes:
             self.repository.get(object_id)
             relations.append({"type": "refutes", "target": object_id})
+        evidence_payload = dict(payload)
+        if independence is not None:
+            evidence_payload["independence"] = independence
         result = self.repository.record(
             "evidence",
-            payload,
+            evidence_payload,
             state="verified" if verified else "completed",
             relations=relations,
             actor=(
@@ -237,17 +280,17 @@ class ResearchLifecycle:
             and not report_payload.get("required_failures")
         )
         relations = []
-        producer_ids: set[str] = set()
         for object_id in evaluates:
             evaluated = self.repository.get(object_id)
-            actor_id = str((evaluated.get("actor") or {}).get("actor_id") or "")
-            if actor_id:
-                producer_ids.add(actor_id)
-            relations.append({"type": "evaluates", "target": object_id})
-        if verifier_id in producer_ids:
-            raise ResearchGitError(
-                "independent verifier must differ from the evaluated object's producer"
+            relations.append(
+                {"type": "evaluates", "target": str(evaluated["object_id"])}
             )
+        independence = require_independent_evaluator(
+            self.repository,
+            evaluator_id=verifier_id,
+            target_ids=evaluates,
+            label="independent review",
+        )
         from .research_context import record_research_context_snapshot
 
         selected_option = "promote" if verified else "hold"
@@ -285,6 +328,7 @@ class ResearchLifecycle:
         context_payload = self.repository.get(context.object_id)["payload"]
         report_payload["context_required"] = True
         report_payload["context_hash"] = context_payload["context_hash"]
+        report_payload["independence"] = independence
         review = self.repository.record(
             "review",
             report_payload,
@@ -402,6 +446,7 @@ class ResearchLifecycle:
                 for item in qualifications["mechanism_model"]
                 if item.get("state") == "verified"
                 and (item.get("payload") or {}).get("status") == "validated"
+                and (item.get("payload") or {}).get("validation")
                 and set(
                     (item.get("payload") or {}).get("evidence_ids") or []
                 ).intersection(resolved_evidence_ids)
@@ -411,6 +456,7 @@ class ResearchLifecycle:
                 for item in qualifications["evidence_quality"]
                 if item.get("state") == "verified"
                 and (item.get("payload") or {}).get("independent") is True
+                and (item.get("payload") or {}).get("independence_receipt")
                 and (item.get("payload") or {}).get("overall_grade")
                 in {"strong", "moderate"}
                 and (item.get("payload") or {}).get("evidence_id")
@@ -620,16 +666,18 @@ class ResearchLifecycle:
                 "verified reproduction requires a successful computational rerun"
             )
         relations: list[dict[str, str]] = []
-        producer_ids: set[str] = set()
         for object_id in reproduces:
             reproduced = self.repository.get(object_id)
-            actor_id = str((reproduced.get("actor") or {}).get("actor_id") or "")
-            if actor_id:
-                producer_ids.add(actor_id)
-            relations.append({"type": "reproduces", "target": object_id})
-        if verified and str(verifier_id) in producer_ids:
-            raise ResearchGitError(
-                "verified reproduction requires a verifier independent of its targets"
+            relations.append(
+                {"type": "reproduces", "target": str(reproduced["object_id"])}
+            )
+        independence = None
+        if verified:
+            independence = require_independent_evaluator(
+                self.repository,
+                evaluator_id=str(verifier_id or ""),
+                target_ids=reproduces,
+                label="verified reproduction",
             )
         payload = {
             key: receipt_payload[key]
@@ -648,6 +696,8 @@ class ResearchLifecycle:
         }
         payload["receipt_hash"] = payload.pop("content_hash")
         payload["receipt"] = receipt_payload
+        if independence is not None:
+            payload["independence"] = independence
         result = self.repository.record(
             "reproduction",
             payload,

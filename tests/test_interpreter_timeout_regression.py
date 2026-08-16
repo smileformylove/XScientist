@@ -142,8 +142,8 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
             ),
             mock.patch.object(module.shutil, "which", return_value="/usr/bin/docker"),
             mock.patch.object(
-                module.subprocess,
-                "run",
+                module,
+                "run_process_bounded",
                 side_effect=module.subprocess.TimeoutExpired("docker", 1),
             ),
             mock.patch.object(
@@ -159,6 +159,47 @@ class InterpreterTimeoutRegressionTests(unittest.TestCase):
 
         self.assertEqual(result.exc_type, "TimeoutError")
         remove_mock.assert_called_once()
+
+    def test_process_backend_caps_output_in_memory(self) -> None:
+        module = self._import_interpreter()
+        with tempfile.TemporaryDirectory() as td:
+            interpreter = module.Interpreter(
+                working_dir=td,
+                sandbox_policy=module.SandboxPolicy(
+                    backend="process",
+                    require_isolation=False,
+                    max_output_chars=64,
+                ),
+            )
+            try:
+                result = interpreter.run("print('x' * 10000)")
+            finally:
+                interpreter.cleanup_session()
+
+        self.assertTrue(result.output_truncated)
+        self.assertNotIn("x" * 100, "".join(result.term_out))
+
+    def test_process_backend_enforces_workspace_quota(self) -> None:
+        module = self._import_interpreter()
+        with tempfile.TemporaryDirectory() as td:
+            interpreter = module.Interpreter(
+                working_dir=td,
+                sandbox_policy=module.SandboxPolicy(
+                    backend="process",
+                    require_isolation=False,
+                    max_workspace_bytes=128,
+                    max_workspace_files=10,
+                ),
+            )
+            try:
+                result = interpreter.run(
+                    "from pathlib import Path; Path('large.bin').write_bytes(b'x' * 4096)"
+                )
+            finally:
+                interpreter.cleanup_session()
+
+        self.assertEqual(result.exc_type, "ResourceLimitError")
+        self.assertIn("workspace size exceeded", "".join(result.term_out))
 
     def test_auto_backend_falls_back_when_image_is_missing(self) -> None:
         module = self._import_interpreter()

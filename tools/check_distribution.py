@@ -62,6 +62,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_vcs.py",
             "xscientist/research_lifecycle.py",
             "xscientist/research_closure.py",
+            "xscientist/research_authority.py",
             "xscientist/research_evolution.py",
             "xscientist/git_support.py",
             "xscientist/research_commands.py",
@@ -138,10 +139,12 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import xscientist
 from xscientist import ResearchEvolution, ResearchLifecycle, ResearchRepository
+from xscientist.research_authority import require_independent_evaluator
 from ai_scientist.protocol.schemas import available_schemas, load_schema
 from ai_scientist.resources import bfts_config_path, latex_template_dir
 assert xscientist.__version__
 assert all((ResearchRepository, ResearchLifecycle, ResearchEvolution))
+assert callable(require_independent_evaluator)
 assert load_schema("manifest")["type"] == "object"
 assert "context_pack" in available_schemas()
 assert bfts_config_path("default").is_file()

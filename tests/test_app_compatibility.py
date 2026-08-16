@@ -86,13 +86,12 @@ class AppCompatibilityTests(unittest.TestCase):
 
         with (
             mock.patch.object(sys, "argv", ["xscientist validate", "--help"]),
-            mock.patch.object(internal, "require_login") as require_login,
             self.assertRaises(SystemExit) as raised,
         ):
             internal.main()
 
         self.assertEqual(raised.exception.code, 0)
-        require_login.assert_not_called()
+        self.assertFalse(hasattr(internal, "require_login"))
 
     def test_installed_validation_writes_bytecode_outside_package(self) -> None:
         internal = importlib.import_module("ai_scientist.apps.validate")

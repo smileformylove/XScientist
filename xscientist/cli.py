@@ -103,8 +103,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--output-root", default=None)
     serve_parser.add_argument("--max-workers", type=int, default=2)
     serve_parser.add_argument("--max-output-chars", type=int, default=200_000)
+    serve_parser.add_argument("--max-workspace-bytes", type=int, default=10 * 1024**3)
+    serve_parser.add_argument("--max-workspace-files", type=int, default=100_000)
     serve_parser.add_argument("--state-dir", default=None)
     serve_parser.add_argument("--reload", action="store_true")
+    serve_parser.add_argument("--allow-unauthenticated", action="store_true")
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -1170,8 +1173,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=parsed.output_root,
             max_workers=parsed.max_workers,
             max_output_chars=parsed.max_output_chars,
+            max_workspace_bytes=parsed.max_workspace_bytes,
+            max_workspace_files=parsed.max_workspace_files,
             state_dir=parsed.state_dir,
             reload=parsed.reload,
+            allow_unauthenticated=parsed.allow_unauthenticated,
         )
         return 0
     if parsed.command == "start":

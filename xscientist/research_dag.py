@@ -200,8 +200,27 @@ def _strategy_projection(
             and (not relation_types or relation.get("type") in relation_types)
         }
 
-    def latest(kind: str) -> Mapping[str, Any] | None:
-        rows = [item for item in objects.values() if item.get("kind") == kind]
+    superseded = {
+        target for item in objects.values() for target in targets(item, {"supersedes"})
+    }
+    effective = {
+        object_id: item
+        for object_id, item in objects.items()
+        if object_id not in superseded and item.get("state") != "superseded"
+    }
+
+    def latest(
+        kind: str, *, portfolio_id: str | None = None
+    ) -> Mapping[str, Any] | None:
+        rows = [
+            item
+            for item in effective.values()
+            if item.get("kind") == kind
+            and (
+                portfolio_id is None
+                or (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+            )
+        ]
         return (
             max(
                 rows,
@@ -214,55 +233,88 @@ def _strategy_projection(
             else None
         )
 
-    superseded = {
-        target for item in objects.values() for target in targets(item, {"supersedes"})
-    }
     active_hypotheses = sorted(
         object_id
-        for object_id, item in objects.items()
+        for object_id, item in effective.items()
         if item.get("kind") == "hypothesis"
-        and item.get("state") != "superseded"
-        and object_id not in superseded
     )
+    portfolios = {
+        object_id: item
+        for object_id, item in effective.items()
+        if item.get("kind") == "hypothesis_portfolio"
+    }
+    portfolios_by_hypothesis: dict[str, set[str]] = {}
+    for portfolio_id, portfolio in portfolios.items():
+        for member in (portfolio.get("payload") or {}).get("members") or []:
+            hypothesis_id = str(member.get("hypothesis_id") or "")
+            if hypothesis_id:
+                portfolios_by_hypothesis.setdefault(hypothesis_id, set()).add(
+                    portfolio_id
+                )
     open_anomalies = sorted(
         object_id
-        for object_id, item in objects.items()
+        for object_id, item in effective.items()
         if item.get("kind") == "anomaly"
         and (item.get("payload") or {}).get("status") == "open"
-        and object_id not in superseded
     )
     mechanisms = sorted(
         object_id
-        for object_id, item in objects.items()
+        for object_id, item in effective.items()
         if item.get("kind") == "mechanism_model"
         and (item.get("payload") or {}).get("status")
         in {"proposed", "tested", "validated"}
-        and object_id not in superseded
     )
-    latest_priority = latest("experiment_priority")
-    next_experiment = None
-    if latest_priority is not None:
-        priority_payload = latest_priority.get("payload") or {}
-        selected_id = priority_payload.get("selected_candidate_id")
-        selected = next(
-            (
-                row
-                for row in priority_payload.get("candidate_set") or []
-                if row.get("candidate_id") == selected_id
-            ),
-            None,
-        )
-        if selected:
-            next_experiment = {
-                "priority_object_id": latest_priority["object_id"],
-                "candidate_id": selected_id,
-                "summary": selected.get("summary"),
-                "expected_information_gain": selected.get("expected_information_gain"),
-                "utility_score": selected.get("utility_score"),
+    portfolio_frontiers: list[dict[str, Any]] = []
+    next_experiments: list[dict[str, Any]] = []
+    for portfolio_id in sorted(portfolios):
+        priority = latest("experiment_priority", portfolio_id=portfolio_id)
+        posterior = latest("posterior_update", portfolio_id=portfolio_id)
+        next_experiment = None
+        if priority is not None:
+            priority_payload = priority.get("payload") or {}
+            selected_id = priority_payload.get("selected_candidate_id")
+            selected = next(
+                (
+                    row
+                    for row in priority_payload.get("candidate_set") or []
+                    if row.get("candidate_id") == selected_id
+                ),
+                None,
+            )
+            if selected:
+                next_experiment = {
+                    "portfolio_id": portfolio_id,
+                    "priority_object_id": str(priority["object_id"]),
+                    "candidate_id": selected_id,
+                    "design_object_id": selected.get("design_object_id"),
+                    "summary": selected.get("summary"),
+                    "expected_information_gain": selected.get(
+                        "expected_information_gain"
+                    ),
+                    "utility_score": selected.get("utility_score"),
+                }
+                next_experiments.append(next_experiment)
+        portfolio_frontiers.append(
+            {
+                "portfolio_id": portfolio_id,
+                "hypothesis_ids": sorted(
+                    str(item.get("hypothesis_id") or "")
+                    for item in (portfolios[portfolio_id].get("payload") or {}).get(
+                        "members"
+                    )
+                    or []
+                    if item.get("hypothesis_id")
+                ),
+                "posterior_update_id": (
+                    str(posterior["object_id"]) if posterior is not None else None
+                ),
+                "next_experiment": next_experiment,
             }
+        )
+    next_experiment = next_experiments[0] if len(next_experiments) == 1 else None
     latest_review = latest("research_review")
     open_questions = list((latest_review or {}).get("payload", {}).get("gaps") or [])
-    for item in objects.values():
+    for item in effective.values():
         if item.get("kind") != "boundary_condition":
             continue
         payload = item.get("payload") or {}
@@ -276,21 +328,22 @@ def _strategy_projection(
             )
     frontier_core = {
         "active_hypothesis_ids": active_hypotheses,
-        "portfolio_ids": sorted(
-            object_id
-            for object_id, item in objects.items()
-            if item.get("kind") == "hypothesis_portfolio"
-            and object_id not in superseded
-        ),
+        "portfolio_ids": sorted(portfolios),
         "prediction_ids": sorted(
             object_id
-            for object_id, item in objects.items()
+            for object_id, item in effective.items()
             if item.get("kind") == "discriminating_prediction"
-            and object_id not in superseded
+        ),
+        "posterior_ids": sorted(
+            object_id
+            for object_id, item in effective.items()
+            if item.get("kind") == "posterior_update"
         ),
         "mechanism_ids": mechanisms,
         "open_anomaly_ids": open_anomalies,
         "open_questions": open_questions,
+        "portfolio_frontiers": portfolio_frontiers,
+        "next_experiments": next_experiments,
         "next_experiment": next_experiment,
     }
     theory_frontier = {
@@ -299,7 +352,7 @@ def _strategy_projection(
     }
 
     claim_insights: list[dict[str, Any]] = []
-    for claim_id, claim in sorted(objects.items()):
+    for claim_id, claim in sorted(effective.items()):
         if claim.get("kind") != "claim":
             continue
         direct = targets(claim)
@@ -307,18 +360,18 @@ def _strategy_projection(
             {
                 object_id
                 for object_id in direct
-                if objects.get(object_id, {}).get("kind")
+                if effective.get(object_id, {}).get("kind")
                 in {"evidence", "passage_evidence", "inference", "evidence_synthesis"}
             }
             | {
                 object_id
-                for object_id, item in objects.items()
+                for object_id, item in effective.items()
                 if claim_id in targets(item, {"supports", "qualified_supports"})
             }
         )
         refuting = sorted(
             object_id
-            for object_id, item in objects.items()
+            for object_id, item in effective.items()
             if claim_id
             in targets(
                 item,
@@ -328,25 +381,25 @@ def _strategy_projection(
         mechanism_ids = sorted(
             object_id
             for object_id in direct
-            if objects.get(object_id, {}).get("kind") == "mechanism_model"
+            if effective.get(object_id, {}).get("kind") == "mechanism_model"
         )
         quality_ids = sorted(
             object_id
-            for object_id, item in objects.items()
+            for object_id, item in effective.items()
             if item.get("kind") == "evidence_quality"
             and set(supporting).intersection(targets(item, {"evaluates"}))
         )
         boundary_ids = sorted(
             {
                 object_id
-                for object_id, item in objects.items()
+                for object_id, item in effective.items()
                 if item.get("kind") in {"boundary_condition", "transfer_matrix"}
                 and claim_id in targets(item)
             }
             | {
                 object_id
                 for object_id in direct
-                if objects.get(object_id, {}).get("kind")
+                if effective.get(object_id, {}).get("kind")
                 in {"boundary_condition", "transfer_matrix"}
             }
         )
@@ -357,28 +410,30 @@ def _strategy_projection(
         valid_mechanisms = [
             object_id
             for object_id in mechanism_ids
-            if objects[object_id].get("state") == "verified"
-            and (objects[object_id].get("payload") or {}).get("status") == "validated"
+            if effective[object_id].get("state") == "verified"
+            and (effective[object_id].get("payload") or {}).get("status") == "validated"
+            and (effective[object_id].get("payload") or {}).get("validation")
             and supporting_set.intersection(
-                (objects[object_id].get("payload") or {}).get("evidence_ids") or []
+                (effective[object_id].get("payload") or {}).get("evidence_ids") or []
             )
         ]
         valid_quality = [
             object_id
             for object_id in quality_ids
-            if objects[object_id].get("state") == "verified"
-            and (objects[object_id].get("payload") or {}).get("independent") is True
-            and (objects[object_id].get("payload") or {}).get("overall_grade")
+            if effective[object_id].get("state") == "verified"
+            and (effective[object_id].get("payload") or {}).get("independent") is True
+            and (effective[object_id].get("payload") or {}).get("independence_receipt")
+            and (effective[object_id].get("payload") or {}).get("overall_grade")
             in {"strong", "moderate"}
         ]
         claim_payload = claim.get("payload") or {}
         valid_transfer = []
         for object_id in boundary_ids:
-            item = objects[object_id]
+            item = effective[object_id]
             if item.get("kind") != "transfer_matrix":
                 continue
             matrix_payload = item.get("payload") or {}
-            matrix_claim = objects.get(str(matrix_payload.get("claim_id") or ""), {})
+            matrix_claim = effective.get(str(matrix_payload.get("claim_id") or ""), {})
             matrix_claim_payload = matrix_claim.get("payload") or {}
             if (
                 item.get("state") == "verified"
@@ -398,6 +453,38 @@ def _strategy_projection(
             gaps.append("evidence_quality_missing")
         if depth_level == "transferable" and not valid_transfer:
             gaps.append("transfer_matrix_missing")
+        hypothesis_ids = {
+            target
+            for target in direct
+            if effective.get(target, {}).get("kind") == "hypothesis"
+        }
+        for evidence_id in (*supporting, *refuting):
+            hypothesis_ids.update(
+                target
+                for target in targets(effective.get(evidence_id, {}))
+                if effective.get(target, {}).get("kind") == "hypothesis"
+            )
+        for mechanism_id in mechanism_ids:
+            target = str(
+                (effective[mechanism_id].get("payload") or {}).get(
+                    "target_hypothesis_id"
+                )
+                or ""
+            )
+            if target:
+                hypothesis_ids.add(target)
+        scoped_portfolios = sorted(
+            {
+                portfolio_id
+                for hypothesis_id in hypothesis_ids
+                for portfolio_id in portfolios_by_hypothesis.get(hypothesis_id, set())
+            }
+        )
+        claim_next = [
+            item
+            for item in next_experiments
+            if item["portfolio_id"] in scoped_portfolios
+        ]
         claim_insights.append(
             {
                 "claim_id": claim_id,
@@ -407,7 +494,9 @@ def _strategy_projection(
                 "mechanism_ids": mechanism_ids,
                 "quality_assessment_ids": quality_ids,
                 "boundary_ids": boundary_ids,
-                "next_experiment": next_experiment,
+                "portfolio_ids": scoped_portfolios,
+                "next_experiments": claim_next,
+                "next_experiment": claim_next[0] if len(claim_next) == 1 else None,
                 "gaps": gaps,
                 "decision_ready": not gaps and not refuting,
             }
@@ -418,7 +507,7 @@ def _strategy_projection(
             sorted(
                 Counter(
                     _epistemic_layer(str(item.get("kind") or ""))
-                    for item in objects.values()
+                    for item in effective.values()
                 ).items()
             )
         ),

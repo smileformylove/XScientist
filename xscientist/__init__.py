@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         save_evidence_quality_assessment,
         save_hypothesis_portfolio,
         save_mechanism_model,
+        save_posterior_update,
         save_transfer_matrix,
         scan_research_anomalies,
     )
@@ -55,6 +56,7 @@ _STRATEGY_EXPORTS = {
     "save_evidence_quality_assessment",
     "save_hypothesis_portfolio",
     "save_mechanism_model",
+    "save_posterior_update",
     "save_transfer_matrix",
     "scan_research_anomalies",
 }
@@ -163,6 +165,7 @@ __all__ = [
     "save_generalization_assessment",
     "save_hypothesis_portfolio",
     "save_mechanism_model",
+    "save_posterior_update",
     "save_transfer_matrix",
     "scan_research_anomalies",
     "__version__",

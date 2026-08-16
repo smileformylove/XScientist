@@ -182,6 +182,8 @@ class CommandResult:
     stderr: str
     started_at: str
     finished_at: str
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -196,6 +198,8 @@ class CommandResult:
             "stderr": self.stderr,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
         }
 
     @classmethod
@@ -215,11 +219,19 @@ class ServiceSettings:
     env: Mapping[str, str] = field(default_factory=dict)
     max_workers: int = 2
     max_output_chars: int = 200_000
+    max_workspace_bytes: int = 10 * 1024 * 1024 * 1024
+    max_workspace_files: int = 100_000
     api_key: str | None = None
     state_dir: str | Path | None = None
+    bind_host: str = "127.0.0.1"
+    allow_unauthenticated: bool = False
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:
             raise ValueError("max_workers must be at least 1")
         if self.max_output_chars < 1:
             raise ValueError("max_output_chars must be at least 1")
+        if self.max_workspace_bytes < 1:
+            raise ValueError("max_workspace_bytes must be at least 1")
+        if self.max_workspace_files < 1:
+            raise ValueError("max_workspace_files must be at least 1")

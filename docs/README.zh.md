@@ -224,9 +224,13 @@ XScientist 把这条策略链也记录为内容寻址、不可变的科研对象
 flowchart LR
   Q["问题"] --> HP["竞争假设组合"]
   HP --> DP["区分性预测"]
-  DP --> IV["按信息价值排序实验"]
-  IV --> X["执行 / 失败 / 矛盾"]
-  X --> A["异常复盘"]
+  DP --> D["锁定候选实验设计"]
+  D --> IV["按信息价值排序"]
+  IV --> X["执行选中设计"]
+  X --> O["观察 + 证据"]
+  O --> P["草稿 posterior 更新"]
+  P --> HP
+  X --> A["失败 / 异常复盘"]
   A --> M["机制 + 证据质量审计"]
   M --> B["边界 / 迁移矩阵"]
   B --> C["描述、因果或可迁移结论"]
@@ -237,29 +241,41 @@ flowchart LR
 # 先生成候选实验、质量评估和边界矩阵模板。
 xscientist research program template --output deep-research.json
 
-# PRIMARY_ID、RIVAL_ID、NULL_ID 是已记录的假设选择器或完整 ID。
+# PRIMARY_ID、RIVAL_ID 是已记录的假设选择器或完整 ID；null 可按需追加。
 xscientist research program portfolio PRIMARY_ID \
-  --alternative RIVAL_ID --null NULL_ID \
+  --alternative RIVAL_ID \
   --question "哪个机制最能预测留出条件？" \
-  --prior PRIMARY_ID=2 --prior RIVAL_ID=1 --prior NULL_ID=1
+  --prior PRIMARY_ID=2 --prior RIVAL_ID=1
 
 xscientist research program prediction @latest:hypothesis_portfolio PRIMARY_ID \
   --when "对候选中介变量做消融" \
   --expect "效应消失" \
-  --distinguishes RIVAL_ID --distinguishes NULL_ID \
+  --distinguishes RIVAL_ID \
   --falsifier "效应保持不变"
+
+# 对同一条件，也必须逐一锁定每个 rival/null 的预测。
+xscientist research program prediction @latest:hypothesis_portfolio RIVAL_ID \
+  --when "对候选中介变量做消融" --expect "效应保持" \
+  --distinguishes PRIMARY_ID --falsifier "效应消失"
 
 xscientist research program prioritize \
   @latest:hypothesis_portfolio deep-research.json
+
+xscientist research experiment "执行被选中的消融" --status completed \
+  --plan SELECTED_DESIGN_ID --priority PRIORITY_ID
+xscientist research evidence "效应消失" --attempt ATTEMPT_ID
+xscientist research program posterior PORTFOLIO_ID PRIORITY_ID ATTEMPT_ID EVIDENCE_ID \
+  --observed "效应消失" \
+  --likelihood PRIMARY_ID=0.9 --likelihood RIVAL_ID=0.1
 
 # 只读检查结构性短板，或把复盘和新异常写入科研历史。
 xscientist research program review
 xscientist research program review --record
 ```
 
-已验证的 `causal` 结论必须绑定经过干预检验的有效机制，以及独立完成、等级至少为
-moderate 的证据质量评估；`transferable` 结论还必须通过多条件迁移矩阵。普通旧流程
-默认仍是 `descriptive`，只有用户或 Agent 主动声明更强结论时才启用更强门槛：
+已验证的 `causal` 结论必须把机制证据追溯到已完成的干预实验，质量评估者不能出现在
+完整生产者 lineage 中；`transferable` 还要求各条件使用独立 attempt/evidence，并隔离
+开发集与留出集的数据哈希。旧 v1 历史仍可验证，新对象默认使用 fail-closed v2：
 
 ```bash
 xscientist research claim "机制 M 在留出域中仍然成立。" \

@@ -11,7 +11,9 @@ from ai_scientist.utils.provider_registry import (
 
 
 class ProviderRegistryTests(unittest.TestCase):
-    def test_resolve_model_provider_should_normalize_prefixed_and_legacy_models(self) -> None:
+    def test_resolve_model_provider_should_normalize_prefixed_and_legacy_models(
+        self,
+    ) -> None:
         openrouter_spec = resolve_model_provider(
             "openrouter/meta-llama/llama-3.1-405b-instruct"
         )
@@ -19,12 +21,16 @@ class ProviderRegistryTests(unittest.TestCase):
         compat_spec = resolve_model_provider("openai_compat/qwen2.5-72b-instruct")
 
         self.assertEqual(openrouter_spec.provider, "openrouter")
-        self.assertEqual(openrouter_spec.client_model, "meta-llama/llama-3.1-405b-instruct")
+        self.assertEqual(
+            openrouter_spec.client_model, "meta-llama/llama-3.1-405b-instruct"
+        )
         self.assertEqual(legacy_spec.provider, "openrouter")
         self.assertEqual(compat_spec.provider, "openai_compat")
         self.assertEqual(compat_spec.client_model, "qwen2.5-72b-instruct")
 
-    def test_build_openai_compatible_client_kwargs_should_respect_provider_envs(self) -> None:
+    def test_build_openai_compatible_client_kwargs_should_respect_provider_envs(
+        self,
+    ) -> None:
         kwargs, model = build_openai_compatible_client_kwargs(
             "gemini/gemini-2.5-pro-preview-03-25",
             env={"GOOGLE_API_KEY": "gem-key"},
@@ -39,13 +45,24 @@ class ProviderRegistryTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["max_retries"], 3)
 
-    def test_missing_model_credentials_should_report_openai_compat_base_url(self) -> None:
+    def test_missing_model_credentials_should_report_openai_compat_base_url(
+        self,
+    ) -> None:
         missing = missing_model_credentials(
             ["openai_compat/custom-model"],
             env={"OPENAI_COMPAT_API_KEY": "compat-key"},
         )
         self.assertEqual(len(missing), 1)
         self.assertIn("OPENAI_COMPAT_BASE_URL | OPENAI_BASE_URL", missing[0]["missing"])
+
+    def test_huggingface_base_url_tracks_requested_model(self) -> None:
+        spec = resolve_model_provider("huggingface/org/custom-model")
+
+        self.assertEqual(spec.client_model, "org/custom-model")
+        self.assertEqual(
+            spec.default_base_url,
+            "https://api-inference.huggingface.co/models/org/custom-model",
+        )
 
     def test_provider_env_statuses_should_surface_vendor_matrix(self) -> None:
         statuses = provider_env_statuses(

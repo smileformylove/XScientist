@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ai_scientist.resources import resolve_bfts_config_path
+from ai_scientist.utils.bounded_process import (
+    ProcessResourceLimitExceeded,
+    run_process_bounded,
+    workspace_limit_checker,
+)
 
 from .models import CommandResult, ProjectRequest
 
@@ -208,9 +213,24 @@ class XScientist:
         *,
         check: bool = False,
         timeout: float | None = None,
+        max_output_chars: int | None = None,
+        max_workspace_bytes: int | None = None,
+        max_workspace_files: int | None = None,
     ) -> CommandResult:
+        output_root = request.output_root or self.output_root
+        workspace = (
+            Path(output_root).expanduser().resolve() / "projects" / request.project
+            if output_root is not None
+            else None
+        )
         return self.run_command(
-            self.project_command(request), check=check, timeout=timeout
+            self.project_command(request),
+            check=check,
+            timeout=timeout,
+            max_output_chars=max_output_chars,
+            workspace=workspace,
+            max_workspace_bytes=max_workspace_bytes,
+            max_workspace_files=max_workspace_files,
         )
 
     def run_command(
@@ -219,28 +239,75 @@ class XScientist:
         *,
         check: bool = False,
         timeout: float | None = None,
+        max_output_chars: int | None = None,
+        workspace: str | Path | None = None,
+        max_workspace_bytes: int | None = None,
+        max_workspace_files: int | None = None,
     ) -> CommandResult:
         env = os.environ.copy()
         env.update(self.env)
         if self.output_root is not None:
             env.setdefault("RESEARCH_OUTPUT_DIR", str(self.output_root))
         started_at = _now_iso()
-        completed = subprocess.run(
-            [str(item) for item in command],
-            cwd=str(self.work_dir) if self.work_dir is not None else None,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+        limit_check = (
+            workspace_limit_checker(
+                workspace,
+                max_bytes=max_workspace_bytes,
+                max_files=max_workspace_files,
+            )
+            if workspace is not None
+            and (max_workspace_bytes is not None or max_workspace_files is not None)
+            else None
         )
+        try:
+            if max_output_chars is None:
+                completed = subprocess.run(
+                    [str(item) for item in command],
+                    cwd=str(self.work_dir) if self.work_dir is not None else None,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                returncode = completed.returncode
+                stdout = completed.stdout
+                stderr = completed.stderr
+                stdout_truncated = False
+                stderr_truncated = False
+            else:
+                completed = run_process_bounded(
+                    command,
+                    cwd=self.work_dir,
+                    env=env,
+                    timeout=timeout,
+                    max_output_chars=max_output_chars,
+                    limit_check=limit_check,
+                )
+                returncode = completed.returncode
+                stdout = completed.stdout
+                stderr = completed.stderr
+                stdout_truncated = completed.stdout_truncated
+                stderr_truncated = completed.stderr_truncated
+        except ProcessResourceLimitExceeded as exc:
+            returncode = 75
+            stdout = exc.stdout
+            stderr = (exc.stderr + "\n" if exc.stderr else "") + (
+                f"ResourceLimitError: {exc.reason}"
+            )
+            stdout_truncated = len(stdout) >= int(max_output_chars or 1)
+            stderr_truncated = len(stderr) > int(max_output_chars or len(stderr))
+            if max_output_chars is not None:
+                stderr = stderr[-max_output_chars:]
         result = CommandResult(
             command=tuple(str(item) for item in command),
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
             started_at=started_at,
             finished_at=_now_iso(),
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
         if check and not result.ok:
             raise subprocess.CalledProcessError(
