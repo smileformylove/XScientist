@@ -237,6 +237,34 @@ def _model_candidates(model: str) -> list[str]:
     return list(dict.fromkeys(candidate for candidate in candidates if candidate))
 
 
+def resolve_model_price(
+    model: str,
+    *,
+    prices_per_million: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, float] | None:
+    """Resolve a complete, non-negative price without treating unknown models as free."""
+
+    prices: dict[str, Mapping[str, Any]] = dict(DEFAULT_MODEL_PRICES_PER_MILLION)
+    prices.update(dict(prices_per_million or {}))
+    for candidate in _model_candidates(model):
+        raw = prices.get(candidate)
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            parsed = {str(key): float(value) for key, value in raw.items()}
+        except (TypeError, ValueError):
+            continue
+        if (
+            "input" in parsed
+            and "output" in parsed
+            and parsed["input"] >= 0
+            and parsed["output"] >= 0
+            and parsed.get("cached_input", parsed["input"]) >= 0
+        ):
+            return parsed
+    return None
+
+
 @dataclass(frozen=True)
 class LLMBudgetLimits:
     max_total_tokens: int | None = None
@@ -586,19 +614,10 @@ class LLMBudgetManager:
                         msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _price_for(self, model: str) -> dict[str, float] | None:
-        prices = dict(DEFAULT_MODEL_PRICES_PER_MILLION)
-        prices.update(self._limits.prices_per_million)
-        for candidate in _model_candidates(model):
-            price = prices.get(candidate)
-            if (
-                price
-                and "input" in price
-                and "output" in price
-                and price["input"] >= 0
-                and price["output"] >= 0
-            ):
-                return price
-        return None
+        return resolve_model_price(
+            model,
+            prices_per_million=self._limits.prices_per_million,
+        )
 
     def _validate_state(self, state: Any) -> None:
         if not isinstance(state, dict) or state.get("version") != STATE_VERSION:

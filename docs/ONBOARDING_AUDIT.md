@@ -199,6 +199,14 @@ or tracking policy.
 
 ### P0 — convert current capability into an honest first success
 
+0.1.2 delivery status (2026-08-17): items 1–4 are implemented. The release
+adds the provider-free contested-evidence demo, runs its exact `demo → status`
+journey from a built wheel across the supported CI matrix, returns stable
+doctor remediation codes, and publishes the guided start/DAG work as a pinned
+package. Item 5 remains open: the offline demo covers the scientific lifecycle,
+but a stubbed model/executor fixture should still exercise the full Autopilot
+orchestrator without cost.
+
 1. **Publish the next release.** Put guided start, the unified DAG, context
    receipts, branch maintenance, and protocol v2 on PyPI so the first command
    is `pip install xscientist`, not a VCS install.

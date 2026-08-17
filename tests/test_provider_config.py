@@ -86,6 +86,88 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertTrue(ready_row["client_available"])
             self.assertTrue(ready_row["ready"])
 
+    def test_provider_check_discloses_presence_only_validation_and_price(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="gpt-4o-mini",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"OPENAI_API_KEY": "process-only-secret"},
+                    clear=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--max-cost-usd",
+                        "1",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.provider-check.v1")
+            self.assertTrue(payload["ok"])
+            self.assertEqual(
+                payload["checks"]["credential_validation"], "presence_only"
+            )
+            self.assertFalse(payload["checks"]["live_api_verified"])
+            self.assertTrue(payload["checks"]["model_price_known"])
+            self.assertNotIn("process-only-secret", output.getvalue())
+
+    def test_provider_check_fails_closed_for_an_unknown_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"OPENAI_API_KEY": "process-only-secret"},
+                    clear=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--max-cost-usd",
+                        "1",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertIn("unknown_model_price", payload["error_codes"])
+            self.assertFalse(payload["checks"]["model_price_known"])
+
     def test_workspace_is_discovered_from_nested_directories(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"

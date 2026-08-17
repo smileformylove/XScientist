@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -110,20 +111,69 @@ def diagnose(
         research_vcs_ready = True
 
     actions: list[str] = []
+    remediations: list[dict[str, Any]] = []
+
+    def add_remediation(
+        code: str,
+        command: str,
+        detail: str,
+        *,
+        severity: str = "error",
+    ) -> None:
+        if command not in actions:
+            actions.append(command)
+        if not any(item["code"] == code for item in remediations):
+            remediations.append(
+                {
+                    "code": code,
+                    "command": command,
+                    "detail": detail,
+                    "severity": severity,
+                }
+            )
+
     if not workspace_ready:
-        actions.append("xscientist setup my-research")
+        add_remediation(
+            "workspace_not_configured",
+            "xscientist setup my-research",
+            "Create a workspace before running this task.",
+        )
     if capabilities["missing_modules"]:
-        actions.append(str(capabilities["install_command"]))
+        add_remediation(
+            "capability_modules_missing",
+            str(capabilities["install_command"]),
+            "Install the exact optional modules required by the selected task.",
+        )
     if provider_required and not selected_provider:
-        actions.append("xscientist provider add <provider>")
+        add_remediation(
+            "provider_not_selected",
+            "xscientist provider add <provider>",
+            "Select and configure one model provider.",
+        )
     elif provider_required and not provider_ready and selected_provider:
-        actions.append(f"xscientist provider add {selected_provider}")
+        add_remediation(
+            "provider_not_ready",
+            f"xscientist provider add {selected_provider}",
+            "Configure credentials and the client for the selected provider.",
+        )
     if auth_required and not authenticated:
-        actions.append("xscientist auth login --user <your-name>")
+        add_remediation(
+            "research_identity_missing",
+            "xscientist auth login --user <your-name>",
+            "Create the local actor identity used for accountable research history.",
+        )
     if not git["ok"] and git.get("install_hint"):
-        actions.append(str(git["install_hint"]))
+        add_remediation(
+            "git_backend_unavailable",
+            str(git["install_hint"]),
+            "Install a compatible local Git backend.",
+        )
     if research_vcs_required and not research_vcs_ready and root is not None:
-        actions.append("xscientist research init .")
+        add_remediation(
+            "research_vcs_not_initialized",
+            "xscientist research init .",
+            "Initialize local scientific history in this workspace.",
+        )
 
     runtime_results: list[dict[str, Any]] = []
     runtime_ok: bool | None = None
@@ -133,10 +183,15 @@ def diagnose(
         from ai_scientist.apps.preflight import check_bfts_config
         from .provider_config import load_workspace_environment
 
+        paper_tools_required = str(task).strip().lower() in {
+            "paper",
+            "ml-study",
+        }
         environment = load_workspace_environment(root)
         if environment.get("error"):
             runtime_results.append(
                 {
+                    "code": "runtime_workspace_environment",
                     "label": "Workspace environment",
                     "ok": False,
                     "severity": "error",
@@ -145,8 +200,12 @@ def diagnose(
             )
         else:
             for result in check_bfts_config(str(root / "bfts_config.yaml")):
+                code = "runtime_" + re.sub(
+                    r"[^a-z0-9]+", "_", str(result.label).lower()
+                ).strip("_")
                 runtime_results.append(
                     {
+                        "code": code,
                         "label": result.label,
                         "ok": result.ok,
                         "severity": result.severity,
@@ -154,19 +213,28 @@ def diagnose(
                     }
                 )
             for command, severity, purpose in (
-                ("pdflatex", "error", "paper compilation"),
+                (
+                    "pdflatex",
+                    "error" if paper_tools_required else "warning",
+                    "paper compilation",
+                ),
                 ("chktex", "warning", "LaTeX linting"),
             ):
                 available = shutil.which(command) is not None
                 runtime_results.append(
                     {
+                        "code": "runtime_" + command,
                         "label": command,
                         "ok": available,
                         "severity": severity,
                         "detail": (
                             f"available for {purpose}"
                             if available
-                            else f"required for {purpose} but not found on PATH"
+                            else (
+                                f"required for {purpose} but not found on PATH"
+                                if severity == "error"
+                                else f"optional for {purpose} but not found on PATH"
+                            )
                         ),
                     }
                 )
@@ -174,28 +242,48 @@ def diagnose(
             not item["ok"] and item["severity"] == "error" for item in runtime_results
         )
         if not runtime_ok:
-            actions.extend(
-                [
+            failed_labels = {
+                str(item["label"])
+                for item in runtime_results
+                if not item["ok"] and item["severity"] == "error"
+            }
+            if "Experiment isolation" in failed_labels:
+                add_remediation(
+                    "executor_image_unavailable",
                     "docker build -f Dockerfile.executor "
                     f"-t xscientist-exec:{__version__} .",
-                    "xscientist preflight --strict --bfts-config bfts_config.yaml",
-                ]
+                    "Build the exact isolated executor selected by the workspace.",
+                )
+            add_remediation(
+                "runtime_preflight_failed",
+                "xscientist preflight --strict --bfts-config bfts_config.yaml",
+                "Re-run the detailed runtime probe after resolving blocking checks.",
             )
-            if not any(
+            if paper_tools_required and not any(
                 item["ok"] for item in runtime_results if item["label"] == "pdflatex"
             ):
-                actions.append("install a TeX distribution that provides pdflatex")
+                add_remediation(
+                    "paper_compiler_missing",
+                    "install a TeX distribution that provides pdflatex",
+                    "Publication output requires a local LaTeX compiler.",
+                )
     elif runtime_preflight:
-        actions.append(f"xscientist doctor --task {capabilities['task']} --deep")
-    actions = list(dict.fromkeys(actions))
+        add_remediation(
+            "runtime_not_checked",
+            f"xscientist doctor --task {capabilities['task']} --deep",
+            "Probe the selected model and isolated executor before paid work.",
+            severity="info",
+        )
 
     checks = {
         "workspace": {
+            "code": "workspace",
             "ok": workspace_ready,
             "configured": config is not None,
             "error": workspace_error or None,
         },
         "git": {
+            "code": "git_backend",
             "ok": bool(git["ok"]),
             "backend": git["backend"],
             "version": git["version"],
@@ -203,6 +291,7 @@ def diagnose(
             "errors": git["errors"],
         },
         "research_vcs": {
+            "code": "research_vcs",
             "ok": research_vcs_ready,
             "required": research_vcs_required,
             "initialized": bool(
@@ -211,8 +300,9 @@ def diagnose(
             "error": research_vcs_error or None,
             **research_vcs_summary,
         },
-        "capabilities": capabilities,
+        "capabilities": {"code": "capabilities", **capabilities},
         "provider": {
+            "code": "provider",
             "ok": provider_ready,
             "required": provider_required,
             "name": selected_provider,
@@ -228,15 +318,18 @@ def diagnose(
             "error": str(provider_row["error"] if provider_row else "") or None,
         },
         "auth": {
+            "code": "research_identity",
             "ok": authenticated or not auth_required,
             "authenticated": authenticated,
             "required": auth_required,
             "status": auth_status,
         },
         "runtime": {
+            "code": "runtime",
             "ok": runtime_ok,
             "required": runtime_preflight,
             "checked": bool(deep and runtime_preflight),
+            "paper_tools_required": str(task).strip().lower() in {"paper", "ml-study"},
             "results": runtime_results,
         },
     }
@@ -260,6 +353,11 @@ def diagnose(
         "workspace": "." if root is not None else None,
         "checks": checks,
         "next_actions": actions,
+        "remediations": remediations,
+        "issue_codes": [item["code"] for item in remediations],
+        "error_codes": [
+            item["code"] for item in remediations if item["severity"] == "error"
+        ],
         "host_paths_disclosed": False,
     }
     # Preflight providers and OS errors can embed host-local paths.  Apply the

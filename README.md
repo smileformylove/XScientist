@@ -43,9 +43,9 @@ commit, challenge it on a branch, or continue from an exact experiment node.
 > isolation boundary. Machine-generated claims remain unverified until the
 > required evidence and independent gates exist.
 
-This README tracks `main`, including features planned for the next release.
-The latest stable PyPI package is `0.1.1`; see [Install and compatibility](#install-and-compatibility)
-before choosing a release channel.
+This README documents stable `0.1.2` and the compatible surface on `main`; see
+[Install and compatibility](#install-and-compatibility) before choosing a
+release channel.
 
 ## Choose your path
 
@@ -59,35 +59,30 @@ before choosing a release channel.
 
 ## Two-minute local demo
 
-This path creates a real Research Git repository and an offline DAG browser. It
-does not call a model or run an experiment.
+This path creates a complete Research Git repository and an offline DAG
+browser. It records a failed attempt, supporting and refuting evidence, an
+independent rejection, and a contested claim without calling a model or the
+network.
 
 Requirements: Python 3.10+ and Git.
 
 ```bash
-# Install the current main branch documented by this README.
-python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
-
-xscientist git doctor
-xscientist research start ./retrieval-study \
-  --question "Does retrieval improve factual accuracy?" \
-  --hypothesis "Retrieval reduces unsupported claims." \
-  --falsifier "No improvement on a held-out benchmark."
-
-cd retrieval-study
-xscientist research status
-xscientist research dag --output ./research-dag
+python -m pip install "xscientist==0.1.2"
+xscientist demo ./retrieval-study --open
+xscientist status ./retrieval-study
 ```
 
-Open `research-dag/research-dag.html` in any browser. The initial graph contains
-the question, research goal, and falsifiable hypothesis. `research start` also
-prints the next valid exploratory and confirmatory commands, so a new user does
-not need to know object IDs or Git internals.
+If the browser does not open automatically, open
+`retrieval-study/research-dag/research-dag.html`. The demo costs `$0.00`, is
+deterministic, and deliberately ends with scientific closure blocked: the
+held-out evidence refutes the broad transfer claim. `status` then shows the
+current branch, scientific progress, run/budget state, DAG, and next action in
+one read-only view.
 
 Continue interactively:
 
 ```bash
+cd retrieval-study
 xscientist research guide
 
 # Exploratory path: compare explanations before locking a study.
@@ -118,12 +113,14 @@ from one question.
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai,ml,pdf-layout] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.2"
 ```
 
 Provider extras are modular: `openai`, `anthropic`, `zhipu`, `bedrock`,
 `vertex`, and `openai-compatible`. The last profile covers DeepSeek, Gemini,
 OpenRouter, Hugging Face inference, Ollama, and generic compatible endpoints.
+The default `research` task does not install ML or PDF-layout stacks. Select
+`--task ml-study` or `--task paper` only when the study needs those tools.
 
 ### 2. Start from a question
 
@@ -146,7 +143,18 @@ For empirical work, replace `--allow-synthetic-data` with `--data-dir ./data`.
 XScientist hashes every input before model calls and mounts the snapshot
 read-only. Use `--max-project-tokens`, `--max-project-hours`, and
 `--max-cost-usd` as hard project limits; unknown model pricing fails closed
-when a cost limit is active.
+when a cost limit is active. For an unbundled model, pass
+`--price-input-per-million` and `--price-output-per-million`, or configure
+`llm_budget.prices_per_million` in the workspace.
+
+Before a paid run, inspect local readiness without making an API request:
+
+```bash
+xscientist provider check --max-cost-usd 10
+```
+
+The result explicitly distinguishes credential presence from live API
+validation and reports whether cost enforcement has a known model price.
 
 Autopilot profiles make the main trade-off explicit:
 
@@ -476,8 +484,8 @@ The public surface lives in `xscientist/`; workflow implementation lives in
 
 | Channel | Install | Use when |
 | --- | --- | --- |
-| Stable `0.1.1` | `python -m pip install "xscientist==0.1.1"` | You need the published package and its release contract |
-| Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You want the guided start, unified DAG, context receipts, and latest protocol work documented here |
+| Stable `0.1.2` | `python -m pip install "xscientist==0.1.2"` | You need the published package and its release contract |
+| Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You need unreleased development work and accept a moving source revision |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | You are changing the repository |
 
 Pin a commit instead of `main` when an experiment must be exactly repeatable.
@@ -607,15 +615,17 @@ See [SDK and API](docs/guides/SDK_AND_API.md),
 
 The repository is in alpha. The strongest surfaces are immutable scientific
 history, provenance, safety defaults, protocol schemas, and offline handoff.
-The main adoption work now is reducing provider/runtime setup, publishing a
-provider-free sample ARA, adding a polished recorded demo, and measuring
-time-to-first-value across clean machines. The detailed, testable strategy is
-in the [onboarding audit](docs/ONBOARDING_AUDIT.md).
+Version 0.1.2 adds a provider-free first success, a unified status view,
+task-sized executor dependencies, stable diagnostic remediation, explicit
+price preflight, and a built-wheel demo smoke. The remaining adoption work is
+reducing container/provider setup further, publishing sample ARAs, adding a
+polished recorded demo, and measuring time-to-first-value across clean
+machines. The detailed strategy is in the
+[onboarding audit](docs/ONBOARDING_AUDIT.md).
 
 The project is building toward:
 
-- one provider-free demo command with a bundled evidence DAG;
-- end-to-end golden journeys in CI on all supported operating systems;
+- end-to-end golden journeys for model-backed runs on all supported systems;
 - more external adapters and protocol conformance fixtures;
 - public reproducibility benchmarks and example studies;
 - a hosted documentation site and searchable protocol reference.

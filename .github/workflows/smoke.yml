@@ -60,6 +60,12 @@ jobs:
           python -c "import xscientist; from xscientist import ProjectRequest, XScientist; assert xscientist.__version__ and ProjectRequest and XScientist"
           python -m xscientist info --json
 
+      - name: Exercise the built-wheel offline first journey
+        run: |
+          python tools/privacy_exec.py -- python -m pip install build -c requirements/constraints-ci.txt
+          python tools/privacy_exec.py -- python tools/build_distribution.py --outdir .ci-dist --no-isolation
+          python tools/privacy_exec.py -- python tools/check_distribution.py --dist-dir .ci-dist --no-install-deps
+
       - name: Exercise extended SDK behavior
         if: runner.os != 'Windows'
         run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_public_sdk.py"

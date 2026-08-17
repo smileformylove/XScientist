@@ -40,8 +40,8 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 > 隔离边界内执行生成代码。机器生成的结论不会自动获得“已验证”状态，只有满足
 > 证据闭环和独立门禁后才能晋级。
 
-本文档跟踪 `main`，包含下一版本计划发布的能力。PyPI 最新稳定版为 `0.1.1`；
-安装前请先看[安装与兼容性](#安装与兼容性)。
+本文档覆盖稳定版 `0.1.2` 以及 `main` 上兼容的公开接口；安装前请先看
+[安装与兼容性](#安装与兼容性)。
 
 ## 先选择你的使用路径
 
@@ -54,33 +54,24 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 
 ## 两分钟本地体验
 
-下面会创建一个真实的科研 Git 仓库和离线 DAG 浏览器，不调用模型，也不运行实验。
-只需要 Python 3.10+ 和 Git。
+下面会创建一个完整的科研 Git 仓库和离线 DAG 浏览器，包含失败尝试、支持证据、
+反驳证据、独立拒绝和争议结论；不调用模型或网络。只需要 Python 3.10+ 和 Git。
 
 ```bash
-# 安装本文档对应的当前 main。
-python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
-
-xscientist git doctor
-xscientist research start ./retrieval-study \
-  --question "检索能否提高事实准确率？" \
-  --hypothesis "检索会减少无依据断言。" \
-  --falsifier "在留出基准上没有提升。" \
-  --lang zh
-
-cd retrieval-study
-xscientist research status
-xscientist research dag --output ./research-dag
+python -m pip install "xscientist==0.1.2"
+xscientist demo ./retrieval-study --lang zh --open
+xscientist status ./retrieval-study --lang zh
 ```
 
-用浏览器打开 `research-dag/research-dag.html`。初始 DAG 已包含问题、研究目标和
-可证伪假设。`research start` 还会给出下一步的探索性与验证性命令，新用户无需先
-学习对象 ID 或 Git 内部原理。
+如果浏览器没有自动打开，请打开
+`retrieval-study/research-dag/research-dag.html`。该演示成本为 `$0.00`，结果可
+确定复现，并且会诚实地停在“科学闭环未通过”：留出证据反驳了宽泛的迁移结论。
+`status` 会在一个只读视图中显示分支、科学进度、运行/预算状态、DAG 和下一步。
 
 继续研究：
 
 ```bash
+cd retrieval-study
 xscientist research guide --lang zh
 
 # 探索性路线：锁定研究前先比较不同解释。
@@ -110,12 +101,14 @@ Autopilot。
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai,ml,pdf-layout] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.2"
 ```
 
 可选 Provider extra 包括 `openai`、`anthropic`、`zhipu`、`bedrock`、
 `vertex` 和 `openai-compatible`。最后一个覆盖 DeepSeek、Gemini、OpenRouter、
 Hugging Face 推理、Ollama 和通用兼容端点。
+默认 `research` 任务不会安装 ML 或 PDF 排版栈；只有研究确实需要时再选择
+`--task ml-study` 或 `--task paper`。
 
 ### 2. 从一个问题开始
 
@@ -136,7 +129,17 @@ xscientist start ./ood-reflection \
 真实数据研究应把 `--allow-synthetic-data` 换成 `--data-dir ./data`。系统会在模型
 调用前为输入计算哈希，并以只读方式挂载数据快照。可同时设置
 `--max-project-tokens`、`--max-project-hours`、`--max-cost-usd` 作为项目级
-硬上限；启用费用上限后，未知模型价格会直接阻断而不是猜测。
+硬上限；启用费用上限后，未知模型价格会直接阻断而不是猜测。未内置价格的模型可
+通过 `--price-input-per-million` 与 `--price-output-per-million` 显式配置，
+也可以写入工作区的 `llm_budget.prices_per_million`。
+
+付费运行前，可以在不发起 API 请求的前提下检查本地状态：
+
+```bash
+xscientist provider check --max-cost-usd 10
+```
+
+输出会明确区分“凭据存在”和“真实 API 已验证”，并显示该模型能否执行费用门禁。
 
 | Autopilot | 适合场景 | 主要行为 |
 | --- | --- | --- |
@@ -418,8 +421,8 @@ flowchart TB
 
 | 渠道 | 安装命令 | 使用场景 |
 | --- | --- | --- |
-| 稳定版 `0.1.1` | `python -m pip install "xscientist==0.1.1"` | 需要已发布版本和稳定发布契约 |
-| 当前 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | 使用本文的引导启动、统一 DAG、context receipt 和最新协议 |
+| 稳定版 `0.1.2` | `python -m pip install "xscientist==0.1.2"` | 需要已发布版本和稳定发布契约 |
+| 当前 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | 需要尚未发布的开发改动，并接受源码版本持续变化 |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | 修改源码和测试 |
 
 实验需要精确复现时，请固定 commit，不要跟踪 `main`。Python 包遵循语义版本，ARA
@@ -536,10 +539,10 @@ print(result.returncode)
 
 ## 当前状态与优化方向
 
-项目目前处于 Alpha。最成熟的部分是不可变科研历史、provenance、安全默认值、协议
-Schema 和离线交接。接下来最重要的采用工作是：把最新能力正式发布到 PyPI、提供
-一条 `xscientist demo` 的无 Provider 示例、增加一段高质量录屏、提供可复现样例
-ARA，并在干净机器上持续测量首次价值时间。详细策略和验收指标见
+项目目前处于 Alpha。0.1.2 已加入零 Provider 首次体验、统一状态视图、按任务缩减
+的执行器依赖、稳定诊断修复项、显式价格预检，以及从构建 wheel 运行 demo 的发行
+门禁。下一步重点是继续降低容器/Provider 配置成本、增加高质量录屏与样例 ARA，
+并在干净机器上持续测量首次价值时间。详细策略见
 [上手与增长审计](ONBOARDING_AUDIT.md)。
 
 ## 参与贡献

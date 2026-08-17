@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -91,21 +94,62 @@ def _render_env(provider: str) -> str:
     )
 
 
+def _installed_vcs_source() -> tuple[str, str] | None:
+    """Return a safe PEP 610 VCS origin so executors install the exact commit."""
+
+    try:
+        raw = importlib_metadata.distribution("xscientist").read_text("direct_url.json")
+        payload = json.loads(raw or "{}")
+    except (importlib_metadata.PackageNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    vcs = payload.get("vcs_info")
+    if not isinstance(vcs, dict) or vcs.get("vcs") != "git":
+        return None
+    commit = str(vcs.get("commit_id") or "").strip()
+    url = str(payload.get("url") or "").strip().removeprefix("git+")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+        return None
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or not re.fullmatch(r"[A-Za-z0-9._~:/@%+\-]+", url)
+    ):
+        return None
+    return url, commit.lower()
+
+
 def _render_dockerfile(
     provider: str,
     *,
     capabilities: tuple[str, ...] | None = None,
     provider_required: bool = True,
 ) -> str:
-    selected = (
-        capabilities if capabilities is not None else ("research", "ml", "pdf-layout")
-    )
-    runtime_spec = capability_installation_spec(
+    selected = capabilities if capabilities is not None else ("research",)
+    package_spec = capability_installation_spec(
         selected,
         provider=provider if provider_required else None,
-        version="${XSCIENTIST_VERSION}",
     )
-    local_extras = runtime_spec.removeprefix("xscientist").split("==", 1)[0]
+    vcs_source = _installed_vcs_source()
+    if vcs_source is None:
+        runtime_spec = capability_installation_spec(
+            selected,
+            provider=provider if provider_required else None,
+            version="${XSCIENTIST_VERSION}",
+        )
+        source_revision = "release"
+        source_kind = "pypi-release"
+    else:
+        source_url, source_revision = vcs_source
+        runtime_spec = f"{package_spec} @ git+{source_url}@{source_revision}"
+        source_kind = "vcs-commit"
+    local_extras = package_spec.removeprefix("xscientist")
     local_spec = f"/tmp/xscientist-build-context{local_extras}"
     torch_install = (
         "RUN python -m pip install --no-cache-dir \\\n    torch --index-url https://download.pytorch.org/whl/cpu\n"
@@ -116,7 +160,8 @@ def _render_dockerfile(
 
 ARG XSCIENTIST_VERSION={__version__}
 ARG XSCIENTIST_INSTALL_MODE=pypi
-ARG XSCIENTIST_SOURCE_REVISION=release
+ARG XSCIENTIST_SOURCE_REVISION={source_revision}
+ARG XSCIENTIST_INSTALL_SOURCE={source_kind}
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
     PYTHONUNBUFFERED=1
@@ -134,7 +179,8 @@ RUN if [ "$XSCIENTIST_INSTALL_MODE" = "local" ]; then \\
     && rm -rf /tmp/xscientist-build-context
 
 LABEL org.opencontainers.image.version="$XSCIENTIST_VERSION" \\
-      org.opencontainers.image.revision="$XSCIENTIST_SOURCE_REVISION"
+      org.opencontainers.image.revision="$XSCIENTIST_SOURCE_REVISION" \\
+      org.xscientist.install-source="$XSCIENTIST_INSTALL_SOURCE"
 
 RUN useradd --create-home --uid 10001 scientist
 USER scientist
@@ -197,6 +243,7 @@ def _render_readme(
         f"""```bash
 xscientist provider add {provider}
 xscientist provider list
+xscientist provider check {provider}
 ```
 
 The command reuses the model `{model}` selected during setup and prompts for
@@ -290,6 +337,7 @@ Inspect the outputs without starting another model call:
 
 ```bash
 # Output root: --output-root ./outputs
+xscientist status .
 xscientist manager --research-dir ./outputs list-papers
 xscientist research status --repo .
 xscientist research objects --repo .
