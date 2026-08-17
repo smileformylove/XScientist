@@ -7,7 +7,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ._version import __version__
 from .dependency_profiles import TASK_PROFILES, resolve_task_capabilities
 from .git_support import inspect_git_backend
 from .provider_config import (
@@ -159,7 +158,7 @@ def diagnose(
     if auth_required and not authenticated:
         add_remediation(
             "research_identity_missing",
-            "xscientist auth login --user <your-name>",
+            "xscientist auth login",
             "Create the local actor identity used for accountable research history.",
         )
     if not git["ok"] and git.get("install_hint"):
@@ -250,9 +249,8 @@ def diagnose(
             if "Experiment isolation" in failed_labels:
                 add_remediation(
                     "executor_image_unavailable",
-                    "docker build -f Dockerfile.executor "
-                    f"-t xscientist-exec:{__version__} .",
-                    "Build the exact isolated executor selected by the workspace.",
+                    "xscientist executor prepare --workspace .",
+                    "Prepare the exact isolated executor selected by the workspace.",
                 )
             add_remediation(
                 "runtime_preflight_failed",
@@ -300,7 +298,14 @@ def diagnose(
             "error": research_vcs_error or None,
             **research_vcs_summary,
         },
-        "capabilities": {"code": "capabilities", **capabilities},
+        "capabilities": {
+            "code": "capabilities",
+            # Keep every doctor row renderable through the same public
+            # ``ok`` field.  ``ready`` remains the richer capability-contract
+            # spelling for existing JSON consumers.
+            "ok": bool(capabilities["ready"]),
+            **capabilities,
+        },
         "provider": {
             "code": "provider",
             "ok": provider_ready,

@@ -1,6 +1,6 @@
 # XScientist onboarding and adoption audit
 
-Last updated: 2026-08-09
+Last updated: 2026-08-17
 
 This document measures how difficult XScientist is to adopt, separates
 intentional scientific rigor from accidental product friction, and defines the
@@ -21,6 +21,28 @@ XScientist has two very different first-run experiences:
 The product is therefore easy to *inspect* but still moderately difficult to
 *operate end to end*. This distinction should remain explicit in all public
 communication.
+
+## 0.1.2 usability implementation update
+
+The P0–P2 product work identified below is now implemented on `main`:
+
+- deterministic offline Autopilot fixtures and a public first-run benchmark;
+- corruption-aware status, stable workspace identity, and executable doctor
+  results in both human and JSON output;
+- detached local runs plus HTTP job logs, graceful cancel, and linked resume;
+- interactive provider/model/evidence selection with a smaller progressive
+  root help surface;
+- version-matched executor check/build/prepare/update commands;
+- read-only upgrade/schema compatibility checks and shell completion;
+- a standalone offline protocol conformance kit;
+- disabled-by-default, fixed-shape, local-only usage counters;
+- a MkDocs site, reproducible example gallery, and MLflow/DVC/notebook adapter
+  cookbook.
+
+The remaining adoption work is empirical: collect opt-in aggregate funnel
+counts from willing users, publish multiple real domain studies with their cost
+and negative-result receipts, and validate median setup/runtime across clean
+supported hosts. Those outcomes cannot be inferred from unit tests alone.
 
 Difficulty scale: 1 is trivial; 5 requires expert knowledge or substantial
 setup.

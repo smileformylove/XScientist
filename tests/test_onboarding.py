@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,7 @@ import yaml
 
 from xscientist._version import __version__
 from xscientist.cli import main as cli_main
+from xscientist.cli import _interactive_start_inputs
 from xscientist.diagnostics import diagnose
 from xscientist.onboarding import (
     WORKSPACE_FILES,
@@ -20,9 +23,96 @@ from xscientist.onboarding import (
     _render_dockerfile,
     create_workspace,
 )
+from xscientist.provider_config import (
+    discover_provider_models,
+    validate_provider_model,
+)
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_ollama_model_discovery_and_bare_name_normalization(self) -> None:
+        response = io.StringIO(
+            json.dumps({"models": [{"name": "qwen2.5:7b"}, {"name": "qwen3:1.7b"}]})
+        )
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=response):
+            models = discover_provider_models("ollama")
+
+        self.assertEqual(models[0], "ollama/qwen2.5:7b")
+        self.assertEqual(
+            validate_provider_model("ollama", "qwen2.5:7b"),
+            ("ollama", "ollama/qwen2.5:7b"),
+        )
+        with self.assertRaisesRegex(ValueError, "not 'zhipu'"):
+            validate_provider_model("zhipu", "openai/wrong-provider")
+
+    def test_ollama_discovery_accepts_a_host_without_a_url_scheme(self) -> None:
+        response = io.StringIO(json.dumps({"models": [{"name": "qwen2.5:7b"}]}))
+        with mock.patch(
+            "urllib.request.OpenerDirector.open", return_value=response
+        ) as opened:
+            models = discover_provider_models(
+                "ollama", environ={"OLLAMA_HOST": "127.0.0.1:11434"}
+            )
+
+        self.assertEqual(models, ["ollama/qwen2.5:7b"])
+        self.assertEqual(
+            opened.call_args.args[0].full_url, "http://127.0.0.1:11434/api/tags"
+        )
+
+    def test_interactive_start_fills_only_missing_first_run_choices(self) -> None:
+        parsed = argparse.Namespace(
+            non_interactive=False,
+            question=None,
+            provider=None,
+            model=None,
+            prepare_only=False,
+            data_dir=None,
+            allow_synthetic_data=False,
+            max_cost_usd=None,
+            max_project_tokens=None,
+        )
+        answers = iter(
+            [
+                "Does the intervention improve the target?",
+                "1",
+                "",
+                "2",
+                "",
+            ]
+        )
+        with (
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+            mock.patch(
+                "xscientist.dependency_profiles.missing_provider_modules",
+                return_value=[],
+            ),
+            mock.patch(
+                "xscientist.provider_config.configured_field_value",
+                return_value="configured",
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            _interactive_start_inputs(parsed, new_workspace=True)
+
+        self.assertEqual(parsed.question, "Does the intervention improve the target?")
+        self.assertEqual(parsed.provider, "zhipu")
+        self.assertEqual(parsed.model, "glm-4-flash")
+        self.assertTrue(parsed.allow_synthetic_data)
+
+    def test_root_help_is_progressive_and_advanced_help_is_available(self) -> None:
+        concise = io.StringIO()
+        advanced = io.StringIO()
+        with contextlib.redirect_stdout(concise):
+            self.assertEqual(cli_main(["--help"]), 0)
+        with contextlib.redirect_stdout(advanced):
+            self.assertEqual(cli_main(["help", "--all"]), 0)
+
+        self.assertIn("Start here:", concise.getvalue())
+        self.assertIn("runs", concise.getvalue())
+        self.assertNotIn("evolution-gate", concise.getvalue())
+        self.assertIn("evolution-gate", advanced.getvalue())
+
     def test_start_requires_an_explicit_data_mode_before_creating_workspace(
         self,
     ) -> None:
@@ -486,6 +576,22 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(paper_pdflatex["severity"], "error")
             self.assertFalse(paper["checks"]["runtime"]["ok"])
             self.assertIn("paper_compiler_missing", paper["error_codes"])
+
+    def test_human_doctor_renders_every_check_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(
+                    ["doctor", "--workspace", str(workspace), "--task", "research"]
+                )
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("capabilities", rendered)
+            self.assertIn("runtime", rendered)
+            self.assertIn("Next actions:", rendered)
 
 
 if __name__ == "__main__":

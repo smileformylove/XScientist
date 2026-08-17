@@ -26,7 +26,7 @@ from xscientist.service import run_server
 
 class PublicSdkTests(unittest.TestCase):
     def test_top_level_api_is_stable_and_lightweight(self) -> None:
-        self.assertEqual(xscientist.__version__, "0.1.2")
+        self.assertEqual(xscientist.__version__, "0.1.3")
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
@@ -259,7 +259,7 @@ class PublicSdkTests(unittest.TestCase):
         self.assertFalse(payload["host_paths_disclosed"])
         self.assertEqual(
             payload["quickstart"],
-            "xscientist demo ./xscientist-demo --open",
+            "xscientist demo ./xscientist-demo --autopilot --open",
         )
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
@@ -353,6 +353,26 @@ class PublicSdkTests(unittest.TestCase):
     def test_service_settings_validate_workers(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_workers"):
             ServiceSettings(max_workers=0)
+
+    def test_service_validates_work_dir_at_startup_and_exposes_discovery_root(
+        self,
+    ) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing"
+            with self.assertRaisesRegex(ValueError, "work_dir does not exist"):
+                xscientist.create_app(ServiceSettings(work_dir=missing))
+
+            app = xscientist.create_app(ServiceSettings(work_dir=td))
+            with TestClient(app) as client:
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["documentation"], "/docs")
 
     def test_service_truncates_large_process_output(self) -> None:
         try:

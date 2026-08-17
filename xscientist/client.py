@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 from ai_scientist.resources import resolve_bfts_config_path
 from ai_scientist.utils.bounded_process import (
+    ProcessCancelled,
     ProcessResourceLimitExceeded,
     run_process_bounded,
     workspace_limit_checker,
@@ -216,6 +217,8 @@ class XScientist:
         max_output_chars: int | None = None,
         max_workspace_bytes: int | None = None,
         max_workspace_files: int | None = None,
+        cancel_check=None,
+        output_callback=None,
     ) -> CommandResult:
         output_root = request.output_root or self.output_root
         workspace = (
@@ -231,6 +234,8 @@ class XScientist:
             workspace=workspace,
             max_workspace_bytes=max_workspace_bytes,
             max_workspace_files=max_workspace_files,
+            cancel_check=cancel_check,
+            output_callback=output_callback,
         )
 
     def run_command(
@@ -243,6 +248,8 @@ class XScientist:
         workspace: str | Path | None = None,
         max_workspace_bytes: int | None = None,
         max_workspace_files: int | None = None,
+        cancel_check=None,
+        output_callback=None,
     ) -> CommandResult:
         env = os.environ.copy()
         env.update(self.env)
@@ -260,7 +267,11 @@ class XScientist:
             else None
         )
         try:
-            if max_output_chars is None:
+            if (
+                max_output_chars is None
+                and cancel_check is None
+                and output_callback is None
+            ):
                 completed = subprocess.run(
                     [str(item) for item in command],
                     cwd=str(self.work_dir) if self.work_dir is not None else None,
@@ -281,14 +292,24 @@ class XScientist:
                     cwd=self.work_dir,
                     env=env,
                     timeout=timeout,
-                    max_output_chars=max_output_chars,
+                    max_output_chars=max_output_chars or 200_000,
                     limit_check=limit_check,
+                    cancel_check=cancel_check,
+                    output_callback=output_callback,
                 )
                 returncode = completed.returncode
                 stdout = completed.stdout
                 stderr = completed.stderr
                 stdout_truncated = completed.stdout_truncated
                 stderr_truncated = completed.stderr_truncated
+        except ProcessCancelled as exc:
+            returncode = 130
+            stdout = exc.stdout
+            stderr = (exc.stderr + "\n" if exc.stderr else "") + "RunCancelled"
+            stdout_truncated = exc.stdout_truncated
+            output_limit = int(max_output_chars or 200_000)
+            stderr_truncated = exc.stderr_truncated or len(stderr) > output_limit
+            stderr = stderr[-output_limit:]
         except ProcessResourceLimitExceeded as exc:
             returncode = 75
             stdout = exc.stdout

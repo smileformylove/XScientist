@@ -7,6 +7,7 @@
   "required": ["schema_version", "name", "question", "actor", "git", "storage"],
   "properties": {
     "schema_version": {"type": "string", "const": "xscientist.research-repository.v1"},
+    "repository_id": {"type": "string", "pattern": "^ws-[0-9a-f]{16}$"},
     "name": {"type": "string"},
     "question": {"type": "string"},
     "actor": {"type": "string"},

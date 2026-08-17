@@ -262,6 +262,14 @@ def create_app(settings: ServiceSettings | None = None):
         if resolved.work_dir is not None
         else Path.cwd().resolve()
     )
+    if not work_dir.exists():
+        raise ValueError(
+            "service work_dir does not exist; create it first or omit --work-dir "
+            "to use the current directory"
+        )
+    if not work_dir.is_dir():
+        raise ValueError("service work_dir must be a directory")
+    output_root.mkdir(parents=True, exist_ok=True)
     client = XScientist(
         work_dir=work_dir,
         output_root=output_root,
@@ -307,6 +315,16 @@ def create_app(settings: ServiceSettings | None = None):
                     content={"detail": "missing or invalid X-API-Key"},
                 )
             return await call_next(request)
+
+    @app.get("/", include_in_schema=False)
+    def service_home() -> dict[str, Any]:
+        return {
+            "name": "XScientist API",
+            "version": __version__,
+            "health": "/health",
+            "documentation": "/docs",
+            "openapi": "/openapi.json",
+        }
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -532,6 +550,37 @@ def create_app(settings: ServiceSettings | None = None):
     @app.get("/v1/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
         job = store.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return job.to_dict()
+
+    @app.get("/v1/jobs/{job_id}/logs")
+    def get_job_logs(job_id: str) -> dict[str, Any]:
+        job = store.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return {
+            "id": job.id,
+            "status": job.status,
+            "stdout": job.stdout_tail,
+            "stderr": job.stderr_tail,
+            "stdout_truncated": job.stdout_truncated,
+            "stderr_truncated": job.stderr_truncated,
+        }
+
+    @app.post("/v1/jobs/{job_id}/cancel", status_code=202)
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        job = store.cancel(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return job.to_dict()
+
+    @app.post("/v1/jobs/{job_id}/resume", status_code=202)
+    def resume_job(job_id: str) -> dict[str, Any]:
+        try:
+            job = store.resume(job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return job.to_dict()

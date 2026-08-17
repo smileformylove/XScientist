@@ -1,0 +1,51 @@
+site_name: XScientist
+site_description: Auditable, forkable, and reproducible autonomous research
+site_url: https://smileformylove.github.io/XScientist/
+repo_url: https://github.com/smileformylove/XScientist
+repo_name: smileformylove/XScientist
+edit_uri: edit/main/docs/
+docs_dir: docs
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+nav:
+  - Home: index.md
+  - Getting started: GETTING_STARTED.md
+  - Examples:
+      - Reproducible gallery: examples/README.md
+      - First-run benchmark: BENCHMARKS.md
+  - Operate:
+      - Long-running studies: LONG_RUNNING_GUIDE.md
+      - Configuration: CONFIG_REFERENCE.md
+      - SDK and HTTP API: guides/SDK_AND_API.md
+      - Privacy and local metrics: guides/PRIVACY_AND_METRICS.md
+  - Integrate:
+      - Adapter cookbook: guides/ADAPTER_COOKBOOK.md
+      - Research DAG and adapters: RESEARCH_DAG_AND_ADAPTERS.md
+      - Protocol conformance: PROTOCOL_CONFORMANCE.md
+  - Understand:
+      - Architecture: ARCHITECTURE.md
+      - Research protocol v2: RESEARCH_PROTOCOL_V2.md
+      - Research VCS: RESEARCH_VCS_SPEC.md
+      - Scientific integrity: RESEARCH_INTEGRITY.md
+  - 中文首页: README.zh.md
+strict: true

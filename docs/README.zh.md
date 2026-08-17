@@ -40,7 +40,7 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 > 隔离边界内执行生成代码。机器生成的结论不会自动获得“已验证”状态，只有满足
 > 证据闭环和独立门禁后才能晋级。
 
-本文档覆盖稳定版 `0.1.2` 以及 `main` 上兼容的公开接口；安装前请先看
+本文档覆盖稳定版 `0.1.3` 以及 `main` 上兼容的公开接口；安装前请先看
 [安装与兼容性](#安装与兼容性)。
 
 ## 先选择你的使用路径
@@ -58,9 +58,16 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 反驳证据、独立拒绝和争议结论；不调用模型或网络。只需要 Python 3.10+ 和 Git。
 
 ```bash
-python -m pip install "xscientist==0.1.2"
+python -m pip install "xscientist==0.1.3"
 xscientist demo ./retrieval-study --lang zh --open
 xscientist status ./retrieval-study --lang zh
+```
+
+如果还想零成本验证完整的 Autopilot 形态（进度、预算、洞见和可恢复回执），运行：
+
+```bash
+xscientist demo ./autopilot-study --autopilot --lang zh
+xscientist benchmark first-run --max-seconds 30
 ```
 
 如果浏览器没有自动打开，请打开
@@ -101,7 +108,7 @@ Autopilot。
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.2"
+  "xscientist[research,openai]==0.1.3"
 ```
 
 可选 Provider extra 包括 `openai`、`anthropic`、`zhipu`、`bedrock`、
@@ -149,6 +156,21 @@ xscientist provider check --max-cost-usd 10
 
 如果设置阶段中止，按诊断修复后重新执行同一命令即可。研究问题与完成的工作都会
 保留，系统从有效 checkpoint 继续，而不是悄悄重跑。
+
+长任务可以放到后台，并在另一个终端中安全管理：
+
+```bash
+xscientist start ./ood-reflection \
+  --question "为什么该机制在分布外失效？" \
+  --allow-synthetic-data --max-cost-usd 10 --detach
+xscientist runs list --workspace ./ood-reflection
+xscientist runs watch RUN_ID --workspace ./ood-reflection
+xscientist runs logs RUN_ID --workspace ./ood-reflection --tail 100
+```
+
+`runs cancel` 会先请求优雅终止，`runs resume` 使用私有保存的原始命令继续；公开
+运行视图不会暴露研究问题或恢复参数。`xscientist upgrade check` 默认离线且只读，
+只有显式添加 `--online` 才会查询 PyPI。
 
 ### 全自动闭环会留下什么
 
@@ -421,7 +443,7 @@ flowchart TB
 
 | 渠道 | 安装命令 | 使用场景 |
 | --- | --- | --- |
-| 稳定版 `0.1.2` | `python -m pip install "xscientist==0.1.2"` | 需要已发布版本和稳定发布契约 |
+| 稳定版 `0.1.3` | `python -m pip install "xscientist==0.1.3"` | 需要已发布版本和稳定发布契约 |
 | 当前 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | 需要尚未发布的开发改动，并接受源码版本持续变化 |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | 修改源码和测试 |
 
@@ -539,7 +561,7 @@ print(result.returncode)
 
 ## 当前状态与优化方向
 
-项目目前处于 Alpha。0.1.2 已加入零 Provider 首次体验、统一状态视图、按任务缩减
+项目目前处于 Alpha。0.1.3 已加入零 Provider 首次体验、统一状态视图、按任务缩减
 的执行器依赖、稳定诊断修复项、显式价格预检，以及从构建 wheel 运行 demo 的发行
 门禁。下一步重点是继续降低容器/Provider 配置成本、增加高质量录屏与样例 ARA，
 并在干净机器上持续测量首次价值时间。详细策略见
@@ -549,10 +571,10 @@ print(result.returncode)
 
 欢迎提交 Issue、协议提案、平台适配器、可复现实例和聚焦的 Pull Request。
 
-- [贡献指南](../.github/CONTRIBUTING.md)
+- [贡献指南](https://github.com/smileformylove/XScientist/blob/main/.github/CONTRIBUTING.md)
 - [Issue 模板](../.github/ISSUE_TEMPLATE/)
-- [行为准则](../.github/CODE_OF_CONDUCT.md)
-- [安全报告](../.github/SECURITY.md)
+- [行为准则](https://github.com/smileformylove/XScientist/blob/main/.github/CODE_OF_CONDUCT.md)
+- [安全报告](https://github.com/smileformylove/XScientist/blob/main/.github/SECURITY.md)
 
 ```bash
 make syntax
@@ -569,9 +591,9 @@ make package-check
 
 - 系统论文：[XScientist: A Git-Like Research Protocol for Long-Running Autonomous Scientific Discovery](https://arxiv.org/abs/2607.12301)
 - 论文源码：[`paper/xscientist_arxiv/`](../paper/xscientist_arxiv/)
-- 系统报告示例：[`example/XScientist_Board.pdf`](../example/XScientist_Board.pdf)
-- 引力研究论文示例：[`example/icml_submitted_gravitation_paper.pdf`](../example/icml_submitted_gravitation_paper.pdf)
-- GitHub 引用元数据：[`CITATION.cff`](../CITATION.cff)
+- 系统报告示例：[`example/XScientist_Board.pdf`](https://github.com/smileformylove/XScientist/blob/main/example/XScientist_Board.pdf)
+- 引力研究论文示例：[`example/icml_submitted_gravitation_paper.pdf`](https://github.com/smileformylove/XScientist/blob/main/example/icml_submitted_gravitation_paper.pdf)
+- GitHub 引用元数据：[`CITATION.cff`](https://github.com/smileformylove/XScientist/blob/main/CITATION.cff)
 
 如果 XScientist 参与了研究结果，请同时记录软件 commit、配置、模型版本、数据身份
 以及 ARA/科研 Git 工件 ID。

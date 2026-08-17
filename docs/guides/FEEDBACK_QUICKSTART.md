@@ -478,7 +478,7 @@ trend = feedback_system.analyze_trends("my_custom_metric")
 
 - Read [LONG_RUNNING_GUIDE.md](../LONG_RUNNING_GUIDE.md) for operational details
 - See [ARCHITECTURE.md](../ARCHITECTURE.md) for system architecture
-- Check [test_enhanced_feedback_system.py](../../tests/test_enhanced_feedback_system.py) for more examples
+- Check [test_enhanced_feedback_system.py](https://github.com/smileformylove/XScientist/blob/main/tests/test_enhanced_feedback_system.py) for more examples
 
 ## Support
 

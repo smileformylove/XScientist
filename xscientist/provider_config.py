@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -92,6 +95,112 @@ ALLOWED_ENV_NAMES = {
 
 class ProviderConfigError(ValueError):
     """Raised when provider configuration is unsafe or malformed."""
+
+
+def normalize_provider_model(provider: str, model: str | None) -> str:
+    """Make a user-entered model ID unambiguous for the selected provider.
+
+    Provider prefixes remain part of the persisted contract, but people should
+    not need to know that internal routing rule during first-run setup.  Models
+    that already resolve correctly (for example ``gpt-4.1`` or
+    ``glm-4-flash``) are kept unchanged; ambiguous bare IDs receive the
+    selected provider prefix.
+    """
+
+    normalized = str(provider or "").strip().lower()
+    selected = str(model or "").strip()
+    if not selected or normalized not in PROVIDER_FIELDS:
+        return selected
+    # A slash is explicit routing metadata, not a friendly bare model name.
+    # Never rewrite it: a mismatched or malformed prefix must keep failing
+    # closed when provider configuration is loaded.
+    if "/" in selected:
+        return selected
+    try:
+        resolved_provider = resolve_model_provider(selected).provider
+        if resolved_provider == normalized:
+            return selected
+    except ValueError:
+        resolved_provider = None
+    # The registry deliberately routes unknown bare IDs through OpenAI as its
+    # historical fallback.  In that ambiguous case, the explicit provider
+    # selected by the user is the stronger signal.  Do not rewrite IDs such as
+    # ``glm-4-flash`` that already resolve to a different concrete provider.
+    can_disambiguate = resolved_provider == "openai" and normalized != "openai"
+    can_route_anthropic_cloud = resolved_provider == "anthropic" and normalized in {
+        "bedrock",
+        "vertex_ai",
+    }
+    if not (can_disambiguate or can_route_anthropic_cloud):
+        return selected
+    prefixed = f"{normalized}/{selected}"
+    try:
+        if resolve_model_provider(prefixed).provider == normalized:
+            return prefixed
+    except ValueError:
+        pass
+    return selected
+
+
+def discover_provider_models(
+    provider: str,
+    *,
+    timeout: float = 0.75,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return locally discoverable model IDs without contacting paid APIs."""
+
+    normalized = str(provider or "").strip().lower()
+    if normalized != "ollama":
+        return []
+    source = os.environ if environ is None else environ
+    base_url = str(
+        source.get("OLLAMA_BASE_URL")
+        or source.get("OLLAMA_HOST")
+        or "http://localhost:11434/v1"
+    ).strip()
+    if not base_url:
+        return []
+    if "://" not in base_url:
+        base_url = "http://" + base_url
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    request = urllib.request.Request(
+        base_url + "/api/tags",
+        headers={"Accept": "application/json", "User-Agent": "xscientist-local"},
+    )
+    parsed_url = urllib.parse.urlparse(base_url)
+    opener = (
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        if parsed_url.hostname in {"localhost", "127.0.0.1", "::1"}
+        else urllib.request.build_opener()
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+    rows = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    names = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        families = {
+            str(item).strip().lower()
+            for item in (details.get("families") or [])
+            if str(item).strip()
+        }
+        family = str(details.get("family") or "").strip().lower()
+        if "embed" in name.lower() or family == "bert" or "bert" in families:
+            continue
+        if name:
+            names.append(normalize_provider_model(normalized, name))
+    return list(dict.fromkeys(names))
 
 
 def workspace_config_path(root: str | Path) -> Path:
@@ -243,7 +352,9 @@ def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]
         raise ProviderConfigError(
             f"unknown provider {provider!r}; expected one of: {choices}"
         )
-    selected = str(model or DEFAULT_MODELS.get(normalized) or "").strip()
+    selected = normalize_provider_model(
+        normalized, model or DEFAULT_MODELS.get(normalized)
+    )
     if not selected:
         raise ProviderConfigError(
             f"--model is required for provider {normalized!r}; use a provider-prefixed "
@@ -253,7 +364,8 @@ def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]
     if spec.provider != normalized:
         raise ProviderConfigError(
             f"model {selected!r} resolves to provider {spec.provider!r}, not "
-            f"{normalized!r}"
+            f"{normalized!r}; use a provider-prefixed ID such as "
+            f"{normalized}/<model>"
         )
     return normalized, selected
 
@@ -535,6 +647,8 @@ def provider_statuses(
 __all__ = [
     "CONFIG_RELATIVE_PATH",
     "DEFAULT_MODELS",
+    "discover_provider_models",
+    "normalize_provider_model",
     "PROVIDER_FIELDS",
     "PROVIDER_NAMES",
     "ProviderConfigError",

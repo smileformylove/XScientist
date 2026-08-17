@@ -4,6 +4,7 @@ include run_stable_daemon.sh
 include start_research.sh
 include CHANGELOG.md
 include CITATION.cff
+include mkdocs.yml
 graft configs
 graft requirements
 graft docs

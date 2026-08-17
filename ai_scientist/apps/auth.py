@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import locale
+import sys
 from datetime import datetime, timezone
 
 from ai_scientist.utils.auth_session import (
@@ -35,54 +37,121 @@ def _format_time(raw: str) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _language(value: str) -> str:
+    if value in {"en", "zh"}:
+        return value
+    detected = (locale.getlocale()[0] or "en").lower()
+    return "zh" if detected.startswith("zh") else "en"
+
+
+def _reason(value: str, language: str) -> str:
+    if language == "zh":
+        return value
+    return {
+        "未检测到登录会话": "no login session was found",
+        "登录会话缺少用户名": "the login session has no username",
+        "登录会话缺少过期时间": "the login session has no expiration time",
+        "登录会话已过期": "the login session has expired",
+    }.get(value, value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="XScientist login session management")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
-    login_parser = subparsers.add_parser("login", help="登录并创建会话")
-    login_parser.add_argument("--user", required=True, help="用户名")
+    login_parser = subparsers.add_parser("login", help="create a local actor session")
+    login_parser.add_argument(
+        "--user", help="local research actor name (prompted in a terminal)"
+    )
     login_parser.add_argument(
         "--ttl-hours",
         type=int,
         default=None,
-        help="会话有效期（小时），默认读取 AI_SCIENTIST_AUTH_TTL_HOURS 或 72",
+        help="session lifetime in hours (default: 72)",
     )
 
-    subparsers.add_parser("status", help="查看当前登录状态")
-    subparsers.add_parser("logout", help="退出登录并删除会话")
+    status_parser = subparsers.add_parser(
+        "status", help="show the current local actor session"
+    )
+    logout_parser = subparsers.add_parser(
+        "logout", help="delete the current local actor session"
+    )
+    for command_parser in (login_parser, status_parser, logout_parser):
+        command_parser.add_argument(
+            "--lang", choices=["auto", "en", "zh"], default="auto"
+        )
 
     args = parser.parse_args()
+    language = _language(args.lang)
 
     if args.cmd == "login":
-        session = create_session(username=args.user, ttl_hours=args.ttl_hours)
-        print("✅ 登录成功")
-        print(f"   用户: {session.get('username')}")
-        print(f"   过期: {_format_time(str(session.get('expires_at') or ''))}")
-        print(f"   会话文件: {_auth_location()}")
+        username = str(args.user or "").strip()
+        if not username and sys.stdin.isatty():
+            prompt = (
+                "本地科研身份名称："
+                if language == "zh"
+                else "Local research actor name: "
+            )
+            username = input(prompt).strip()
+        if not username:
+            parser.error("--user is required outside an interactive terminal")
+        session = create_session(username=username, ttl_hours=args.ttl_hours)
+        if language == "zh":
+            print("✅ 登录成功")
+            print(f"   用户：{session.get('username')}")
+            print(f"   过期：{_format_time(str(session.get('expires_at') or ''))}")
+            print(f"   会话文件：{_auth_location()}")
+        else:
+            print("Local research actor session created.")
+            print(f"User: {session.get('username')}")
+            print(f"Expires: {_format_time(str(session.get('expires_at') or ''))}")
+            print(f"Session file: {_auth_location()}")
         return 0
 
     if args.cmd == "status":
         ok, reason, session = validate_session()
         if not ok:
-            print("❌ 未登录")
-            print(f"   原因: {reason}")
-            print(f"   会话文件: {_auth_location()}")
+            if language == "zh":
+                print("❌ 未登录")
+                print(f"   原因：{reason}")
+                print(f"   会话文件：{_auth_location()}")
+            else:
+                print("No active local research actor session.")
+                print(f"Reason: {_reason(reason, language)}")
+                print(f"Session file: {_auth_location()}")
             return 1
-        print("✅ 已登录")
-        print(f"   用户: {session_user()}")
-        print(f"   签发: {_format_time(str(session.get('issued_at') or ''))}")
-        print(f"   过期: {_format_time(str(session.get('expires_at') or ''))}")
-        print(f"   最近活动: {_format_time(str(session.get('last_seen_at') or ''))}")
-        print(f"   会话文件: {_auth_location()}")
+        if language == "zh":
+            print("✅ 已登录")
+            print(f"   用户：{session_user()}")
+            print(f"   签发：{_format_time(str(session.get('issued_at') or ''))}")
+            print(f"   过期：{_format_time(str(session.get('expires_at') or ''))}")
+            print(
+                f"   最近活动：{_format_time(str(session.get('last_seen_at') or ''))}"
+            )
+            print(f"   会话文件：{_auth_location()}")
+        else:
+            print("Local research actor session is active.")
+            print(f"User: {session_user()}")
+            print(f"Issued: {_format_time(str(session.get('issued_at') or ''))}")
+            print(f"Expires: {_format_time(str(session.get('expires_at') or ''))}")
+            print(
+                f"Last active: {_format_time(str(session.get('last_seen_at') or ''))}"
+            )
+            print(f"Session file: {_auth_location()}")
         return 0
 
     if args.cmd == "logout":
         removed = clear_session()
-        if removed:
+        if language == "zh" and removed:
             print("✅ 已退出登录")
-        else:
+        elif language == "zh":
             print("ℹ️ 当前没有可删除的登录会话")
-        print(f"   会话文件: {_auth_location()}")
+        elif removed:
+            print("Local research actor session deleted.")
+        else:
+            print("No local research actor session existed.")
+        label = "会话文件" if language == "zh" else "Session file"
+        print(f"{label}: {_auth_location()}")
         return 0
 
     parser.error("unknown command")

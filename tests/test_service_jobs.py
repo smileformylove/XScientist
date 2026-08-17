@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,63 @@ class ServiceJobTests(unittest.TestCase):
                 store.shutdown()
 
         self.assertEqual(observed_lock_states, [False, False, False])
+
+    def test_running_job_can_be_cancelled_and_resumed(self) -> None:
+        entered = threading.Event()
+
+        def run_project(request, **kwargs):
+            if request.resume:
+                return CommandResult(
+                    command=("python", "run.py", "--resume"),
+                    returncode=0,
+                    stdout="resumed",
+                    stderr="",
+                    started_at="start-2",
+                    finished_at="finish-2",
+                )
+            entered.set()
+            self.assertIn("cancel_check", kwargs)
+            self.assertTrue(entered.wait(timeout=1))
+            while not kwargs["cancel_check"]():
+                threading.Event().wait(0.01)
+            kwargs["output_callback"]("partial", "", False, False)
+            return CommandResult(
+                command=("python", "run.py"),
+                returncode=130,
+                stdout="partial",
+                stderr="RunCancelled",
+                started_at="start",
+                finished_at="finish",
+            )
+
+        client = mock.Mock()
+        client.run_project.side_effect = run_project
+        with tempfile.TemporaryDirectory() as td:
+            store = JobStore(
+                client,
+                max_workers=1,
+                max_output_chars=100,
+                state_dir=td,
+            )
+            try:
+                submitted = store.submit(
+                    ProjectRequest(project="demo", topic="topic.md")
+                )
+                self.assertTrue(entered.wait(timeout=2))
+                cancelling = store.cancel(submitted.id)
+                self.assertEqual(cancelling.status, "cancelling")
+                store.futures[submitted.id].result(timeout=5)
+                cancelled = store.get(submitted.id)
+                self.assertEqual(cancelled.status, "cancelled")
+                self.assertEqual(cancelled.stdout_tail, "partial")
+
+                resumed = store.resume(submitted.id)
+                self.assertEqual(resumed.resume_of, submitted.id)
+                self.assertTrue(resumed.request.resume)
+                store.futures[resumed.id].result(timeout=5)
+                self.assertEqual(store.get(resumed.id).status, "succeeded")
+            finally:
+                store.shutdown()
 
 
 if __name__ == "__main__":

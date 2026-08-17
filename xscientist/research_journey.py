@@ -51,8 +51,67 @@ def _step(
         "code": code,
         "title": _text(language, title_en, title_zh),
         "why": _text(language, why_en, why_zh),
-        "command": command,
+        "command": _localize_command(language, command),
     }
+
+
+def _localize_command(language: str, command: str) -> str:
+    if language != "zh":
+        return command
+    replacements = {
+        "YOUR HYPOTHESIS": "你的假设",
+        "WHAT RESULT WOULD DISPROVE IT": "什么结果会推翻它",
+        "WHAT TO TEST": "要检验什么",
+        "WHAT RESULT SEPARATES THE EXPLANATIONS": "什么结果能区分这些解释",
+        "DATASET": "数据集",
+        "METRIC": "指标",
+        "BASELINE": "基线",
+        "SPLIT_FILE": "划分文件",
+        "YOUR_NAME": "你的姓名",
+        "WHAT YOU RAN": "运行了什么",
+        "WHAT THE RESULT SHOWS": "结果说明了什么",
+        "BOUNDED CONCLUSION": "有边界的结论",
+        "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION": "该证据为何支持这一结论",
+        "REVIEW SUMMARY": "复核摘要",
+        "REVIEWER": "复核人",
+        "BOUNDED CLAIM": "有边界的主张",
+        "TESTED CONDITIONS": "已检验条件",
+        "TEST THE CONTESTED BOUNDARY": "检验存在争议的边界",
+        "WHAT RESULT WOULD RESOLVE THE CONFLICT": "什么结果能解决冲突",
+        "RESOLUTION EXPERIMENT": "争议解决实验",
+        "RESOLUTION METRIC": "解决指标",
+        "RESOLUTION RESULT": "争议解决结果",
+        "RESOLUTION CONCLUSION": "争议解决结论",
+        "WHY THE NEW EVIDENCE RESOLVES THE CONFLICT": "新证据为何能解决冲突",
+        "RESOLUTION REVIEW": "争议解决复核",
+        "NARROWED CLAIM": "缩小范围后的主张",
+        "RESOLVED CONDITIONS": "已解决的适用条件",
+        "REPRODUCER": "复现人",
+    }
+    rendered = command
+    for source, target in replacements.items():
+        rendered = rendered.replace(source, target)
+    return rendered
+
+
+def _created_at(item: dict[str, Any]) -> str:
+    return str(item.get("created_at") or "")
+
+
+def _latest(items: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    matches = [item for item in items if item.get("kind") == kind]
+    return max(matches, key=_created_at) if matches else None
+
+
+def _latest_after(
+    items: list[dict[str, Any]], kind: str, created_at: str
+) -> dict[str, Any] | None:
+    matches = [
+        item
+        for item in items
+        if item.get("kind") == kind and _created_at(item) > created_at
+    ]
+    return max(matches, key=_created_at) if matches else None
 
 
 def build_research_guide(
@@ -71,6 +130,20 @@ def build_research_guide(
         for item in objects
         for relation in item.get("relations") or []
     ]
+    latest_claim = _latest(objects, "claim")
+    contested_claim = (
+        latest_claim
+        if latest_claim is not None
+        and (
+            latest_claim.get("state") in {"contested", "rejected"}
+            or any(
+                relation.get("type") in {"refutes", "contradicts"}
+                and relation.get("target") == latest_claim.get("object_id")
+                for _source, relation in relations
+            )
+        )
+        else None
+    )
     next_steps: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
 
@@ -218,6 +291,118 @@ def build_research_guide(
                 ),
             )
         )
+    elif contested_claim is not None:
+        resolution_plan = _latest_after(
+            objects, "research_plan", _created_at(contested_claim)
+        )
+        resolution_attempt = (
+            _latest_after(objects, "experiment_attempt", _created_at(resolution_plan))
+            if resolution_plan is not None
+            else None
+        )
+        resolution_evidence = (
+            _latest_after(objects, "evidence", _created_at(resolution_attempt))
+            if resolution_attempt is not None
+            else None
+        )
+        resolution_inference = (
+            _latest_after(objects, "inference", _created_at(resolution_evidence))
+            if resolution_evidence is not None
+            else None
+        )
+        resolution_review = (
+            _latest_after(objects, "review", _created_at(resolution_inference))
+            if resolution_inference is not None
+            else None
+        )
+        if resolution_plan is None:
+            step = _step(
+                selected_language,
+                code="resolve_contested_claim",
+                title_en=(
+                    "Resolve or narrow the contested claim: plan a boundary test"
+                ),
+                title_zh="解决争议或缩小结论范围：规划一次边界检验",
+                why_en=(
+                    "A held or refuted claim needs a discriminating condition "
+                    "before it can be narrowed or replaced."
+                ),
+                why_zh="被暂缓或反驳的结论，需要先增加有区分度的条件检验。",
+                command=(
+                    "xscientist research plan @latest:hypothesis "
+                    '"TEST THE CONTESTED BOUNDARY" '
+                    '--test "WHAT RESULT WOULD RESOLVE THE CONFLICT"'
+                ),
+            )
+        elif resolution_attempt is None:
+            step = _step(
+                selected_language,
+                code="run_resolution_experiment",
+                title_en="Run the planned boundary experiment",
+                title_zh="运行已规划的边界实验",
+                why_en="The new plan advances only after its result is recorded.",
+                why_zh="只有记录新计划对应的实验结果，争议解决流程才会继续。",
+                command=(
+                    'xscientist research experiment "RESOLUTION EXPERIMENT" '
+                    "--status completed --plan @latest:research_plan "
+                    "--metric RESOLUTION_METRIC=0 --seed 1"
+                ),
+            )
+        elif resolution_evidence is None:
+            step = _step(
+                selected_language,
+                code="bind_resolution_evidence",
+                title_en="Bind the boundary result as evidence",
+                title_zh="把边界实验结果绑定为证据",
+                why_en="Record what the new attempt supports or refutes.",
+                why_zh="明确新实验支持或反驳了什么。",
+                command=(
+                    'xscientist research evidence "RESOLUTION RESULT" '
+                    "--attempt @latest:experiment_attempt --supports @latest:hypothesis"
+                ),
+            )
+        elif resolution_inference is None:
+            step = _step(
+                selected_language,
+                code="infer_resolution",
+                title_en="State the bounded resolution",
+                title_zh="写下有边界的争议解决结论",
+                why_en="Explain why the new evidence changes the claim boundary.",
+                why_zh="说明新证据为何改变了原结论的适用边界。",
+                command=(
+                    'xscientist research infer "RESOLUTION CONCLUSION" '
+                    "--premise @latest:evidence "
+                    '--warrant "WHY THE NEW EVIDENCE RESOLVES THE CONFLICT"'
+                ),
+            )
+        elif resolution_review is None:
+            step = _step(
+                selected_language,
+                code="review_resolution",
+                title_en="Independently review the resolution",
+                title_zh="独立复核争议解决结果",
+                why_en="The revised boundary still needs an independent gate.",
+                why_zh="修改后的结论边界仍需要独立门禁。",
+                command=(
+                    'xscientist research review "RESOLUTION REVIEW" '
+                    "--evaluates @latest:inference --verifier human:REVIEWER "
+                    "--decision hold"
+                ),
+            )
+        else:
+            step = _step(
+                selected_language,
+                code="replace_contested_claim",
+                title_en="Record the narrowed replacement claim",
+                title_zh="记录缩小范围后的替代主张",
+                why_en="Preserve the old contested claim and add the evidence-bounded replacement.",
+                why_zh="保留原争议主张，同时新增受证据约束的替代主张。",
+                command=(
+                    'xscientist research claim "NARROWED CLAIM" '
+                    '--evidence @latest:inference --scope "RESOLVED CONDITIONS"'
+                ),
+            )
+        next_steps.append(step)
     elif not counts["reproduction"]:
         next_steps.append(
             _step(

@@ -8,7 +8,7 @@ type: software
 authors:
   - family-names: Luo
     given-names: Jixiang
-version: 0.1.2
+version: 0.1.3
 license: Apache-2.0
 repository-code: https://github.com/smileformylove/XScientist
 url: https://github.com/smileformylove/XScientist

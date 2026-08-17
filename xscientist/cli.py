@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -101,17 +102,50 @@ def _build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("args", nargs=argparse.REMAINDER)
 
     serve_parser = subparsers.add_parser("serve", help="Start the HTTP API service.")
-    serve_parser.add_argument("--host", default="127.0.0.1")
-    serve_parser.add_argument("--port", type=int, default=8000)
-    serve_parser.add_argument("--work-dir", default=None)
-    serve_parser.add_argument("--output-root", default=None)
-    serve_parser.add_argument("--max-workers", type=int, default=2)
-    serve_parser.add_argument("--max-output-chars", type=int, default=200_000)
-    serve_parser.add_argument("--max-workspace-bytes", type=int, default=10 * 1024**3)
-    serve_parser.add_argument("--max-workspace-files", type=int, default=100_000)
-    serve_parser.add_argument("--state-dir", default=None)
-    serve_parser.add_argument("--reload", action="store_true")
-    serve_parser.add_argument("--allow-unauthenticated", action="store_true")
+    serve_parser.add_argument(
+        "--host", default="127.0.0.1", help="bind address (default: loopback only)"
+    )
+    serve_parser.add_argument("--port", type=int, default=8000, help="TCP port")
+    serve_parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="existing directory containing service-readable inputs",
+    )
+    serve_parser.add_argument(
+        "--output-root", default=None, help="directory for projects and API state"
+    )
+    serve_parser.add_argument(
+        "--max-workers", type=int, default=2, help="maximum concurrent jobs"
+    )
+    serve_parser.add_argument(
+        "--max-output-chars",
+        type=int,
+        default=200_000,
+        help="retained stdout/stderr characters per stream",
+    )
+    serve_parser.add_argument(
+        "--max-workspace-bytes",
+        type=int,
+        default=10 * 1024**3,
+        help="per-project filesystem byte limit",
+    )
+    serve_parser.add_argument(
+        "--max-workspace-files",
+        type=int,
+        default=100_000,
+        help="per-project filesystem file limit",
+    )
+    serve_parser.add_argument(
+        "--state-dir", default=None, help="persistent job metadata directory"
+    )
+    serve_parser.add_argument(
+        "--reload", action="store_true", help="development reload"
+    )
+    serve_parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help="explicitly allow an unauthenticated non-loopback binding",
+    )
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -122,6 +156,16 @@ def _build_parser() -> argparse.ArgumentParser:
     demo_parser.add_argument("directory", nargs="?", default="./xscientist-demo")
     demo_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
     demo_parser.add_argument("--open", action="store_true", dest="open_browser")
+    demo_parser.add_argument(
+        "--autopilot",
+        action="store_true",
+        help="also create zero-cost deterministic Autopilot runtime artifacts",
+    )
+    demo_parser.add_argument(
+        "--autopilot-profile",
+        choices=["balanced", "discovery", "publication"],
+        default="balanced",
+    )
     demo_parser.add_argument("--git-user-name")
     demo_parser.add_argument("--git-user-email")
     demo_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -132,6 +176,130 @@ def _build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("workspace", nargs="?", default=None)
     status_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
     status_parser.add_argument("--json", action="store_true", dest="as_json")
+    runs_parser = subparsers.add_parser(
+        "runs",
+        help="Start, inspect, watch, cancel, and resume detached research runs.",
+    )
+    runs_subparsers = runs_parser.add_subparsers(dest="runs_command", required=True)
+    runs_list = runs_subparsers.add_parser("list", help="List local detached runs.")
+    runs_list.add_argument("--workspace", default=".")
+    runs_list.add_argument("--json", action="store_true", dest="as_json")
+    for command, help_text in (
+        ("show", "Show one detached run."),
+        ("watch", "Follow one detached run until it finishes."),
+        ("logs", "Show bounded stdout/stderr tails for one run."),
+        ("cancel", "Request safe cancellation for one run."),
+        ("resume", "Resume a failed, cancelled, or interrupted run."),
+    ):
+        run_parser = runs_subparsers.add_parser(command, help=help_text)
+        run_parser.add_argument("run_id")
+        run_parser.add_argument(
+            "--workspace", default=".", help="workspace that owns the run"
+        )
+        run_parser.add_argument("--json", action="store_true", dest="as_json")
+        if command == "watch":
+            run_parser.add_argument("--interval", type=float, default=2.0)
+        if command == "logs":
+            run_parser.add_argument(
+                "--stream", choices=["stdout", "stderr", "both"], default="both"
+            )
+            run_parser.add_argument("--tail", type=int, default=200)
+        if command == "resume":
+            run_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="resume even when local prerequisite checks still fail",
+            )
+    executor_parser = subparsers.add_parser(
+        "executor",
+        help="Inspect, build, cache, or update the version-matched Docker executor.",
+    )
+    executor_subparsers = executor_parser.add_subparsers(
+        dest="executor_command", required=True
+    )
+    for command, help_text in (
+        ("check", "Inspect Docker and the exact configured image."),
+        ("build", "Build the configured executor image."),
+        ("prepare", "Reuse a valid cached image or build it."),
+        ("update", "Refresh the base image and rebuild the executor."),
+    ):
+        command_parser = executor_subparsers.add_parser(command, help=help_text)
+        command_parser.add_argument("--workspace", default=".")
+        command_parser.add_argument("--json", action="store_true", dest="as_json")
+    upgrade_parser = subparsers.add_parser(
+        "upgrade",
+        help="Check package and workspace compatibility without changing files.",
+    )
+    upgrade_subparsers = upgrade_parser.add_subparsers(
+        dest="upgrade_command", required=True
+    )
+    upgrade_check = upgrade_subparsers.add_parser(
+        "check", help="Check installed, workspace, and optional PyPI versions."
+    )
+    upgrade_check.add_argument("--workspace", default=".")
+    upgrade_check.add_argument(
+        "--online",
+        action="store_true",
+        help="explicitly query PyPI for the latest published version",
+    )
+    upgrade_check.add_argument("--timeout", type=float, default=3.0)
+    upgrade_check.add_argument("--json", action="store_true", dest="as_json")
+    completion_parser = subparsers.add_parser(
+        "completion",
+        help="Print a shell completion script; never edit shell configuration.",
+    )
+    completion_parser.add_argument("shell", choices=["bash", "zsh", "fish"])
+    conformance_parser = subparsers.add_parser(
+        "conformance",
+        help="Create or verify an offline protocol producer conformance kit.",
+    )
+    conformance_subparsers = conformance_parser.add_subparsers(
+        dest="conformance_command", required=True
+    )
+    conformance_init = conformance_subparsers.add_parser(
+        "init", help="Create versioned known-good and known-bad fixtures."
+    )
+    conformance_init.add_argument("directory")
+    conformance_init.add_argument("--json", action="store_true", dest="as_json")
+    conformance_check = conformance_subparsers.add_parser(
+        "check", help="Check a kit directory or one JSON protocol artifact."
+    )
+    conformance_check.add_argument("target")
+    conformance_check.add_argument("--schema", default="research_object")
+    conformance_check.add_argument("--json", action="store_true", dest="as_json")
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Run reproducible provider-free usability benchmarks.",
+    )
+    benchmark_subparsers = benchmark_parser.add_subparsers(
+        dest="benchmark_command", required=True
+    )
+    first_run = benchmark_subparsers.add_parser(
+        "first-run", help="Measure empty-directory to inspectable research status."
+    )
+    first_run.add_argument("--workspace", default=None)
+    first_run.add_argument(
+        "--profile",
+        choices=["balanced", "discovery", "publication"],
+        default="balanced",
+    )
+    first_run.add_argument("--max-seconds", type=float, default=None)
+    first_run.add_argument("--json", action="store_true", dest="as_json")
+    metrics_parser = subparsers.add_parser(
+        "metrics",
+        help="Control explicit opt-in, local-only, payload-free usage counters.",
+    )
+    metrics_subparsers = metrics_parser.add_subparsers(
+        dest="metrics_command", required=True
+    )
+    for command, help_text in (
+        ("status", "Show the local collection boundary and event count."),
+        ("enable", "Enable local-only usage counters."),
+        ("disable", "Disable future local usage counters."),
+        ("export", "Print every locally stored event for inspection."),
+    ):
+        command_parser = metrics_subparsers.add_parser(command, help=help_text)
+        command_parser.add_argument("--json", action="store_true", dest="as_json")
     init_parser = subparsers.add_parser(
         "init",
         help="Create a ready-to-configure research workspace.",
@@ -346,7 +514,9 @@ def _build_start_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("directory", help="workspace and Research VCS root")
     parser.add_argument(
-        "--question", required=True, help="one concrete research question"
+        "--question",
+        required=False,
+        help="one concrete research question; prompted interactively when omitted",
     )
     parser.add_argument(
         "--autopilot",
@@ -409,12 +579,196 @@ def _build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="run in the background and manage it with `xscientist runs`",
+    )
+    parser.add_argument(
         "--prepare-only",
         action="store_true",
         help="stop after workspace, login, provider, and deep runtime validation",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
+
+
+def _print_curated_help(*, include_advanced: bool = False) -> None:
+    print("usage: xscientist COMMAND [options]")
+    print()
+    print("Start here:")
+    print("  demo       Create a free, offline contested-evidence example")
+    print("  start      Prepare and run one guarded autonomous study")
+    print("  status     Show progress, budget, outputs, and the next action")
+    print("  runs       Watch, inspect, cancel, or resume detached runs")
+    print("  doctor     Diagnose setup and print copyable repairs")
+    print()
+    print("Configure:")
+    print("  setup      Create and diagnose a workspace")
+    print("  provider   Add, check, and switch model providers")
+    print("  capability Explain task-specific optional dependencies")
+    print("  executor   Check, cache, build, or update the isolated executor")
+    print("  upgrade    Check package and workspace compatibility (read-only)")
+    print("  completion Generate bash, zsh, or fish completion")
+    print()
+    print("Scientific history:")
+    print("  research   Plan, record, review, branch, diff, and reproduce")
+    if include_advanced:
+        print()
+        print("Advanced and compatibility commands:")
+        print("  project batch daemon manager ara feedback evolution evolution-gate")
+        print("  serve privacy conformance metrics auth git preflight validate")
+        print("  benchmark bfts zhipu init info")
+    else:
+        print()
+        print("Run `xscientist help --all` for advanced and compatibility commands.")
+    print("Run `xscientist COMMAND --help` for command-specific options.")
+
+
+def _selected_language(value: str) -> str:
+    if value in {"en", "zh"}:
+        return value
+    import locale
+
+    detected = (locale.getlocale()[0] or "en").lower()
+    return "zh" if detected.startswith("zh") else "en"
+
+
+def _command_with_workspace(
+    command: str,
+    workspace: str | Path | None,
+    *,
+    flag: str = "--workspace",
+) -> str:
+    """Render one command that remains copyable from the caller's directory."""
+
+    if workspace is None or flag in command:
+        return command
+    return f"{command} {flag} {shlex.quote(str(workspace))}"
+
+
+def _contextual_action(command: str, workspace: str | Path | None) -> str:
+    if workspace is None:
+        return command
+    quoted = shlex.quote(str(workspace))
+    if "--workspace ." in command:
+        return command.replace("--workspace .", f"--workspace {quoted}")
+    if command == "xscientist research init .":
+        return f"xscientist research init {quoted}"
+    if command.startswith("xscientist provider add "):
+        return _command_with_workspace(command, workspace)
+    if command.startswith("xscientist doctor "):
+        return _command_with_workspace(command, workspace)
+    if command.startswith("xscientist executor "):
+        return _command_with_workspace(command, workspace)
+    if command.startswith("xscientist preflight "):
+        return f"cd {quoted} && {command}"
+    return command
+
+
+def _prompt_provider_model(provider: str, *, default: str | None = None) -> str:
+    from .provider_config import discover_provider_models, normalize_provider_model
+
+    discovered = discover_provider_models(provider)
+    if discovered:
+        print(f"Detected {provider} models:")
+        for index, model in enumerate(discovered[:8], start=1):
+            print(f"  {index}. {model}")
+    suggested = default or (discovered[0] if discovered else None)
+    example = suggested or f"{provider}/<model>"
+    prompt = f"Model ID [{example}]: " if suggested else f"Model ID ({example}): "
+    entered = input(prompt).strip()
+    if not entered and not suggested:
+        raise ValueError(f"a model is required; use an ID such as {provider}/<model>")
+    return normalize_provider_model(provider, entered or suggested)
+
+
+def _interactive_start_inputs(
+    parsed: argparse.Namespace, *, new_workspace: bool
+) -> None:
+    """Fill only missing first-run choices without weakening automation."""
+
+    if parsed.non_interactive or not sys.stdin.isatty():
+        return
+    if not str(parsed.question or "").strip():
+        parsed.question = input("Research question: ").strip()
+    if new_workspace and not parsed.provider:
+        from .dependency_profiles import missing_provider_modules
+        from .provider_config import (
+            DEFAULT_MODELS,
+            PROVIDER_FIELDS,
+            PROVIDER_NAMES,
+            configured_field_value,
+        )
+
+        rows = []
+        for name in PROVIDER_NAMES:
+            credentials = all(
+                not field.required or bool(configured_field_value(field, {}))
+                for field in PROVIDER_FIELDS[name]
+            )
+            client = not missing_provider_modules(name)
+            rows.append((name, credentials, client))
+        print("Available model providers:")
+        for index, (name, credentials, client) in enumerate(rows, start=1):
+            state = (
+                "locally configured"
+                if credentials and client
+                else ("client installed" if client else "client not installed")
+            )
+            print(f"  {index}. {name:<14} {state}")
+        ready = next(
+            (index for index, row in enumerate(rows, start=1) if row[1] and row[2]),
+            1,
+        )
+        answer = input(f"Provider [{ready}]: ").strip()
+        if not answer:
+            selected_index = ready
+        elif answer.isdigit() and 1 <= int(answer) <= len(rows):
+            selected_index = int(answer)
+        else:
+            matches = [
+                index for index, row in enumerate(rows, start=1) if row[0] == answer
+            ]
+            if not matches:
+                raise ValueError("provider selection is not in the displayed list")
+            selected_index = matches[0]
+        parsed.provider = rows[selected_index - 1][0]
+        if not parsed.model:
+            parsed.model = _prompt_provider_model(
+                parsed.provider,
+                default=DEFAULT_MODELS.get(parsed.provider),
+            )
+    if (
+        not parsed.prepare_only
+        and not parsed.data_dir
+        and not parsed.allow_synthetic_data
+    ):
+        print("Evidence input:")
+        print("  1. Existing empirical data directory (read-only snapshot)")
+        print(
+            "  2. Synthetic/computational exploration (cannot become independent proof)"
+        )
+        print("  3. Prepare the workspace only")
+        choice = input("Choose [1]: ").strip() or "1"
+        if choice == "1":
+            parsed.data_dir = input("Data directory: ").strip()
+        elif choice == "2":
+            parsed.allow_synthetic_data = True
+        elif choice == "3":
+            parsed.prepare_only = True
+        else:
+            raise ValueError("evidence input choice must be 1, 2, or 3")
+    if (
+        not parsed.prepare_only
+        and parsed.max_cost_usd is None
+        and parsed.max_project_tokens is None
+    ):
+        answer = input(
+            "Optional maximum model cost in USD "
+            "[blank keeps the workspace token/time limits]: "
+        ).strip()
+        if answer:
+            parsed.max_cost_usd = float(answer)
 
 
 def _build_doctor_parser() -> argparse.ArgumentParser:
@@ -460,6 +814,17 @@ def _load_json_file(path: str) -> object:
         return json.load(handle)
 
 
+def _record_local_metric(event: str, *, ok: bool) -> None:
+    """Best-effort local counter; metrics must never affect command behavior."""
+
+    try:
+        from .usage_metrics import record_event
+
+        record_event(event, status="ok" if ok else "error")
+    except (OSError, ValueError):
+        pass
+
+
 def _installation_info() -> dict[str, object]:
     import importlib.util
     import os
@@ -487,6 +852,12 @@ def _installation_info() -> dict[str, object]:
     else:
         profile = "core"
     authenticated, auth_status, _session = validate_session()
+    auth_status = {
+        "未检测到登录会话": "no login session was found",
+        "登录会话缺少用户名": "login session has no username",
+        "登录会话缺少过期时间": "login session has no expiration time",
+        "登录会话已过期": "login session has expired",
+    }.get(auth_status, auth_status)
     active_provider = str(os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or "").strip()
     missing_provider_clients = (
         missing_provider_modules(active_provider) if active_provider else []
@@ -495,7 +866,7 @@ def _installation_info() -> dict[str, object]:
     recommended_install = (
         installation_command(active_provider)
         if active_provider
-        else 'python -m pip install "xscientist[research,<provider-extra>]"'
+        else 'python -m pip install "xscientist[research,openai]"'
     )
     return {
         "name": "xscientist",
@@ -506,6 +877,7 @@ def _installation_info() -> dict[str, object]:
         "missing_research_packages": missing_runtime,
         "missing_service_packages": missing_service,
         "provider_client_ready": provider_client_ready,
+        "provider_configured": bool(active_provider),
         "missing_provider_clients": missing_provider_clients,
         "recommended_install": recommended_install,
         "python_version": sys.version.split()[0],
@@ -518,7 +890,7 @@ def _installation_info() -> dict[str, object]:
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
-        "quickstart": "xscientist demo ./xscientist-demo --open",
+        "quickstart": "xscientist demo ./xscientist-demo --autopilot --open",
         "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
@@ -592,7 +964,7 @@ def _configure_provider(
             raise ProviderConfigError(
                 f"--model is required for provider {name!r} in non-interactive mode"
             )
-        model = input(f"Model ID for {name}: ").strip()
+        model = _prompt_provider_model(name)
     provider, model = validate_provider_model(name, model)
     env_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
     env_path = resolve_env_file(workspace, env_name)
@@ -817,7 +1189,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
-                state = "ready for a local run" if payload["ok"] else "not ready"
+                state = "local checks passed" if payload["ok"] else "not ready"
                 print(f"Provider {provider}: {state}")
                 print(f"Model: {model or '-'}")
                 print(
@@ -834,7 +1206,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     )
                 )
                 for remediation in remediations:
-                    print(f"Next: {remediation['command']}")
+                    print(
+                        "Next: "
+                        + _contextual_action(
+                            remediation["command"],
+                            parsed.workspace,
+                        )
+                    )
             return 0 if payload["ok"] else 1
 
         if parsed.provider_command == "remove":
@@ -990,7 +1368,6 @@ def _run_start(parsed: argparse.Namespace) -> int:
     import contextlib
     import io
     import os
-    import subprocess
 
     import yaml
 
@@ -1005,10 +1382,23 @@ def _run_start(parsed: argparse.Namespace) -> int:
         ProviderConfigError,
         load_provider_config,
         load_workspace_environment,
+        validate_provider_model,
     )
     from .research_git import ResearchGitError, repository_status
     from .research_vcs import ResearchRepository
 
+    workspace = Path(parsed.directory).expanduser().resolve()
+    try:
+        _interactive_start_inputs(
+            parsed,
+            new_workspace=not (workspace / ".xscientist" / "providers.json").is_file(),
+        )
+    except KeyboardInterrupt:
+        print("\nxscientist start: cancelled by user", file=sys.stderr)
+        return 130
+    except (EOFError, ValueError) as exc:
+        print(f"xscientist start: {exc}", file=sys.stderr)
+        return 2
     question = str(parsed.question or "").strip()
     if not question:
         print("xscientist start: --question cannot be empty", file=sys.stderr)
@@ -1060,7 +1450,6 @@ def _run_start(parsed: argparse.Namespace) -> int:
         )
         return 2
 
-    workspace = Path(parsed.directory).expanduser().resolve()
     phases: dict[str, object] = {}
     try:
         config_exists = (workspace / ".xscientist" / "providers.json").is_file()
@@ -1091,9 +1480,16 @@ def _run_start(parsed: argparse.Namespace) -> int:
         if not selected_model:
             if parsed.non_interactive or not sys.stdin.isatty():
                 raise ProviderConfigError(
-                    f"--model is required for provider {selected_provider!r}"
+                    f"--model is required for provider {selected_provider!r}; "
+                    f"use {selected_provider}/<model>"
                 )
-            selected_model = input(f"Model ID for {selected_provider}: ").strip()
+            selected_model = input(
+                f"Model ID for {selected_provider} "
+                f"(for example {selected_provider}/<model>): "
+            ).strip()
+        selected_provider, selected_model = validate_provider_model(
+            selected_provider, selected_model
+        )
         if not config_exists:
             create_workspace(
                 workspace,
@@ -1249,58 +1645,10 @@ def _run_start(parsed: argparse.Namespace) -> int:
             return 1
 
         if parsed.build_executor:
-            source_root = Path(__file__).resolve().parents[1]
-            local_source = (source_root / "pyproject.toml").is_file() and (
-                source_root / "xscientist"
-            ).is_dir()
-            build_context = source_root if local_source else workspace
-            command = [
-                "docker",
-                "build",
-                "-f",
-                str(workspace / "Dockerfile.executor"),
-                "-t",
-                f"xscientist-exec:{__version__}",
-            ]
-            if local_source:
-                revision = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=source_root,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                ).stdout.strip()
-                dirty = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=source_root,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                ).stdout.strip()
-                if revision and dirty:
-                    revision += "-dirty"
-                command.extend(
-                    [
-                        "--build-arg",
-                        "XSCIENTIST_INSTALL_MODE=local",
-                        "--build-arg",
-                        "XSCIENTIST_SOURCE_REVISION=" + (revision or "local-source"),
-                        "--build-arg",
-                        "XSCIENTIST_INSTALL_SOURCE=local-source",
-                    ]
-                )
-            command.append(str(build_context))
-            completed = subprocess.run(
-                command,
-                cwd=build_context,
-                text=True,
-                capture_output=bool(parsed.as_json),
-                check=False,
-            )
-            phases["executor_build"] = {
-                "ok": completed.returncode == 0,
-                "returncode": completed.returncode,
-            }
+            from .executor_manager import prepare_executor
+
+            executor_status = prepare_executor(workspace)
+            phases["executor_build"] = executor_status
 
         report = diagnose(
             workspace,
@@ -1347,7 +1695,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             print("XScientist is configured, but the automated run is not ready.")
             print("Resolve these items, then rerun the same command:")
             for action in report["next_actions"]:
-                print(f"  {action}")
+                print(f"  {_contextual_action(action, parsed.directory)}")
         return 1
 
     if parsed.prepare_only:
@@ -1430,6 +1778,15 @@ def _run_start(parsed: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if not raw_argv or raw_argv in (["--help"], ["-h"]):
+        _print_curated_help()
+        return 0
+    if raw_argv and raw_argv[0] == "help":
+        if raw_argv[1:] in ([], ["--all"]):
+            _print_curated_help(include_advanced=raw_argv[1:] == ["--all"])
+            return 0
+        print("xscientist help: use `xscientist COMMAND --help`", file=sys.stderr)
+        return 2
     if raw_argv and raw_argv[0] in _DELEGATES:
         return _DELEGATES[raw_argv[0]](raw_argv[1:])
 
@@ -1437,7 +1794,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         {"loaded": False}
         if raw_argv
         and raw_argv[0]
-        in {"provider", "init", "start", "setup", "doctor", "capability"}
+        in {
+            "provider",
+            "init",
+            "start",
+            "runs",
+            "executor",
+            "upgrade",
+            "completion",
+            "conformance",
+            "benchmark",
+            "metrics",
+            "setup",
+            "doctor",
+            "capability",
+        }
         else _bootstrap_workspace_environment()
     )
     if workspace_state.get("error") and (
@@ -1467,35 +1838,378 @@ def main(argv: Sequence[str] | None = None) -> int:
     if parsed.command == "serve":
         from .service import run_server
 
-        run_server(
-            host=parsed.host,
-            port=parsed.port,
-            work_dir=parsed.work_dir,
-            output_root=parsed.output_root,
-            max_workers=parsed.max_workers,
-            max_output_chars=parsed.max_output_chars,
-            max_workspace_bytes=parsed.max_workspace_bytes,
-            max_workspace_files=parsed.max_workspace_files,
-            state_dir=parsed.state_dir,
-            reload=parsed.reload,
-            allow_unauthenticated=parsed.allow_unauthenticated,
-        )
+        try:
+            run_server(
+                host=parsed.host,
+                port=parsed.port,
+                work_dir=parsed.work_dir,
+                output_root=parsed.output_root,
+                max_workers=parsed.max_workers,
+                max_output_chars=parsed.max_output_chars,
+                max_workspace_bytes=parsed.max_workspace_bytes,
+                max_workspace_files=parsed.max_workspace_files,
+                state_dir=parsed.state_dir,
+                reload=parsed.reload,
+                allow_unauthenticated=parsed.allow_unauthenticated,
+            )
+        except (ModuleNotFoundError, OSError, ValueError) as exc:
+            print(f"xscientist serve: {exc}", file=sys.stderr)
+            return 2
         return 0
     if parsed.command == "start":
-        return _run_start(parsed)
+        from .run_control import (
+            RunControlError,
+            begin_active_run,
+            finish_active_run,
+            launch_detached_run,
+        )
+
+        if parsed.detach:
+            try:
+                payload = launch_detached_run(parsed.directory, raw_argv)
+            except (OSError, RunControlError, ValueError) as exc:
+                print(f"xscientist start: {exc}", file=sys.stderr)
+                return 2
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Detached research run started: {payload['id']}")
+                print(f"Workspace: {payload['workspace']}")
+                print(
+                    "Watch: xscientist runs watch "
+                    f"{payload['id']} --workspace "
+                    f"{shlex.quote(str(parsed.directory))}"
+                )
+            return 0
+        active_run = begin_active_run()
+        returncode = 1
+        try:
+            returncode = _run_start(parsed)
+            return returncode
+        finally:
+            finish_active_run(active_run, returncode)
+    if parsed.command == "runs":
+        from .run_control import (
+            RunControlError,
+            cancel_run,
+            get_run,
+            list_runs,
+            read_run_logs,
+            resume_run,
+        )
+
+        try:
+            if parsed.runs_command == "list":
+                rows = list_runs(parsed.workspace)
+                payload = {"schema": "xscientist.local-runs.v1", "items": rows}
+            elif parsed.runs_command == "show":
+                payload = get_run(parsed.workspace, parsed.run_id)
+                if payload.get("status") in {
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    logs = read_run_logs(
+                        parsed.workspace,
+                        parsed.run_id,
+                        stream="both",
+                        tail=20,
+                    )
+                    lines = [
+                        line.strip()
+                        for line in [*logs["stderr"], *logs["stdout"]]
+                        if line.strip()
+                    ]
+                    payload["failure_summary"] = lines[-1] if lines else None
+            elif parsed.runs_command == "logs":
+                payload = read_run_logs(
+                    parsed.workspace,
+                    parsed.run_id,
+                    stream=parsed.stream,
+                    tail=parsed.tail,
+                )
+            elif parsed.runs_command == "cancel":
+                payload = cancel_run(parsed.workspace, parsed.run_id)
+            elif parsed.runs_command == "resume":
+                payload = resume_run(
+                    parsed.workspace,
+                    parsed.run_id,
+                    force=parsed.force,
+                )
+            else:
+                import time
+
+                previous = None
+                while True:
+                    payload = get_run(parsed.workspace, parsed.run_id)
+                    status = payload.get("status")
+                    if not parsed.as_json and status != previous:
+                        print(f"{payload['id']}  {status}")
+                    previous = status
+                    if status not in {"queued", "running", "cancelling"}:
+                        break
+                    time.sleep(parsed.interval)
+        except (OSError, RunControlError, ValueError) as exc:
+            if getattr(parsed, "as_json", False):
+                print(
+                    json.dumps(
+                        {
+                            "schema": "xscientist.run-error.v1",
+                            "ok": False,
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"xscientist runs: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif parsed.runs_command == "list":
+            if not payload["items"]:
+                print("No detached runs in this workspace.")
+            for item in payload["items"]:
+                duration = item.get("duration_seconds")
+                duration_text = (
+                    f"{duration:.1f}s" if isinstance(duration, float) else "-"
+                )
+                route = str(
+                    item.get("model") or item.get("provider") or "provider pending"
+                )
+                print(
+                    f"{item['id']}  {item['status']:<11} "
+                    f"{duration_text:>8}  {item.get('profile') or 'balanced':<11} "
+                    f"{route}  {item.get('created_at') or ''}"
+                )
+        elif parsed.runs_command == "logs":
+            if payload["stdout"]:
+                print("\n".join(payload["stdout"]))
+            if payload["stderr"]:
+                print("\n".join(payload["stderr"]), file=sys.stderr)
+        elif parsed.runs_command != "watch":
+            print(f"Run {payload['id']}: {payload['status']}")
+            if parsed.runs_command == "show":
+                print(f"Profile: {payload.get('profile') or 'balanced'}")
+                print(f"Task: {payload.get('task') or 'research'}")
+                print(
+                    "Provider/model: "
+                    f"{payload.get('provider') or 'pending'} / "
+                    f"{payload.get('model') or 'pending'}"
+                )
+                if payload.get("duration_seconds") is not None:
+                    print(f"Duration: {payload['duration_seconds']}s")
+                if payload.get("returncode") is not None:
+                    print(f"Exit code: {payload['returncode']}")
+                if payload.get("failure_summary"):
+                    print(f"Failure: {payload['failure_summary']}")
+                    print(
+                        "Logs: xscientist runs logs "
+                        f"{payload['id']} --workspace "
+                        f"{shlex.quote(str(parsed.workspace))}"
+                    )
+            if parsed.runs_command == "resume":
+                print(
+                    f"Watch: xscientist runs watch {payload['id']} "
+                    f"--workspace {shlex.quote(str(parsed.workspace))}"
+                )
+        return 0
+    if parsed.command == "executor":
+        from .executor_manager import (
+            ExecutorManagerError,
+            build_executor,
+            inspect_executor,
+            prepare_executor,
+        )
+
+        try:
+            if parsed.executor_command == "check":
+                payload = inspect_executor(parsed.workspace)
+            elif parsed.executor_command == "build":
+                payload = build_executor(parsed.workspace)
+            else:
+                payload = prepare_executor(
+                    parsed.workspace,
+                    update=parsed.executor_command == "update",
+                )
+        except (OSError, ExecutorManagerError, ValueError) as exc:
+            if parsed.as_json:
+                print(
+                    json.dumps(
+                        {
+                            "schema": "xscientist.executor-error.v1",
+                            "ok": False,
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"xscientist executor: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Executor image: {payload['image']}")
+            print(f"Docker daemon: {payload['daemon_ready']}")
+            print(f"Image available: {payload['image_available']}")
+            print(f"Version match: {payload['version_match']}")
+            if payload.get("install_source"):
+                print(f"Install source: {payload['install_source']}")
+            if payload.get("next_action"):
+                print(
+                    "Next: "
+                    + _contextual_action(
+                        "xscientist executor prepare --workspace .",
+                        parsed.workspace,
+                    )
+                )
+        return 0 if payload["ok"] else 1
+    if parsed.command == "upgrade":
+        from .upgrade_check import check_upgrade
+
+        if parsed.timeout <= 0:
+            print(
+                "xscientist upgrade: --timeout must be greater than zero",
+                file=sys.stderr,
+            )
+            return 2
+        payload = check_upgrade(
+            parsed.workspace,
+            online=parsed.online,
+            timeout=parsed.timeout,
+        )
+        _record_local_metric("upgrade_check", ok=bool(payload["ok"]))
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            package = payload["package"]
+            print(f"Installed version: {package['installed_version']}")
+            if package["online_checked"]:
+                print(f"Latest version: {package['latest_version'] or 'unavailable'}")
+            print(f"Workspace compatible: {payload['compatible']}")
+            for name, check in payload["checks"].items():
+                state = "compatible" if check["compatible"] else "incompatible"
+                suffix = " (not present)" if not check["present"] else ""
+                print(f"{name}: {state}{suffix}")
+            if package["online_error"]:
+                print(
+                    f"Online check failed: {package['online_error']}", file=sys.stderr
+                )
+            for remediation in payload["remediations"]:
+                print(f"Next: {remediation}")
+        return 0 if payload["ok"] else 1
+    if parsed.command == "completion":
+        from .completion import completion_script
+
+        print(completion_script(parsed.shell), end="")
+        return 0
+    if parsed.command == "conformance":
+        from .conformance import check_conformance, init_conformance_kit
+
+        try:
+            if parsed.conformance_command == "init":
+                payload = init_conformance_kit(parsed.directory)
+            else:
+                payload = check_conformance(parsed.target, schema_name=parsed.schema)
+                _record_local_metric("conformance_check", ok=bool(payload["ok"]))
+        except (OSError, ValueError) as exc:
+            print(f"xscientist conformance: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif parsed.conformance_command == "init":
+            print(f"Conformance kit ready: {payload['directory']}")
+            print(f"Cases: {payload['cases']}")
+            print(
+                "Run: xscientist conformance check "
+                + shlex.quote(str(parsed.directory))
+            )
+        else:
+            print(
+                f"Protocol conformance: {payload['passed']}/{payload['total']} passed"
+            )
+            for case in payload["cases"]:
+                state = "PASS" if case["passed"] else "FAIL"
+                expectation = "valid" if case["expected_valid"] else "invalid"
+                actual = "valid" if case["actual_valid"] else "invalid"
+                print(
+                    f"{state}  {case['file']} ({case['schema_name']}; "
+                    f"expected {expectation}, got {actual})"
+                )
+        return 0 if payload["ok"] else 1
+    if parsed.command == "benchmark":
+        from .benchmark import benchmark_first_run
+
+        try:
+            payload = benchmark_first_run(
+                parsed.workspace,
+                profile=parsed.profile,
+                max_seconds=parsed.max_seconds,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"xscientist benchmark: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"First-run benchmark: {payload['duration_seconds']}s")
+            print(
+                "Evidence DAG: "
+                f"{payload['research']['dag_nodes']} nodes / "
+                f"{payload['research']['dag_relations']} relations"
+            )
+            print(f"Scientific closure: {payload['research']['closure']}")
+            print("Cost: $0.00; network and model providers were not used.")
+            if parsed.max_seconds is not None:
+                print(f"Threshold passed: {payload['threshold_passed']}")
+        return 0 if payload["ok"] else 1
+    if parsed.command == "metrics":
+        from .usage_metrics import export_metrics, metrics_status, set_metrics_enabled
+
+        if parsed.metrics_command == "enable":
+            payload = set_metrics_enabled(True)
+        elif parsed.metrics_command == "disable":
+            payload = set_metrics_enabled(False)
+        elif parsed.metrics_command == "export":
+            payload = export_metrics()
+        else:
+            payload = metrics_status()
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Local usage metrics enabled: {payload['enabled']}")
+            print(f"Stored events: {payload['event_count']}")
+            print("Network transmission: disabled")
+            print("Excluded: " + ", ".join(payload["excluded_fields"]))
+            if parsed.metrics_command == "export":
+                for event in payload["events"]:
+                    print(json.dumps(event, sort_keys=True))
+        return 0
     if parsed.command == "demo":
         import webbrowser
 
-        from .demo import create_demo
+        from .demo import create_autopilot_demo, create_demo
         from .research_git import ResearchGitError
 
         try:
-            payload = create_demo(
-                parsed.directory,
-                language=parsed.lang,
-                git_user_name=parsed.git_user_name,
-                git_user_email=parsed.git_user_email,
-            )
+            if parsed.autopilot:
+                payload = create_autopilot_demo(
+                    parsed.directory,
+                    profile=parsed.autopilot_profile,
+                    language=parsed.lang,
+                    git_user_name=parsed.git_user_name,
+                    git_user_email=parsed.git_user_email,
+                )
+            else:
+                payload = create_demo(
+                    parsed.directory,
+                    language=parsed.lang,
+                    git_user_name=parsed.git_user_name,
+                    git_user_email=parsed.git_user_email,
+                )
         except (OSError, ResearchGitError, ValueError) as exc:
             if parsed.as_json:
                 print(
@@ -1520,14 +2234,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
-            print("XScientist provider-free demo is ready.")
-            print(
-                f"Evidence DAG: {payload['dag']['nodes']} nodes, "
-                f"{payload['dag']['relations']} relations"
-            )
-            print(f"Scientific closure: {payload['dag']['closure']}")
-            print(f"Open: {payload['dag']['html']}")
-            print("Cost: $0.00; no provider or network was used.")
+            language = _selected_language(parsed.lang)
+            if language == "zh":
+                closure = {
+                    "blocked": "未通过（存在待解决争议）",
+                    "complete": "已完成",
+                    "verified": "已验证",
+                }.get(payload["dag"]["closure"], payload["dag"]["closure"])
+                print("XScientist 零 Provider 演示已就绪。")
+                print(
+                    f"证据 DAG：{payload['dag']['nodes']} 个节点，"
+                    f"{payload['dag']['relations']} 条关系"
+                )
+                print(f"科学闭环：{closure}")
+                print(f"打开：{payload['dag']['html']}")
+                print("费用：$0.00；未使用 Provider 或网络。")
+            else:
+                print("XScientist provider-free demo is ready.")
+                print(
+                    f"Evidence DAG: {payload['dag']['nodes']} nodes, "
+                    f"{payload['dag']['relations']} relations"
+                )
+                print(f"Scientific closure: {payload['dag']['closure']}")
+                print(f"Open: {payload['dag']['html']}")
+                print("Cost: $0.00; no provider or network was used.")
+            if payload.get("autopilot_fixture"):
+                profile = payload["autopilot_fixture"]["profile"]
+                if language == "zh":
+                    print(f"Autopilot 样例：完整 / 确定性 / 可恢复（{profile}）")
+                else:
+                    print(
+                        "Autopilot fixture: complete / deterministic / resumable "
+                        f"({profile})"
+                    )
+        _record_local_metric("demo", ok=True)
         return 0
     if parsed.command == "status":
         from .workspace_status import build_workspace_status
@@ -1536,36 +2276,105 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
+            language = _selected_language(parsed.lang)
             research = payload["research"]
             run = payload["run"]
             result = payload["result"]
-            print(f"Workspace: {payload['workspace']}")
-            print(
-                "Research: "
-                + (
-                    f"{research['branch']} / staged={research['staged']}"
-                    if research["initialized"]
-                    else "not initialized"
+            if language == "zh":
+                print(f"工作区：{payload['workspace']}")
+                print(
+                    "科研历史："
+                    + (
+                        f"{research['branch']} / 暂存={research['staged']}"
+                        if research["initialized"]
+                        else "未初始化"
+                    )
                 )
-            )
+            else:
+                print(f"Workspace: {payload['workspace']}")
+                print(
+                    "Research: "
+                    + (
+                        f"{research['branch']} / staged={research['staged']}"
+                        if research["initialized"]
+                        else "not initialized"
+                    )
+                )
             if (research.get("guide") or {}).get("progress"):
                 progress = research["guide"]["progress"]
+                label = "科学进度" if language == "zh" else "Scientific progress"
                 print(
-                    f"Scientific progress: {progress['completed_stages']}/"
+                    f"{label}: {progress['completed_stages']}/"
                     f"{progress['total_stages']} ({progress['percent']}%)"
                 )
-            print(
-                f"Automated run: {run['current_stage'] or ('started' if run['started'] else 'not started')}"
-            )
+            if run["started"]:
+                run_state = run["current_stage"] or (
+                    "已启动" if language == "zh" else "started"
+                )
+            elif result["dag_html"]:
+                run_state = (
+                    "未启动（已有离线科研历史）"
+                    if language == "zh"
+                    else "not started (offline research history is available)"
+                )
+            else:
+                run_state = "未启动" if language == "zh" else "not started"
+            print(f"{'自动运行' if language == 'zh' else 'Automated run'}: {run_state}")
             if payload["budget"]["available"]:
-                print(f"Budget used: {payload['budget']['used']}")
+                used = payload["budget"]["used"] or {}
+                cost = float(used.get("cost_usd") or 0)
+                input_tokens = int(used.get("input_tokens") or 0)
+                output_tokens = int(used.get("output_tokens") or 0)
+                if language == "zh":
+                    print(
+                        f"预算已用：${cost:.2f}；输入 {input_tokens:,} tokens，"
+                        f"输出 {output_tokens:,} tokens"
+                    )
+                else:
+                    print(
+                        f"Budget used: ${cost:.2f}; {input_tokens:,} input tokens; "
+                        f"{output_tokens:,} output tokens"
+                    )
             if result["dag_html"]:
-                print(f"Evidence DAG: {result['dag_html']}")
+                label = "证据 DAG" if language == "zh" else "Evidence DAG"
+                print(f"{label}: {result['dag_html']}")
+            if result.get("epistemic_status"):
+                label = "结论状态" if language == "zh" else "Result status"
+                status_value = result["epistemic_status"]
+                if language == "zh":
+                    status_value = {
+                        "machine_synthesized_unverified": "机器综合，尚未独立验证",
+                        "verified": "已验证",
+                        "contested": "存在争议",
+                    }.get(status_value, status_value)
+                print(f"{label}: {status_value}")
+            for error in payload["errors"]:
+                target = f" ({error.get('file')})" if error.get("file") else ""
+                problem_label = "问题" if language == "zh" else "Problem"
+                print(
+                    f"{problem_label}: {error.get('code', 'status_error')}{target}: "
+                    f"{error.get('detail', '')}",
+                    file=sys.stderr,
+                )
+                if error.get("remediation"):
+                    repair_label = "修复" if language == "zh" else "Repair"
+                    print(f"{repair_label}: {error['remediation']}", file=sys.stderr)
             if payload["next_steps"]:
                 step = payload["next_steps"][0]
-                print(f"Next: {step.get('title') or step.get('code')}")
+                print(
+                    f"{'下一步' if language == 'zh' else 'Next'}: "
+                    f"{step.get('title') or step.get('code')}"
+                )
                 if step.get("command"):
-                    print(f"Run:  {step['command']}")
+                    command = step["command"]
+                    if " research discovery template " not in f" {command} ":
+                        command = _command_with_workspace(
+                            command,
+                            parsed.workspace,
+                            flag="--repo",
+                        )
+                    print(f"{'运行' if language == 'zh' else 'Run'}:  {command}")
+        _record_local_metric("status", ok=bool(payload["ok"]))
         return 0 if payload["ok"] else 1
     if parsed.command == "info":
         payload = _installation_info()
@@ -1602,7 +2411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("No secrets were written.")
             print("Next steps:")
             for index, step in enumerate(payload["next_steps"], start=1):
-                print(f"  {index}. {step}")
+                print(f"  {index}. {_contextual_action(step, parsed.directory)}")
         return 0
     if parsed.command == "setup":
         from .diagnostics import diagnose
@@ -1619,9 +2428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"--model is required for provider {parsed.provider!r} "
                         "in non-interactive mode"
                     )
-                selected_model = input(f"Model ID for {parsed.provider}: ").strip()
-                if not selected_model:
-                    raise ProviderConfigError("model ID is required")
+                selected_model = _prompt_provider_model(parsed.provider)
             onboarding = create_workspace(
                 parsed.directory,
                 profile=parsed.profile,
@@ -1749,7 +2556,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if payload["next_actions"]:
                 print("Next actions:")
                 for index, action in enumerate(payload["next_actions"], start=1):
-                    print(f"  {index}. {action}")
+                    print(
+                        f"  {index}. " f"{_contextual_action(action, parsed.directory)}"
+                    )
         return 0 if payload["ok"] else 1
     if parsed.command == "doctor":
         from .diagnostics import diagnose
@@ -1774,11 +2583,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"Deep runtime ready: {payload['runtime_ready']}")
             for name, check in payload["checks"].items():
-                print(f"{name:<14} {check['ok']}")
+                state = check.get("ok", check.get("ready"))
+                rendered = "not checked" if state is None else str(bool(state))
+                print(f"{name:<14} {rendered}")
             if payload["next_actions"]:
                 print("Next actions:")
                 for action in payload["next_actions"]:
-                    print(f"  {action}")
+                    print(f"  {_contextual_action(action, parsed.workspace)}")
+        _record_local_metric("doctor", ok=bool(payload["ok"]))
         return 0 if payload["ok"] else 1
     if parsed.command == "capability":
         from .dependency_profiles import (

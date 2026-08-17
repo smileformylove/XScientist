@@ -289,13 +289,16 @@ not contact a remote. Use `xscientist git doctor` for the backend-only view.
 ## 4. Create a local login
 
 ```bash
-xscientist auth login --user <your-name>
+xscientist auth login
 ```
+
+In a terminal this prompts for the local actor name stored in accountable
+Research VCS history. Automation can pass `--user NAME` explicitly.
 
 ## 5. Build the isolated experiment image
 
 ```bash
-docker build -f Dockerfile.executor -t {image} .
+xscientist executor prepare --workspace .
 ```
 
 The generated BFTS config fails closed if this image is unavailable. It does
@@ -485,10 +488,10 @@ def create_workspace(
             ),
             "xscientist git doctor",
             f"xscientist provider add {normalized_provider}",
-            "xscientist auth login --user <your-name>",
-            f"docker build -f Dockerfile.executor -t xscientist-exec:{__version__} .",
-            "xscientist preflight --strict --bfts-config bfts_config.yaml",
-            "xscientist start . --question <question> --allow-synthetic-data",
+            "xscientist auth login",
+            "xscientist executor prepare --workspace .",
+            "xscientist doctor --workspace . --task research --deep",
+            'xscientist start . --question "YOUR QUESTION" --allow-synthetic-data',
         ],
     }
 

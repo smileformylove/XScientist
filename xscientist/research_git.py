@@ -21,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -731,7 +732,9 @@ def _config_text(
 ) -> str:
     patterns = "\n".join(f"    - {json.dumps(item)}" for item in DEFAULT_TRACK_PATTERNS)
     denied = "\n".join(f"    - {json.dumps(item)}" for item in DEFAULT_DENY_PATTERNS)
+    repository_id = f"ws-{uuid.uuid4().hex[:16]}"
     return f"""schema_version: {REPOSITORY_SCHEMA}
+repository_id: {repository_id}
 name: {json.dumps(name, ensure_ascii=False)}
 question: question.md
 actor: {json.dumps(actor, ensure_ascii=False)}

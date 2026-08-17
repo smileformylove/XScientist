@@ -175,6 +175,10 @@ dev = [
   "pytest>=8.0",
   "twine>=6.0",
 ]
+docs = [
+  "mkdocs>=1.6",
+  "mkdocs-material>=9.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/smileformylove/XScientist"

@@ -19,6 +19,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
             "LICENSE",
             "MANIFEST.in",
             "Makefile",
+            "mkdocs.yml",
             "README.md",
             "pyproject.toml",
             "requirements.txt",
@@ -47,12 +48,14 @@ class OpenSourceHygieneTests(unittest.TestCase):
             path.name
             for pattern in ("*.yaml", "*.yml")
             for path in repo_root.glob(pattern)
+            if path.name != "mkdocs.yml"
         )
         self.assertEqual(
             root_configs,
             [],
             f"runtime YAML configs should live under configs/: {root_configs}",
         )
+        self.assertTrue((repo_root / "mkdocs.yml").is_file())
 
     def test_environment_template_lives_under_configs(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -152,10 +155,10 @@ class OpenSourceHygieneTests(unittest.TestCase):
             self.assertIn("PyPI", text)
         english = self.readme_path.read_text(encoding="utf-8")
         chinese = self.chinese_readme_path.read_text(encoding="utf-8")
-        self.assertIn("xscientist==0.1.2", english)
-        self.assertIn("stable `0.1.2`", english)
-        self.assertIn("xscientist==0.1.2", chinese)
-        self.assertIn("稳定版 `0.1.2`", chinese)
+        self.assertIn("xscientist==0.1.3", english)
+        self.assertIn("stable `0.1.3`", english)
+        self.assertIn("xscientist==0.1.3", chinese)
+        self.assertIn("稳定版 `0.1.3`", chinese)
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (

@@ -43,7 +43,7 @@ commit, challenge it on a branch, or continue from an exact experiment node.
 > isolation boundary. Machine-generated claims remain unverified until the
 > required evidence and independent gates exist.
 
-This README documents stable `0.1.2` and the compatible surface on `main`; see
+This README documents stable `0.1.3` and the compatible surface on `main`; see
 [Install and compatibility](#install-and-compatibility) before choosing a
 release channel.
 
@@ -59,102 +59,117 @@ release channel.
 
 ## Two-minute local demo
 
-This path creates a complete Research Git repository and an offline DAG
-browser. It records a failed attempt, supporting and refuting evidence, an
-independent rejection, and a contested claim without calling a model or the
-network.
+Start here even if you eventually plan to use a paid model. This proves that
+the package, Git-backed research history, evidence graph, status view, and
+offline browser work before credentials or Docker enter the picture.
 
 Requirements: Python 3.10+ and Git.
 
 ```bash
-python -m pip install "xscientist==0.1.2"
-xscientist demo ./retrieval-study --open
-xscientist status ./retrieval-study
+python -m pip install "xscientist==0.1.3"
+xscientist demo ./first-study --autopilot --open
+xscientist status ./first-study
 ```
 
-If the browser does not open automatically, open
-`retrieval-study/research-dag/research-dag.html`. The demo costs `$0.00`, is
-deterministic, and deliberately ends with scientific closure blocked: the
-held-out evidence refutes the broad transfer claim. `status` then shows the
-current branch, scientific progress, run/budget state, DAG, and next action in
-one read-only view.
+Expected result:
 
-Continue interactively:
+- a complete offline study in about a few seconds;
+- an evidence DAG with supporting and refuting results;
+- `$0.00` cost, with no model or network access;
+- a concrete next command that is safe to copy from your current directory.
+
+The final state is deliberately `blocked`, not failed. Held-out evidence
+refutes an overly broad claim, so XScientist preserves the conflict and asks
+for a boundary experiment instead of manufacturing a positive conclusion. If
+the browser does not open, use the path printed after `Open:`.
+
+You can also run the repeatable first-run benchmark:
 
 ```bash
-cd retrieval-study
-xscientist research guide
-
-# Exploratory path: compare explanations before locking a study.
-xscientist research plan @latest:hypothesis \
-  "Compare retrieval against a no-retrieval baseline" \
-  --test "A held-out benchmark separates the explanations"
-
-# Confirmatory path: lock the design before observing the result.
-xscientist research preregister @latest:hypothesis \
-  --dataset DATASET \
-  --metric factual_accuracy \
-  --baseline no_retrieval \
-  --split-file SPLIT_FILE \
-  --registered-by human:YOUR_NAME
+xscientist benchmark first-run --max-seconds 30
 ```
-
-Selectors such as `@latest:hypothesis` remove most ID copying. The CLI keeps
-the full immutable IDs in the repository for reproducibility.
 
 ## Run an autonomous study
 
-`xscientist start` is the guarded one-command entry point. It creates or reuses
-a workspace, configures one provider, establishes a local research identity,
-initializes Research Git, validates the isolated executor, and starts Autopilot
-from one question.
+`xscientist start` is the main user entry point. It creates or reuses a
+workspace, configures one provider, asks for a local research actor name,
+initializes Research Git, checks the isolated executor, and starts from one
+question.
 
-### 1. Install one provider profile
+Before continuing, choose one provider route.
+
+### Route A: local Ollama
+
+Use this route to avoid model API charges. XScientist detects models already
+installed in a running Ollama service and presents them in the interactive
+setup.
 
 ```bash
-python -m pip install \
-  "xscientist[research,openai]==0.1.2"
+python -m pip install "xscientist[research,openai-compatible]==0.1.3"
+xscientist start ./local-study
 ```
 
-Provider extras are modular: `openai`, `anthropic`, `zhipu`, `bedrock`,
-`vertex`, and `openai-compatible`. The last profile covers DeepSeek, Gemini,
-OpenRouter, Hugging Face inference, Ollama, and generic compatible endpoints.
-The default `research` task does not install ML or PDF-layout stacks. Select
-`--task ml-study` or `--task paper` only when the study needs those tools.
+The terminal asks for the question, provider, detected model, evidence mode,
+local actor name, and optional budget. Bare Ollama names such as
+`qwen2.5:7b` are accepted and normalized automatically.
 
-### 2. Start from a question
+### Route B: hosted model provider
 
-The example below is an explicitly exploratory computational study. The CLI
-prompts for a missing credential using hidden input; existing environment
-variables take precedence.
+Install the research runtime plus exactly one provider client:
+
+```bash
+python -m pip install "xscientist[research,openai]==0.1.3"
+export OPENAI_API_KEY="..."
+xscientist start ./hosted-study
+```
+
+Replace `openai` with `anthropic`, `zhipu`, `bedrock`, `vertex`, or
+`openai-compatible`. The last profile covers DeepSeek, Gemini, OpenRouter,
+Hugging Face inference, Ollama, and generic OpenAI-compatible endpoints.
+
+For an explicit, automation-friendly start:
 
 ```bash
 xscientist start ./ood-reflection \
   --question "Why does retrieval-guided reflection fail out of distribution?" \
   --provider openai \
   --model openai/gpt-4.1 \
+  --user YOUR_NAME \
   --autopilot discovery \
   --allow-synthetic-data \
   --max-cost-usd 10 \
-  --build-executor
+  --non-interactive
 ```
 
-For empirical work, replace `--allow-synthetic-data` with `--data-dir ./data`.
-XScientist hashes every input before model calls and mounts the snapshot
-read-only. Use `--max-project-tokens`, `--max-project-hours`, and
-`--max-cost-usd` as hard project limits; unknown model pricing fails closed
-when a cost limit is active. For an unbundled model, pass
-`--price-input-per-million` and `--price-output-per-million`, or configure
-`llm_budget.prices_per_million` in the workspace.
+Use `--data-dir ./data` instead of `--allow-synthetic-data` for empirical
+work. Input data is content-hashed before model calls and mounted read-only.
+Unknown model pricing fails closed when `--max-cost-usd` is active; unbundled
+models can supply `--price-input-per-million` and
+`--price-output-per-million` explicitly.
 
-Before a paid run, inspect local readiness without making an API request:
+### Required isolation
+
+Model-generated experiment code is never silently executed in the host Python
+process. A model-backed experiment needs Docker and a version-matched executor:
 
 ```bash
-xscientist provider check --max-cost-usd 10
+xscientist executor prepare --workspace ./ood-reflection
 ```
 
-The result explicitly distinguishes credential presence from live API
-validation and reports whether cost enforcement has a known model price.
+If Docker is unavailable, the command stops with a direct diagnostic. The
+provider-free demo and read-only Research Git operations remain usable without
+Docker.
+
+### Check readiness before spending money
+
+```bash
+xscientist provider check --workspace ./ood-reflection --max-cost-usd 10
+xscientist doctor --workspace ./ood-reflection --deep
+```
+
+`provider check` validates local credential presence, client availability, and
+cost enforcement; it does not make a paid or live provider request. Doctor
+prints ordered, copyable repairs using the same public commands shown here.
 
 Autopilot profiles make the main trade-off explicit:
 
@@ -164,9 +179,66 @@ Autopilot profiles make the main trade-off explicit:
 | `discovery` | Mechanism finding | More rival hypotheses, branch diversity, and refutation pressure |
 | `publication` | Candidate manuscript | Multi-role review board and stricter submission gates |
 
-If setup stops, run the same command again after following its diagnostic. The
-question is pinned to the workspace and completed work is resumed instead of
-silently restarted.
+### Detach and control long runs
+
+```bash
+xscientist start ./ood-reflection \
+  --question "Why does the mechanism fail out of distribution?" \
+  --allow-synthetic-data --max-cost-usd 10 --detach
+
+xscientist runs list --workspace ./ood-reflection
+xscientist runs show RUN_ID --workspace ./ood-reflection
+xscientist runs watch RUN_ID --workspace ./ood-reflection
+xscientist runs logs RUN_ID --workspace ./ood-reflection --tail 100
+xscientist runs cancel RUN_ID --workspace ./ood-reflection
+xscientist runs resume RUN_ID --workspace ./ood-reflection
+```
+
+Run views show state, profile, provider/model, duration, exit code, and a
+bounded failure summary. Questions and exact resume arguments remain private.
+Resume rechecks local prerequisites before relaunching; `--force` is available
+for an intentional bypass.
+
+### Recover from a stopped setup or run
+
+```bash
+xscientist status ./ood-reflection
+xscientist doctor --workspace ./ood-reflection --deep
+xscientist runs logs RUN_ID --workspace ./ood-reflection --tail 100
+```
+
+Fix the first reported blocker and rerun the original command. Workspaces pin
+the research question and preserve completed checkpoints, so recovery does not
+silently restart valid work. A misspelled or missing workspace path is an
+error, rather than an empty successful status.
+
+### Shell completion and compatibility checks
+
+```bash
+# Current zsh session; add this line to .zshrc if desired.
+source <(xscientist completion zsh)
+
+xscientist upgrade check --workspace ./ood-reflection
+xscientist upgrade check --workspace ./ood-reflection --online
+```
+
+Completion includes practical subcommands and options but never edits shell
+configuration. Upgrade checks are read-only and offline unless `--online` is
+explicitly present.
+
+### Continue the offline demo by hand
+
+```bash
+xscientist research guide --repo ./first-study
+xscientist research plan @latest:hypothesis \
+  "Compare retrieval against a no-retrieval baseline" \
+  --test "A held-out benchmark separates the explanations" \
+  --repo ./first-study
+```
+
+After recording the plan, `status` advances to the boundary experiment instead
+of repeating the same instruction. Selectors such as `@latest:hypothesis`
+avoid manual ID copying while immutable full IDs remain in the repository.
 
 ### What the autonomous loop produces
 
@@ -484,7 +556,7 @@ The public surface lives in `xscientist/`; workflow implementation lives in
 
 | Channel | Install | Use when |
 | --- | --- | --- |
-| Stable `0.1.2` | `python -m pip install "xscientist==0.1.2"` | You need the published package and its release contract |
+| Stable `0.1.3` | `python -m pip install "xscientist==0.1.3"` | You need the published package and its release contract |
 | Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You need unreleased development work and accept a moving source revision |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | You are changing the repository |
 
@@ -615,7 +687,7 @@ See [SDK and API](docs/guides/SDK_AND_API.md),
 
 The repository is in alpha. The strongest surfaces are immutable scientific
 history, provenance, safety defaults, protocol schemas, and offline handoff.
-Version 0.1.2 adds a provider-free first success, a unified status view,
+Version 0.1.3 adds a provider-free first success, a unified status view,
 task-sized executor dependencies, stable diagnostic remediation, explicit
 price preflight, and a built-wheel demo smoke. The remaining adoption work is
 reducing container/provider setup further, publishing sample ARAs, adding a

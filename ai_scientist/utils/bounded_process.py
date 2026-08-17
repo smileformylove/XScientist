@@ -33,6 +33,24 @@ class ProcessResourceLimitExceeded(RuntimeError):
         self.stderr = stderr
 
 
+class ProcessCancelled(RuntimeError):
+    """Raised after a caller-requested subprocess cancellation."""
+
+    def __init__(
+        self,
+        *,
+        stdout: str,
+        stderr: str,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    ) -> None:
+        super().__init__("process cancelled")
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
+
+
 class BoundedTextBuffer:
     """Thread-safe tail buffer whose retained character count is bounded."""
 
@@ -145,6 +163,18 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> None:
             pass
 
 
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:  # pragma: no cover - exercised by the Windows CI smoke lane
+            process.terminate()
+    except (OSError, ProcessLookupError):
+        return
+
+
 def run_process_bounded(
     command: Sequence[str],
     *,
@@ -153,6 +183,8 @@ def run_process_bounded(
     timeout: float | None = None,
     max_output_chars: int = 200_000,
     limit_check: Callable[[], str | None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    output_callback: Callable[[str, str, bool, bool], None] | None = None,
     poll_interval: float = 0.1,
 ) -> BoundedProcessResult:
     """Run a subprocess while continuously draining output into bounded tails."""
@@ -191,14 +223,24 @@ def run_process_bounded(
 
     started = time.monotonic()
     timed_out = False
+    cancelled = False
     limit_reason: str | None = None
     next_limit_check = started
+    next_output_callback = started
     try:
         while process.poll() is None:
             now = time.monotonic()
             if timeout is not None and now - started >= timeout:
                 timed_out = True
                 _kill_process_tree(process)
+                break
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                _terminate_process_tree(process)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _kill_process_tree(process)
                 break
             if limit_check is not None and now >= next_limit_check:
                 try:
@@ -209,6 +251,21 @@ def run_process_bounded(
                     _kill_process_tree(process)
                     break
                 next_limit_check = now + max(0.1, poll_interval)
+            if output_callback is not None and now >= next_output_callback:
+                stdout_now, stdout_truncated_now = stdout_buffer.snapshot()
+                stderr_now, stderr_truncated_now = stderr_buffer.snapshot()
+                try:
+                    output_callback(
+                        stdout_now,
+                        stderr_now,
+                        stdout_truncated_now,
+                        stderr_truncated_now,
+                    )
+                except Exception:
+                    # Output persistence is observational and must not orphan
+                    # or terminate the controlled subprocess.
+                    pass
+                next_output_callback = now + 0.5
             time.sleep(min(max(0.01, poll_interval), 0.25))
         process.wait()
         if limit_reason is None and limit_check is not None:
@@ -222,6 +279,11 @@ def run_process_bounded(
 
     stdout, stdout_truncated = stdout_buffer.snapshot()
     stderr, stderr_truncated = stderr_buffer.snapshot()
+    if output_callback is not None:
+        try:
+            output_callback(stdout, stderr, stdout_truncated, stderr_truncated)
+        except Exception:
+            pass
     if timed_out:
         raise subprocess.TimeoutExpired(
             argv,
@@ -234,6 +296,13 @@ def run_process_bounded(
             limit_reason,
             stdout=stdout,
             stderr=stderr,
+        )
+    if cancelled:
+        raise ProcessCancelled(
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
         )
     return BoundedProcessResult(
         returncode=process.returncode,

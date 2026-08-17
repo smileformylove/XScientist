@@ -249,6 +249,9 @@ Endpoints:
 - `POST /v1/projects`
 - `GET /v1/jobs`
 - `GET /v1/jobs/{job_id}`
+- `GET /v1/jobs/{job_id}/logs`
+- `POST /v1/jobs/{job_id}/cancel`
+- `POST /v1/jobs/{job_id}/resume`
 - `GET /v1/papers`
 - `GET /v1/papers/{folder}`
 - `GET /v1/shortlist`
@@ -319,6 +322,9 @@ Job metadata is atomically persisted under
 `<output-root>/.xscientist/api/jobs` (or `--state-dir`). Completed jobs survive
 service restarts; queued/running jobs recovered after a restart are marked
 `interrupted` because the original child process cannot be safely reattached.
+The logs endpoint returns bounded live tails while a job is running. Cancellation
+requests graceful process-group termination before escalation, and resume creates
+a new job linked through `resume_of` rather than rewriting the old audit record.
 
 ## Packaged resources
 

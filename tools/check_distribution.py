@@ -67,6 +67,13 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/git_support.py",
             "xscientist/research_commands.py",
             "xscientist/demo.py",
+            "xscientist/benchmark.py",
+            "xscientist/completion.py",
+            "xscientist/conformance.py",
+            "xscientist/executor_manager.py",
+            "xscientist/run_control.py",
+            "xscientist/upgrade_check.py",
+            "xscientist/usage_metrics.py",
             "xscientist/workspace_status.py",
             "ai_scientist/resources/configs/bfts_default.yaml",
             "ai_scientist/protocol/schemas/research_closure.schema.json",
@@ -98,9 +105,12 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "LICENSE",
             "README.md",
             "pyproject.toml",
+            "mkdocs.yml",
             "tools/check_distribution.py",
+            "tools/benchmark_first_run.py",
             "tools/engineering_checks.py",
             "docs/ENGINEERING.md",
+            "docs/GETTING_STARTED.md",
         )
     }
     missing = sorted(required_sdist - sdist_names)
@@ -169,6 +179,7 @@ demo_output = io.StringIO()
 with contextlib.redirect_stdout(demo_output):
     demo_exit = cli_main([
         "demo", str(demo_root),
+        "--autopilot",
         "--git-user-name", "XScientist CI",
         "--git-user-email", "ci@example.invalid",
         "--json",
@@ -177,16 +188,54 @@ demo = json.loads(demo_output.getvalue())
 assert demo_exit == 0
 assert demo["provider_used"] is False and demo["network_used"] is False
 assert demo["cost_usd"] == 0.0 and demo["dag"]["integrity_ok"] is True
+assert demo["autopilot_fixture"]["resumable"] is True
 status_output = io.StringIO()
 with contextlib.redirect_stdout(status_output):
     status_exit = cli_main(["status", str(demo_root), "--json"])
 status = json.loads(status_output.getvalue())
 assert status_exit == 0 and status["research"]["initialized"] is True
+assert status["run"]["started"] is True
+assert status["run"]["current_stage"] == "complete"
+assert status["budget"]["used"]["cost_usd"] == 0.0
+assert status["result"]["epistemic_status"] == "machine_synthesized_unverified"
+human_status_output = io.StringIO()
+with contextlib.redirect_stdout(human_status_output):
+    human_status_exit = cli_main(["status", str(demo_root), "--lang", "en"])
+assert human_status_exit == 0
+assert "Scientific progress:" in human_status_output.getvalue()
+assert "Resolve or narrow the contested claim" in human_status_output.getvalue()
+completion_output = io.StringIO()
+with contextlib.redirect_stdout(completion_output):
+    assert cli_main(["completion", "bash"]) == 0
+assert "complete -F" in completion_output.getvalue()
+upgrade_output = io.StringIO()
+with contextlib.redirect_stdout(upgrade_output):
+    assert cli_main(["upgrade", "check", "--workspace", str(demo_root), "--json"]) == 0
+upgrade = json.loads(upgrade_output.getvalue())
+assert upgrade["compatible"] is True and upgrade["mutated"] is False
+kit_root = Path.cwd() / "protocol-kit"
+conformance_init_output = io.StringIO()
+with contextlib.redirect_stdout(conformance_init_output):
+    assert cli_main(["conformance", "init", str(kit_root), "--json"]) == 0
+conformance_output = io.StringIO()
+with contextlib.redirect_stdout(conformance_output):
+    assert cli_main(["conformance", "check", str(kit_root), "--json"]) == 0
+conformance = json.loads(conformance_output.getvalue())
+assert conformance["passed"] == conformance["total"] == 2
+doctor_output = io.StringIO()
+with contextlib.redirect_stdout(doctor_output):
+    doctor_exit = cli_main([
+        "doctor", "--workspace", str(demo_root), "--task", "research"
+    ])
+assert doctor_exit == 1
+assert "capabilities" in doctor_output.getvalue()
+assert "Next actions:" in doctor_output.getvalue()
 print(json.dumps({
     "version": xscientist.__version__,
     "schemas": len(available_schemas()),
     "demo_nodes": demo["dag"]["nodes"],
     "demo_closure": demo["dag"]["closure"],
+    "human_cli_smoke": True,
 }))
 """
         try:

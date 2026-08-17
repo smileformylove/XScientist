@@ -6,6 +6,60 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-17
+
+### Added
+
+- Persistent local detached-run controls and HTTP job log/cancel/resume
+  endpoints, including bounded live output, graceful process-group shutdown,
+  exact private resume commands, and PID-reuse protection.
+- Interactive first-run provider/model/evidence selection, progressive root
+  help, shell completion, version-matched executor management, and a
+  deterministic zero-cost Autopilot fixture with a public first-run benchmark.
+- Read-only offline upgrade/schema compatibility checks, an offline protocol
+  producer conformance kit, and disabled-by-default fixed-shape local usage
+  counters that never transmit research data.
+- A MkDocs documentation site configuration, reproducible example gallery,
+  MLflow/DVC/notebook adapter cookbook, protocol conformance guide, and strict
+  documentation build workflow.
+
+### Changed
+
+- Workspace status uses a stable path-free repository identity, detects
+  malformed runtime state instead of treating it as absent, and directs
+  contested claims to a boundary-resolving next experiment.
+- The provider-free demo now records a bounded inference and can populate the
+  same progress, budget, insight, negative-result, and resumability surfaces
+  used by Autopilot without executing generated code.
+- Doctor human output renders every capability row consistently and the
+  installed-wheel smoke journey now covers human status/doctor, completion,
+  upgrade compatibility, and protocol conformance.
+- The English README now leads with zero-cost proof, local Ollama and hosted
+  provider routes, Docker expectations, paid-run checks, background control,
+  and recovery instead of requiring protocol knowledge before first use.
+- Detached run views now show profile, provider/model, duration, exit state,
+  and bounded failure context; resume rechecks unresolved prerequisites unless
+  the operator explicitly uses `--force`.
+- Shell completion covers practical subcommands and options, and human status,
+  demo, and authentication output now honor a consistent English/Chinese path.
+
+### Fixed
+
+- Cancellation preserves bounded-output truncation metadata and refuses to
+  signal a process whose persisted identity or process group no longer matches.
+- Detached `--detach` parsing is attached to `xscientist start` rather than the
+  workspace setup command.
+- Explicit missing workspace paths now fail in status, run, executor, and
+  upgrade journeys instead of being reported as empty compatible workspaces.
+- Interactive Ollama setup discovers locally installed models and normalizes
+  common bare model names to unambiguous provider-prefixed IDs.
+- Contested-claim guidance advances through plan, experiment, evidence,
+  inference, review, and replacement instead of repeating the same plan.
+- Copyable status, Doctor, executor, conformance, and run commands preserve the
+  workspace selected by the caller.
+- The HTTP service validates its work directory at startup and exposes a useful
+  root discovery response instead of failing the first submitted job.
+
 ## [0.1.2] - 2026-08-17
 
 ### Added
@@ -197,7 +251,8 @@ for its Python package; the ARA protocol has its own version in
 - Dependency minimums and CI compatibility windows are explicit and checked.
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
-[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/smileformylove/XScientist/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/smileformylove/XScientist/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/smileformylove/XScientist/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smileformylove/XScientist/releases/tag/v0.1.0
