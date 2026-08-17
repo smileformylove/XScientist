@@ -98,13 +98,16 @@ class OptionalDependencyImportTests(unittest.TestCase):
             install_hint="Install the 'anthropic' package to use Anthropic-backed models.",
         )
 
-        with mock.patch.object(module, "anthropic", missing_anthropic), mock.patch.object(
-            module,
-            "resolve_model_provider",
-            return_value=SimpleNamespace(
-                client_family="anthropic",
-                display_name="Anthropic",
-                client_model="demo-model",
+        with (
+            mock.patch.object(module, "anthropic", missing_anthropic),
+            mock.patch.object(
+                module,
+                "resolve_model_provider",
+                return_value=SimpleNamespace(
+                    client_family="anthropic",
+                    display_name="Anthropic",
+                    client_model="demo-model",
+                ),
             ),
         ):
             with self.assertRaisesRegex(
@@ -113,7 +116,7 @@ class OptionalDependencyImportTests(unittest.TestCase):
             ):
                 module.create_client("demo-model")
 
-    def test_huggingface_http_fallback_should_raise_with_requests_install_hint(
+    def test_huggingface_non_compatibility_error_does_not_change_transport(
         self,
     ) -> None:
         module = importlib.import_module("ai_scientist.llm")
@@ -129,19 +132,22 @@ class OptionalDependencyImportTests(unittest.TestCase):
                     def create(**_kwargs):
                         raise RuntimeError("force http fallback")
 
-        with mock.patch.object(module, "requests", missing_requests), mock.patch.object(
-            module,
-            "resolve_model_provider",
-            return_value=SimpleNamespace(
-                provider="huggingface",
-                request_style="openai_chat",
-                client_model="demo-model",
+        with (
+            mock.patch.object(module, "requests", missing_requests),
+            mock.patch.object(
+                module,
+                "resolve_model_provider",
+                return_value=SimpleNamespace(
+                    provider="huggingface",
+                    request_style="openai_chat",
+                    client_model="demo-model",
+                ),
             ),
-        ), mock.patch.dict(os.environ, {"HUGGINGFACE_API_KEY": "demo-key"}, clear=False):
-            with self.assertRaisesRegex(
-                ModuleNotFoundError,
-                "Install the 'requests' package",
-            ):
+            mock.patch.dict(
+                os.environ, {"HUGGINGFACE_API_KEY": "demo-key"}, clear=False
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "force http fallback"):
                 module.get_response_from_llm(
                     "hello",
                     FailingClient(),
@@ -181,7 +187,9 @@ class OptionalDependencyImportTests(unittest.TestCase):
     def test_treesearch_zhipu_backend_should_raise_with_install_hint_when_sdk_missing(
         self,
     ) -> None:
-        module = importlib.import_module("ai_scientist.treesearch.backend.backend_zhipu")
+        module = importlib.import_module(
+            "ai_scientist.treesearch.backend.backend_zhipu"
+        )
         missing_zhipuai = MissingOptionalDependencyProxy(
             "zhipuai",
             install_hint="Install the 'zhipuai' package to use the treesearch Zhipu backend.",

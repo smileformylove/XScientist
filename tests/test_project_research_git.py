@@ -127,6 +127,26 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
                         "baseline": "baseline-a",
                     }
                 ],
+                "socratic_challenge": {
+                    "primary_hypothesis": "H1 improves accuracy.",
+                    "proposed_mechanism": "feature M",
+                    "rival_hypotheses": [
+                        {
+                            "rival_id": "rival_null",
+                            "class": "null_effect",
+                            "statement": "H1 has no reliable effect.",
+                            "discriminating_prediction": "accuracy does not improve",
+                            "source": "protocol_default",
+                        }
+                    ],
+                    "discriminating_tests": [
+                        {
+                            "test_id": "paired-test",
+                            "targets": ["rival_null"],
+                            "design": "run a paired test on the locked split",
+                        }
+                    ],
+                },
             }
             initialize_pipeline_contracts(root)
             save_contract_artifact(root, "research_plan", plan, producer="test")
@@ -206,6 +226,20 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
             self.assertFalse(gate["payload"]["claim_promotion_allowed"])
             self.assertEqual(manuscript["state"], "draft")
             self.assertIn("experiment_attempt", {item["kind"] for item in objects})
+            self.assertTrue(
+                {
+                    "hypothesis_portfolio",
+                    "discriminating_prediction",
+                    "experiment_design",
+                    "experiment_priority",
+                    "research_review",
+                }
+                <= {item["kind"] for item in objects}
+            )
+            self.assertEqual(
+                args._research_vcs_ids["strategy"]["status"],
+                "proposed_not_executed",
+            )
             self.assertEqual(
                 attempt["provenance"]["ara_manifest_hash"],
                 hash_manifest(ara_manifest),

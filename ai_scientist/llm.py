@@ -5,7 +5,8 @@ import os
 import re
 import time
 from typing import Any
-from ai_scientist.protocol.llm_trace import record_llm_call
+from urllib.parse import quote
+from ai_scientist.protocol.llm_trace import record_llm_call, strict_llm_tracing
 from ai_scientist.utils.token_tracker import track_token_usage
 from ai_scientist.utils.llm_budget import LLMBudgetExceeded, llm_budget_manager
 from ai_scientist.utils.optional_dependencies import (
@@ -44,6 +45,42 @@ _ANTHROPIC_RETRY_EXCEPTIONS = resolve_exception_types(
 )
 
 MAX_NUM_TOKENS = 4096
+
+
+def _huggingface_http_fallback_url(client_model: str) -> str:
+    """Return the legacy inference endpoint for the exact requested model."""
+
+    normalized = str(client_model or "").strip().strip("/")
+    if not normalized:
+        raise ValueError("HuggingFace fallback requires a concrete model id")
+    return "https://api-inference.huggingface.co/models/" + quote(
+        normalized, safe="/-_."
+    )
+
+
+def _is_huggingface_protocol_compatibility_error(exc: Exception) -> bool:
+    """Limit HTTP fallback to client/protocol incompatibilities.
+
+    Authentication, rate-limit, timeout, and server failures must retain their
+    original meaning.  Falling back on those errors can silently change both
+    provider behaviour and the scientific provenance of the call.
+    """
+
+    if isinstance(exc, (AttributeError, TypeError)):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    return status_code in {404, 405, 415, 422}
+
+
+def _huggingface_generated_text(response: Any) -> str:
+    payload = response.json()
+    if isinstance(payload, list) and payload:
+        payload = payload[0]
+    if isinstance(payload, dict) and isinstance(payload.get("generated_text"), str):
+        return payload["generated_text"]
+    raise ValueError("HuggingFace response did not contain generated_text")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -108,13 +145,10 @@ AVAILABLE_LLMS = [
     "ollama/qwen3:8b",
     "ollama/qwen3:32b",
     "ollama/qwen3:235b",
-
     "ollama/qwen2.5vl:8b",
     "ollama/qwen2.5vl:32b",
-
     "ollama/qwen3-coder:70b",
     "ollama/qwen3-coder:480b",
-
     # Deepseek models via Ollama
     "ollama/deepseek-r1:8b",
     "ollama/deepseek-r1:32b",
@@ -341,7 +375,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
                 **({"timeout": timeout} if timeout is not None else {}),
             ),
         )
-    
+
     else:
         raise ValueError(f"Model {model} not supported.")
 
@@ -364,6 +398,14 @@ def get_response_from_llm(
         msg_history = []
     spec = resolve_model_provider(model)
     response = None
+    trace_model = model
+    trace_provider = getattr(spec, "provider", "unknown")
+    trace_request_style = getattr(spec, "request_style", "unknown")
+    trace_params: dict[str, Any] = {
+        "temperature": temperature,
+        "max_tokens": MAX_NUM_TOKENS,
+        "seed": 0,
+    }
     _t0 = time.perf_counter()
 
     if model_uses_anthropic_client(model):
@@ -473,22 +515,30 @@ def get_response_from_llm(
             content = response.choices[0].message.content
         except LLMBudgetExceeded:
             raise
-        except Exception as e:
-            # Fallback to direct API call if OpenAI client doesn't work with HuggingFace
+        except Exception as exc:
+            if not _is_huggingface_protocol_compatibility_error(exc):
+                raise
+            # Some HuggingFace endpoints do not expose the OpenAI-compatible
+            # chat contract.  The compatibility path must call the same model
+            # and make the transport switch explicit in the trace.
+            fallback_url = _huggingface_http_fallback_url(spec.client_model)
             headers = {
                 "Authorization": f"Bearer {os.environ['HUGGINGFACE_API_KEY']}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
             payload = {
                 "inputs": {
                     "system": system_message,
-                    "messages": [{"role": m["role"], "content": m["content"]} for m in new_msg_history]
+                    "messages": [
+                        {"role": item["role"], "content": item["content"]}
+                        for item in new_msg_history
+                    ],
                 },
                 "parameters": {
                     "temperature": temperature,
                     "max_new_tokens": MAX_NUM_TOKENS,
-                    "return_full_text": False
-                }
+                    "return_full_text": False,
+                },
             }
             response = _budgeted_provider_call(
                 model=model,
@@ -496,16 +546,30 @@ def get_response_from_llm(
                 system_message=system_message,
                 max_output_tokens=MAX_NUM_TOKENS,
                 create=lambda timeout: requests.post(
-                    "https://api-inference.huggingface.co/models/agentica-org/DeepCoder-14B-Preview",
+                    fallback_url,
                     headers=headers,
                     json=payload,
                     timeout=timeout or 60,
                 ),
             )
             if response.status_code == 200:
-                content = response.json()["generated_text"]
+                content = _huggingface_generated_text(response)
             else:
-                raise ValueError(f"Error from HuggingFace API: {response.text}")
+                raise ValueError(
+                    "HuggingFace inference endpoint returned HTTP "
+                    f"{response.status_code}"
+                )
+            trace_model = spec.client_model
+            trace_provider = "huggingface_http"
+            trace_request_style = "huggingface_inference"
+            trace_params.update(
+                {
+                    "fallback": True,
+                    "fallback_from": "openai_compatible",
+                    "fallback_reason": type(exc).__name__,
+                    "actual_model": spec.client_model,
+                }
+            )
 
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
@@ -522,11 +586,13 @@ def get_response_from_llm(
 
     _record_llm_call_safe(
         spec=spec,
-        model=model,
+        model=trace_model,
+        provider=trace_provider,
+        request_style=trace_request_style,
         system_message=system_message,
         messages=new_msg_history,
         response_text=content,
-        params={"temperature": temperature, "max_tokens": MAX_NUM_TOKENS, "seed": 0},
+        params=trace_params,
         response=response,
         latency_ms=int((time.perf_counter() - _t0) * 1000),
     )
@@ -545,6 +611,8 @@ def _record_llm_call_safe(
     response: Any = None,
     latency_ms: int | None = None,
     error: str | None = None,
+    provider: str | None = None,
+    request_style: str | None = None,
 ) -> None:
     """Wrap ``record_llm_call`` so a broken tracer never breaks the LLM call.
 
@@ -556,9 +624,9 @@ def _record_llm_call_safe(
     try:
         tokens = _extract_tokens(response)
         record_llm_call(
-            provider=getattr(spec, "provider", "unknown"),
+            provider=provider or getattr(spec, "provider", "unknown"),
             model=model,
-            request_style=getattr(spec, "request_style", "unknown"),
+            request_style=request_style or getattr(spec, "request_style", "unknown"),
             system_message=system_message or "",
             messages=messages or [],
             response_text=response_text or "",
@@ -568,7 +636,9 @@ def _record_llm_call_safe(
             error=error,
         )
     except Exception:
-        # Tracer must never bring down the caller.
+        if strict_llm_tracing():
+            raise
+        # Exploratory tracing must never bring down the caller.
         return
 
 
@@ -579,13 +649,11 @@ def _extract_tokens(response: Any) -> dict[str, int] | None:
     usage = getattr(response, "usage", None)
     if usage is None:
         return None
-    input_tokens = (
-        getattr(usage, "input_tokens", None)
-        or getattr(usage, "prompt_tokens", None)
+    input_tokens = getattr(usage, "input_tokens", None) or getattr(
+        usage, "prompt_tokens", None
     )
-    output_tokens = (
-        getattr(usage, "output_tokens", None)
-        or getattr(usage, "completion_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None) or getattr(
+        usage, "completion_tokens", None
     )
     out: dict[str, int] = {}
     if isinstance(input_tokens, int):
@@ -595,7 +663,7 @@ def _extract_tokens(response: Any) -> dict[str, int] | None:
     return out or None
 
 
-def extract_json_between_markers(llm_output: str) -> dict | None: 
+def extract_json_between_markers(llm_output: str) -> dict | None:
     # Regular expression pattern to find JSON content between ```json and ```
     json_pattern = r"```json(.*?)```"
     matches = re.findall(json_pattern, llm_output, re.DOTALL)
@@ -628,6 +696,7 @@ def create_client(model) -> tuple[Any, str]:
     if spec.client_family == "anthropic":
         print(f"Using {spec.display_name} API with model {spec.client_model}.")
         import httpx as _httpx
+
         _http_client = _httpx.Client(
             timeout=_httpx.Timeout(60.0, connect=10.0),
             transport=_httpx.HTTPTransport(retries=3),
@@ -636,11 +705,14 @@ def create_client(model) -> tuple[Any, str]:
                 max_keepalive_connections=0,
             ),
         )
-        return anthropic.Anthropic(
-            timeout=60.0,
-            max_retries=0,
-            http_client=_http_client,
-        ), model
+        return (
+            anthropic.Anthropic(
+                timeout=60.0,
+                max_retries=0,
+                http_client=_http_client,
+            ),
+            model,
+        )
     if spec.client_family == "anthropic_bedrock":
         print(f"Using {spec.display_name} with model {spec.client_model}.")
         return anthropic.AnthropicBedrock(max_retries=0), model

@@ -49,7 +49,13 @@ from .hashing import (
     hash_manifest,
     hash_node_payload,
 )
-from .llm_trace import active_ara_root, capture_llm_calls, record_llm_call
+from .llm_trace import (
+    LLMTraceError,
+    active_ara_root,
+    capture_llm_calls,
+    record_llm_call,
+    strict_llm_tracing,
+)
 from .objects import ObjectRef, ObjectStore
 from .schemas import available_schemas, load_schema
 from .validator import (
@@ -156,7 +162,9 @@ __all__ = [
     "hash_manifest",
     "hash_node_payload",
     "load_schema",
+    "LLMTraceError",
     "record_llm_call",
+    "strict_llm_tracing",
     "research_payload_issues",
     "research_profile_status",
     "validate_ara",

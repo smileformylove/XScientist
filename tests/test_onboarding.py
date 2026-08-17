@@ -14,7 +14,12 @@ import yaml
 from xscientist._version import __version__
 from xscientist.cli import main as cli_main
 from xscientist.diagnostics import diagnose
-from xscientist.onboarding import WORKSPACE_FILES, create_workspace
+from xscientist.onboarding import (
+    WORKSPACE_FILES,
+    _installed_vcs_source,
+    _render_dockerfile,
+    create_workspace,
+)
 
 
 class OnboardingTests(unittest.TestCase):
@@ -80,6 +85,101 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("--allow-synthetic-data", argv)
             self.assertIn("--research-vcs-strict", argv)
 
+    def test_start_fails_before_provider_use_when_cost_price_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "tester"}),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch("xscientist.diagnostics.diagnose") as diagnose_mock,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--non-interactive",
+                        "--max-cost-usd",
+                        "1",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["phase"], "budget")
+            self.assertEqual(payload["error_code"], "unknown_model_price")
+            self.assertFalse(payload["phases"]["budget"]["price_configured"])
+            diagnose_mock.assert_not_called()
+
+    def test_start_accepts_an_explicit_price_for_cost_enforcement(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            ready = {
+                "schema": "xscientist.doctor.v1",
+                "ok": True,
+                "configuration_ready": True,
+                "runtime_ready": True,
+                "task": "research",
+                "workspace": ".",
+                "checks": {},
+                "next_actions": [],
+            }
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "tester"}),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--non-interactive",
+                        "--max-cost-usd",
+                        "1",
+                        "--price-input-per-million",
+                        "0.1",
+                        "--price-output-per-million",
+                        "0.3",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["phases"]["budget"]["price_configured"])
+            self.assertEqual(payload["phases"]["budget"]["price_source"], "workspace")
+            config = yaml.safe_load(
+                (workspace / "bfts_config.yaml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                config["llm_budget"]["prices_per_million"]["glm-4-flash"],
+                {"input": 0.1, "output": 0.3},
+            )
+
     def test_init_creates_safe_installed_package_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
@@ -127,14 +227,15 @@ class OnboardingTests(unittest.TestCase):
             dockerfile = (workspace / "Dockerfile.executor").read_text()
             self.assertIn(f"ARG XSCIENTIST_VERSION={__version__}", dockerfile)
             self.assertIn(
-                "xscientist[research,ml,pdf-layout,zhipu]==${XSCIENTIST_VERSION}",
+                "xscientist[research,zhipu]==${XSCIENTIST_VERSION}",
                 dockerfile,
             )
             self.assertIn("ARG XSCIENTIST_INSTALL_MODE=pypi", dockerfile)
             self.assertIn(
-                "/tmp/xscientist-build-context[research,ml,pdf-layout,zhipu]",
+                "/tmp/xscientist-build-context[research,zhipu]",
                 dockerfile,
             )
+            self.assertNotIn("torch --index-url", dockerfile)
             self.assertIn("org.opencontainers.image.revision", dockerfile)
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
@@ -158,6 +259,53 @@ class OnboardingTests(unittest.TestCase):
                 f'python -m pip install "xscientist[research,zhipu]=={__version__}"',
             )
             self.assertEqual(payload["next_steps"][2], "xscientist git doctor")
+
+    def test_vcs_installs_pin_executor_to_the_exact_safe_commit(self) -> None:
+        direct_url = json.dumps(
+            {
+                "url": "https://github.com/example/XScientist.git",
+                "vcs_info": {
+                    "vcs": "git",
+                    "commit_id": "a" * 40,
+                },
+            }
+        )
+        distribution = SimpleNamespace(read_text=lambda _name: direct_url)
+        with mock.patch(
+            "xscientist.onboarding.importlib_metadata.distribution",
+            return_value=distribution,
+        ):
+            self.assertEqual(
+                _installed_vcs_source(),
+                ("https://github.com/example/XScientist.git", "a" * 40),
+            )
+            dockerfile = _render_dockerfile("zhipu")
+
+        self.assertIn(
+            "xscientist[research,zhipu] @ "
+            "git+https://github.com/example/XScientist.git@" + "a" * 40,
+            dockerfile,
+        )
+        self.assertIn("ARG XSCIENTIST_INSTALL_SOURCE=vcs-commit", dockerfile)
+        self.assertIn(
+            'org.xscientist.install-source="$XSCIENTIST_INSTALL_SOURCE"',
+            dockerfile,
+        )
+        self.assertNotIn("==${XSCIENTIST_VERSION}", dockerfile)
+
+    def test_vcs_executor_source_rejects_urls_that_can_embed_credentials(self) -> None:
+        direct_url = json.dumps(
+            {
+                "url": "https://token@github.com/example/XScientist.git",
+                "vcs_info": {"vcs": "git", "commit_id": "b" * 40},
+            }
+        )
+        distribution = SimpleNamespace(read_text=lambda _name: direct_url)
+        with mock.patch(
+            "xscientist.onboarding.importlib_metadata.distribution",
+            return_value=distribution,
+        ):
+            self.assertIsNone(_installed_vcs_source())
 
     def test_non_default_provider_requires_matching_explicit_model(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -303,6 +451,41 @@ class OnboardingTests(unittest.TestCase):
             self.assertNotIn(str(Path(td).resolve()), serialized)
             self.assertIn("[REDACTED", serialized)
             self.assertFalse(payload["host_paths_disclosed"])
+
+    def test_deep_doctor_only_blocks_on_pdflatex_for_paper_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            with (
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch(
+                    "ai_scientist.apps.preflight.check_bfts_config",
+                    return_value=[],
+                ),
+                mock.patch("shutil.which", return_value=None),
+            ):
+                research = diagnose(workspace, task="research", deep=True)
+                paper = diagnose(workspace, task="paper", deep=True)
+
+            research_pdflatex = next(
+                item
+                for item in research["checks"]["runtime"]["results"]
+                if item["label"] == "pdflatex"
+            )
+            paper_pdflatex = next(
+                item
+                for item in paper["checks"]["runtime"]["results"]
+                if item["label"] == "pdflatex"
+            )
+            self.assertEqual(research_pdflatex["severity"], "warning")
+            self.assertIn("optional", research_pdflatex["detail"])
+            self.assertTrue(research["checks"]["runtime"]["ok"])
+            self.assertEqual(paper_pdflatex["severity"], "error")
+            self.assertFalse(paper["checks"]["runtime"]["ok"])
+            self.assertIn("paper_compiler_missing", paper["error_codes"])
 
 
 if __name__ == "__main__":

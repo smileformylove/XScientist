@@ -43,9 +43,9 @@ commit, challenge it on a branch, or continue from an exact experiment node.
 > isolation boundary. Machine-generated claims remain unverified until the
 > required evidence and independent gates exist.
 
-This README tracks `main`, including features planned for the next release.
-The latest stable PyPI package is `0.1.1`; see [Install and compatibility](#install-and-compatibility)
-before choosing a release channel.
+This README documents stable `0.1.2` and the compatible surface on `main`; see
+[Install and compatibility](#install-and-compatibility) before choosing a
+release channel.
 
 ## Choose your path
 
@@ -59,35 +59,30 @@ before choosing a release channel.
 
 ## Two-minute local demo
 
-This path creates a real Research Git repository and an offline DAG browser. It
-does not call a model or run an experiment.
+This path creates a complete Research Git repository and an offline DAG
+browser. It records a failed attempt, supporting and refuting evidence, an
+independent rejection, and a contested claim without calling a model or the
+network.
 
 Requirements: Python 3.10+ and Git.
 
 ```bash
-# Install the current main branch documented by this README.
-python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
-
-xscientist git doctor
-xscientist research start ./retrieval-study \
-  --question "Does retrieval improve factual accuracy?" \
-  --hypothesis "Retrieval reduces unsupported claims." \
-  --falsifier "No improvement on a held-out benchmark."
-
-cd retrieval-study
-xscientist research status
-xscientist research dag --output ./research-dag
+python -m pip install "xscientist==0.1.2"
+xscientist demo ./retrieval-study --open
+xscientist status ./retrieval-study
 ```
 
-Open `research-dag/research-dag.html` in any browser. The initial graph contains
-the question, research goal, and falsifiable hypothesis. `research start` also
-prints the next valid exploratory and confirmatory commands, so a new user does
-not need to know object IDs or Git internals.
+If the browser does not open automatically, open
+`retrieval-study/research-dag/research-dag.html`. The demo costs `$0.00`, is
+deterministic, and deliberately ends with scientific closure blocked: the
+held-out evidence refutes the broad transfer claim. `status` then shows the
+current branch, scientific progress, run/budget state, DAG, and next action in
+one read-only view.
 
 Continue interactively:
 
 ```bash
+cd retrieval-study
 xscientist research guide
 
 # Exploratory path: compare explanations before locking a study.
@@ -118,12 +113,14 @@ from one question.
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai,ml,pdf-layout] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.2"
 ```
 
 Provider extras are modular: `openai`, `anthropic`, `zhipu`, `bedrock`,
 `vertex`, and `openai-compatible`. The last profile covers DeepSeek, Gemini,
 OpenRouter, Hugging Face inference, Ollama, and generic compatible endpoints.
+The default `research` task does not install ML or PDF-layout stacks. Select
+`--task ml-study` or `--task paper` only when the study needs those tools.
 
 ### 2. Start from a question
 
@@ -146,7 +143,18 @@ For empirical work, replace `--allow-synthetic-data` with `--data-dir ./data`.
 XScientist hashes every input before model calls and mounts the snapshot
 read-only. Use `--max-project-tokens`, `--max-project-hours`, and
 `--max-cost-usd` as hard project limits; unknown model pricing fails closed
-when a cost limit is active.
+when a cost limit is active. For an unbundled model, pass
+`--price-input-per-million` and `--price-output-per-million`, or configure
+`llm_budget.prices_per_million` in the workspace.
+
+Before a paid run, inspect local readiness without making an API request:
+
+```bash
+xscientist provider check --max-cost-usd 10
+```
+
+The result explicitly distinguishes credential presence from live API
+validation and reports whether cost enforcement has a known model price.
 
 Autopilot profiles make the main trade-off explicit:
 
@@ -247,9 +255,13 @@ separate, content-addressed profile while keeping old Research Objects valid.
 flowchart LR
   Q["Question"] --> HP["Competitive hypothesis portfolio"]
   HP --> DP["Discriminating predictions"]
-  DP --> IV["Rank experiments by information value"]
-  IV --> X["Run / fail / contradict"]
-  X --> A["Anomaly review"]
+  DP --> D["Locked candidate designs"]
+  D --> IV["Rank by information value"]
+  IV --> X["Selected attempt"]
+  X --> O["Observation + evidence"]
+  O --> P["Draft posterior update"]
+  P --> HP
+  X --> A["Failure / anomaly review"]
   A --> M["Mechanism + evidence-quality audit"]
   M --> B["Boundary / transfer matrix"]
   B --> C["Descriptive, causal, or transferable claim"]
@@ -266,30 +278,45 @@ deterministic policy.
 xscientist research program template --output deep-research.json
 
 xscientist research program portfolio PRIMARY_ID \
-  --alternative RIVAL_ID --null NULL_ID \
+  --alternative RIVAL_ID \
   --question "Which mechanism best predicts held-out behavior?" \
-  --prior PRIMARY_ID=2 --prior RIVAL_ID=1 --prior NULL_ID=1
+  --prior PRIMARY_ID=2 --prior RIVAL_ID=1
 
 xscientist research program prediction @latest:hypothesis_portfolio PRIMARY_ID \
   --when "The proposed mediator is ablated" \
   --expect "The effect disappears" \
-  --distinguishes RIVAL_ID --distinguishes NULL_ID \
+  --distinguishes RIVAL_ID \
   --falsifier "The effect remains unchanged"
+
+# Record the same-condition outcome for every rival/null member as well.
+xscientist research program prediction @latest:hypothesis_portfolio RIVAL_ID \
+  --when "The proposed mediator is ablated" \
+  --expect "The effect remains" \
+  --distinguishes PRIMARY_ID --falsifier "The effect disappears"
 
 # Edit experiment_candidates in the generated file, then rank the whole set.
 xscientist research program prioritize \
   @latest:hypothesis_portfolio deep-research.json
+
+# The attempt must consume the design selected by that priority.
+xscientist research experiment "Run selected ablation" --status completed \
+  --plan SELECTED_DESIGN_ID --priority PRIORITY_ID
+xscientist research evidence "The effect disappeared" --attempt ATTEMPT_ID
+xscientist research program posterior PORTFOLIO_ID PRIORITY_ID ATTEMPT_ID EVIDENCE_ID \
+  --observed "The effect disappeared" \
+  --likelihood PRIMARY_ID=0.9 --likelihood RIVAL_ID=0.1
 
 # Read-only review, or append a review plus newly detected anomalies.
 xscientist research program review
 xscientist research program review --record
 ```
 
-Verified `causal` claims require a validated intervention-tested mechanism and
-an independent, strong or moderate evidence-quality assessment. Verified
-`transferable` claims additionally require a passing multi-condition transfer
-matrix. These are opt-in depth levels, so existing descriptive workflows stay
-compatible while stronger language fails closed:
+Verified `causal` claims require a mechanism whose verified evidence traces to
+a completed intervention attempt, plus a strong/moderate quality assessment by
+an actor absent from the full producer lineage. `transferable` additionally
+requires separate attempts/evidence for each condition and distinct
+development/held-out dataset hashes. Existing v1 history remains readable;
+new strategy objects use the fail-closed v2 profile:
 
 ```bash
 xscientist research claim "M causes the effect across held-out domains." \
@@ -457,8 +484,8 @@ The public surface lives in `xscientist/`; workflow implementation lives in
 
 | Channel | Install | Use when |
 | --- | --- | --- |
-| Stable `0.1.1` | `python -m pip install "xscientist==0.1.1"` | You need the published package and its release contract |
-| Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You want the guided start, unified DAG, context receipts, and latest protocol work documented here |
+| Stable `0.1.2` | `python -m pip install "xscientist==0.1.2"` | You need the published package and its release contract |
+| Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You need unreleased development work and accept a moving source revision |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | You are changing the repository |
 
 Pin a commit instead of `main` when an experiment must be exactly repeatable.
@@ -588,15 +615,17 @@ See [SDK and API](docs/guides/SDK_AND_API.md),
 
 The repository is in alpha. The strongest surfaces are immutable scientific
 history, provenance, safety defaults, protocol schemas, and offline handoff.
-The main adoption work now is reducing provider/runtime setup, publishing a
-provider-free sample ARA, adding a polished recorded demo, and measuring
-time-to-first-value across clean machines. The detailed, testable strategy is
-in the [onboarding audit](docs/ONBOARDING_AUDIT.md).
+Version 0.1.2 adds a provider-free first success, a unified status view,
+task-sized executor dependencies, stable diagnostic remediation, explicit
+price preflight, and a built-wheel demo smoke. The remaining adoption work is
+reducing container/provider setup further, publishing sample ARAs, adding a
+polished recorded demo, and measuring time-to-first-value across clean
+machines. The detailed strategy is in the
+[onboarding audit](docs/ONBOARDING_AUDIT.md).
 
 The project is building toward:
 
-- one provider-free demo command with a bundled evidence DAG;
-- end-to-end golden journeys in CI on all supported operating systems;
+- end-to-end golden journeys for model-backed runs on all supported systems;
 - more external adapters and protocol conformance fixtures;
 - public reproducibility benchmarks and example studies;
 - a hosted documentation site and searchable protocol reference.

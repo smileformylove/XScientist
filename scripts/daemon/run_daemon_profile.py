@@ -370,8 +370,6 @@ def _build_command(profile: dict[str, Any], *, dry_run: bool = False) -> list[st
 
 
 def main() -> int:
-    require_login("守护进程配置运行(run_daemon_profile)")
-
     parser = argparse.ArgumentParser(
         description="Launch the continuous daemon from a reusable profile config"
     )
@@ -414,6 +412,7 @@ def main() -> int:
             )
         )
         return 0
+    require_login("守护进程配置运行(run_daemon_profile)")
     completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
     return completed.returncode
 

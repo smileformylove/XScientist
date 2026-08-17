@@ -217,6 +217,7 @@ huggingface/
 
 # 统一的输出目录
 _outputs/
+output/
 .ci-output/
 
 # Local scratch / temp worktrees (do not ship)

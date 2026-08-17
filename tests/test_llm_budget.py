@@ -20,6 +20,7 @@ from ai_scientist.utils.llm_budget import (
     estimate_tokens,
     is_llm_budget_exception,
     llm_budget_exception_payload,
+    resolve_model_price,
 )
 
 
@@ -37,6 +38,22 @@ def _raise_budget_error_in_worker() -> None:
 
 
 class LLMBudgetTests(unittest.TestCase):
+    def test_public_price_resolution_never_treats_unknown_as_free(self) -> None:
+        self.assertIsNone(resolve_model_price("unknown-provider/model"))
+        self.assertEqual(
+            resolve_model_price(
+                "custom/local",
+                prices_per_million={"custom/local": {"input": 0.0, "output": 0.0}},
+            ),
+            {"input": 0.0, "output": 0.0},
+        )
+        self.assertIsNone(
+            resolve_model_price(
+                "custom/broken",
+                prices_per_million={"custom/broken": {"input": 1.0, "output": -1.0}},
+            )
+        )
+
     def test_budget_exception_survives_pickle_round_trip(self) -> None:
         original = LLMBudgetExceeded(
             "tokens",

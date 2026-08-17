@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_scientist.protocol.llm_trace import ENV_ACTIVE_ROOT, ENV_STAGE
+from ai_scientist.protocol.llm_trace import ENV_ACTIVE_ROOT, ENV_STAGE, ENV_STRICT
 from ai_scientist.utils.ara_pipeline import (
     activate_llm_tracing,
     deactivate_llm_tracing,
@@ -20,7 +20,9 @@ class ActivateLLMTracingTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.project = Path(self._tmp.name) / "proj"
         self.project.mkdir()
-        self._snap = {k: os.environ.get(k) for k in (ENV_ACTIVE_ROOT, ENV_STAGE)}
+        self._snap = {
+            k: os.environ.get(k) for k in (ENV_ACTIVE_ROOT, ENV_STAGE, ENV_STRICT)
+        }
         for k in self._snap:
             os.environ.pop(k, None)
         self.addCleanup(self._restore)
@@ -68,6 +70,17 @@ class ActivateLLMTracingTests(unittest.TestCase):
         # Never activated → no crash.
         deactivate_llm_tracing()
         deactivate_llm_tracing()
+
+    def test_strict_activation_is_scoped_and_cleared(self) -> None:
+        activate_llm_tracing(
+            project_dir=self.project,
+            idea={"Name": "publication"},
+            timestamp="ts",
+            strict=True,
+        )
+        self.assertEqual(os.environ[ENV_STRICT], "1")
+        deactivate_llm_tracing()
+        self.assertNotIn(ENV_STRICT, os.environ)
 
     def test_exp_dir_without_timestamp_falls_back(self) -> None:
         # exp_dir names without a leading timestamp are common; activation

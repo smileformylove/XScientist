@@ -445,6 +445,23 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     _add_program_save_arguments(program_priority)
 
+    program_posterior = program_subparsers.add_parser(
+        "posterior",
+        help="Bind a selected attempt and observation to a Bayesian portfolio update.",
+    )
+    program_posterior.add_argument("portfolio_id")
+    program_posterior.add_argument("priority_id")
+    program_posterior.add_argument("attempt_id")
+    program_posterior.add_argument("evidence_id")
+    program_posterior.add_argument("--observed", required=True)
+    program_posterior.add_argument(
+        "--likelihood",
+        action="append",
+        required=True,
+        help="Hypothesis selector=likelihood (0..1).",
+    )
+    _add_program_save_arguments(program_posterior)
+
     program_mechanism = program_subparsers.add_parser(
         "mechanism", help="Record an intervention-testable causal mechanism."
     )
@@ -659,7 +676,17 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         default="exploratory",
     )
     experiment_parser.add_argument("--plan")
+    experiment_parser.add_argument(
+        "--priority", help="Locked priority that selected an experiment design."
+    )
     experiment_parser.add_argument("--preregistration")
+    experiment_parser.add_argument("--intervention", action="append", default=[])
+    experiment_parser.add_argument("--boundary-condition", default="")
+    experiment_parser.add_argument(
+        "--boundary-role",
+        choices=["development", "transfer", "heldout", "scale"],
+        default="",
+    )
     experiment_parser.add_argument(
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
@@ -1521,6 +1548,7 @@ def main(
                 save_evidence_quality_assessment,
                 save_hypothesis_portfolio,
                 save_mechanism_model,
+                save_posterior_update,
                 save_transfer_matrix,
             )
 
@@ -1608,6 +1636,31 @@ def main(
                         f"(EIG={selected['expected_information_gain']}, "
                         f"utility={selected['utility_score']})"
                     )
+                return 0
+            if args.program_command == "posterior":
+                raw_likelihoods = _parse_assignments(
+                    args.likelihood, label="likelihood"
+                )
+                try:
+                    likelihoods = {
+                        key: float(value) for key, value in raw_likelihoods.items()
+                    }
+                except (TypeError, ValueError) as exc:
+                    raise ResearchGitError(
+                        "likelihoods must be numeric hypothesis=probability assignments"
+                    ) from exc
+                result = save_posterior_update(
+                    args.repo,
+                    portfolio_id=args.portfolio_id,
+                    priority_id=args.priority_id,
+                    attempt_id=args.attempt_id,
+                    evidence_id=args.evidence_id,
+                    observed_outcome=args.observed,
+                    likelihoods=likelihoods,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("posterior update", result, as_json=args.as_json)
                 return 0
             if args.program_command == "mechanism":
                 result = save_mechanism_model(
@@ -1870,6 +1923,7 @@ def main(
                 status=args.status,
                 study_phase=args.study_phase,
                 plan_id=args.plan,
+                priority_id=args.priority,
                 preregistration_id=args.preregistration,
                 metrics=_parse_assignments(args.metric, label="metric"),
                 seeds=args.seed,
@@ -1881,6 +1935,9 @@ def main(
                 dataset_hashes=args.dataset_hash,
                 code_commit=args.code_commit,
                 failure_class=args.failure_class,
+                interventions=args.intervention,
+                boundary_condition=args.boundary_condition,
+                boundary_role=args.boundary_role,
                 reproduce_command=args.reproduce_command,
                 message=args.message,
                 commit=not args.no_commit,

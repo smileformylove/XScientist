@@ -12,8 +12,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ai_scientist.utils.auth_session import require_login
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIN_PYTHON = (3, 10)
 _IGNORED_PATH_PARTS = {"__pycache__", "tests"}
@@ -147,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
         help="also import all installed application entrypoints",
     )
     args = parser.parse_args(argv)
-    require_login("安装包校验(xscientist validate)")
     ensure_supported_python()
     os.environ.setdefault(
         "RESEARCH_OUTPUT_DIR", tempfile.mkdtemp(prefix="xscientist_validate_")

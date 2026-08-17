@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ai_scientist.protocol import ObjectStore, load_schema, record_llm_call
 from ai_scientist.protocol.llm_trace import (
@@ -15,6 +16,8 @@ from ai_scientist.protocol.llm_trace import (
     ENV_ENABLED,
     ENV_REDACT,
     ENV_STAGE,
+    ENV_STRICT,
+    LLMTraceError,
     _redact,
     _redact_string,
     active_ara_root,
@@ -25,7 +28,7 @@ from ai_scientist.protocol.validator import _validate_against_schema, Validation
 class _EnvGuard:
     """Snapshot the tracer env vars for a single test and restore on exit."""
 
-    _KEYS = (ENV_ACTIVE_ROOT, ENV_ENABLED, ENV_STAGE, ENV_REDACT)
+    _KEYS = (ENV_ACTIVE_ROOT, ENV_ENABLED, ENV_STAGE, ENV_REDACT, ENV_STRICT)
 
     def __init__(self) -> None:
         self._snap = {k: os.environ.get(k) for k in self._KEYS}
@@ -276,6 +279,34 @@ class LLMTraceTests(unittest.TestCase):
         )
         # Either it silently swallows (returns None) or it succeeds — both are fine.
         self.assertTrue(cid is None or isinstance(cid, str))
+
+    def test_strict_mode_fails_when_trace_cannot_be_persisted(self) -> None:
+        self._enable()
+        os.environ[ENV_STRICT] = "1"
+        with mock.patch.object(
+            ObjectStore, "put_json", side_effect=OSError("disk full")
+        ):
+            with self.assertRaisesRegex(LLMTraceError, "persistence failed"):
+                record_llm_call(
+                    provider="p",
+                    model="m",
+                    request_style="r",
+                    system_message="s",
+                    messages=[],
+                    response_text="x",
+                )
+
+    def test_strict_mode_requires_active_ara_root(self) -> None:
+        os.environ[ENV_STRICT] = "1"
+        with self.assertRaisesRegex(LLMTraceError, "active ARA root"):
+            record_llm_call(
+                provider="p",
+                model="m",
+                request_style="r",
+                system_message="s",
+                messages=[],
+                response_text="x",
+            )
 
     # ------------------------------------------------------------------
     # helpers

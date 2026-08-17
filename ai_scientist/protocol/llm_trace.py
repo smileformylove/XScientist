@@ -41,6 +41,7 @@ from .objects import ObjectStore
 ENV_ACTIVE_ROOT = "AI_SCIENTIST_ARA_ACTIVE_ROOT"
 ENV_ENABLED = "AI_SCIENTIST_LLM_TRACE"
 ENV_STAGE = "AI_SCIENTIST_LLM_STAGE"
+ENV_STRICT = "AI_SCIENTIST_LLM_TRACE_STRICT"
 # Deprecated compatibility name.  Redaction is now unconditional; setting the
 # variable to ``0`` has no effect because persistent traces must fail closed.
 ENV_REDACT = "AI_SCIENTIST_LLM_REDACT"
@@ -69,8 +70,25 @@ _KEEP_PARAM_KEYS = frozenset(
         "tool_choice",
         "stop",
         "reasoning_effort",
+        "fallback",
+        "fallback_from",
+        "fallback_reason",
+        "actual_model",
     }
 )
+
+
+class LLMTraceError(RuntimeError):
+    """Raised when a strict provenance trace cannot be persisted."""
+
+
+def strict_llm_tracing() -> bool:
+    return str(os.environ.get(ENV_STRICT, "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def active_ara_root() -> str | None:
@@ -81,11 +99,17 @@ def active_ara_root() -> str | None:
     editing code.
     """
     if str(os.environ.get(ENV_ENABLED, "1")).strip() == "0":
+        if strict_llm_tracing():
+            raise LLMTraceError("strict LLM tracing cannot be disabled")
         return None
     root = os.environ.get(ENV_ACTIVE_ROOT)
     if not root:
+        if strict_llm_tracing():
+            raise LLMTraceError("strict LLM tracing requires an active ARA root")
         return None
     if not os.path.isdir(root):
+        if strict_llm_tracing():
+            raise LLMTraceError("strict LLM tracing requires an existing ARA root")
         return None
     return root
 
@@ -191,8 +215,12 @@ def record_llm_call(
             buf.append(messages_ref["hash"])
 
         return call_id
-    except Exception:
-        # Tracing is best-effort; never break the real LLM path.
+    except Exception as exc:
+        if strict_llm_tracing():
+            raise LLMTraceError(
+                f"strict LLM trace persistence failed: {type(exc).__name__}"
+            ) from exc
+        # Exploratory tracing remains best-effort.
         return None
 
 
@@ -235,9 +263,12 @@ __all__ = [
     "ENV_ACTIVE_ROOT",
     "ENV_ENABLED",
     "ENV_STAGE",
+    "ENV_STRICT",
     "ENV_REDACT",
     "CALLS_JSONL_RELPATH",
     "active_ara_root",
     "capture_llm_calls",
+    "LLMTraceError",
     "record_llm_call",
+    "strict_llm_tracing",
 ]

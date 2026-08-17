@@ -62,9 +62,12 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_vcs.py",
             "xscientist/research_lifecycle.py",
             "xscientist/research_closure.py",
+            "xscientist/research_authority.py",
             "xscientist/research_evolution.py",
             "xscientist/git_support.py",
             "xscientist/research_commands.py",
+            "xscientist/demo.py",
+            "xscientist/workspace_status.py",
             "ai_scientist/resources/configs/bfts_default.yaml",
             "ai_scientist/protocol/schemas/research_closure.schema.json",
             "ai_scientist/protocol/schemas/reproduction_receipt.schema.json",
@@ -109,57 +112,101 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
     return wheel, sdist
 
 
-def smoke_install(wheel: Path) -> None:
+def smoke_install(wheel: Path, *, install_deps: bool = True) -> None:
     with tempfile.TemporaryDirectory(prefix="xscientist_wheel_check_") as td:
         root = Path(td)
         target = root / "site"
-        install = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--target",
-                str(target),
-                str(wheel),
-            ],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        install_command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--target",
+            str(target),
+            str(wheel),
+        ]
+        if not install_deps:
+            install_command.insert(-1, "--no-deps")
+        try:
+            install = subprocess.run(
+                install_command,
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "isolated wheel install timed out after 300 seconds"
+            ) from exc
         if install.returncode:
             raise RuntimeError(f"isolated wheel install failed:\n{install.stderr}")
 
         script = """
+import contextlib
+import io
 import json
 import sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import xscientist
 from xscientist import ResearchEvolution, ResearchLifecycle, ResearchRepository
+from xscientist.cli import main as cli_main
+from xscientist.research_authority import require_independent_evaluator
 from ai_scientist.protocol.schemas import available_schemas, load_schema
 from ai_scientist.resources import bfts_config_path, latex_template_dir
 assert xscientist.__version__
 assert all((ResearchRepository, ResearchLifecycle, ResearchEvolution))
+assert callable(require_independent_evaluator)
 assert load_schema("manifest")["type"] == "object"
 assert "context_pack" in available_schemas()
 assert bfts_config_path("default").is_file()
 assert (latex_template_dir("icml") / "template.tex").is_file()
-print(json.dumps({"version": xscientist.__version__, "schemas": len(available_schemas())}))
+demo_root = Path.cwd() / "demo"
+demo_output = io.StringIO()
+with contextlib.redirect_stdout(demo_output):
+    demo_exit = cli_main([
+        "demo", str(demo_root),
+        "--git-user-name", "XScientist CI",
+        "--git-user-email", "ci@example.invalid",
+        "--json",
+    ])
+demo = json.loads(demo_output.getvalue())
+assert demo_exit == 0
+assert demo["provider_used"] is False and demo["network_used"] is False
+assert demo["cost_usd"] == 0.0 and demo["dag"]["integrity_ok"] is True
+status_output = io.StringIO()
+with contextlib.redirect_stdout(status_output):
+    status_exit = cli_main(["status", str(demo_root), "--json"])
+status = json.loads(status_output.getvalue())
+assert status_exit == 0 and status["research"]["initialized"] is True
+print(json.dumps({
+    "version": xscientist.__version__,
+    "schemas": len(available_schemas()),
+    "demo_nodes": demo["dag"]["nodes"],
+    "demo_closure": demo["dag"]["closure"],
+}))
 """
-        smoke = subprocess.run(
-            [sys.executable, "-c", script, str(target)],
-            cwd=root,
-            env={
-                **os.environ,
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            smoke = subprocess.run(
+                [sys.executable, "-c", script, str(target)],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "isolated wheel demo smoke timed out after 60 seconds"
+            ) from exc
         if smoke.returncode:
             raise RuntimeError(f"isolated wheel import failed:\n{smoke.stderr}")
         print(f"[OK] isolated wheel smoke: {smoke.stdout.strip()}")
@@ -169,13 +216,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist-dir", type=Path, default=REPOSITORY_ROOT / "dist")
     parser.add_argument("--no-install-smoke", action="store_true")
+    parser.add_argument(
+        "--no-install-deps",
+        action="store_true",
+        help="reuse already installed core dependencies while testing wheel code",
+    )
     args = parser.parse_args(argv)
     dist_dir = args.dist_dir.expanduser().resolve()
     wheel, sdist = inspect_distribution(dist_dir)
     print(f"[OK] wheel inventory: {wheel.name}")
     print(f"[OK] sdist inventory: {sdist.name}")
     if not args.no_install_smoke:
-        smoke_install(wheel)
+        smoke_install(wheel, install_deps=not args.no_install_deps)
     return 0
 
 

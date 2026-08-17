@@ -516,6 +516,7 @@ def save_experiment(
     status: str,
     study_phase: str = "exploratory",
     plan_id: str | None = None,
+    priority_id: str | None = None,
     preregistration_id: str | None = None,
     metrics: Mapping[str, Any] | None = None,
     seeds: Sequence[int] = (),
@@ -524,6 +525,9 @@ def save_experiment(
     dataset_hashes: Sequence[str] = (),
     code_commit: str | None = None,
     failure_class: str = "",
+    interventions: Sequence[str] = (),
+    boundary_condition: str = "",
+    boundary_role: str = "",
     reproduce_command: str | None = None,
     message: str | None = None,
     commit: bool = True,
@@ -541,6 +545,25 @@ def save_experiment(
         payload["seeds"] = list(dict.fromkeys(seeds))
     if failure_class.strip():
         payload["failure_class"] = failure_class.strip()
+    if interventions:
+        payload["interventions"] = [
+            _required_text(value, label="experiment intervention")
+            for value in interventions
+        ]
+    if boundary_condition.strip() or boundary_role.strip():
+        if not boundary_condition.strip() or boundary_role not in {
+            "development",
+            "transfer",
+            "heldout",
+            "scale",
+        }:
+            raise ResearchGitError(
+                "experiment boundary requires a condition and valid boundary role"
+            )
+        payload["boundary_condition"] = _required_text(
+            boundary_condition, label="experiment boundary condition"
+        )
+        payload["boundary_role"] = boundary_role
     environment = capture_environment_receipt(repository.path)
     provenance: dict[str, Any] = {
         "environment_hash": environment_hash or environment["content_hash"],
@@ -568,6 +591,7 @@ def save_experiment(
         payload,
         preregistration_id=preregistration_id,
         plan_id=plan_id,
+        priority_id=priority_id,
         provenance=provenance,
         commit=False,
     )

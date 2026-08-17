@@ -94,9 +94,11 @@ The initial object kinds are:
 The additive deep-research strategy profile also defines
 `hypothesis_portfolio`, `discriminating_prediction`, `experiment_priority`,
 `anomaly`, `research_review`, `mechanism_model`, `evidence_quality`,
-`boundary_condition`, and `transfer_matrix`. Implementations MUST NOT mutate a
-historical built-in profile declaration merely to add these kinds; the strategy
-profile has its own URI, version, and digest.
+`boundary_condition`, `transfer_matrix`, and (in strategy v2)
+`posterior_update`. Strategy v2 also specializes `experiment_design` and
+`observation` for the competitive experiment loop. Implementations MUST NOT
+mutate a historical built-in profile declaration merely to add these kinds;
+v1 and v2 have distinct URIs, versions, kind sets, and digests.
 
 Every object contains a versioned schema identifier, object kind, lifecycle
 state, payload, typed relations, actor receipt, provenance receipt, and content
@@ -264,7 +266,11 @@ reported. A privacy-preserving tree view MUST NOT emit object payloads.
 | Human approver | Optional approval at policy-defined high-impact boundaries |
 
 A research agent MUST NOT write an evaluation that is treated as independent
-for its own candidate. Evaluator inputs and versions are bound to the decision.
+for its own candidate. Independence MUST be evaluated against the complete
+producer provenance closure, not only the directly evaluated object's actor.
+The evaluator, resolved targets, producer actors, traversed object IDs, policy,
+and canonical receipt hash MUST be stored. Evaluator inputs and versions are
+bound to the decision.
 For decisions created under the context-snapshot policy, the bound snapshot
 MUST be complete and its context/source/memory hashes MUST recompute. Legacy
 unbound decisions remain readable but MUST be diagnosed as weaker evidence.
@@ -276,6 +282,23 @@ The standard lifecycle is:
 `question -> ideation -> preregistration_draft -> preregistration_locked ->
 experiment_attempt -> evidence -> independent_review -> claim_promotion ->
 manuscript -> release`.
+
+The competitive strategy-v2 sub-lifecycle is:
+
+`portfolio -> locked prediction per hypothesis -> locked candidate design ->
+priority -> selected attempt -> observation/evidence -> posterior_update ->
+next priority`.
+
+The attempt MUST consume the priority and exact selected design. A posterior
+MUST bind that attempt, its observation and evidence, declare one likelihood
+per portfolio hypothesis, and match deterministic Bayesian normalization. The
+same evidence MUST NOT update one portfolio twice. An agent-computed posterior
+is a draft belief state, not independent verification.
+
+A validated mechanism MUST trace verified evidence to a completed attempt and
+locked intervention-bearing protocol. A transfer-ready matrix MUST use
+pairwise-disjoint evidence and attempt sets, and development versus held-out
+conditions MUST use disjoint dataset identities.
 
 Exploratory work may proceed without a locked preregistration, but its claims
 remain candidate claims. Confirmatory and submission-grade promotion fails

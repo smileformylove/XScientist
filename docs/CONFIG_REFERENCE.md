@@ -15,6 +15,7 @@ the active model through `xscientist provider`:
 ```bash
 xscientist provider add openai --model "openai/your-model-id"
 xscientist provider list
+xscientist provider check openai --max-cost-usd 10
 xscientist provider activate openai
 ```
 
@@ -23,6 +24,28 @@ If the selected client is absent, it prints the exact provider-specific command
 without displaying credential values. Commands started below the workspace root
 discover `.xscientist/providers.json` through parent directories, so nested
 notebooks and experiment folders do not need repeated `--workspace` flags.
+
+`provider check` is intentionally non-billing: it validates metadata,
+credential presence, the installed client, and (when `--max-cost-usd` is
+supplied) a complete non-negative model price. It does **not** call the model
+API, and its JSON output reports `credential_validation: presence_only` and
+`live_api_verified: false` so local readiness is not confused with a live
+account/model test.
+
+For models without a bundled price, either configure
+`llm_budget.prices_per_million` in `bfts_config.yaml` or supply explicit prices
+on the first guarded run:
+
+```bash
+xscientist start ./study --question "..." --prepare-only \
+  --max-cost-usd 10 \
+  --price-input-per-million 0.50 \
+  --price-output-per-million 1.50
+```
+
+The default start task is `research`, which avoids ML and PDF-layout extras.
+Use `--task ml-study`, `--task paper`, or `--task pdf-review` only when those
+capabilities are required.
 
 Provider installation profiles:
 

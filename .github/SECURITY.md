@@ -10,7 +10,7 @@ not available, open an issue with minimal details and request a private follow-u
 ## Supported versions
 
 Security fixes are applied to the default branch and the latest tagged minor
-release when one exists. The current `0.2.x` source line is alpha software;
+release when one exists. The current `0.1.x` source line is alpha software;
 older untagged snapshots are not supported.
 
 ## Running generated experiments

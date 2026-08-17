@@ -70,11 +70,15 @@ class JobStore:
         *,
         max_workers: int,
         max_output_chars: int,
+        max_workspace_bytes: int = 10 * 1024 * 1024 * 1024,
+        max_workspace_files: int = 100_000,
         state_dir: str | Path,
         write_json: Callable[[str | Path, Any], None] = atomic_write_json,
     ) -> None:
         self.client = client
         self.max_output_chars = max_output_chars
+        self.max_workspace_bytes = max_workspace_bytes
+        self.max_workspace_files = max_workspace_files
         self.write_json = write_json
         self.executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="xscientist-api"
@@ -134,7 +138,12 @@ class JobStore:
                 status="running",
                 started_at=_now_iso(),
             )
-            result = self.client.run_project(job.request)
+            result = self.client.run_project(
+                job.request,
+                max_output_chars=self.max_output_chars,
+                max_workspace_bytes=self.max_workspace_bytes,
+                max_workspace_files=self.max_workspace_files,
+            )
             result = CommandResult(
                 command=result.command,
                 returncode=result.returncode,
@@ -142,6 +151,14 @@ class JobStore:
                 stderr=result.stderr[-self.max_output_chars :],
                 started_at=result.started_at,
                 finished_at=result.finished_at,
+                stdout_truncated=(
+                    result.stdout_truncated
+                    or len(result.stdout) > self.max_output_chars
+                ),
+                stderr_truncated=(
+                    result.stderr_truncated
+                    or len(result.stderr) > self.max_output_chars
+                ),
             )
             final_changes = {
                 "result": result,

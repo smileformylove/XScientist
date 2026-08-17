@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
-
 OPENAI_COMPATIBLE_PROVIDERS = {
     "openai",
     "ollama",
@@ -151,7 +150,11 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             "anthropic_bedrock",
             raw_model.split("/", 1)[1],
             "anthropic_messages",
-            required_env_vars=("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION_NAME"),
+            required_env_vars=(
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_REGION_NAME",
+            ),
         )
 
     if raw_model.startswith("vertex_ai/") and "claude" in raw_model:
@@ -179,7 +182,11 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
 
     if prefix == "openai":
         client_model = suffix
-        request_style = "openai_reasoning" if client_model.startswith(("o1", "o3")) else "openai_chat"
+        request_style = (
+            "openai_reasoning"
+            if client_model.startswith(("o1", "o3"))
+            else "openai_chat"
+        )
         return _build_spec(
             raw_model,
             "openai",
@@ -189,7 +196,11 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             api_key_env_vars=("OPENAI_API_KEY",),
         )
 
-    if prefix == "deepseek" or raw_model.startswith("deepseek-") or raw_model in {"deepseek-coder", "deepseek-chat", "deepseek-reasoner"}:
+    if (
+        prefix == "deepseek"
+        or raw_model.startswith("deepseek-")
+        or raw_model in {"deepseek-coder", "deepseek-chat", "deepseek-reasoner"}
+    ):
         client_model = suffix if prefix == "deepseek" else raw_model
         if client_model == "deepseek-coder-v2-0724":
             client_model = "deepseek-coder"
@@ -203,7 +214,10 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             default_base_url="https://api.deepseek.com",
         )
 
-    if prefix == "huggingface" or raw_model in {"deepcoder-14b", "agentica-org/DeepCoder-14B-Preview"}:
+    if prefix == "huggingface" or raw_model in {
+        "deepcoder-14b",
+        "agentica-org/DeepCoder-14B-Preview",
+    }:
         client_model = suffix if prefix == "huggingface" else raw_model
         if client_model == "deepcoder-14b":
             client_model = "agentica-org/DeepCoder-14B-Preview"
@@ -214,7 +228,9 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             client_model,
             "huggingface_chat",
             api_key_env_vars=("HUGGINGFACE_API_KEY",),
-            default_base_url="https://api-inference.huggingface.co/models/agentica-org/DeepCoder-14B-Preview",
+            default_base_url=(
+                "https://api-inference.huggingface.co/models/" + client_model
+            ),
         )
 
     if prefix == "openrouter" or raw_model in {
@@ -295,7 +311,10 @@ def model_uses_anthropic_client(model: str) -> bool:
 
 
 def model_uses_openai_chat(model: str) -> bool:
-    return resolve_model_provider(model).request_style in {"openai_chat", "huggingface_chat"}
+    return resolve_model_provider(model).request_style in {
+        "openai_chat",
+        "huggingface_chat",
+    }
 
 
 def model_uses_openai_reasoning(model: str) -> bool:
@@ -315,7 +334,10 @@ def _missing_requirements(
     for env_name in spec.required_env_vars:
         if not str(source.get(env_name) or "").strip():
             missing.append(env_name)
-    if spec.api_key_env_vars and _pick_first_env(spec.api_key_env_vars, source)[1] is None:
+    if (
+        spec.api_key_env_vars
+        and _pick_first_env(spec.api_key_env_vars, source)[1] is None
+    ):
         missing.append(" | ".join(spec.api_key_env_vars))
     # Some OpenAI-compatible providers (e.g., Ollama) ship a safe default base_url.
     # Only require explicit base_url configuration when no default is available.
@@ -424,7 +446,11 @@ def provider_env_statuses(
             "anthropic_bedrock",
             "anthropic.claude-3-5-sonnet-20241022-v2:0",
             "anthropic_messages",
-            required_env_vars=("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION_NAME"),
+            required_env_vars=(
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_REGION_NAME",
+            ),
         ),
         _build_spec(
             "vertex_ai/claude-3-5-sonnet@20241022",

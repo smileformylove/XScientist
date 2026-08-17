@@ -829,6 +829,139 @@ def _record_local_research_planning_objects(
                 relations=[{"type": "depends_on", "target": candidate.object_id}],
             )
             object_ids["plans"][index] = candidate_plan.object_id
+        challenge = (
+            lead_plan.get("socratic_challenge")
+            if isinstance(lead_plan, dict)
+            and isinstance(lead_plan.get("socratic_challenge"), dict)
+            else {}
+        )
+        rivals = [
+            item
+            for item in challenge.get("rival_hypotheses") or []
+            if isinstance(item, dict) and str(item.get("statement") or "").strip()
+        ]
+        tests = [
+            item
+            for item in challenge.get("discriminating_tests") or []
+            if isinstance(item, dict) and str(item.get("design") or "").strip()
+        ]
+        if rivals and tests:
+            from xscientist.research_strategy import (
+                rank_experiment_candidates,
+                save_discriminating_prediction,
+                save_hypothesis_portfolio,
+            )
+
+            rival_objects = []
+            rival_id_map: dict[str, str] = {}
+            for rival in rivals:
+                recorded_rival = lifecycle.repository.record(
+                    "hypothesis",
+                    {
+                        "statement": str(rival["statement"]),
+                        "falsifier": str(
+                            rival.get("discriminating_prediction")
+                            or "A predeclared discriminating test favors another hypothesis."
+                        ),
+                        "source": str(rival.get("source") or "socratic_challenge"),
+                        "rival_class": rival.get("class"),
+                    },
+                    state="draft",
+                )
+                rival_objects.append(recorded_rival)
+                rival_id_map[str(rival.get("rival_id") or recorded_rival.object_id)] = (
+                    recorded_rival.object_id
+                )
+            portfolio = save_hypothesis_portfolio(
+                project_root,
+                question=str(
+                    challenge.get("primary_hypothesis")
+                    or idea_cards[0].get("title")
+                    or "Which competing explanation survives the next test?"
+                ),
+                primary_id=planning["hypothesis"].object_id,
+                alternative_ids=[item.object_id for item in rival_objects],
+                commit=False,
+            )["object"]
+            hypothesis_ids = [
+                planning["hypothesis"].object_id,
+                *[item.object_id for item in rival_objects],
+            ]
+            prediction_ids: list[str] = []
+            candidates: list[dict[str, object]] = []
+            rival_by_object_id = {
+                object_id: rival
+                for rival, object_id in zip(rivals, rival_id_map.values())
+            }
+            for test in tests:
+                condition = str(test["design"])
+                targeted = {
+                    rival_id_map[value]
+                    for value in test.get("targets") or []
+                    if value in rival_id_map
+                }
+                predictions: dict[str, str] = {}
+                for hypothesis_id in hypothesis_ids:
+                    if hypothesis_id == planning["hypothesis"].object_id:
+                        outcome = "the primary hypothesis passes its preregistered success rule"
+                    elif hypothesis_id in targeted:
+                        outcome = str(
+                            rival_by_object_id[hypothesis_id].get(
+                                "discriminating_prediction"
+                            )
+                            or "the targeted rival is favored"
+                        )
+                    else:
+                        outcome = "this test is not decisive for this rival"
+                    predictions[hypothesis_id] = outcome
+                    prediction = save_discriminating_prediction(
+                        project_root,
+                        portfolio_id=portfolio.object_id,
+                        hypothesis_id=hypothesis_id,
+                        when=condition,
+                        expected_outcome=outcome,
+                        distinguishes_from=[
+                            value for value in hypothesis_ids if value != hypothesis_id
+                        ],
+                        falsifier="the observed outcome is closer to a competing prediction",
+                        commit=False,
+                    )["object"]
+                    prediction_ids.append(prediction.object_id)
+                test_id = str(test.get("test_id") or f"test-{len(candidates) + 1}")
+                candidates.append(
+                    {
+                        "candidate_id": test_id,
+                        "summary": condition,
+                        "condition": condition,
+                        "interventions": (
+                            [str(challenge.get("proposed_mechanism"))]
+                            if "mechanism" in test_id
+                            and challenge.get("proposed_mechanism")
+                            else []
+                        ),
+                        "predictions": predictions,
+                        "novelty": 2,
+                        "impact": 3,
+                        "transfer_value": 3 if "boundary" in test_id else 2,
+                        "cost": 2,
+                        "risk": 1,
+                        "redundancy": 0,
+                    }
+                )
+            priority_result = rank_experiment_candidates(
+                project_root,
+                portfolio_id=portfolio.object_id,
+                candidates=candidates,
+                commit=False,
+            )
+            priority = priority_result["object"]
+            object_ids["strategy"] = {
+                "portfolio": portfolio.object_id,
+                "predictions": prediction_ids,
+                "priority": priority.object_id,
+                "designs": [item.object_id for item in priority_result["related"]],
+                "status": "proposed_not_executed",
+            }
         args._research_vcs_ids = object_ids
         print(
             "🧬 Research VCS 已记录 "
@@ -1217,6 +1350,15 @@ def _record_local_research_handoff_objects(
             object_ids.setdefault("gates", {})[idea_index] = gate.object_id
             object_ids.setdefault("contexts", {})[idea_index] = context.object_id
             object_ids.setdefault("manuscripts", {})[idea_index] = manuscript.object_id
+        from xscientist.research_strategy import review_research_program
+
+        strategy_review = review_research_program(
+            lifecycle.repository.path,
+            record=True,
+            commit=False,
+        )
+        if strategy_review.get("object") is not None:
+            object_ids["program_review"] = strategy_review["object"].object_id
         args._research_vcs_ids = object_ids
         print(
             "🧬 Research VCS 已投影 "
@@ -1916,6 +2058,7 @@ def process_single_idea(args):
             idea=idea,
             timestamp=timestamp,
             stage="pipeline",
+            strict=bool(strict_fallbacks or require_quality_gate),
         )
         initialize_pipeline_contracts(
             exp_dir,

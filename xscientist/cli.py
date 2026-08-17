@@ -70,6 +70,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xscientist",
         description="XScientist SDK, workflow CLI, and API service.",
+        epilog=(
+            "Start simple: `xscientist demo ./demo-study`, then use "
+            "`xscientist start --help` for model-backed research."
+        ),
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -103,11 +107,31 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--output-root", default=None)
     serve_parser.add_argument("--max-workers", type=int, default=2)
     serve_parser.add_argument("--max-output-chars", type=int, default=200_000)
+    serve_parser.add_argument("--max-workspace-bytes", type=int, default=10 * 1024**3)
+    serve_parser.add_argument("--max-workspace-files", type=int, default=100_000)
     serve_parser.add_argument("--state-dir", default=None)
     serve_parser.add_argument("--reload", action="store_true")
+    serve_parser.add_argument("--allow-unauthenticated", action="store_true")
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
+    demo_parser = subparsers.add_parser(
+        "demo",
+        help="Create a complete provider-free evidence demo and offline DAG.",
+    )
+    demo_parser.add_argument("directory", nargs="?", default="./xscientist-demo")
+    demo_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    demo_parser.add_argument("--open", action="store_true", dest="open_browser")
+    demo_parser.add_argument("--git-user-name")
+    demo_parser.add_argument("--git-user-email")
+    demo_parser.add_argument("--json", action="store_true", dest="as_json")
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show research progress, budget use, outputs, and the next action.",
+    )
+    status_parser.add_argument("workspace", nargs="?", default=None)
+    status_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    status_parser.add_argument("--json", action="store_true", dest="as_json")
     init_parser = subparsers.add_parser(
         "init",
         help="Create a ready-to-configure research workspace.",
@@ -173,6 +197,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="workspace root (default: discover from the current directory)",
     )
     provider_list.add_argument("--json", action="store_true", dest="as_json")
+    provider_check = provider_subparsers.add_parser(
+        "check",
+        help=(
+            "Check one provider's local credentials, client, model, and optional "
+            "cost enforcement without making a paid API call."
+        ),
+    )
+    provider_check.add_argument("name", nargs="?", choices=_PROVIDER_CHOICES)
+    provider_check.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
+    provider_check.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help="also require a known non-negative price for the configured model",
+    )
+    provider_check.add_argument("--json", action="store_true", dest="as_json")
     provider_add = provider_subparsers.add_parser(
         "add",
         help="Configure a provider; secrets are prompted with hidden input.",
@@ -310,6 +354,15 @@ def _build_start_parser() -> argparse.ArgumentParser:
         default="balanced",
     )
     parser.add_argument(
+        "--task",
+        choices=["research", "paper", "pdf-review", "ml-study"],
+        default=None,
+        help=(
+            "runtime capability profile; defaults to research, or paper for "
+            "publication autopilot"
+        ),
+    )
+    parser.add_argument(
         "--provider",
         choices=_PROVIDER_CHOICES,
         default=None,
@@ -329,6 +382,24 @@ def _build_start_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-project-tokens", type=int, default=None)
     parser.add_argument("--max-project-hours", type=float, default=None)
     parser.add_argument("--max-cost-usd", type=float, default=None)
+    parser.add_argument(
+        "--price-input-per-million",
+        type=float,
+        default=None,
+        help="explicit USD input-token price for models without a bundled price",
+    )
+    parser.add_argument(
+        "--price-output-per-million",
+        type=float,
+        default=None,
+        help="explicit USD output-token price for models without a bundled price",
+    )
+    parser.add_argument(
+        "--price-cached-input-per-million",
+        type=float,
+        default=None,
+        help="optional USD cached-input price; defaults to the input price",
+    )
     parser.add_argument(
         "--build-executor",
         action="store_true",
@@ -447,7 +518,7 @@ def _installation_info() -> dict[str, object]:
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
-        "quickstart": "xscientist setup my-research --task research",
+        "quickstart": "xscientist demo ./xscientist-demo --open",
         "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
@@ -583,6 +654,10 @@ def _configure_provider(
 
 
 def _run_provider(parsed: argparse.Namespace) -> int:
+    import yaml
+
+    from ai_scientist.utils.llm_budget import resolve_model_price
+
     from .provider_config import (
         ProviderConfigError,
         activate_provider,
@@ -635,6 +710,132 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     if row["configured"] and missing_clients:
                         print(f"    Install: {row['install_command']}")
             return 0
+
+        if parsed.provider_command == "check":
+            if parsed.max_cost_usd is not None and parsed.max_cost_usd <= 0:
+                raise ProviderConfigError("--max-cost-usd must be greater than zero")
+            config = load_provider_config(workspace, missing_ok=False)
+            provider = str(parsed.name or config.get("active_provider") or "")
+            if not provider:
+                raise ProviderConfigError(
+                    "no active provider is configured; pass a provider name or run "
+                    "`xscientist provider activate NAME`"
+                )
+            row = next(
+                item
+                for item in provider_statuses(workspace)
+                if item["provider"] == provider
+            )
+            custom_prices: dict[str, object] = {}
+            bfts_path = workspace / "bfts_config.yaml"
+            if bfts_path.is_file():
+                try:
+                    bfts = yaml.safe_load(bfts_path.read_text(encoding="utf-8"))
+                except yaml.YAMLError as exc:
+                    raise ProviderConfigError(
+                        f"cannot read BFTS config: {exc}"
+                    ) from exc
+                if isinstance(bfts, dict):
+                    budget = bfts.get("llm_budget")
+                    prices = (
+                        budget.get("prices_per_million")
+                        if isinstance(budget, dict)
+                        else None
+                    )
+                    if isinstance(prices, dict):
+                        custom_prices = prices
+            model = str(row.get("model") or "")
+            price = (
+                resolve_model_price(model, prices_per_million=custom_prices)
+                if model
+                else None
+            )
+            error_codes: list[str] = []
+            remediations: list[dict[str, str]] = []
+            if not row["configured"]:
+                error_codes.append("provider_not_configured")
+                remediations.append(
+                    {
+                        "code": "configure_provider",
+                        "command": f"xscientist provider add {provider}",
+                    }
+                )
+            if row["missing"]:
+                error_codes.append("provider_credentials_missing")
+                remediations.append(
+                    {
+                        "code": "configure_credentials",
+                        "command": f"xscientist provider add {provider}",
+                    }
+                )
+            if row["missing_client_modules"]:
+                error_codes.append("provider_client_missing")
+                remediations.append(
+                    {
+                        "code": "install_provider_client",
+                        "command": str(row["install_command"]),
+                    }
+                )
+            if row["error"]:
+                error_codes.append("provider_credential_file_unsafe")
+                remediations.append(
+                    {
+                        "code": "restrict_credential_file",
+                        "command": f"chmod 600 {config.get('env_file') or '.env'}",
+                    }
+                )
+            cost_ready = parsed.max_cost_usd is None or price is not None
+            if not cost_ready:
+                error_codes.append("unknown_model_price")
+                remediations.append(
+                    {
+                        "code": "configure_model_price",
+                        "command": (
+                            "edit llm_budget.prices_per_million in bfts_config.yaml"
+                        ),
+                    }
+                )
+            payload = {
+                "schema": "xscientist.provider-check.v1",
+                "ok": bool(row["ready"] and cost_ready),
+                "workspace": ".",
+                "provider": provider,
+                "model": model or None,
+                "checks": {
+                    "metadata_configured": bool(row["configured"]),
+                    "credentials_present": bool(row["credentials_available"]),
+                    "credential_validation": "presence_only",
+                    "client_available": bool(row["client_available"]),
+                    "model_price_known": price is not None,
+                    "cost_limit_requested": parsed.max_cost_usd is not None,
+                    "live_api_verified": False,
+                },
+                "price_per_million": price,
+                "error_codes": error_codes,
+                "remediations": remediations,
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                state = "ready for a local run" if payload["ok"] else "not ready"
+                print(f"Provider {provider}: {state}")
+                print(f"Model: {model or '-'}")
+                print(
+                    "Credentials: "
+                    + ("present" if row["credentials_available"] else "missing")
+                    + " (presence check only; no live API request was made)"
+                )
+                print(
+                    "Model pricing: "
+                    + (
+                        "price known"
+                        if price is not None
+                        else "not configured (required only for --max-cost-usd)"
+                    )
+                )
+                for remediation in remediations:
+                    print(f"Next: {remediation['command']}")
+            return 0 if payload["ok"] else 1
 
         if parsed.provider_command == "remove":
             config = remove_provider(workspace, parsed.name)
@@ -791,10 +992,14 @@ def _run_start(parsed: argparse.Namespace) -> int:
     import os
     import subprocess
 
+    import yaml
+
     from ai_scientist.utils.atomic_io import atomic_write_text
     from ai_scientist.utils.auth_session import create_session, validate_session
+    from ai_scientist.utils.llm_budget import resolve_model_price
     from .diagnostics import diagnose
     from .onboarding import WorkspaceInitError, create_workspace
+    from .dependency_profiles import TASK_PROFILES
     from .provider_config import (
         DEFAULT_MODELS,
         ProviderConfigError,
@@ -835,6 +1040,25 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 f"xscientist start: {label} must be greater than zero", file=sys.stderr
             )
             return 2
+    price_values = (
+        parsed.price_input_per_million,
+        parsed.price_output_per_million,
+        parsed.price_cached_input_per_million,
+    )
+    if any(value is not None and float(value) < 0 for value in price_values):
+        print(
+            "xscientist start: explicit model prices must be non-negative",
+            file=sys.stderr,
+        )
+        return 2
+    if (parsed.price_input_per_million is None) != (
+        parsed.price_output_per_million is None
+    ):
+        print(
+            "xscientist start: input and output prices must be supplied together",
+            file=sys.stderr,
+        )
+        return 2
 
     workspace = Path(parsed.directory).expanduser().resolve()
     phases: dict[str, object] = {}
@@ -857,6 +1081,13 @@ def _run_start(parsed: argparse.Namespace) -> int:
         selected_model = (
             parsed.model or existing_model or DEFAULT_MODELS.get(selected_provider)
         )
+        selected_task = str(
+            parsed.task
+            or ("paper" if parsed.autopilot == "publication" else "research")
+        )
+        selected_capabilities = tuple(
+            str(item) for item in TASK_PROFILES[selected_task]["capabilities"]
+        )
         if not selected_model:
             if parsed.non_interactive or not sys.stdin.isatty():
                 raise ProviderConfigError(
@@ -870,11 +1101,16 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 provider=selected_provider,
                 model=selected_model,
                 force=parsed.force,
-                task="research",
-                capabilities=("research", "ml", "pdf-layout"),
+                task=selected_task,
+                capabilities=selected_capabilities,
                 provider_required=True,
             )
-        phases["workspace"] = {"ok": True, "created": not config_exists}
+        phases["workspace"] = {
+            "ok": True,
+            "created": not config_exists,
+            "task": selected_task,
+            "capabilities": list(selected_capabilities),
+        }
 
         topic = f"# Research question\n\n{question}\n"
         established_topic = workspace / "00_config" / "topic.md"
@@ -946,6 +1182,72 @@ def _run_start(parsed: argparse.Namespace) -> int:
         if load_result.get("error"):
             raise ProviderConfigError(str(load_result["error"]))
 
+        budget_path = workspace / "bfts_config.yaml"
+        budget_payload = yaml.safe_load(budget_path.read_text(encoding="utf-8"))
+        if not isinstance(budget_payload, dict):
+            raise ProviderConfigError("BFTS configuration must be a mapping")
+        budget_section = budget_payload.setdefault("llm_budget", {})
+        if not isinstance(budget_section, dict):
+            raise ProviderConfigError("BFTS llm_budget must be a mapping")
+        custom_prices = budget_section.setdefault("prices_per_million", {})
+        if not isinstance(custom_prices, dict):
+            raise ProviderConfigError("llm_budget.prices_per_million must be a mapping")
+        if parsed.price_input_per_million is not None:
+            explicit_price = {
+                "input": float(parsed.price_input_per_million),
+                "output": float(parsed.price_output_per_million),
+            }
+            if parsed.price_cached_input_per_million is not None:
+                explicit_price["cached_input"] = float(
+                    parsed.price_cached_input_per_million
+                )
+            custom_prices[selected_model] = explicit_price
+            atomic_write_text(
+                budget_path,
+                yaml.safe_dump(budget_payload, sort_keys=False, allow_unicode=True),
+            )
+        price = resolve_model_price(
+            selected_model,
+            prices_per_million=custom_prices,
+        )
+        phases["budget"] = {
+            "ok": parsed.max_cost_usd is None or price is not None,
+            "cost_limit_enabled": parsed.max_cost_usd is not None,
+            "model": selected_model,
+            "price_configured": price is not None,
+            "price_source": (
+                "workspace"
+                if selected_model in custom_prices
+                else ("bundled" if price is not None else None)
+            ),
+        }
+        if parsed.max_cost_usd is not None and price is None:
+            payload = {
+                "schema": "xscientist.start.v1",
+                "ok": False,
+                "phase": "budget",
+                "error_code": "unknown_model_price",
+                "error": (
+                    f"no price is configured for model {selected_model!r}; "
+                    "XScientist will not guess or treat it as free"
+                ),
+                "workspace": ".",
+                "phases": phases,
+                "next_actions": [
+                    "rerun with --price-input-per-million PRICE "
+                    "--price-output-per-million PRICE",
+                    "or edit llm_budget.prices_per_million in bfts_config.yaml",
+                ],
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print("XScientist cannot enforce the requested cost limit yet.")
+                print(payload["error"])
+                for action in payload["next_actions"]:
+                    print(f"  {action}")
+            return 1
+
         if parsed.build_executor:
             source_root = Path(__file__).resolve().parents[1]
             local_source = (source_root / "pyproject.toml").is_file() and (
@@ -983,6 +1285,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
                         "XSCIENTIST_INSTALL_MODE=local",
                         "--build-arg",
                         "XSCIENTIST_SOURCE_REVISION=" + (revision or "local-source"),
+                        "--build-arg",
+                        "XSCIENTIST_INSTALL_SOURCE=local-source",
                     ]
                 )
             command.append(str(build_context))
@@ -1000,7 +1304,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
 
         report = diagnose(
             workspace,
-            task="research",
+            task=selected_task,
             provider=selected_provider,
             deep=True,
         )
@@ -1170,12 +1474,99 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=parsed.output_root,
             max_workers=parsed.max_workers,
             max_output_chars=parsed.max_output_chars,
+            max_workspace_bytes=parsed.max_workspace_bytes,
+            max_workspace_files=parsed.max_workspace_files,
             state_dir=parsed.state_dir,
             reload=parsed.reload,
+            allow_unauthenticated=parsed.allow_unauthenticated,
         )
         return 0
     if parsed.command == "start":
         return _run_start(parsed)
+    if parsed.command == "demo":
+        import webbrowser
+
+        from .demo import create_demo
+        from .research_git import ResearchGitError
+
+        try:
+            payload = create_demo(
+                parsed.directory,
+                language=parsed.lang,
+                git_user_name=parsed.git_user_name,
+                git_user_email=parsed.git_user_email,
+            )
+        except (OSError, ResearchGitError, ValueError) as exc:
+            if parsed.as_json:
+                print(
+                    json.dumps(
+                        {
+                            "schema": "xscientist.demo.v1",
+                            "ok": False,
+                            "error_code": "demo_creation_failed",
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"xscientist demo: {exc}", file=sys.stderr)
+            return 2
+        if parsed.open_browser:
+            payload["browser_opened"] = bool(
+                webbrowser.open(Path(payload["dag"]["html"]).as_uri())
+            )
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("XScientist provider-free demo is ready.")
+            print(
+                f"Evidence DAG: {payload['dag']['nodes']} nodes, "
+                f"{payload['dag']['relations']} relations"
+            )
+            print(f"Scientific closure: {payload['dag']['closure']}")
+            print(f"Open: {payload['dag']['html']}")
+            print("Cost: $0.00; no provider or network was used.")
+        return 0
+    if parsed.command == "status":
+        from .workspace_status import build_workspace_status
+
+        payload = build_workspace_status(parsed.workspace, language=parsed.lang)
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            research = payload["research"]
+            run = payload["run"]
+            result = payload["result"]
+            print(f"Workspace: {payload['workspace']}")
+            print(
+                "Research: "
+                + (
+                    f"{research['branch']} / staged={research['staged']}"
+                    if research["initialized"]
+                    else "not initialized"
+                )
+            )
+            if (research.get("guide") or {}).get("progress"):
+                progress = research["guide"]["progress"]
+                print(
+                    f"Scientific progress: {progress['completed_stages']}/"
+                    f"{progress['total_stages']} ({progress['percent']}%)"
+                )
+            print(
+                f"Automated run: {run['current_stage'] or ('started' if run['started'] else 'not started')}"
+            )
+            if payload["budget"]["available"]:
+                print(f"Budget used: {payload['budget']['used']}")
+            if result["dag_html"]:
+                print(f"Evidence DAG: {result['dag_html']}")
+            if payload["next_steps"]:
+                step = payload["next_steps"][0]
+                print(f"Next: {step.get('title') or step.get('code')}")
+                if step.get("command"):
+                    print(f"Run:  {step['command']}")
+        return 0 if payload["ok"] else 1
     if parsed.command == "info":
         payload = _installation_info()
         if parsed.as_json:

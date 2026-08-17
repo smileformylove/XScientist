@@ -27,6 +27,13 @@ from typing import Any, Literal
 import humanize
 from dataclasses_json import DataClassJsonMixin
 
+from ai_scientist.utils.bounded_process import (
+    BoundedTextBuffer,
+    ProcessResourceLimitExceeded,
+    run_process_bounded,
+    workspace_limit_checker,
+)
+
 logger = logging.getLogger("ai-scientist")
 
 
@@ -44,6 +51,7 @@ class ExecutionResult(DataClassJsonMixin):
     exc_stack: list[tuple] | None = None
     execution_backend: str = "process"
     isolation: dict[str, Any] | None = None
+    output_truncated: bool = False
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -63,6 +71,9 @@ class SandboxPolicy:
     pids_limit: int = 256
     read_only_root: bool = True
     read_only_mounts: tuple[str, ...] = ()
+    max_output_chars: int = 200_000
+    max_workspace_bytes: int = 10 * 1024 * 1024 * 1024
+    max_workspace_files: int = 100_000
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "process", "docker"}:
@@ -73,6 +84,12 @@ class SandboxPolicy:
             raise ValueError("Sandbox CPU limit must be positive")
         if self.pids_limit <= 0:
             raise ValueError("Sandbox PID limit must be positive")
+        if self.max_output_chars <= 0:
+            raise ValueError("Sandbox output limit must be positive")
+        if self.max_workspace_bytes <= 0:
+            raise ValueError("Sandbox workspace byte limit must be positive")
+        if self.max_workspace_files <= 0:
+            raise ValueError("Sandbox workspace file limit must be positive")
 
 
 def sandbox_policy_from_config(exec_config: Any | None) -> SandboxPolicy:
@@ -97,6 +114,15 @@ def sandbox_policy_from_config(exec_config: Any | None) -> SandboxPolicy:
             str(item)
             for item in (getattr(exec_config, "read_only_mounts", ()) or ())
             if str(item).strip()
+        ),
+        max_output_chars=int(
+            getattr(exec_config, "max_output_chars", 200_000) or 200_000
+        ),
+        max_workspace_bytes=int(
+            getattr(exec_config, "max_workspace_bytes", 10 * 1024**3) or 10 * 1024**3
+        ),
+        max_workspace_files=int(
+            getattr(exec_config, "max_workspace_files", 100_000) or 100_000
         ),
     )
 
@@ -175,11 +201,14 @@ def exception_summary(e, working_dir, exec_file_name, format_tb_ipython):
 
 
 class RedirectQueue:
-    def __init__(self, queue):
+    def __init__(self, queue, *, chunk_chars: int = 8192):
         self.queue = queue
+        self.chunk_chars = chunk_chars
 
     def write(self, msg):
-        self.queue.put(msg)
+        text = str(msg or "")
+        for offset in range(0, len(text), self.chunk_chars):
+            self.queue.put(text[offset : offset + self.chunk_chars])
 
     def flush(self):
         pass
@@ -280,6 +309,9 @@ class Interpreter:
                 if self.execution_backend == "docker"
                 else []
             ),
+            "max_output_chars": policy.max_output_chars,
+            "max_workspace_bytes": policy.max_workspace_bytes,
+            "max_workspace_files": policy.max_workspace_files,
         }
 
     def child_proc_setup(self, result_outq: Queue) -> None:
@@ -358,7 +390,9 @@ class Interpreter:
         # - result_outq: receive stdout/stderr from child
         # - event_outq: receive events from child (e.g. state:ready, state:finished)
         # trunk-ignore(mypy/var-annotated)
-        self.code_inq, self.result_outq, self.event_outq = Queue(), Queue(), Queue()
+        self.code_inq = Queue(maxsize=4)
+        self.result_outq = Queue(maxsize=256)
+        self.event_outq = Queue(maxsize=16)
         self.process = Process(
             target=self._run_session,
             args=(self.code_inq, self.result_outq, self.event_outq),
@@ -518,14 +552,18 @@ class Interpreter:
         started = time.monotonic()
         metadata = self.execution_metadata()
         container_name = f"xscientist-{uuid.uuid4().hex[:16]}"
+        limit_check = workspace_limit_checker(
+            self.working_dir,
+            max_bytes=self.sandbox_policy.max_workspace_bytes,
+            max_files=self.sandbox_policy.max_workspace_files,
+        )
         try:
-            completed = subprocess.run(
+            completed = run_process_bounded(
                 self._docker_command_for_name(container_name),
                 cwd=self.working_dir,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout,
-                check=False,
+                max_output_chars=self.sandbox_policy.max_output_chars,
+                limit_check=limit_check,
             )
             exec_time = time.monotonic() - started
         except subprocess.TimeoutExpired as exc:
@@ -547,6 +585,28 @@ class Interpreter:
                 exc_stack=[],
                 execution_backend="docker",
                 isolation=metadata,
+                output_truncated=(
+                    len(str(exc.stdout or "")) >= self.sandbox_policy.max_output_chars
+                    or len(str(exc.stderr or ""))
+                    >= self.sandbox_policy.max_output_chars
+                ),
+            )
+        except ProcessResourceLimitExceeded as exc:
+            self._force_remove_container(container_name)
+            output = [value for value in (exc.stdout, exc.stderr) if value]
+            output.append(f"ResourceLimitError: {exc.reason}")
+            return ExecutionResult(
+                term_out=output,
+                exec_time=time.monotonic() - started,
+                exc_type="ResourceLimitError",
+                exc_info={"backend": "docker", "reason": exc.reason},
+                exc_stack=[],
+                execution_backend="docker",
+                isolation=metadata,
+                output_truncated=(
+                    len(exc.stdout) >= self.sandbox_policy.max_output_chars
+                    or len(exc.stderr) >= self.sandbox_policy.max_output_chars
+                ),
             )
         except OSError as exc:
             return ExecutionResult(
@@ -582,6 +642,7 @@ class Interpreter:
             exc_stack=[],
             execution_backend="docker",
             isolation=metadata,
+            output_truncated=(completed.stdout_truncated or completed.stderr_truncated),
         )
 
     def run(self, code: str, reset_session=True) -> ExecutionResult:
@@ -635,6 +696,27 @@ class Interpreter:
             raise RuntimeError(msg) from None
         assert state[0] == "state:ready", state
         start_time = time.time()
+        output_buffer = BoundedTextBuffer(self.sandbox_policy.max_output_chars)
+        workspace_check = workspace_limit_checker(
+            self.working_dir,
+            max_bytes=self.sandbox_policy.max_workspace_bytes,
+            max_files=self.sandbox_policy.max_workspace_files,
+        )
+        next_workspace_check = start_time
+        resource_limit_reason: str | None = None
+        saw_eof = False
+
+        def drain_output_queue() -> bool:
+            saw_eof = False
+            while True:
+                try:
+                    line = self.result_outq.get_nowait()
+                except queue.Empty:
+                    return saw_eof
+                if line == "<|EOF|>":
+                    saw_eof = True
+                else:
+                    output_buffer.append(str(line))
 
         # this flag indicates that the child ahs exceeded the time limit and an interrupt was sent
         # if the child process dies without this flag being set, it's an unexpected termination
@@ -642,9 +724,29 @@ class Interpreter:
         timeout_grace_seconds = 60
 
         while True:
+            saw_eof = drain_output_queue() or saw_eof
+            now = time.time()
+            if now >= next_workspace_check:
+                try:
+                    resource_limit_reason = workspace_check()
+                except Exception as exc:
+                    resource_limit_reason = (
+                        f"workspace limit check failed: {type(exc).__name__}"
+                    )
+                if resource_limit_reason:
+                    self.cleanup_session()
+                    state = (
+                        None,
+                        "ResourceLimitError",
+                        {"reason": resource_limit_reason},
+                        [],
+                    )
+                    exec_time = now - start_time
+                    break
+                next_workspace_check = now + 0.5
             try:
                 # check if the child is done
-                state = self.event_outq.get(timeout=1)  # wait for state:finished
+                state = self.event_outq.get(timeout=0.1)  # wait for state:finished
                 assert state[0] == "state:finished", state
                 exec_time = time.time() - start_time
                 break
@@ -685,26 +787,42 @@ class Interpreter:
                         exec_time = self.timeout
                         break
 
-        output: list[str] = []
+        if resource_limit_reason is None:
+            resource_limit_reason = workspace_check()
+            if resource_limit_reason:
+                self.cleanup_session()
+                state = (
+                    None,
+                    "ResourceLimitError",
+                    {"reason": resource_limit_reason},
+                    [],
+                )
+
         e_cls_name, exc_info, exc_stack = state[1:]
-        while True:
+        while not saw_eof:
             try:
-                line = self.result_outq.get(timeout=1)
-                output.append(line)
+                line = self.result_outq.get(timeout=0.1)
                 if line == "<|EOF|>":
+                    saw_eof = True
                     break
+                output_buffer.append(str(line))
             except queue.Empty:
                 if e_cls_name == "TimeoutError":
                     break
-                if self.result_outq.empty():
+                if not saw_eof and self.process is not None and self.process.is_alive():
                     continue
-        if output and output[-1] == "<|EOF|>":
-            output.pop()
+
+                break
+
+        output_text, output_truncated = output_buffer.snapshot()
+        output = [output_text] if output_text else []
 
         if e_cls_name == "TimeoutError":
             output.append(
                 f"TimeoutError: Execution exceeded the time limit of {humanize.naturaldelta(self.timeout)}"
             )
+        elif e_cls_name == "ResourceLimitError":
+            output.append(f"ResourceLimitError: {resource_limit_reason}")
         else:
             output.append(
                 f"Execution time: {humanize.naturaldelta(exec_time)} seconds (time limit is {humanize.naturaldelta(self.timeout)})."
@@ -717,4 +835,5 @@ class Interpreter:
             exc_stack,
             execution_backend="process",
             isolation=self.execution_metadata(),
+            output_truncated=output_truncated,
         )

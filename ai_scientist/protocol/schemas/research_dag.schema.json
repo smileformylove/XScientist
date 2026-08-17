@@ -3,7 +3,7 @@
   "$id": "https://xscientist.io/protocol/research-vcs.v1/research_dag.schema.json",
   "title": "XScientist Unified Scientific Evidence DAG",
   "type": "object",
-  "required": ["schema_version", "ref", "commit", "content_disclosed", "sources", "nodes", "edges", "proof_summary", "scientific_closure", "integrity", "generated_at", "graph_hash"],
+  "required": ["schema_version", "ref", "commit", "content_disclosed", "sources", "nodes", "edges", "proof_summary", "theory_frontier", "claim_insights", "strategy_summary", "scientific_closure", "integrity", "generated_at", "graph_hash"],
   "properties": {
     "schema_version": {"const": "xscientist.research-dag.v1"},
     "ref": {"type": "string", "minLength": 1},
@@ -59,13 +59,90 @@
       }
     },
     "proof_summary": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
-    "theory_frontier": {"type": "object"},
-    "claim_insights": {"type": "array", "items": {"type": "object"}},
-    "strategy_summary": {"type": "object"},
+    "theory_frontier": {
+      "type": "object",
+      "required": ["active_hypothesis_ids", "portfolio_ids", "prediction_ids", "posterior_ids", "mechanism_ids", "open_anomaly_ids", "open_questions", "portfolio_frontiers", "next_experiments", "next_experiment", "frontier_hash"],
+      "properties": {
+        "active_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "portfolio_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "prediction_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "posterior_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "mechanism_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "open_anomaly_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "open_questions": {"type": "array", "items": {"type": "object"}},
+        "portfolio_frontiers": {"type": "array", "items": {"$ref": "#/$defs/portfolioFrontier"}},
+        "next_experiments": {"type": "array", "items": {"$ref": "#/$defs/nextExperiment"}},
+        "next_experiment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/nextExperiment"}]},
+        "frontier_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "claim_insights": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "depth_level", "supporting_ids", "refuting_ids", "mechanism_ids", "quality_assessment_ids", "boundary_ids", "portfolio_ids", "next_experiments", "next_experiment", "gaps", "decision_ready"],
+        "properties": {
+          "claim_id": {"type": "string"},
+          "depth_level": {"enum": ["descriptive", "causal", "transferable"]},
+          "supporting_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "refuting_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "mechanism_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "quality_assessment_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "boundary_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "portfolio_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "next_experiments": {"type": "array", "items": {"$ref": "#/$defs/nextExperiment"}},
+          "next_experiment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/nextExperiment"}]},
+          "gaps": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "decision_ready": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "strategy_summary": {
+      "type": "object",
+      "required": ["profile", "layer_counts", "review_due", "latest_review_id", "open_anomaly_count", "claim_depth_counts"],
+      "properties": {
+        "profile": {"const": "xscientist.deep-research-strategy.v1"},
+        "layer_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "review_due": {"type": "boolean"},
+        "latest_review_id": {"type": ["string", "null"]},
+        "open_anomaly_count": {"type": "integer", "minimum": 0},
+        "claim_depth_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      },
+      "additionalProperties": false
+    },
     "scientific_closure": {"type": "object"},
     "integrity": {"type": "object"},
     "generated_at": {"type": "string"},
     "graph_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "nextExperiment": {
+      "type": "object",
+      "required": ["portfolio_id", "priority_object_id", "candidate_id", "design_object_id", "summary", "expected_information_gain", "utility_score"],
+      "properties": {
+        "portfolio_id": {"type": "string"},
+        "priority_object_id": {"type": "string"},
+        "candidate_id": {"type": "string"},
+        "design_object_id": {"type": ["string", "null"]},
+        "summary": {"type": "string"},
+        "expected_information_gain": {"type": "number", "minimum": 0, "maximum": 1},
+        "utility_score": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    "portfolioFrontier": {
+      "type": "object",
+      "required": ["portfolio_id", "hypothesis_ids", "posterior_update_id", "next_experiment"],
+      "properties": {
+        "portfolio_id": {"type": "string"},
+        "hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "posterior_update_id": {"type": ["string", "null"]},
+        "next_experiment": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/nextExperiment"}]}
+      },
+      "additionalProperties": false
+    }
+  }
 }

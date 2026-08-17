@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from jsonschema import ValidationError, validate as validate_json
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.protocol.hashing import content_hash
 from ai_scientist.protocol.research_vcs import (
     research_payload_issues,
@@ -210,6 +211,21 @@ def _receipt_integrity_issues(
         issues.append("verified reproduction lacks independent-evaluator authority")
     if str((reproduction.get("actor") or {}).get("actor_id") or "") in producer_ids:
         issues.append("reproduction verifier is also a producer in the claim lineage")
+    independence = payload.get("independence")
+    if not isinstance(independence, Mapping):
+        issues.append("verified reproduction lacks an independence receipt")
+    else:
+        expected = canonical_content_hash(
+            {key: value for key, value in independence.items() if key != "receipt_hash"}
+        )
+        if independence.get("policy") != "xscientist.provenance-actor-disjoint.v1":
+            issues.append("verified reproduction independence policy is invalid")
+        if independence.get("receipt_hash") != expected:
+            issues.append("verified reproduction independence receipt hash mismatch")
+        if independence.get("evaluator_id") != str(
+            (reproduction.get("actor") or {}).get("actor_id") or ""
+        ):
+            issues.append("reproduction actor disagrees with its independence receipt")
     return issues
 
 
@@ -429,6 +445,7 @@ def _claim_closure(
             for object_id in qualification_ids["mechanism_model"]
             if objects[object_id].get("state") == "verified"
             and (objects[object_id].get("payload") or {}).get("status") == "validated"
+            and (objects[object_id].get("payload") or {}).get("validation")
             and set(
                 (objects[object_id].get("payload") or {}).get("evidence_ids") or []
             ).intersection(evidence_ids)
@@ -438,6 +455,7 @@ def _claim_closure(
             for object_id in qualification_ids["evidence_quality"]
             if objects[object_id].get("state") == "verified"
             and (objects[object_id].get("payload") or {}).get("independent") is True
+            and (objects[object_id].get("payload") or {}).get("independence_receipt")
             and (objects[object_id].get("payload") or {}).get("overall_grade")
             in {"strong", "moderate"}
             and (objects[object_id].get("payload") or {}).get("evidence_id")
@@ -468,6 +486,14 @@ def _claim_closure(
             if (
                 matrix.get("state") == "verified"
                 and matrix_payload.get("transfer_ready") is True
+                and all(
+                    (matrix_payload.get("independence_checks") or {}).get(key) is True
+                    for key in (
+                        "evidence_sets_pairwise_disjoint",
+                        "attempt_sets_pairwise_disjoint",
+                        "development_heldout_datasets_disjoint",
+                    )
+                )
                 and " ".join(str(matrix_claim_payload.get("statement") or "").split())
                 == " ".join(str(claim_payload.get("statement") or "").split())
                 and matrix_claim_payload.get("scope_hash")
@@ -811,6 +837,26 @@ def _claim_closure(
             review_targets = set(_targets(review, relation_types=("evaluates",)))
             evaluated.update(review_targets)
             review_actor = review.get("actor") or {}
+            independence = (review.get("payload") or {}).get("independence")
+            independence_ok = False
+            if isinstance(independence, Mapping):
+                expected_independence_hash = canonical_content_hash(
+                    {
+                        key: value
+                        for key, value in independence.items()
+                        if key != "receipt_hash"
+                    }
+                )
+                independence_ok = bool(
+                    independence.get("policy")
+                    == "xscientist.provenance-actor-disjoint.v1"
+                    and independence.get("receipt_hash") == expected_independence_hash
+                    and independence.get("evaluator_id")
+                    == str(review_actor.get("actor_id") or "")
+                    and review_targets.intersection(
+                        set(independence.get("target_ids") or [])
+                    )
+                )
             trusted_review = trusted_review or (
                 review.get("state") == "verified"
                 and review_actor.get("authority") == "independent_evaluator"
@@ -821,6 +867,7 @@ def _claim_closure(
                     )
                 )
                 and review_context_ok
+                and independence_ok
             )
         bound = bool(evaluated.intersection({claim_id, *evidence_ids, *argument_ids}))
         if (

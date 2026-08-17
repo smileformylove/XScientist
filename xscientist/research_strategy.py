@@ -16,6 +16,7 @@ from typing import Any
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 
+from .research_authority import require_independent_evaluator
 from .research_git import ResearchGitError, ResearchObjectResult, create_checkpoint
 from .research_vcs import ResearchRepository
 
@@ -29,7 +30,10 @@ EVIDENCE_QUALITY_DOMAINS = (
     "independence",
     "external_validity",
 )
-EXPERIMENT_PRIORITY_POLICY_VERSION = "1.0"
+EXPERIMENT_PRIORITY_POLICY_VERSION = "2.0"
+MECHANISM_VALIDATION_POLICY = "xscientist.intervention-lineage.v1"
+TRANSFER_VALIDATION_POLICY = "xscientist.disjoint-boundary-evidence.v1"
+POSTERIOR_UPDATE_POLICY = "xscientist.discrete-bayes.v1"
 RESEARCH_REVIEW_INTERVAL = 5
 
 
@@ -93,6 +97,259 @@ def _ensure_stage_available(repository: ResearchRepository, *, commit: bool) -> 
         )
 
 
+def _targets(
+    item: Mapping[str, Any], relation_types: set[str] | None = None
+) -> set[str]:
+    return {
+        str(relation.get("target") or "")
+        for relation in item.get("relations") or []
+        if str(relation.get("target") or "")
+        and (not relation_types or relation.get("type") in relation_types)
+    }
+
+
+def _effective_objects(repository: ResearchRepository) -> dict[str, dict[str, Any]]:
+    objects = {str(item["object_id"]): item for item in repository.objects()}
+    superseded = {
+        target for item in objects.values() for target in _targets(item, {"supersedes"})
+    }
+    return {
+        object_id: item
+        for object_id, item in objects.items()
+        if object_id not in superseded and item.get("state") != "superseded"
+    }
+
+
+def _latest_portfolio_object(
+    repository: ResearchRepository,
+    *,
+    kind: str,
+    portfolio_id: str,
+) -> dict[str, Any] | None:
+    rows = [
+        item
+        for item in _effective_objects(repository).values()
+        if item.get("kind") == kind
+        and (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+    ]
+    return (
+        max(
+            rows,
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("object_id") or ""),
+            ),
+        )
+        if rows
+        else None
+    )
+
+
+def _portfolio_weights(
+    repository: ResearchRepository,
+    portfolio: Mapping[str, Any],
+) -> tuple[dict[str, float], str | None]:
+    portfolio_id = str(portfolio["object_id"])
+    posterior = _latest_portfolio_object(
+        repository,
+        kind="posterior_update",
+        portfolio_id=portfolio_id,
+    )
+    if posterior is not None:
+        weights = (posterior.get("payload") or {}).get("posterior_weights") or {}
+        return {str(key): float(value) for key, value in weights.items()}, str(
+            posterior["object_id"]
+        )
+    members = (portfolio.get("payload") or {}).get("members") or []
+    return {
+        str(item["hypothesis_id"]): float(item["prior_weight"]) for item in members
+    }, None
+
+
+def _normalised_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return " ".join(
+            _normalised_text(item) for _, item in sorted(value.items())
+        ).lower()
+    if isinstance(value, (list, tuple)):
+        return " ".join(_normalised_text(item) for item in value).lower()
+    return " ".join(str(value or "").lower().split())
+
+
+def _evidence_attempt_lineage(
+    repository: ResearchRepository,
+    evidence: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve evidence to completed attempts and their committed protocols."""
+
+    pending = list(_targets(evidence, {"derived_from", "reproduces"}))
+    seen: set[str] = set()
+    attempts: dict[str, dict[str, Any]] = {}
+    protocols: dict[str, dict[str, Any]] = {}
+    while pending:
+        selector = pending.pop()
+        item = repository.get(selector)
+        object_id = str(item["object_id"])
+        if object_id in seen:
+            continue
+        seen.add(object_id)
+        if item.get("kind") == "experiment_attempt":
+            attempts[object_id] = item
+            for target in _targets(item, {"depends_on", "consumes"}):
+                linked = repository.get(target)
+                if linked.get("kind") in {
+                    "research_plan",
+                    "experiment_design",
+                    "preregistration",
+                    "experiment_priority",
+                }:
+                    protocols[str(linked["object_id"])] = linked
+        pending.extend(
+            target
+            for target in _targets(item, {"derived_from", "reproduces"})
+            if target not in seen
+        )
+    return (
+        [attempts[key] for key in sorted(attempts)],
+        [protocols[key] for key in sorted(protocols)],
+    )
+
+
+def _mechanism_validation_receipt(
+    repository: ResearchRepository,
+    *,
+    evidence: Sequence[Mapping[str, Any]],
+    interventions: Sequence[str],
+) -> dict[str, Any]:
+    if not evidence:
+        raise ResearchGitError("validated mechanism requires intervention evidence")
+    if any(item.get("state") != "verified" for item in evidence):
+        raise ResearchGitError("validated mechanism evidence must be verified")
+    attempts: dict[str, dict[str, Any]] = {}
+    protocols: dict[str, dict[str, Any]] = {}
+    for item in evidence:
+        linked_attempts, linked_protocols = _evidence_attempt_lineage(repository, item)
+        if not linked_attempts:
+            raise ResearchGitError(
+                "validated mechanism evidence must derive from an experiment attempt"
+            )
+        attempts.update({str(row["object_id"]): row for row in linked_attempts})
+        protocols.update({str(row["object_id"]): row for row in linked_protocols})
+    if any(item.get("state") != "completed" for item in attempts.values()):
+        raise ResearchGitError(
+            "validated mechanism evidence must derive from completed attempts"
+        )
+    locked_protocol_ids = sorted(
+        str(item["object_id"])
+        for item in protocols.values()
+        if item.get("state") == "locked"
+        and item.get("kind")
+        in {"preregistration", "experiment_design", "research_plan"}
+    )
+    if not locked_protocol_ids:
+        raise ResearchGitError(
+            "validated mechanism requires a locked preregistration or experiment design"
+        )
+    design_payloads = [
+        item.get("payload") or {}
+        for item in (*attempts.values(), *protocols.values())
+        if item.get("kind")
+        in {"experiment_attempt", "research_plan", "experiment_design"}
+    ]
+    design_text = _normalised_text(design_payloads)
+    missing = [
+        value for value in interventions if _normalised_text(value) not in design_text
+    ]
+    if missing:
+        raise ResearchGitError(
+            "validated mechanism interventions are not committed in the attempt/design: "
+            + ", ".join(missing)
+        )
+    core = {
+        "policy": MECHANISM_VALIDATION_POLICY,
+        "evidence_ids": sorted(str(item["object_id"]) for item in evidence),
+        "attempt_ids": sorted(attempts),
+        "protocol_ids": sorted(protocols),
+        "locked_protocol_ids": locked_protocol_ids,
+        "matched_interventions": sorted(set(interventions)),
+    }
+    return {**core, "receipt_hash": canonical_content_hash(core)}
+
+
+def _boundary_evidence_receipt(
+    repository: ResearchRepository,
+    *,
+    evidence: Sequence[Mapping[str, Any]],
+    condition: str,
+    role: str,
+) -> dict[str, Any]:
+    if not evidence:
+        raise ResearchGitError("supported boundary requires evidence")
+    if any(item.get("state") != "verified" for item in evidence):
+        raise ResearchGitError("supported boundary evidence must be verified")
+    attempts: dict[str, dict[str, Any]] = {}
+    protocols: dict[str, dict[str, Any]] = {}
+    for item in evidence:
+        linked_attempts, linked_protocols = _evidence_attempt_lineage(repository, item)
+        if not linked_attempts:
+            raise ResearchGitError(
+                "supported boundary evidence must derive from an experiment attempt"
+            )
+        attempts.update({str(row["object_id"]): row for row in linked_attempts})
+        protocols.update({str(row["object_id"]): row for row in linked_protocols})
+    if any(item.get("state") != "completed" for item in attempts.values()):
+        raise ResearchGitError("supported boundary attempts must be completed")
+    dataset_hashes = sorted(
+        {
+            str(value)
+            for item in attempts.values()
+            for value in (item.get("provenance") or {}).get("dataset_hashes") or []
+        }
+    )
+    if not dataset_hashes:
+        raise ResearchGitError(
+            "supported boundary evidence requires dataset hashes in attempt provenance"
+        )
+    committed = [
+        item
+        for item in (*attempts.values(), *protocols.values())
+        if item.get("kind")
+        in {"experiment_attempt", "research_plan", "experiment_design"}
+    ]
+    condition_matches = any(
+        _normalised_text((item.get("payload") or {}).get("boundary_condition"))
+        == _normalised_text(condition)
+        and _normalised_text((item.get("payload") or {}).get("boundary_role"))
+        == _normalised_text(role)
+        for item in committed
+    )
+    if not condition_matches:
+        raise ResearchGitError(
+            "supported boundary condition and role must be committed in its attempt/design"
+        )
+    locked_protocols = [
+        str(item["object_id"])
+        for item in protocols.values()
+        if item.get("state") == "locked"
+        and item.get("kind")
+        in {"preregistration", "experiment_design", "research_plan"}
+    ]
+    if not locked_protocols:
+        raise ResearchGitError(
+            "supported boundary evidence requires a locked preregistration or design"
+        )
+    core = {
+        "policy": TRANSFER_VALIDATION_POLICY,
+        "evidence_ids": sorted(str(item["object_id"]) for item in evidence),
+        "attempt_ids": sorted(attempts),
+        "locked_protocol_ids": sorted(locked_protocols),
+        "dataset_hashes": dataset_hashes,
+        "condition": condition,
+        "role": role,
+    }
+    return {**core, "receipt_hash": canonical_content_hash(core)}
+
+
 def research_strategy_template() -> dict[str, Any]:
     """Return an editable example for experiment, quality, and boundary files."""
 
@@ -101,6 +358,8 @@ def research_strategy_template() -> dict[str, Any]:
             {
                 "candidate_id": "counterfactual-ablation",
                 "summary": "Intervene on the proposed mediator and measure the outcome.",
+                "condition": "mediator M is ablated on the held-out split",
+                "interventions": ["do(M=0)"],
                 "predictions": {
                     "REPLACE_HYPOTHESIS_ID": "effect_disappears",
                     "REPLACE_RIVAL_HYPOTHESIS_ID": "effect_remains",
@@ -349,10 +608,8 @@ def rank_experiment_candidates(
         kinds={"hypothesis_portfolio"},
         label="experiment portfolio",
     )
-    members = (portfolio.get("payload") or {}).get("members") or []
-    priors = {
-        str(item["hypothesis_id"]): float(item["prior_weight"]) for item in members
-    }
+    portfolio_object_id = str(portfolio["object_id"])
+    priors, posterior_id = _portfolio_weights(repository, portfolio)
     if not candidates:
         raise ResearchGitError("experiment priority requires at least one candidate")
     rating_fields = (
@@ -363,11 +620,23 @@ def rank_experiment_candidates(
         "risk",
         "redundancy",
     )
+    effective = _effective_objects(repository)
+    locked_predictions = [
+        item
+        for item in effective.values()
+        if item.get("kind") == "discriminating_prediction"
+        and item.get("state") == "locked"
+        and (item.get("payload") or {}).get("portfolio_id") == portfolio_object_id
+    ]
     rows: list[dict[str, Any]] = []
+    candidate_specs: list[dict[str, Any]] = []
     for raw in candidates:
         if not isinstance(raw, Mapping):
             raise ResearchGitError("each experiment candidate must be an object")
         candidate_id = _required_text(raw.get("candidate_id"), label="candidate id")
+        condition = _required_text(
+            raw.get("condition"), label=f"candidate {candidate_id} condition"
+        )
         predictions = raw.get("predictions")
         if not isinstance(predictions, Mapping):
             raise ResearchGitError(
@@ -393,6 +662,64 @@ def rank_experiment_candidates(
             raise ResearchGitError(
                 f"candidate {candidate_id} must predict every portfolio hypothesis"
             )
+        raw_prediction_ids = raw.get("prediction_ids") or {}
+        if not isinstance(raw_prediction_ids, Mapping):
+            raise ResearchGitError(
+                f"candidate {candidate_id} prediction_ids must be an object"
+            )
+        bound_predictions: dict[str, str] = {}
+        for hypothesis_id, outcome in resolved_predictions.items():
+            selector = raw_prediction_ids.get(hypothesis_id)
+            if selector is None:
+                selector = next(
+                    (
+                        key
+                        for key, value in raw_prediction_ids.items()
+                        if str(repository.get(str(key))["object_id"]) == hypothesis_id
+                    ),
+                    None,
+                )
+            matches = []
+            if selector:
+                selected_prediction = _resolve_kind(
+                    repository,
+                    str(selector),
+                    kinds={"discriminating_prediction"},
+                    label="candidate locked prediction",
+                )
+                matches = [selected_prediction]
+            else:
+                matches = [
+                    item
+                    for item in locked_predictions
+                    if (item.get("payload") or {}).get("hypothesis_id") == hypothesis_id
+                    and _normalised_text((item.get("payload") or {}).get("when"))
+                    == _normalised_text(condition)
+                    and _normalised_text(
+                        (item.get("payload") or {}).get("expected_outcome")
+                    )
+                    == _normalised_text(outcome)
+                ]
+            matches = [
+                item
+                for item in matches
+                if item.get("state") == "locked"
+                and (item.get("payload") or {}).get("portfolio_id")
+                == portfolio_object_id
+                and (item.get("payload") or {}).get("hypothesis_id") == hypothesis_id
+                and _normalised_text((item.get("payload") or {}).get("when"))
+                == _normalised_text(condition)
+                and _normalised_text(
+                    (item.get("payload") or {}).get("expected_outcome")
+                )
+                == _normalised_text(outcome)
+            ]
+            if len(matches) != 1:
+                raise ResearchGitError(
+                    f"candidate {candidate_id} requires exactly one locked prediction "
+                    f"for portfolio hypothesis {hypothesis_id}"
+                )
+            bound_predictions[hypothesis_id] = str(matches[0]["object_id"])
         ratings: dict[str, int] = {}
         for field in rating_fields:
             value = raw.get(field, 0)
@@ -418,17 +745,31 @@ def rank_experiment_candidates(
             + 0.05 * ratings["redundancy"] / 4
         )
         score = round(max(0.0, min(1.0, benefit - penalty)), 6)
-        rows.append(
+        summary = _required_text(raw.get("summary"), label="candidate summary")
+        interventions = [
+            _required_text(value, label="candidate intervention")
+            for value in (raw.get("interventions") or [])
+        ]
+        row = {
+            "candidate_id": candidate_id,
+            "summary": summary,
+            "condition": condition,
+            "predictions": dict(sorted(resolved_predictions.items())),
+            "prediction_ids": dict(sorted(bound_predictions.items())),
+            "expected_information_gain": round(eig, 6),
+            "ratings": ratings,
+            "utility_score": score,
+            "discriminates": len(set(resolved_predictions.values())) > 1,
+        }
+        rows.append(row)
+        candidate_specs.append(
             {
                 "candidate_id": candidate_id,
-                "summary": _required_text(
-                    raw.get("summary"), label="candidate summary"
-                ),
+                "summary": summary,
+                "condition": condition,
+                "interventions": interventions,
                 "predictions": dict(sorted(resolved_predictions.items())),
-                "expected_information_gain": round(eig, 6),
-                "ratings": ratings,
-                "utility_score": score,
-                "discriminates": len(set(resolved_predictions.values())) > 1,
+                "prediction_ids": dict(sorted(bound_predictions.items())),
             }
         )
     if len({row["candidate_id"] for row in rows}) != len(rows):
@@ -448,19 +789,58 @@ def rank_experiment_candidates(
             if rank == 1
             else "lower information value or higher cost/risk/redundancy"
         )
+    spec_by_id = {item["candidate_id"]: item for item in candidate_specs}
+    design_results: list[ResearchObjectResult] = []
+    for row in rows:
+        spec = spec_by_id[row["candidate_id"]]
+        design_core = {
+            "protocol_kind": "competitive_experiment_candidate",
+            "portfolio_id": portfolio_object_id,
+            **spec,
+        }
+        design_payload = {
+            **design_core,
+            "design_hash": canonical_content_hash(design_core),
+        }
+        design = repository.record(
+            "experiment_design",
+            design_payload,
+            state="locked",
+            relations=[
+                {
+                    "type": "depends_on",
+                    "target": portfolio_object_id,
+                    "role": "portfolio",
+                },
+                *[
+                    {
+                        "type": "depends_on",
+                        "target": prediction_id,
+                        "role": "locked_prediction",
+                    }
+                    for prediction_id in spec["prediction_ids"].values()
+                ],
+            ],
+        )
+        design_results.append(design)
+        row["design_object_id"] = design.object_id
     policy = {
         "version": EXPERIMENT_PRIORITY_POLICY_VERSION,
         "score": "0.50*normalized_EIG + 0.15*novelty + 0.15*impact + 0.10*transfer - 0.10*cost - 0.05*risk - 0.05*redundancy",
         "ratings": "auditable ordinal integers from 0 to 4",
         "eig": "entropy reduction under the locked deterministic outcome partition",
+        "prediction_binding": "every outcome is bound to an immutable locked prediction",
     }
     core = {
         "protocol_kind": "information_value_experiment_priority",
-        "portfolio_id": str(portfolio["object_id"]),
+        "portfolio_id": portfolio_object_id,
+        "prior_source_id": posterior_id or portfolio_object_id,
+        "prior_weights": dict(sorted(priors.items())),
         "policy": policy,
         "policy_hash": canonical_content_hash(policy),
         "candidate_set": rows,
         "selected_candidate_id": rows[0]["candidate_id"],
+        "selected_design_id": rows[0]["design_object_id"],
     }
     payload = {**core, "priority_hash": canonical_content_hash(core)}
     result = repository.record(
@@ -470,21 +850,254 @@ def rank_experiment_candidates(
         relations=[
             {
                 "type": "depends_on",
-                "target": str(portfolio["object_id"]),
+                "target": portfolio_object_id,
                 "role": "portfolio",
-            }
+            },
+            *(
+                [
+                    {
+                        "type": "depends_on",
+                        "target": posterior_id,
+                        "role": "posterior_prior",
+                    }
+                ]
+                if posterior_id
+                else []
+            ),
+            *[
+                {
+                    "type": "selects" if row["selected"] else "depends_on",
+                    "target": row["design_object_id"],
+                    "role": "candidate_design",
+                }
+                for row in rows
+            ],
         ],
     )
     saved = _checkpoint_results(
         repository,
         result,
-        (),
+        design_results,
         stage="plan",
         subject=message or "rank experiments by expected information value",
         status="locked",
         commit=commit,
     )
     saved["ranking"] = payload
+    return saved
+
+
+def save_posterior_update(
+    repo: str | Path,
+    *,
+    portfolio_id: str,
+    priority_id: str,
+    attempt_id: str,
+    evidence_id: str,
+    observed_outcome: str,
+    likelihoods: Mapping[str, float],
+    message: str | None = None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Append one evidence-bound Bayesian update without certifying its truth."""
+
+    repository = ResearchRepository(repo)
+    _ensure_stage_available(repository, commit=commit)
+    portfolio = _resolve_kind(
+        repository,
+        portfolio_id,
+        kinds={"hypothesis_portfolio"},
+        label="posterior portfolio",
+    )
+    resolved_portfolio_id = str(portfolio["object_id"])
+    priority = _resolve_kind(
+        repository,
+        priority_id,
+        kinds={"experiment_priority"},
+        label="posterior experiment priority",
+    )
+    priority_payload = priority.get("payload") or {}
+    if (
+        priority.get("state") != "locked"
+        or priority_payload.get("portfolio_id") != resolved_portfolio_id
+    ):
+        raise ResearchGitError("posterior priority is not locked for this portfolio")
+    attempt = _resolve_kind(
+        repository,
+        attempt_id,
+        kinds={"experiment_attempt"},
+        label="posterior experiment attempt",
+    )
+    if attempt.get("state") != "completed":
+        raise ResearchGitError("posterior update requires a completed attempt")
+    attempt_targets = _targets(attempt, {"depends_on", "consumes"})
+    selected_design_id = str(priority_payload.get("selected_design_id") or "")
+    if (
+        str(priority["object_id"]) not in attempt_targets
+        or selected_design_id not in attempt_targets
+    ):
+        raise ResearchGitError(
+            "posterior attempt must consume the selected priority and design"
+        )
+    evidence = _resolve_kind(
+        repository,
+        evidence_id,
+        kinds={"evidence", "effect_estimate", "evidence_synthesis", "reproduction"},
+        label="posterior evidence",
+    )
+    if evidence.get("state") not in {"completed", "verified"}:
+        raise ResearchGitError(
+            "posterior update requires completed or verified evidence"
+        )
+    linked_attempts, _ = _evidence_attempt_lineage(repository, evidence)
+    if str(attempt["object_id"]) not in {
+        str(item["object_id"]) for item in linked_attempts
+    }:
+        raise ResearchGitError("posterior evidence does not derive from its attempt")
+    reused = [
+        item
+        for item in _effective_objects(repository).values()
+        if item.get("kind") == "posterior_update"
+        and (item.get("payload") or {}).get("portfolio_id") == resolved_portfolio_id
+        and (item.get("payload") or {}).get("evidence_id") == str(evidence["object_id"])
+    ]
+    if reused:
+        raise ResearchGitError("posterior evidence has already updated this portfolio")
+
+    prior_weights, prior_posterior_id = _portfolio_weights(repository, portfolio)
+    resolved_likelihoods: dict[str, float] = {}
+    for selector, value in likelihoods.items():
+        hypothesis = _resolve_kind(
+            repository,
+            str(selector),
+            kinds={"hypothesis"},
+            label="posterior likelihood hypothesis",
+        )
+        object_id = str(hypothesis["object_id"])
+        if object_id not in prior_weights:
+            raise ResearchGitError("posterior likelihood is outside its portfolio")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= float(value) <= 1
+        ):
+            raise ResearchGitError("posterior likelihoods must be numbers from 0 to 1")
+        resolved_likelihoods[object_id] = float(value)
+    if set(resolved_likelihoods) != set(prior_weights):
+        raise ResearchGitError(
+            "posterior update requires one likelihood per hypothesis"
+        )
+    unnormalised = {
+        hypothesis_id: prior_weights[hypothesis_id]
+        * resolved_likelihoods[hypothesis_id]
+        for hypothesis_id in prior_weights
+    }
+    normalizer = sum(unnormalised.values())
+    if normalizer <= 0:
+        raise ResearchGitError(
+            "posterior likelihoods assign zero mass to every hypothesis"
+        )
+    posterior_weights = {
+        hypothesis_id: round(value / normalizer, 12)
+        for hypothesis_id, value in sorted(unnormalised.items())
+    }
+    final_id = sorted(posterior_weights)[-1]
+    posterior_weights[final_id] = round(
+        1.0
+        - sum(
+            value
+            for hypothesis_id, value in posterior_weights.items()
+            if hypothesis_id != final_id
+        ),
+        12,
+    )
+    normalized_outcome = _required_text(observed_outcome, label="observed outcome")
+    observation_core = {
+        "protocol_kind": "competitive_experiment_observation",
+        "measurement": normalized_outcome,
+        "attempt_id": str(attempt["object_id"]),
+        "evidence_id": str(evidence["object_id"]),
+    }
+    observation_payload = {
+        **observation_core,
+        "observation_hash": canonical_content_hash(observation_core),
+    }
+    observation = repository.record(
+        "observation",
+        observation_payload,
+        state="completed",
+        relations=[
+            {"type": "derived_from", "target": str(attempt["object_id"])},
+            {
+                "type": "depends_on",
+                "target": str(evidence["object_id"]),
+                "role": "evidence_anchor",
+            },
+        ],
+    )
+    core = {
+        "protocol_kind": "evidence_bound_posterior_update",
+        "policy": POSTERIOR_UPDATE_POLICY,
+        "portfolio_id": resolved_portfolio_id,
+        "priority_id": str(priority["object_id"]),
+        "selected_design_id": selected_design_id,
+        "attempt_id": str(attempt["object_id"]),
+        "observation_id": observation.object_id,
+        "evidence_id": str(evidence["object_id"]),
+        "observed_outcome": normalized_outcome,
+        "prior_source_id": prior_posterior_id or resolved_portfolio_id,
+        "prior_weights": dict(sorted(prior_weights.items())),
+        "likelihoods": dict(sorted(resolved_likelihoods.items())),
+        "posterior_weights": posterior_weights,
+        "evidence_state": str(evidence.get("state") or ""),
+        "epistemic_status": "agent_computed_draft",
+    }
+    payload = {**core, "update_hash": canonical_content_hash(core)}
+    result = repository.record(
+        "posterior_update",
+        payload,
+        state="completed",
+        relations=[
+            {
+                "type": "depends_on",
+                "target": resolved_portfolio_id,
+                "role": "portfolio",
+            },
+            {
+                "type": "consumes",
+                "target": str(priority["object_id"]),
+                "role": "priority",
+            },
+            {"type": "observes", "target": observation.object_id},
+            {
+                "type": "consumes",
+                "target": str(evidence["object_id"]),
+                "role": "evidence",
+            },
+            *(
+                [
+                    {
+                        "type": "depends_on",
+                        "target": prior_posterior_id,
+                        "role": "prior_posterior",
+                    }
+                ]
+                if prior_posterior_id
+                else []
+            ),
+        ],
+    )
+    saved = _checkpoint_results(
+        repository,
+        result,
+        [observation],
+        stage="evidence",
+        subject=message or "update hypothesis portfolio from observed evidence",
+        status="completed",
+        commit=commit,
+    )
+    saved["posterior"] = payload
+    saved["observation"] = observation
     return saved
 
 
@@ -519,21 +1132,38 @@ def save_mechanism_model(
         )
         for item in evidence_ids
     ]
+    normalized_mediators = [
+        _required_text(value, label="mechanism mediator") for value in mediators
+    ]
+    normalized_interventions = [
+        _required_text(value, label="mechanism intervention") for value in interventions
+    ]
+    rival_ids = sorted({str(item["object_id"]) for item in rivals})
+    if status == "validated" and not rival_ids:
+        raise ResearchGitError(
+            "validated mechanism requires at least one tested rival explanation"
+        )
+    validation = (
+        _mechanism_validation_receipt(
+            repository,
+            evidence=evidence,
+            interventions=normalized_interventions,
+        )
+        if status == "validated"
+        else None
+    )
     core = {
         "protocol_kind": "causal_mechanism_model",
         "statement": _required_text(statement, label="mechanism statement"),
         "target_hypothesis_id": str(hypothesis["object_id"]),
-        "mediators": [
-            _required_text(value, label="mechanism mediator") for value in mediators
-        ],
-        "interventions": [
-            _required_text(value, label="mechanism intervention")
-            for value in interventions
-        ],
-        "rival_hypothesis_ids": sorted({str(item["object_id"]) for item in rivals}),
+        "mediators": normalized_mediators,
+        "interventions": normalized_interventions,
+        "rival_hypothesis_ids": rival_ids,
         "evidence_ids": sorted({str(item["object_id"]) for item in evidence}),
         "status": status,
     }
+    if validation is not None:
+        core["validation"] = validation
     payload = {**core, "mechanism_hash": canonical_content_hash(core)}
     result = repository.record(
         "mechanism_model",
@@ -606,6 +1236,17 @@ def save_evidence_quality_assessment(
         },
         label="quality evidence",
     )
+    normalized_assessor = _required_text(assessor_id, label="quality assessor")
+    independence = (
+        require_independent_evaluator(
+            repository,
+            evaluator_id=normalized_assessor,
+            target_ids=[str(evidence["object_id"])],
+            label="independent evidence quality assessment",
+        )
+        if independent
+        else None
+    )
     normalized_domains = {
         name: str(domains.get(name) or "not_assessed")
         for name in EVIDENCE_QUALITY_DOMAINS
@@ -622,6 +1263,8 @@ def save_evidence_quality_assessment(
         "overall_grade": _quality_grade(normalized_domains),
         "independent": bool(independent),
     }
+    if independence is not None:
+        core["independence_receipt"] = independence
     payload = {**core, "assessment_hash": canonical_content_hash(core)}
     result = repository.record(
         "evidence_quality",
@@ -635,7 +1278,7 @@ def save_evidence_quality_assessment(
             }
         ],
         actor={
-            "actor_id": _required_text(assessor_id, label="quality assessor"),
+            "actor_id": normalized_assessor,
             "authority": "independent_evaluator" if independent else "research_agent",
         },
     )
@@ -661,8 +1304,7 @@ def save_transfer_matrix(
     repository = ResearchRepository(repo)
     _ensure_stage_available(repository, commit=commit)
     claim = _resolve_kind(repository, claim_id, kinds={"claim"}, label="boundary claim")
-    boundary_results: list[ResearchObjectResult] = []
-    normalized_rows: list[dict[str, Any]] = []
+    prepared_rows: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for raw in rows:
         if not isinstance(raw, Mapping):
             raise ResearchGitError("each boundary row must be an object")
@@ -681,19 +1323,81 @@ def save_transfer_matrix(
             )
             for selector in (raw.get("evidence_ids") or [])
         ]
-        core = {
+        role = str(raw.get("role") or "development")
+        status = str(raw.get("status") or "untested")
+        if role not in {"development", "transfer", "heldout", "scale"}:
+            raise ResearchGitError("boundary role is invalid")
+        if status not in {"supported", "refuted", "mixed", "untested"}:
+            raise ResearchGitError("boundary status is invalid")
+        dimension = _required_text(raw.get("dimension"), label="boundary dimension")
+        condition = _required_text(raw.get("condition"), label="boundary condition")
+        if status == "untested" and evidence:
+            raise ResearchGitError("untested boundary cannot cite result evidence")
+        validation = (
+            _boundary_evidence_receipt(
+                repository,
+                evidence=evidence,
+                condition=condition,
+                role=role,
+            )
+            if status != "untested"
+            else None
+        )
+        core: dict[str, Any] = {
             "protocol_kind": "claim_boundary_condition",
             "claim_id": str(claim["object_id"]),
-            "dimension": _required_text(
-                raw.get("dimension"), label="boundary dimension"
-            ),
-            "condition": _required_text(
-                raw.get("condition"), label="boundary condition"
-            ),
-            "role": str(raw.get("role") or "development"),
-            "status": str(raw.get("status") or "untested"),
+            "dimension": dimension,
+            "condition": condition,
+            "role": role,
+            "status": status,
             "evidence_ids": sorted({str(item["object_id"]) for item in evidence}),
         }
+        if validation is not None:
+            core["validation"] = validation
+        prepared_rows.append((core, evidence))
+    if not prepared_rows:
+        raise ResearchGitError("transfer matrix requires at least one boundary row")
+
+    tested_cores = [core for core, _ in prepared_rows if core["status"] != "untested"]
+    evidence_sets = [set(core["evidence_ids"]) for core in tested_cores]
+    attempt_sets = [set(core["validation"]["attempt_ids"]) for core in tested_cores]
+    independent_evidence = all(
+        not left.intersection(right)
+        for index, left in enumerate(evidence_sets)
+        for right in evidence_sets[index + 1 :]
+    )
+    independent_attempts = all(
+        not left.intersection(right)
+        for index, left in enumerate(attempt_sets)
+        for right in attempt_sets[index + 1 :]
+    )
+    development_datasets = {
+        value
+        for core in tested_cores
+        if core["role"] == "development"
+        for value in core["validation"]["dataset_hashes"]
+    }
+    heldout_datasets = {
+        value
+        for core in tested_cores
+        if core["role"] in {"transfer", "heldout"}
+        for value in core["validation"]["dataset_hashes"]
+    }
+    heldout_dataset_disjoint = bool(
+        development_datasets
+        and heldout_datasets
+        and not development_datasets.intersection(heldout_datasets)
+    )
+    independence_checks = {
+        "policy": TRANSFER_VALIDATION_POLICY,
+        "evidence_sets_pairwise_disjoint": independent_evidence,
+        "attempt_sets_pairwise_disjoint": independent_attempts,
+        "development_heldout_datasets_disjoint": heldout_dataset_disjoint,
+    }
+
+    boundary_results: list[ResearchObjectResult] = []
+    normalized_rows: list[dict[str, Any]] = []
+    for core, evidence in prepared_rows:
         payload = {**core, "boundary_hash": canonical_content_hash(core)}
         boundary = repository.record(
             "boundary_condition",
@@ -723,8 +1427,6 @@ def save_transfer_matrix(
                 "boundary_hash": payload["boundary_hash"],
             }
         )
-    if not normalized_rows:
-        raise ResearchGitError("transfer matrix requires at least one boundary row")
     tested = [row for row in normalized_rows if row["status"] != "untested"]
     dimensions = sorted({row["dimension"] for row in tested})
     transfer_rows = [
@@ -735,6 +1437,9 @@ def save_transfer_matrix(
         and len(dimensions) >= 2
         and any(row["status"] == "supported" for row in transfer_rows)
         and all(row["status"] == "supported" for row in tested)
+        and independence_checks["evidence_sets_pairwise_disjoint"]
+        and independence_checks["attempt_sets_pairwise_disjoint"]
+        and independence_checks["development_heldout_datasets_disjoint"]
     )
     coverage = {
         "row_count": len(normalized_rows),
@@ -750,6 +1455,7 @@ def save_transfer_matrix(
         "claim_id": str(claim["object_id"]),
         "rows": normalized_rows,
         "coverage": coverage,
+        "independence_checks": independence_checks,
         "transfer_ready": transfer_ready,
     }
     payload = {**core, "matrix_hash": canonical_content_hash(core)}
@@ -778,33 +1484,24 @@ def save_transfer_matrix(
     return saved
 
 
-def _targets(
-    item: Mapping[str, Any], relation_types: set[str] | None = None
-) -> set[str]:
-    return {
-        str(relation.get("target") or "")
-        for relation in item.get("relations") or []
-        if str(relation.get("target") or "")
-        and (not relation_types or relation.get("type") in relation_types)
-    }
-
-
 def scan_research_anomalies(
     repo: str | Path,
     *,
     record: bool = False,
 ) -> dict[str, Any]:
     repository = ResearchRepository(repo)
-    objects = {str(item["object_id"]): item for item in repository.objects()}
+    objects = _effective_objects(repository)
     existing = {
-        tuple(
-            sorted(
+        (
+            str((item.get("payload") or {}).get("anomaly_type") or ""),
+            *sorted(
                 str(value)
                 for value in (item.get("payload") or {}).get("source_ids") or []
-            )
+            ),
         )
         for item in objects.values()
         if item.get("kind") == "anomaly"
+        and (item.get("payload") or {}).get("status") == "open"
     }
     candidates: list[dict[str, Any]] = []
     for object_id, item in objects.items():
@@ -842,7 +1539,10 @@ def scan_research_anomalies(
                 )
     unique: dict[tuple[str, ...], dict[str, Any]] = {}
     for candidate in candidates:
-        key = tuple(sorted(candidate["source_ids"]))
+        key = (
+            candidate["anomaly_type"],
+            *sorted(candidate["source_ids"]),
+        )
         if key not in existing:
             unique[key] = candidate
     pending = [unique[key] for key in sorted(unique)]
@@ -883,7 +1583,9 @@ def review_research_program(
     repository = ResearchRepository(repo)
     if record:
         _ensure_stage_available(repository, commit=commit)
-    objects = repository.objects()
+    all_objects = repository.objects()
+    effective = _effective_objects(repository)
+    objects = list(effective.values())
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for item in objects:
         by_kind.setdefault(str(item["kind"]), []).append(item)
@@ -898,7 +1600,7 @@ def review_research_program(
     new_object_count = sum(
         str(item.get("created_at") or "") > last_review_at
         and item.get("kind") != "research_review"
-        for item in objects
+        for item in all_objects
     )
     gaps: list[dict[str, str]] = []
     recommendations: list[dict[str, str]] = []
@@ -919,18 +1621,82 @@ def review_research_program(
             "No locked competitive hypothesis portfolio exists.",
             "Create `research program portfolio` with primary and rival hypotheses.",
         )
-    if not by_kind.get("discriminating_prediction"):
-        gap(
-            "discriminating_prediction_missing",
-            "No prediction distinguishes competing explanations.",
-            "Record outcomes that differ across portfolio members.",
-        )
-    if not by_kind.get("experiment_priority"):
-        gap(
-            "information_value_unranked",
-            "Experiment candidates were not ranked by expected information value.",
-            "Run `research program prioritize` before the next expensive experiment.",
-        )
+    for portfolio in by_kind.get("hypothesis_portfolio", []):
+        portfolio_id = str(portfolio["object_id"])
+        member_ids = {
+            str(item.get("hypothesis_id") or "")
+            for item in (portfolio.get("payload") or {}).get("members") or []
+        }
+        predictions = [
+            item
+            for item in by_kind.get("discriminating_prediction", [])
+            if (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+        ]
+        predicted_ids = {
+            str((item.get("payload") or {}).get("hypothesis_id") or "")
+            for item in predictions
+        }
+        if predicted_ids != member_ids:
+            gap(
+                f"discriminating_prediction_missing:{portfolio_id}",
+                "A portfolio lacks locked predictions for every competing hypothesis.",
+                "Record one condition-matched prediction per portfolio member.",
+            )
+        priorities = [
+            item
+            for item in by_kind.get("experiment_priority", [])
+            if (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+        ]
+        if not priorities:
+            gap(
+                f"information_value_unranked:{portfolio_id}",
+                "A portfolio has no evidence-bound experiment priority.",
+                "Run `research program prioritize` before the next expensive experiment.",
+            )
+            continue
+        executable_priorities = [
+            item
+            for item in priorities
+            if (item.get("payload") or {}).get("selected_design_id")
+            and (item.get("payload") or {}).get("prior_weights")
+        ]
+        if not executable_priorities:
+            gap(
+                f"strategy_v2_upgrade_required:{portfolio_id}",
+                "The portfolio only has legacy priorities without executable designs.",
+                "Append v2 locked predictions, candidate designs, and a new priority.",
+            )
+            continue
+        selected_priority_ids = {
+            str(item["object_id"]) for item in executable_priorities
+        }
+        completed_attempts = [
+            item
+            for item in by_kind.get("experiment_attempt", [])
+            if item.get("state") == "completed"
+            and selected_priority_ids.intersection(_targets(item, {"consumes"}))
+        ]
+        if completed_attempts:
+            attempt_ids = {str(item["object_id"]) for item in completed_attempts}
+            observed_evidence = [
+                item
+                for item in by_kind.get("evidence", [])
+                if attempt_ids.intersection(_targets(item, {"derived_from"}))
+            ]
+            posterior_evidence = {
+                str((item.get("payload") or {}).get("evidence_id") or "")
+                for item in by_kind.get("posterior_update", [])
+                if (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+            }
+            if any(
+                str(item["object_id"]) not in posterior_evidence
+                for item in observed_evidence
+            ):
+                gap(
+                    f"posterior_update_missing:{portfolio_id}",
+                    "Completed competitive evidence has not updated its portfolio.",
+                    "Record an observation and likelihood-bound posterior update.",
+                )
     if not by_kind.get("mechanism_model"):
         gap(
             "mechanism_unmodeled",
@@ -979,6 +1745,8 @@ def review_research_program(
                 "hypothesis_portfolio",
                 "discriminating_prediction",
                 "experiment_priority",
+                "experiment_design",
+                "posterior_update",
                 "anomaly",
                 "mechanism_model",
                 "evidence_quality",
@@ -1026,7 +1794,7 @@ def inspect_claim_depth(
 ) -> dict[str, Any]:
     repository = ResearchRepository(repo)
     claim = _resolve_kind(repository, claim_id, kinds={"claim"}, label="claim")
-    objects = {str(item["object_id"]): item for item in repository.objects()}
+    objects = _effective_objects(repository)
     resolved_claim_id = str(claim["object_id"])
     direct = _targets(claim)
     supporting = sorted(
@@ -1077,18 +1845,53 @@ def inspect_claim_depth(
         for object_id in direct
         if objects.get(object_id, {}).get("kind") == "mechanism_model"
     )
+    hypothesis_ids = {
+        target
+        for target in direct
+        if objects.get(target, {}).get("kind") == "hypothesis"
+    }
+    for evidence_object_id in (*supporting, *refuting):
+        hypothesis_ids.update(
+            target
+            for target in _targets(objects.get(evidence_object_id, {}))
+            if objects.get(target, {}).get("kind") == "hypothesis"
+        )
+    for mechanism_id in mechanisms:
+        hypothesis_id = str(
+            (objects[mechanism_id].get("payload") or {}).get("target_hypothesis_id")
+            or ""
+        )
+        if hypothesis_id:
+            hypothesis_ids.add(hypothesis_id)
+    portfolio_ids = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "hypothesis_portfolio"
+        and hypothesis_ids.intersection(
+            str(member.get("hypothesis_id") or "")
+            for member in (item.get("payload") or {}).get("members") or []
+        )
+    )
     priorities = sorted(
         (
             item
             for item in objects.values()
             if item.get("kind") == "experiment_priority"
+            and (item.get("payload") or {}).get("portfolio_id") in portfolio_ids
         ),
         key=lambda item: (str(item.get("created_at") or ""), str(item["object_id"])),
         reverse=True,
     )
-    next_experiment = None
-    if priorities:
-        payload = priorities[0].get("payload") or {}
+    latest_priorities: dict[str, dict[str, Any]] = {}
+    for item in priorities:
+        portfolio_id = str((item.get("payload") or {}).get("portfolio_id") or "")
+        latest_priorities.setdefault(portfolio_id, item)
+    next_experiments = []
+    for portfolio_id in portfolio_ids:
+        priority = latest_priorities.get(portfolio_id)
+        if priority is None:
+            continue
+        payload = priority.get("payload") or {}
         selected_id = payload.get("selected_candidate_id")
         selected = next(
             (
@@ -1099,19 +1902,27 @@ def inspect_claim_depth(
             None,
         )
         if selected:
-            next_experiment = {
-                "priority_object_id": priorities[0]["object_id"],
-                "candidate_id": selected_id,
-                "summary": selected.get("summary"),
-                "expected_information_gain": selected.get("expected_information_gain"),
-                "utility_score": selected.get("utility_score"),
-            }
+            next_experiments.append(
+                {
+                    "portfolio_id": portfolio_id,
+                    "priority_object_id": priority["object_id"],
+                    "candidate_id": selected_id,
+                    "design_object_id": selected.get("design_object_id"),
+                    "summary": selected.get("summary"),
+                    "expected_information_gain": selected.get(
+                        "expected_information_gain"
+                    ),
+                    "utility_score": selected.get("utility_score"),
+                }
+            )
+    next_experiment = next_experiments[0] if len(next_experiments) == 1 else None
     depth_level = str((claim.get("payload") or {}).get("depth_level") or "descriptive")
     valid_mechanisms = [
         object_id
         for object_id in mechanisms
         if objects[object_id].get("state") == "verified"
         and (objects[object_id].get("payload") or {}).get("status") == "validated"
+        and (objects[object_id].get("payload") or {}).get("validation")
         and supporting_set.intersection(
             (objects[object_id].get("payload") or {}).get("evidence_ids") or []
         )
@@ -1121,6 +1932,7 @@ def inspect_claim_depth(
         for object_id in quality
         if objects[object_id].get("state") == "verified"
         and (objects[object_id].get("payload") or {}).get("independent") is True
+        and (objects[object_id].get("payload") or {}).get("independence_receipt")
         and (objects[object_id].get("payload") or {}).get("overall_grade")
         in {"strong", "moderate"}
     ]
@@ -1161,6 +1973,8 @@ def inspect_claim_depth(
         "quality_assessment_ids": quality,
         "mechanism_ids": mechanisms,
         "boundary_ids": boundaries,
+        "portfolio_ids": portfolio_ids,
+        "next_experiments": next_experiments,
         "next_experiment": next_experiment,
         "gaps": gaps,
         "decision_ready": not gaps and not refuting,
@@ -1179,6 +1993,7 @@ __all__ = [
     "save_evidence_quality_assessment",
     "save_hypothesis_portfolio",
     "save_mechanism_model",
+    "save_posterior_update",
     "save_transfer_matrix",
     "scan_research_anomalies",
 ]

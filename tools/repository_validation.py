@@ -14,14 +14,13 @@ import py_compile
 import re
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from ai_scientist.utils.auth_session import require_login  # noqa: E402
 from ai_scientist.utils.privacy import redact_sensitive_text  # noqa: E402
 
 IGNORED_PATH_PARTS = {
@@ -2157,6 +2156,22 @@ Results are preliminary.
             ),
             encoding="utf-8",
         )
+        validation_auth = root / "validation_auth.json"
+        issued_at = datetime.now(timezone.utc)
+        validation_auth.write_text(
+            json.dumps(
+                {
+                    "username": "xscientist-validation",
+                    "session_id": "offline-validation-session",
+                    "issued_at": issued_at.isoformat(),
+                    "expires_at": (issued_at + timedelta(hours=1)).isoformat(),
+                    "last_seen_at": issued_at.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        daemon_env = os.environ.copy()
+        daemon_env["AI_SCIENTIST_AUTH_FILE"] = str(validation_auth)
         daemon_run = subprocess.run(
             [
                 sys.executable,
@@ -2182,6 +2197,7 @@ Results are preliminary.
                 "1",
             ],
             cwd=str(PROJECT_ROOT),
+            env=daemon_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2457,6 +2473,7 @@ Results are preliminary.
                 str(portable_rehearsal_profile),
             ],
             cwd=str(PROJECT_ROOT),
+            env=daemon_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2490,6 +2507,7 @@ Results are preliminary.
                 str(PROJECT_ROOT / "scripts" / "daemon" / "run_daemon_rehearsal.py"),
             ],
             cwd=str(PROJECT_ROOT),
+            env=daemon_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2524,6 +2542,7 @@ Results are preliminary.
             check=True,
         )
         start_menu_env = dict(os.environ)
+        start_menu_env["AI_SCIENTIST_AUTH_FILE"] = str(validation_auth)
         start_menu_env["RESEARCH_OUTPUT_DIR"] = str(root / "menu_research")
         start_menu_env["PYTHON"] = sys.executable
         start_menu_env.pop("ZHIPU_API_KEY", None)
@@ -2547,6 +2566,7 @@ Results are preliminary.
                 "--print-command",
             ],
             cwd=str(PROJECT_ROOT),
+            env=daemon_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2567,6 +2587,7 @@ Results are preliminary.
                 str(wrapper_overlay),
             ],
             cwd=str(PROJECT_ROOT),
+            env=daemon_env,
             capture_output=True,
             text=True,
             check=True,
@@ -2592,6 +2613,7 @@ Results are preliminary.
             "# Operator Brief\nready\n", encoding="utf-8"
         )
         wrapper_env = dict(os.environ)
+        wrapper_env["AI_SCIENTIST_AUTH_FILE"] = str(validation_auth)
         wrapper_env["RESEARCH_OUTPUT_DIR"] = str(root)
         wrapper_env["PYTHON"] = sys.executable
         status_run = subprocess.run(
@@ -3228,8 +3250,6 @@ def main(argv: list[str] | None = None) -> int:
         help="also import shared runners and entrypoints; requires installed dependencies",
     )
     args = parser.parse_args(argv)
-    require_login("仓库校验(validate_repo)")
-
     ensure_supported_python()
 
     if is_source_checkout():
