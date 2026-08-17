@@ -6,7 +6,21 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-17
+
 ### Added
+
+- A one-command, provider-free `xscientist demo` that creates a deterministic
+  Research VCS history with a failed attempt, supporting and refuting evidence,
+  an independent rejection, a contested claim, and an offline DAG for `$0`.
+- A compact, read-only `xscientist status` view for scientific progress,
+  automated run state, budget use, results, the evidence DAG, and the next
+  valid action.
+- `xscientist provider check` now reports credential presence, client
+  availability, live-verification scope, and optional cost-enforcement
+  readiness without making a paid API request.
+- Stable doctor error codes and structured copyable remediation records while
+  preserving the existing `next_actions` compatibility surface.
 
 - An additive deep-research strategy profile with competitive hypothesis
   portfolios, discriminating predictions, deterministic expected-information-
@@ -34,9 +48,10 @@ for its Python package; the ARA protocol has its own version in
   scientific boundary.
 - First-class question/Autopilot/resume/data/budget controls in the Python SDK
   and HTTP project contract.
-- Source-checkout executor builds now install the exact local source revision
-  and label it in the image, while installed releases remain pinned to their
-  matching PyPI version.
+- Source-checkout executor builds install the exact local source revision;
+  PEP 610 VCS installs pin the isolated executor to the same safe HTTPS commit;
+  installed releases remain pinned to their matching PyPI version. Image
+  labels expose which source mode was actually selected.
 - Shared project budget ledgers now use native advisory locks on both POSIX and
   Windows, preserving cross-process token/cost caps for parallel workers.
 - Beginner-oriented `research start`, exploratory `research plan`, and
@@ -50,6 +65,27 @@ for its Python package; the ARA protocol has its own version in
   and hash-bound platform receipts.
 - Schema-bound `research ingest` receipts for MLflow, DVC, notebooks, ELNs,
   instruments, and other tools; imports remain unverified until reviewed.
+
+### Changed
+
+- Guarded starts default to the smaller `research` capability profile and only
+  install ML or PDF-layout tooling when `--task ml-study`, `paper`, or
+  `pdf-review` requires it.
+- Cost-limited starts resolve model pricing before provider use, fail closed
+  with `unknown_model_price`, and accept explicit input/output/cached-input
+  prices for unbundled or local models.
+- Generated executor Dockerfiles now default to the selected research/provider
+  capabilities instead of silently pulling the ML and PDF-layout stacks.
+
+### Fixed
+
+- Missing `pdflatex` is a warning for general research and PDF review, while
+  remaining a blocker for tasks that actually compile a paper.
+- Distribution checks exercise the exact provider-free `demo → status` path
+  from an isolated built wheel, and the compatibility CI matrix runs that
+  journey on Linux, macOS, and Windows.
+- Provider and start cost checks no longer allow an unknown model to become an
+  implicit zero-cost estimate.
 
 ## [0.1.1] - 2026-08-08
 
@@ -161,6 +197,7 @@ for its Python package; the ARA protocol has its own version in
 - Dependency minimums and CI compatibility windows are explicit and checked.
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
-[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/smileformylove/XScientist/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/smileformylove/XScientist/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/smileformylove/XScientist/releases/tag/v0.1.0

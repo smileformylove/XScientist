@@ -152,10 +152,10 @@ class OpenSourceHygieneTests(unittest.TestCase):
             self.assertIn("PyPI", text)
         english = self.readme_path.read_text(encoding="utf-8")
         chinese = self.chinese_readme_path.read_text(encoding="utf-8")
-        self.assertIn("xscientist==0.1.1", english)
-        self.assertIn("The latest stable PyPI package is `0.1.1`", english)
-        self.assertIn("xscientist==0.1.1", chinese)
-        self.assertIn("PyPI 最新稳定版为 `0.1.1`", chinese)
+        self.assertIn("xscientist==0.1.2", english)
+        self.assertIn("stable `0.1.2`", english)
+        self.assertIn("xscientist==0.1.2", chinese)
+        self.assertIn("稳定版 `0.1.2`", chinese)
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (

@@ -26,7 +26,7 @@ from xscientist.service import run_server
 
 class PublicSdkTests(unittest.TestCase):
     def test_top_level_api_is_stable_and_lightweight(self) -> None:
-        self.assertEqual(xscientist.__version__, "0.1.1")
+        self.assertEqual(xscientist.__version__, "0.1.2")
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
@@ -259,7 +259,7 @@ class PublicSdkTests(unittest.TestCase):
         self.assertFalse(payload["host_paths_disclosed"])
         self.assertEqual(
             payload["quickstart"],
-            "xscientist setup my-research --task research",
+            "xscientist demo ./xscientist-demo --open",
         )
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
