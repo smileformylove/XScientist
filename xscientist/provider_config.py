@@ -142,17 +142,7 @@ def normalize_provider_model(provider: str, model: str | None) -> str:
     return selected
 
 
-def discover_provider_models(
-    provider: str,
-    *,
-    timeout: float = 0.75,
-    environ: Mapping[str, str] | None = None,
-) -> list[str]:
-    """Return locally discoverable model IDs without contacting paid APIs."""
-
-    normalized = str(provider or "").strip().lower()
-    if normalized != "ollama":
-        return []
+def _ollama_base_url(environ: Mapping[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     base_url = str(
         source.get("OLLAMA_BASE_URL")
@@ -160,12 +150,23 @@ def discover_provider_models(
         or "http://localhost:11434/v1"
     ).strip()
     if not base_url:
-        return []
+        return ""
     if "://" not in base_url:
         base_url = "http://" + base_url
     base_url = base_url.rstrip("/")
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]
+    return base_url
+
+
+def _ollama_models(
+    *,
+    timeout: float,
+    environ: Mapping[str, str] | None,
+) -> tuple[list[str], str | None]:
+    base_url = _ollama_base_url(environ)
+    if not base_url:
+        return [], "Ollama endpoint is not configured"
     request = urllib.request.Request(
         base_url + "/api/tags",
         headers={"Accept": "application/json", "User-Agent": "xscientist-local"},
@@ -180,10 +181,10 @@ def discover_provider_models(
         with opener.open(request, timeout=timeout) as response:
             payload = json.load(response)
     except (OSError, ValueError, urllib.error.URLError):
-        return []
+        return [], "Ollama is not reachable; start it with `ollama serve`"
     rows = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
-        return []
+        return [], "Ollama returned an invalid model-list response"
     names = []
     for row in rows:
         if not isinstance(row, dict):
@@ -199,8 +200,66 @@ def discover_provider_models(
         if "embed" in name.lower() or family == "bert" or "bert" in families:
             continue
         if name:
-            names.append(normalize_provider_model(normalized, name))
-    return list(dict.fromkeys(names))
+            names.append(normalize_provider_model("ollama", name))
+    return list(dict.fromkeys(names)), None
+
+
+def discover_provider_models(
+    provider: str,
+    *,
+    timeout: float = 0.75,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return locally discoverable model IDs without contacting paid APIs."""
+
+    normalized = str(provider or "").strip().lower()
+    if normalized != "ollama":
+        return []
+    models, _error = _ollama_models(timeout=timeout, environ=environ)
+    return models
+
+
+def probe_provider_model(
+    provider: str,
+    model: str | None,
+    *,
+    timeout: float = 0.75,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Verify free local providers without making a paid API request."""
+
+    normalized = str(provider or "").strip().lower()
+    if normalized != "ollama":
+        return {
+            "checked": False,
+            "ok": True,
+            "service_reachable": None,
+            "model_available": None,
+            "models": [],
+            "error": None,
+        }
+    models, error = _ollama_models(timeout=timeout, environ=environ)
+    selected = normalize_provider_model(normalized, model)
+    service_reachable = error is None
+    model_available = (
+        bool(selected and selected in models) if service_reachable else False
+    )
+    if service_reachable and not selected:
+        error = "No Ollama model is selected"
+    elif service_reachable and not model_available:
+        model_name = selected.split("/", 1)[-1] if selected else "<model>"
+        error = (
+            f"Ollama model {model_name!r} is not installed; "
+            f"run `ollama pull {model_name}`"
+        )
+    return {
+        "checked": True,
+        "ok": bool(service_reachable and model_available),
+        "service_reachable": service_reachable,
+        "model_available": model_available,
+        "models": models,
+        "error": error,
+    }
 
 
 def workspace_config_path(root: str | Path) -> Path:
@@ -588,6 +647,8 @@ def provider_statuses(
     root: str | Path,
     *,
     find_spec: Any = None,
+    probe_local: bool = False,
+    environ: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     workspace = Path(root).expanduser().resolve()
     config = load_provider_config(workspace, missing_ok=False)
@@ -601,6 +662,7 @@ def provider_statuses(
         else ""
     )
     stored = read_env_file(env_file)
+    effective_environ = {**stored, **dict(os.environ if environ is None else environ)}
     active = str(config.get("active_provider") or "")
     configured_entries = config.get("providers", {})
     rows = []
@@ -617,6 +679,23 @@ def provider_statuses(
             if field.required
             and not _is_configured_value(configured_field_value(field, stored))
         ]
+        model = str(entry.get("model") or "") if isinstance(entry, dict) else ""
+        local_probe = (
+            probe_provider_model(
+                provider,
+                model,
+                environ=effective_environ,
+            )
+            if probe_local and isinstance(entry, dict) and bool(entry)
+            else {
+                "checked": False,
+                "ok": True,
+                "service_reachable": None,
+                "model_available": None,
+                "models": [],
+                "error": None,
+            }
+        )
         rows.append(
             {
                 "provider": provider,
@@ -633,12 +712,12 @@ def provider_statuses(
                     and not missing
                     and not missing_clients
                     and not env_error
+                    and local_probe["ok"]
                 ),
-                "model": (
-                    str(entry.get("model") or "") if isinstance(entry, dict) else ""
-                ),
+                "model": model,
                 "missing": missing,
                 "error": env_error,
+                "local_probe": local_probe,
             }
         )
     return rows
@@ -659,6 +738,7 @@ __all__ = [
     "load_provider_config",
     "load_workspace_environment",
     "provider_config_payload",
+    "probe_provider_model",
     "provider_statuses",
     "read_env_file",
     "remove_provider",

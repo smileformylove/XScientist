@@ -207,6 +207,86 @@ class LocalRunControlTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertIn("c3", output.getvalue())
             self.assertIn("succeeded", output.getvalue())
+            self.assertIn("2026-01-01", output.getvalue())
+
+    def test_failed_json_run_has_actionable_summary_and_status_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True)
+            state = {
+                "schema": RUN_SCHEMA,
+                "id": "d4",
+                "status": "failed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "finished_at": "2026-01-01T00:00:01+00:00",
+                "returncode": 1,
+                "stdout": "d4.out.log",
+                "stderr": "d4.err.log",
+                "provider": "ollama",
+                "model": "ollama/qwen2.5:7b",
+                "profile": "balanced",
+                "task": "research",
+                "resume_argv": ["start"],
+            }
+            (runs / "d4.json").write_text(json.dumps(state), encoding="utf-8")
+            (runs / "d4.out.log").write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "next_actions": [
+                            'python -m pip install "xscientist[research]"'
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            (runs / "d4.err.log").write_text("", encoding="utf-8")
+
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                self.assertEqual(
+                    cli_main(["runs", "show", "d4", "--workspace", str(workspace)]),
+                    0,
+                )
+            self.assertIn("Prerequisite check failed", shown.getvalue())
+            self.assertIn("xscientist[research]", shown.getvalue())
+            self.assertNotIn("Failure: }", shown.getvalue())
+
+            status = io.StringIO()
+            with contextlib.redirect_stdout(status):
+                self.assertEqual(cli_main(["status", str(workspace)]), 0)
+            self.assertIn("Latest background run: d4 / failed", status.getvalue())
+            self.assertIn("xscientist runs show d4", status.getvalue())
+
+            logs = io.StringIO()
+            with contextlib.redirect_stdout(logs):
+                self.assertEqual(
+                    cli_main(["runs", "logs", "d4", "--workspace", str(workspace)]),
+                    0,
+                )
+            self.assertIn("--- stdout ---", logs.getvalue())
+
+    def test_logs_warn_when_structured_tail_starts_mid_document(self) -> None:
+        payload = {
+            "schema": "xscientist.local-run-logs.v1",
+            "ok": True,
+            "id": "run-1",
+            "stdout": ['"error_codes": [', '  "docker_unavailable"', "]"],
+            "stderr": [],
+        }
+        output = io.StringIO()
+        with (
+            mock.patch("xscientist.run_control.read_run_logs", return_value=payload),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(
+                ["runs", "logs", "run-1", "--workspace", ".", "--tail", "3"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("starts mid-document", output.getvalue())
 
     def test_invalid_run_id_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:

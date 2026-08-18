@@ -16,6 +16,7 @@ from .research_git import ResearchGitError, repository_status
 from .research_journey import build_research_guide
 
 STATUS_SCHEMA = "xscientist.workspace-status.v1"
+RUN_SCHEMA = "xscientist.local-run.v1"
 
 
 def _read_json(path: Path) -> tuple[dict[str, Any], str | None]:
@@ -60,6 +61,28 @@ def _workspace_identity(root: Path) -> tuple[str, str]:
 
 def _first_existing(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.is_file()), None)
+
+
+def _latest_background_run(root: Path) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for path in (root / "04_logs" / "runs").glob("*.json"):
+        payload, error = _read_json(path)
+        if error or payload.get("schema") != RUN_SCHEMA:
+            continue
+        candidates.append(payload)
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda item: str(item.get("created_at") or ""))
+    return {
+        "id": latest.get("id"),
+        "status": latest.get("status"),
+        "created_at": latest.get("created_at"),
+        "finished_at": latest.get("finished_at"),
+        "provider": latest.get("provider"),
+        "model": latest.get("model"),
+        "profile": latest.get("profile"),
+        "returncode": latest.get("returncode"),
+    }
 
 
 def build_workspace_status(
@@ -179,6 +202,7 @@ def build_workspace_status(
                 else None
             ),
         },
+        "background_run": _latest_background_run(root),
         "budget": {
             "available": bool(budget),
             "limits": budget.get("limits"),

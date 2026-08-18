@@ -6,6 +6,27 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Changed
+
+- Ollama readiness now verifies the local service and selected model, accepts
+  numbered interactive model choices, and treats local inference as zero API
+  cost while preserving token budgets.
+- Human status, detached-run, executor, provider, and upgrade output now uses
+  clearer user-facing states, local timestamps, structured failure summaries,
+  and context-aware next actions.
+- English and Chinese install documentation now distinguishes the published
+  `0.1.2` package from the `0.1.3` release candidate on `main`, with PyPI-safe
+  documentation links.
+
+### Fixed
+
+- Provider checks and Doctor no longer report an unreachable Ollama endpoint
+  as ready, and Docker failures distinguish a missing installation from a
+  stopped daemon.
+- Workspace status includes the latest detached run, demo output explains a
+  scientifically contested closure, and installation info no longer reports
+  contradictory provider-client readiness when no provider is configured.
+
 ## [0.1.3] - 2026-08-17
 
 ### Added

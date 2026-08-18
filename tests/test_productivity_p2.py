@@ -78,8 +78,18 @@ class ProductivityP2Tests(unittest.TestCase):
             with mock.patch("urllib.request.urlopen", return_value=response):
                 payload = check_upgrade(raw, online=True)
             self.assertTrue(payload["package"]["update_available"])
+            self.assertEqual(payload["package"]["index_relation"], "update_available")
             self.assertFalse(payload["mutated"])
             self.assertEqual(list(Path(raw).iterdir()), [])
+
+    def test_upgrade_explains_an_unreleased_installed_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            response = _PyPIResponse(json.dumps({"info": {"version": "0.1.2"}}))
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                payload = check_upgrade(raw, online=True)
+
+        self.assertFalse(payload["package"]["update_available"])
+        self.assertEqual(payload["package"]["index_relation"], "newer_than_index")
 
     def test_upgrade_check_reports_incompatible_schema(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

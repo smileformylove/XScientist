@@ -168,6 +168,72 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertIn("unknown_model_price", payload["error_codes"])
             self.assertFalse(payload["checks"]["model_price_known"])
 
+    def test_ollama_check_verifies_service_model_and_zero_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="ollama",
+                model="qwen2.5:7b",
+            )
+            output = io.StringIO()
+            response = io.StringIO(json.dumps({"models": [{"name": "qwen2.5:7b"}]}))
+            with (
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch("urllib.request.OpenerDirector.open", return_value=response),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--max-cost-usd",
+                        "1",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["checks"]["live_api_verified"])
+            self.assertFalse(payload["checks"]["credentials_required"])
+            self.assertEqual(payload["checks"]["credential_validation"], "not_required")
+            self.assertEqual(payload["price_per_million"]["input"], 0.0)
+
+    def test_ollama_check_fails_when_the_local_service_is_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="ollama",
+                model="qwen2.5:7b",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "urllib.request.OpenerDirector.open",
+                    side_effect=OSError("not reachable"),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    ["provider", "check", "--workspace", str(workspace), "--json"]
+                )
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertIn("local_provider_unreachable", payload["error_codes"])
+            self.assertFalse(payload["checks"]["live_api_verified"])
+
     def test_workspace_is_discovered_from_nested_directories(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"

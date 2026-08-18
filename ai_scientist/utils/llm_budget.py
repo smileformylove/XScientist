@@ -244,6 +244,9 @@ def resolve_model_price(
 ) -> dict[str, float] | None:
     """Resolve a complete, non-negative price without treating unknown models as free."""
 
+    if str(model or "").strip().lower().startswith("ollama/"):
+        return {"input": 0.0, "cached_input": 0.0, "output": 0.0}
+
     prices: dict[str, Mapping[str, Any]] = dict(DEFAULT_MODEL_PRICES_PER_MILLION)
     prices.update(dict(prices_per_million or {}))
     for candidate in _model_candidates(model):

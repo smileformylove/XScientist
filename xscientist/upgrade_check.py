@@ -129,6 +129,16 @@ def check_upgrade(
         and _version_key(latest)
         and _version_key(latest) > _version_key(__version__)
     )
+    installed_key = _version_key(__version__)
+    latest_key = _version_key(latest or "")
+    if not latest_key:
+        index_relation = "unknown"
+    elif installed_key > latest_key:
+        index_relation = "newer_than_index"
+    elif installed_key < latest_key:
+        index_relation = "update_available"
+    else:
+        index_relation = "current"
     if update_available:
         remediations.append(
             f"Review the changelog, then run `python -m pip install --upgrade xscientist=={latest}`."
@@ -145,6 +155,7 @@ def check_upgrade(
             "update_available": update_available,
             "online_checked": online,
             "online_error": online_error,
+            "index_relation": index_relation,
         },
         "checks": checks,
         "remediations": remediations,

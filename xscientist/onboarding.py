@@ -226,12 +226,11 @@ def _render_readme(
 ) -> str:
     image = f"xscientist-exec:{__version__}"
     install = (
-        installation_command(provider, version=__version__)
+        installation_command(provider)
         if capabilities is None
         else capability_installation_command(
             capabilities,
             provider=provider if provider_required else None,
-            version=__version__,
         )
     )
     install_note = (
@@ -478,12 +477,11 @@ def create_workspace(
         "next_steps": [
             f"cd {workspace_view}",
             (
-                installation_command(normalized_provider, version=__version__)
+                installation_command(normalized_provider)
                 if selected_capabilities is None
                 else capability_installation_command(
                     selected_capabilities,
                     provider=(normalized_provider if provider_required else None),
-                    version=__version__,
                 )
             ),
             "xscientist git doctor",

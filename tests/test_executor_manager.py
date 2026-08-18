@@ -13,7 +13,11 @@ import yaml
 
 from xscientist._version import __version__
 from xscientist.cli import main as cli_main
-from xscientist.executor_manager import inspect_executor, prepare_executor
+from xscientist.executor_manager import (
+    DOCKER_INSTALL_URL,
+    inspect_executor,
+    prepare_executor,
+)
 
 
 class ExecutorManagerTests(unittest.TestCase):
@@ -70,6 +74,19 @@ class ExecutorManagerTests(unittest.TestCase):
         self.assertTrue(payload["cache_hit"])
         self.assertFalse(payload["built"])
         build.assert_not_called()
+
+    def test_missing_docker_gives_install_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = self._workspace(td)
+            with mock.patch(
+                "xscientist.executor_manager.shutil.which", return_value=None
+            ):
+                status = inspect_executor(workspace)
+
+        self.assertFalse(status["ok"])
+        self.assertFalse(status["docker_available"])
+        self.assertIn(DOCKER_INSTALL_URL, status["error"])
+        self.assertEqual(status["next_action"], DOCKER_INSTALL_URL)
 
     def test_cli_check_explains_an_unavailable_executor(self) -> None:
         unavailable = {

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo_v1.png" width="220" alt="XScientist logo">
+  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/logo_v1.png" width="220" alt="XScientist logo">
 </p>
 
 <h1 align="center">XScientist</h1>
@@ -16,7 +16,7 @@
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/pyversions/xscientist.svg" alt="Python versions"></a>
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/dm/xscientist.svg" alt="PyPI downloads"></a>
   <a href="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml"><img src="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main" alt="Smoke checks"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/smileformylove/XScientist/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 license"></a>
   <a href="https://arxiv.org/abs/2607.12301"><img src="https://img.shields.io/badge/arXiv-2607.12301-b31b1b.svg" alt="arXiv paper"></a>
 </p>
 
@@ -26,8 +26,8 @@
   <a href="#go-deeper-than-one-hypothesis">Deep research</a> ·
   <a href="#from-a-better-score-to-a-transferable-method">Method discovery</a> ·
   <a href="#research-git-for-humans-and-agents">Research Git</a> ·
-  <a href="docs/RESEARCH_PROTOCOL_V2.md">Protocol</a> ·
-  <a href="docs/README.zh.md">中文</a>
+  <a href="https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md">Protocol</a> ·
+  <a href="https://github.com/smileformylove/XScientist/blob/main/docs/README.zh.md">中文</a>
 </p>
 
 XScientist is a local-first research system and an open scientific protocol. It
@@ -43,9 +43,10 @@ commit, challenge it on a branch, or continue from an exact experiment node.
 > isolation boundary. Machine-generated claims remain unverified until the
 > required evidence and independent gates exist.
 
-This README documents stable `0.1.3` and the compatible surface on `main`; see
-[Install and compatibility](#install-and-compatibility) before choosing a
-release channel.
+This README documents the `0.1.3` release candidate currently on `main`. The
+latest published PyPI release is `0.1.2`; use the source install commands below
+for the new `0.1.3` journeys until that release is published. See
+[Install and compatibility](#install-and-compatibility) for both channels.
 
 ## Choose your path
 
@@ -66,7 +67,7 @@ offline browser work before credentials or Docker enter the picture.
 Requirements: Python 3.10+ and Git.
 
 ```bash
-python -m pip install "xscientist==0.1.3"
+python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist demo ./first-study --autopilot --open
 xscientist status ./first-study
 ```
@@ -105,20 +106,23 @@ installed in a running Ollama service and presents them in the interactive
 setup.
 
 ```bash
-python -m pip install "xscientist[research,openai-compatible]==0.1.3"
+python -m pip install "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist start ./local-study
 ```
 
 The terminal asks for the question, provider, detected model, evidence mode,
-local actor name, and optional budget. Bare Ollama names such as
-`qwen2.5:7b` are accepted and normalized automatically.
+local actor name, and optional budget. Choose a detected model by number or
+name. Bare Ollama names such as `qwen2.5:7b` are accepted and normalized
+automatically. Readiness checks verify that the Ollama service is reachable and
+the selected model is installed; local Ollama tokens count toward token limits
+but are treated as `$0.00` for API-cost limits.
 
 ### Route B: hosted model provider
 
 Install the research runtime plus exactly one provider client:
 
 ```bash
-python -m pip install "xscientist[research,openai]==0.1.3"
+python -m pip install "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
 export OPENAI_API_KEY="..."
 xscientist start ./hosted-study
 ```
@@ -156,9 +160,9 @@ process. A model-backed experiment needs Docker and a version-matched executor:
 xscientist executor prepare --workspace ./ood-reflection
 ```
 
-If Docker is unavailable, the command stops with a direct diagnostic. The
-provider-free demo and read-only Research Git operations remain usable without
-Docker.
+If Docker is unavailable, the command distinguishes a missing CLI from a
+stopped daemon and links to the official installation guide. The provider-free
+demo and read-only Research Git operations remain usable without Docker.
 
 ### Check readiness before spending money
 
@@ -167,9 +171,10 @@ xscientist provider check --workspace ./ood-reflection --max-cost-usd 10
 xscientist doctor --workspace ./ood-reflection --deep
 ```
 
-`provider check` validates local credential presence, client availability, and
-cost enforcement; it does not make a paid or live provider request. Doctor
-prints ordered, copyable repairs using the same public commands shown here.
+`provider check` validates credential presence, client availability, and cost
+enforcement. For Ollama it also makes a free local service/model readiness
+request; it never makes a paid hosted-provider request. Doctor prints ordered,
+copyable repairs using the same public commands shown here.
 
 Autopilot profiles make the main trade-off explicit:
 
@@ -197,7 +202,8 @@ xscientist runs resume RUN_ID --workspace ./ood-reflection
 Run views show state, profile, provider/model, duration, exit code, and a
 bounded failure summary. Questions and exact resume arguments remain private.
 Resume rechecks local prerequisites before relaunching; `--force` is available
-for an intentional bypass.
+for an intentional bypass. `xscientist status` also surfaces the latest
+detached run, so a fast startup failure is not mistaken for a healthy pipeline.
 
 ### Recover from a stopped setup or run
 
@@ -313,9 +319,9 @@ closure information, enabling three different claims about a result:
 - **Verified**: an eligible independent authority has passed the required gate.
 
 These levels are intentionally not interchangeable. See the
-[protocol v2 specification](docs/RESEARCH_PROTOCOL_V2.md),
-[DAG and adapter guide](docs/RESEARCH_DAG_AND_ADAPTERS.md), and
-[research integrity policy](docs/RESEARCH_INTEGRITY.md).
+[protocol v2 specification](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md),
+[DAG and adapter guide](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md), and
+[research integrity policy](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md).
 
 ## Go deeper than one hypothesis
 
@@ -400,7 +406,7 @@ xscientist research program claim @latest:claim
 xscientist research dag --output ./research-dag
 ```
 
-See the [deep research protocol](docs/DEEP_RESEARCH_PROTOCOL.md) for object
+See the [deep research protocol](https://github.com/smileformylove/XScientist/blob/main/docs/DEEP_RESEARCH_PROTOCOL.md) for object
 semantics, scoring, fail-closed gates, and automation boundaries.
 
 ## From a better score to a transferable method
@@ -442,7 +448,7 @@ Claims at `method_discovery` strength are blocked unless a passing
 cross-condition assessment is linked. The assessment also rejects improvements
 caused by protected-file edits, resource expansion, runner changes, missing
 baselines, incomplete conditions, or broken proxy-to-target ranking. See the
-[method discovery protocol](docs/METHOD_DISCOVERY_PROTOCOL.md) for complete
+[method discovery protocol](https://github.com/smileformylove/XScientist/blob/main/docs/METHOD_DISCOVERY_PROTOCOL.md) for complete
 JSON examples and verdict semantics.
 
 ## Research Git for humans and agents
@@ -548,7 +554,7 @@ flowchart TB
 
 The public surface lives in `xscientist/`; workflow implementation lives in
 `ai_scientist/`; versioned schemas live in `ai_scientist/protocol/`. See the
-[architecture document](docs/ARCHITECTURE.md) for component boundaries.
+[architecture document](https://github.com/smileformylove/XScientist/blob/main/docs/ARCHITECTURE.md) for component boundaries.
 
 ## Install and compatibility
 
@@ -556,8 +562,8 @@ The public surface lives in `xscientist/`; workflow implementation lives in
 
 | Channel | Install | Use when |
 | --- | --- | --- |
-| Stable `0.1.3` | `python -m pip install "xscientist==0.1.3"` | You need the published package and its release contract |
-| Current `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You need unreleased development work and accept a moving source revision |
+| Published `0.1.2` | `python -m pip install "xscientist==0.1.2"` | You need the current PyPI package and its release contract |
+| `0.1.3` release candidate | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | You need the journeys documented here before the PyPI release and accept a moving source revision |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | You are changing the repository |
 
 Pin a commit instead of `main` when an experiment must be exactly repeatable.
@@ -661,27 +667,27 @@ An optional FastAPI service is available through `xscientist[service]`. Tool
 authors can discover platform adapters with `xscientist research adapter list`
 and use the versioned `xscientist.research_adapters` entry-point contract.
 
-See [SDK and API](docs/guides/SDK_AND_API.md),
-[configuration](docs/CONFIG_REFERENCE.md), and
-[DAG/adapters](docs/RESEARCH_DAG_AND_ADAPTERS.md).
+See [SDK and API](https://github.com/smileformylove/XScientist/blob/main/docs/guides/SDK_AND_API.md),
+[configuration](https://github.com/smileformylove/XScientist/blob/main/docs/CONFIG_REFERENCE.md), and
+[DAG/adapters](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md).
 
 ## Documentation
 
 | Need | Guide |
 | --- | --- |
-| First autonomous project | [Project usage](docs/guides/PROJECT_USAGE.md) |
-| Understand current onboarding difficulty and targets | [Onboarding audit](docs/ONBOARDING_AUDIT.md) |
-| Research Git commands and mental model | [Local Research Git](docs/LOCAL_RESEARCH_GIT.md) |
-| Protocol guarantees and migration | [Research protocol v2](docs/RESEARCH_PROTOCOL_V2.md) · [migration](docs/PROTOCOL_MIGRATION_2026.md) |
-| Evidence DAG and integrations | [DAG and adapters](docs/RESEARCH_DAG_AND_ADAPTERS.md) |
-| Competitive hypotheses and deeper claim gates | [Deep research protocol](docs/DEEP_RESEARCH_PROTOCOL.md) |
-| Engineering gain vs. method discovery | [Method discovery protocol](docs/METHOD_DISCOVERY_PROTOCOL.md) |
-| Context and memory invariants | [Epistemic graph](docs/EPISTEMIC_GRAPH_SPEC.md) · [science constitution](docs/SCIENCE_CONSTITUTION.md) |
-| Scientific integrity and evaluation | [Research integrity](docs/RESEARCH_INTEGRITY.md) · [evaluation governance](docs/EVALUATION_GOVERNANCE.md) |
-| Controlled self-evolution | [Self-evolution architecture](docs/SELF_EVOLUTION_ARCHITECTURE.md) · [evolution gate](docs/EVOLUTION_GATE.md) |
-| ARA retention, bundles, and GC | [ARA storage lifecycle](docs/ARA_STORAGE_LIFECYCLE.md) |
-| Long-running daemon operations | [Long-running guide](docs/LONG_RUNNING_GUIDE.md) |
-| Architecture, engineering, and release policy | [Architecture](docs/ARCHITECTURE.md) · [engineering](docs/ENGINEERING.md) |
+| First autonomous project | [Project usage](https://github.com/smileformylove/XScientist/blob/main/docs/guides/PROJECT_USAGE.md) |
+| Understand current onboarding difficulty and targets | [Onboarding audit](https://github.com/smileformylove/XScientist/blob/main/docs/ONBOARDING_AUDIT.md) |
+| Research Git commands and mental model | [Local Research Git](https://github.com/smileformylove/XScientist/blob/main/docs/LOCAL_RESEARCH_GIT.md) |
+| Protocol guarantees and migration | [Research protocol v2](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md) · [migration](https://github.com/smileformylove/XScientist/blob/main/docs/PROTOCOL_MIGRATION_2026.md) |
+| Evidence DAG and integrations | [DAG and adapters](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md) |
+| Competitive hypotheses and deeper claim gates | [Deep research protocol](https://github.com/smileformylove/XScientist/blob/main/docs/DEEP_RESEARCH_PROTOCOL.md) |
+| Engineering gain vs. method discovery | [Method discovery protocol](https://github.com/smileformylove/XScientist/blob/main/docs/METHOD_DISCOVERY_PROTOCOL.md) |
+| Context and memory invariants | [Epistemic graph](https://github.com/smileformylove/XScientist/blob/main/docs/EPISTEMIC_GRAPH_SPEC.md) · [science constitution](https://github.com/smileformylove/XScientist/blob/main/docs/SCIENCE_CONSTITUTION.md) |
+| Scientific integrity and evaluation | [Research integrity](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) · [evaluation governance](https://github.com/smileformylove/XScientist/blob/main/docs/EVALUATION_GOVERNANCE.md) |
+| Controlled self-evolution | [Self-evolution architecture](https://github.com/smileformylove/XScientist/blob/main/docs/SELF_EVOLUTION_ARCHITECTURE.md) · [evolution gate](https://github.com/smileformylove/XScientist/blob/main/docs/EVOLUTION_GATE.md) |
+| ARA retention, bundles, and GC | [ARA storage lifecycle](https://github.com/smileformylove/XScientist/blob/main/docs/ARA_STORAGE_LIFECYCLE.md) |
+| Long-running daemon operations | [Long-running guide](https://github.com/smileformylove/XScientist/blob/main/docs/LONG_RUNNING_GUIDE.md) |
+| Architecture, engineering, and release policy | [Architecture](https://github.com/smileformylove/XScientist/blob/main/docs/ARCHITECTURE.md) · [engineering](https://github.com/smileformylove/XScientist/blob/main/docs/ENGINEERING.md) |
 
 ## Project status and roadmap
 
@@ -693,7 +699,7 @@ price preflight, and a built-wheel demo smoke. The remaining adoption work is
 reducing container/provider setup further, publishing sample ARAs, adding a
 polished recorded demo, and measuring time-to-first-value across clean
 machines. The detailed strategy is in the
-[onboarding audit](docs/ONBOARDING_AUDIT.md).
+[onboarding audit](https://github.com/smileformylove/XScientist/blob/main/docs/ONBOARDING_AUDIT.md).
 
 The project is building toward:
 
@@ -707,10 +713,10 @@ The project is building toward:
 Issues, protocol proposals, adapters, reproducible examples, and focused pull
 requests are welcome.
 
-- Read the [contributing guide](.github/CONTRIBUTING.md).
-- Use the [issue templates](.github/ISSUE_TEMPLATE/) for bugs and features.
-- Follow the [code of conduct](.github/CODE_OF_CONDUCT.md).
-- Report vulnerabilities through the [security policy](.github/SECURITY.md),
+- Read the [contributing guide](https://github.com/smileformylove/XScientist/blob/main/.github/CONTRIBUTING.md).
+- Use the [issue templates](https://github.com/smileformylove/XScientist/tree/main/.github/ISSUE_TEMPLATE) for bugs and features.
+- Follow the [code of conduct](https://github.com/smileformylove/XScientist/blob/main/.github/CODE_OF_CONDUCT.md).
+- Report vulnerabilities through the [security policy](https://github.com/smileformylove/XScientist/blob/main/.github/SECURITY.md),
   not a public issue.
 
 Common checks:
@@ -735,7 +741,7 @@ re-execution, or CAS reachability require compatibility tests.
 
 If XScientist contributes to a research result, record the software commit,
 configuration, model versions, data identities, and ARA/Research Git artifact
-IDs. GitHub can also read the repository's [`CITATION.cff`](CITATION.cff).
+IDs. GitHub can also read the repository's [`CITATION.cff`](https://github.com/smileformylove/XScientist/blob/main/CITATION.cff).
 
 ```bibtex
 @misc{xscientist_arxiv_2607_12301,
@@ -760,4 +766,4 @@ attribution.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/smileformylove/XScientist/blob/main/LICENSE).

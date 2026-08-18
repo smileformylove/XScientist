@@ -14,6 +14,7 @@ import yaml
 from ._version import __version__
 
 EXECUTOR_SCHEMA = "xscientist.executor-status.v1"
+DOCKER_INSTALL_URL = "https://docs.docker.com/get-started/get-docker/"
 
 
 class ExecutorManagerError(RuntimeError):
@@ -96,8 +97,20 @@ def inspect_executor(
     source = labels.get("org.xscientist.install-source")
     version_match = image_available and version == __version__
     ready = docker_available and daemon_ready and image_available and version_match
-    if error is None and image_available and not version_match:
+    if not docker_available:
+        error = f"Docker CLI is not installed. Install Docker: {DOCKER_INSTALL_URL}"
+    elif not daemon_ready:
+        error = "Docker is installed, but its daemon is not running; start Docker"
+    elif error is None and image_available and not version_match:
         error = f"executor version {version or 'unknown'} does not match {__version__}"
+    if ready:
+        next_action = None
+    elif not docker_available:
+        next_action = DOCKER_INSTALL_URL
+    elif not daemon_ready:
+        next_action = "Start Docker, then rerun this command"
+    else:
+        next_action = f"xscientist executor prepare --workspace {root.name}"
     return {
         "schema": EXECUTOR_SCHEMA,
         "ok": ready,
@@ -111,9 +124,7 @@ def inspect_executor(
         "revision": labels.get("org.opencontainers.image.revision"),
         "install_source": source,
         "error": error,
-        "next_action": (
-            None if ready else f"xscientist executor prepare --workspace {root.name}"
-        ),
+        "next_action": next_action,
         "host_paths_disclosed": False,
     }
 
@@ -163,7 +174,9 @@ def build_executor(
     if not dockerfile.is_file():
         raise ExecutorManagerError("Dockerfile.executor was not found")
     if shutil.which("docker") is None:
-        raise ExecutorManagerError("Docker CLI is not installed")
+        raise ExecutorManagerError(
+            f"Docker CLI is not installed. Install Docker: {DOCKER_INSTALL_URL}"
+        )
     image = _image_name(config)
     context, source_args = _source_build_arguments(root)
     command = ["docker", "build", "-f", str(dockerfile), "-t", image]
@@ -193,6 +206,7 @@ def prepare_executor(
 
 
 __all__ = [
+    "DOCKER_INSTALL_URL",
     "EXECUTOR_SCHEMA",
     "ExecutorManagerError",
     "build_executor",

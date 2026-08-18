@@ -69,7 +69,11 @@ def diagnose(
         provider_row = next(
             (
                 row
-                for row in provider_statuses(root, **status_kwargs)
+                for row in provider_statuses(
+                    root,
+                    probe_local=True,
+                    **status_kwargs,
+                )
                 if row["provider"] == selected_provider
             ),
             None,
@@ -150,11 +154,27 @@ def diagnose(
             "Select and configure one model provider.",
         )
     elif provider_required and not provider_ready and selected_provider:
-        add_remediation(
-            "provider_not_ready",
-            f"xscientist provider add {selected_provider}",
-            "Configure credentials and the client for the selected provider.",
-        )
+        local_probe = (provider_row or {}).get("local_probe") or {}
+        if local_probe.get("checked") and not local_probe.get("service_reachable"):
+            add_remediation(
+                "local_provider_unreachable",
+                "ollama serve",
+                "Start the local Ollama service, then run Doctor again.",
+            )
+        elif local_probe.get("checked") and not local_probe.get("model_available"):
+            model = str((provider_row or {}).get("model") or "<model>")
+            model_name = model.split("/", 1)[-1]
+            add_remediation(
+                "local_model_missing",
+                f"ollama pull {model_name}",
+                "Install the model selected by this workspace.",
+            )
+        else:
+            add_remediation(
+                "provider_not_ready",
+                f"xscientist provider add {selected_provider}",
+                "Configure credentials and the client for the selected provider.",
+            )
     if auth_required and not authenticated:
         add_remediation(
             "research_identity_missing",
@@ -247,11 +267,29 @@ def diagnose(
                 if not item["ok"] and item["severity"] == "error"
             }
             if "Experiment isolation" in failed_labels:
-                add_remediation(
-                    "executor_image_unavailable",
-                    "xscientist executor prepare --workspace .",
-                    "Prepare the exact isolated executor selected by the workspace.",
+                isolation = next(
+                    (
+                        item
+                        for item in runtime_results
+                        if item["label"] == "Experiment isolation" and not item["ok"]
+                    ),
+                    {},
                 )
+                if (
+                    "docker executable not found"
+                    in str(isolation.get("detail") or "").lower()
+                ):
+                    add_remediation(
+                        "docker_cli_missing",
+                        "https://docs.docker.com/get-started/get-docker/",
+                        "Install and start Docker before preparing the executor.",
+                    )
+                else:
+                    add_remediation(
+                        "executor_image_unavailable",
+                        "xscientist executor prepare --workspace .",
+                        "Prepare the exact isolated executor selected by the workspace.",
+                    )
             add_remediation(
                 "runtime_preflight_failed",
                 "xscientist preflight --strict --bfts-config bfts_config.yaml",
@@ -321,6 +359,9 @@ def diagnose(
                 provider_row["missing_client_modules"] if provider_row else []
             ),
             "error": str(provider_row["error"] if provider_row else "") or None,
+            "local_probe": dict(
+                provider_row.get("local_probe") if provider_row else {}
+            ),
         },
         "auth": {
             "code": "research_identity",

@@ -81,6 +81,7 @@ class DemoStatusTests(unittest.TestCase):
                 payload["next_steps"][0]["code"], "resolve_contested_claim"
             )
             self.assertEqual(payload["workspace"], "demo")
+            self.assertIsNone(payload["background_run"])
             self.assertTrue(payload["workspace_id"].startswith("ws-"))
             repository_config = yaml.safe_load(
                 (workspace / "research.yaml").read_text(encoding="utf-8")
@@ -122,6 +123,8 @@ class DemoStatusTests(unittest.TestCase):
                 )
 
             self.assertIn("Scientific closure: blocked", demo_output.getvalue())
+            self.assertIn("the demo itself succeeded", demo_output.getvalue())
+            self.assertIn("Next: xscientist status", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("Workspace: demo", rendered)
             self.assertIn("Scientific progress: 7/8", rendered)
@@ -186,6 +189,7 @@ class DemoStatusTests(unittest.TestCase):
                 )
 
             self.assertIn("零 Provider 演示已就绪", demo_output.getvalue())
+            self.assertIn("演示成功", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("工作区：demo", rendered)
             self.assertIn("科学进度", rendered)

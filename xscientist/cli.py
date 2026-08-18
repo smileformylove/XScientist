@@ -665,6 +665,78 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     return command
 
 
+def _parse_structured_log(lines: Sequence[str]) -> dict[str, object] | None:
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _structured_log_tail_is_partial(lines: Sequence[str]) -> bool:
+    text = "\n".join(lines).strip()
+    if not text or _parse_structured_log(lines) is not None:
+        return False
+    first = text.splitlines()[0].strip()
+    return first.startswith(("{", "[", '"')) or bool(
+        re.match(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:", first)
+    )
+
+
+def _nested_first(payload: object, key: str) -> object | None:
+    if isinstance(payload, dict):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            return value
+        for child in payload.values():
+            found = _nested_first(child, key)
+            if found not in (None, "", [], {}):
+                return found
+    elif isinstance(payload, list):
+        for child in payload:
+            found = _nested_first(child, key)
+            if found not in (None, "", [], {}):
+                return found
+    return None
+
+
+def _run_failure_summary(logs: dict[str, object]) -> str | None:
+    for stream in ("stderr", "stdout"):
+        lines = [str(line) for line in logs.get(stream, [])]
+        payload = _parse_structured_log(lines)
+        if payload is not None:
+            error = _nested_first(payload, "error")
+            if isinstance(error, str):
+                return error
+            actions = _nested_first(payload, "next_actions")
+            if isinstance(actions, list) and actions:
+                return f"Prerequisite check failed; next: {actions[0]}"
+            codes = _nested_first(payload, "error_codes")
+            if isinstance(codes, list) and codes:
+                return "Run failed: " + ", ".join(str(code) for code in codes[:3])
+        for line in reversed(lines):
+            candidate = line.strip()
+            if candidate and candidate not in {"{", "}", "[", "]", "},", "],"}:
+                return candidate
+    return None
+
+
+def _format_run_timestamp(value: object) -> str:
+    from datetime import datetime
+
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return raw
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def _prompt_provider_model(provider: str, *, default: str | None = None) -> str:
     from .provider_config import discover_provider_models, normalize_provider_model
 
@@ -675,8 +747,17 @@ def _prompt_provider_model(provider: str, *, default: str | None = None) -> str:
             print(f"  {index}. {model}")
     suggested = default or (discovered[0] if discovered else None)
     example = suggested or f"{provider}/<model>"
-    prompt = f"Model ID [{example}]: " if suggested else f"Model ID ({example}): "
+    prompt = (
+        f"Model [1, Enter={example}]: "
+        if discovered and suggested == discovered[0]
+        else (f"Model ID [{example}]: " if suggested else f"Model ID ({example}): ")
+    )
     entered = input(prompt).strip()
+    if discovered and entered.isdigit():
+        selected_index = int(entered)
+        if not 1 <= selected_index <= len(discovered):
+            raise ValueError("model selection is not in the displayed list")
+        entered = discovered[selected_index - 1]
     if not entered and not suggested:
         raise ValueError(f"a model is required; use an ID such as {provider}/<model>")
     return normalize_provider_model(provider, entered or suggested)
@@ -832,6 +913,7 @@ def _installation_info() -> dict[str, object]:
     from ai_scientist.apps.preflight import CORE_PACKAGES
     from ai_scientist.utils.auth_session import validate_session
     from .dependency_profiles import installation_command, missing_provider_modules
+    from .provider_config import discover_provider_models
 
     runtime_modules = sorted(CORE_PACKAGES)
     service_modules = ["fastapi", "pydantic", "uvicorn"]
@@ -859,13 +941,17 @@ def _installation_info() -> dict[str, object]:
         "登录会话已过期": "login session has expired",
     }.get(auth_status, auth_status)
     active_provider = str(os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or "").strip()
-    missing_provider_clients = (
-        missing_provider_modules(active_provider) if active_provider else []
+    local_models = (
+        [] if active_provider else discover_provider_models("ollama", timeout=0.2)
     )
-    provider_client_ready = bool(active_provider) and not missing_provider_clients
+    missing_provider_clients = (
+        missing_provider_modules(active_provider) if active_provider else None
+    )
+    provider_client_ready = not missing_provider_clients if active_provider else None
+    suggested_provider = active_provider or ("ollama" if local_models else None)
     recommended_install = (
-        installation_command(active_provider)
-        if active_provider
+        installation_command(suggested_provider)
+        if suggested_provider
         else 'python -m pip install "xscientist[research,openai]"'
     )
     return {
@@ -878,7 +964,14 @@ def _installation_info() -> dict[str, object]:
         "missing_service_packages": missing_service,
         "provider_client_ready": provider_client_ready,
         "provider_configured": bool(active_provider),
+        "provider_client_status": (
+            "ready"
+            if provider_client_ready is True
+            else ("missing" if provider_client_ready is False else "not_configured")
+        ),
         "missing_provider_clients": missing_provider_clients,
+        "suggested_provider": suggested_provider,
+        "discovered_local_models": local_models,
         "recommended_install": recommended_install,
         "python_version": sys.version.split()[0],
         "python_executable": Path(sys.executable).name,
@@ -1031,6 +1124,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
     from ai_scientist.utils.llm_budget import resolve_model_price
 
     from .provider_config import (
+        PROVIDER_FIELDS,
         ProviderConfigError,
         activate_provider,
         discover_workspace_root,
@@ -1051,7 +1145,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         else:
             workspace = Path(parsed.workspace).expanduser().resolve()
         if parsed.provider_command == "list":
-            rows = provider_statuses(workspace)
+            rows = provider_statuses(workspace, probe_local=True)
             payload = {
                 "workspace": ".",
                 "providers": rows,
@@ -1076,6 +1170,8 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         suffix += f"; missing clients: {missing_clients}"
                     if row["error"]:
                         suffix += f"; error: {row['error']}"
+                    if row["local_probe"].get("error"):
+                        suffix += f"; local check: {row['local_probe']['error']}"
                     print(
                         f"{marker} {row['provider']}: {state}; model: {model}{suffix}"
                     )
@@ -1095,7 +1191,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 )
             row = next(
                 item
-                for item in provider_statuses(workspace)
+                for item in provider_statuses(workspace, probe_local=True)
                 if item["provider"] == provider
             )
             custom_prices: dict[str, object] = {}
@@ -1156,6 +1252,24 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         "command": f"chmod 600 {config.get('env_file') or '.env'}",
                     }
                 )
+            local_probe = row["local_probe"]
+            if local_probe["checked"] and not local_probe["service_reachable"]:
+                error_codes.append("local_provider_unreachable")
+                remediations.append(
+                    {
+                        "code": "start_local_provider",
+                        "command": "ollama serve",
+                    }
+                )
+            elif local_probe["checked"] and not local_probe["model_available"]:
+                error_codes.append("local_model_missing")
+                model_name = model.split("/", 1)[-1] if model else "<model>"
+                remediations.append(
+                    {
+                        "code": "install_local_model",
+                        "command": f"ollama pull {model_name}",
+                    }
+                )
             cost_ready = parsed.max_cost_usd is None or price is not None
             if not cost_ready:
                 error_codes.append("unknown_model_price")
@@ -1176,11 +1290,22 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "checks": {
                     "metadata_configured": bool(row["configured"]),
                     "credentials_present": bool(row["credentials_available"]),
-                    "credential_validation": "presence_only",
+                    "credentials_required": any(
+                        field.required for field in PROVIDER_FIELDS[provider]
+                    ),
+                    "credential_validation": (
+                        "presence_only"
+                        if any(field.required for field in PROVIDER_FIELDS[provider])
+                        else "not_required"
+                    ),
                     "client_available": bool(row["client_available"]),
                     "model_price_known": price is not None,
                     "cost_limit_requested": parsed.max_cost_usd is not None,
-                    "live_api_verified": False,
+                    "local_service_reachable": local_probe["service_reachable"],
+                    "model_available": local_probe["model_available"],
+                    "live_api_verified": bool(
+                        local_probe["checked"] and local_probe["ok"]
+                    ),
                 },
                 "price_per_million": price,
                 "error_codes": error_codes,
@@ -1189,22 +1314,35 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
-                state = "local checks passed" if payload["ok"] else "not ready"
+                state = (
+                    "local service and model verified"
+                    if local_probe["checked"] and payload["ok"]
+                    else ("local checks passed" if payload["ok"] else "not ready")
+                )
                 print(f"Provider {provider}: {state}")
                 print(f"Model: {model or '-'}")
-                print(
-                    "Credentials: "
-                    + ("present" if row["credentials_available"] else "missing")
-                    + " (presence check only; no live API request was made)"
-                )
+                if any(field.required for field in PROVIDER_FIELDS[provider]):
+                    print(
+                        "Credentials: "
+                        + ("present" if row["credentials_available"] else "missing")
+                        + " (presence check only; no paid API request was made)"
+                    )
+                else:
+                    print("Credentials: not required for this local provider")
                 print(
                     "Model pricing: "
                     + (
-                        "price known"
-                        if price is not None
-                        else "not configured (required only for --max-cost-usd)"
+                        "$0.00 for local Ollama"
+                        if provider == "ollama"
+                        else (
+                            "price known"
+                            if price is not None
+                            else "not configured (required only for --max-cost-usd)"
+                        )
                     )
                 )
+                if local_probe.get("error"):
+                    print(f"Local check: {local_probe['error']}")
                 for remediation in remediations:
                     print(
                         "Next: "
@@ -1913,14 +2051,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         parsed.workspace,
                         parsed.run_id,
                         stream="both",
-                        tail=20,
+                        tail=500,
                     )
-                    lines = [
-                        line.strip()
-                        for line in [*logs["stderr"], *logs["stdout"]]
-                        if line.strip()
-                    ]
-                    payload["failure_summary"] = lines[-1] if lines else None
+                    payload["failure_summary"] = _run_failure_summary(logs)
             elif parsed.runs_command == "logs":
                 payload = read_run_logs(
                     parsed.workspace,
@@ -1981,23 +2114,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     f"{item['id']}  {item['status']:<11} "
                     f"{duration_text:>8}  {item.get('profile') or 'balanced':<11} "
-                    f"{route}  {item.get('created_at') or ''}"
+                    f"{route}  {_format_run_timestamp(item.get('created_at'))}"
                 )
         elif parsed.runs_command == "logs":
+            summary = _run_failure_summary(payload)
+            if summary:
+                print(f"Summary: {summary}")
+            partial_streams = [
+                stream
+                for stream in ("stdout", "stderr")
+                if _structured_log_tail_is_partial(payload.get(stream, []))
+            ]
+            if partial_streams:
+                print(
+                    "Note: this structured log tail starts mid-document; "
+                    "increase --tail or use --json for machine-readable output."
+                )
             if payload["stdout"]:
+                print("--- stdout ---")
                 print("\n".join(payload["stdout"]))
             if payload["stderr"]:
+                print("--- stderr ---", file=sys.stderr)
                 print("\n".join(payload["stderr"]), file=sys.stderr)
         elif parsed.runs_command != "watch":
             print(f"Run {payload['id']}: {payload['status']}")
             if parsed.runs_command == "show":
                 print(f"Profile: {payload.get('profile') or 'balanced'}")
                 print(f"Task: {payload.get('task') or 'research'}")
-                print(
-                    "Provider/model: "
-                    f"{payload.get('provider') or 'pending'} / "
-                    f"{payload.get('model') or 'pending'}"
-                )
+                print(f"Provider: {payload.get('provider') or 'pending'}")
+                print(f"Model: {payload.get('model') or 'pending'}")
                 if payload.get("duration_seconds") is not None:
                     print(f"Duration: {payload['duration_seconds']}s")
                 if payload.get("returncode") is not None:
@@ -2058,11 +2203,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Version match: {payload['version_match']}")
             if payload.get("install_source"):
                 print(f"Install source: {payload['install_source']}")
+            if payload.get("error"):
+                print(f"Problem: {payload['error']}")
             if payload.get("next_action"):
+                next_action = str(payload["next_action"])
+                if next_action.startswith("xscientist executor prepare"):
+                    next_action = "xscientist executor prepare --workspace ."
                 print(
                     "Next: "
                     + _contextual_action(
-                        "xscientist executor prepare --workspace .",
+                        next_action,
                         parsed.workspace,
                     )
                 )
@@ -2089,6 +2239,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Installed version: {package['installed_version']}")
             if package["online_checked"]:
                 print(f"Latest version: {package['latest_version'] or 'unavailable'}")
+                if package.get("index_relation") == "newer_than_index":
+                    print(
+                        "Release status: this installation is newer than PyPI "
+                        "and is likely a development or unreleased build."
+                    )
+                elif package.get("index_relation") == "current":
+                    print("Release status: current with PyPI")
+                elif package.get("index_relation") == "update_available":
+                    print("Release status: an update is available")
             print(f"Workspace compatible: {payload['compatible']}")
             for name, check in payload["checks"].items():
                 state = "compatible" if check["compatible"] else "incompatible"
@@ -2237,7 +2396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             language = _selected_language(parsed.lang)
             if language == "zh":
                 closure = {
-                    "blocked": "未通过（存在待解决争议）",
+                    "blocked": "已完成（结论存在待解决争议）",
                     "complete": "已完成",
                     "verified": "已验证",
                 }.get(payload["dag"]["closure"], payload["dag"]["closure"])
@@ -2247,6 +2406,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{payload['dag']['relations']} 条关系"
                 )
                 print(f"科学闭环：{closure}")
+                if payload["dag"]["closure"] == "blocked":
+                    print(
+                        "含义：演示成功；反驳证据缩小了结论范围，需要继续做边界检验。"
+                    )
                 print(f"打开：{payload['dag']['html']}")
                 print("费用：$0.00；未使用 Provider 或网络。")
             else:
@@ -2256,8 +2419,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{payload['dag']['relations']} relations"
                 )
                 print(f"Scientific closure: {payload['dag']['closure']}")
+                if payload["dag"]["closure"] == "blocked":
+                    print(
+                        "Meaning: expected scientific result—refuting evidence "
+                        "narrowed the claim; the demo itself succeeded."
+                    )
                 print(f"Open: {payload['dag']['html']}")
                 print("Cost: $0.00; no provider or network was used.")
+            if language == "zh":
+                print("下一步：xscientist status " + shlex.quote(str(parsed.directory)))
+            else:
+                print("Next: xscientist status " + shlex.quote(str(parsed.directory)))
             if payload.get("autopilot_fixture"):
                 profile = payload["autopilot_fixture"]["profile"]
                 if language == "zh":
@@ -2280,6 +2452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             research = payload["research"]
             run = payload["run"]
             result = payload["result"]
+            background_run = payload.get("background_run")
             if language == "zh":
                 print(f"工作区：{payload['workspace']}")
                 print(
@@ -2311,6 +2484,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_state = run["current_stage"] or (
                     "已启动" if language == "zh" else "started"
                 )
+                if language == "zh":
+                    run_state = {
+                        "complete": "已完成",
+                        "failed": "失败",
+                        "cancelled": "已取消",
+                        "running": "运行中",
+                    }.get(str(run_state), run_state)
             elif result["dag_html"]:
                 run_state = (
                     "未启动（已有离线科研历史）"
@@ -2319,7 +2499,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 run_state = "未启动" if language == "zh" else "not started"
-            print(f"{'自动运行' if language == 'zh' else 'Automated run'}: {run_state}")
+            print(
+                f"{'科研流水线' if language == 'zh' else 'Research pipeline'}: {run_state}"
+            )
+            if isinstance(background_run, dict):
+                background_status = str(background_run.get("status") or "unknown")
+                if language == "zh":
+                    background_status = {
+                        "queued": "排队中",
+                        "running": "运行中",
+                        "cancelling": "取消中",
+                        "cancelled": "已取消",
+                        "failed": "失败",
+                        "succeeded": "成功",
+                        "interrupted": "已中断",
+                    }.get(background_status, background_status)
+                    print(
+                        f"最近后台任务：{background_run.get('id')} / "
+                        f"{background_status}"
+                    )
+                else:
+                    print(
+                        f"Latest background run: {background_run.get('id')} / "
+                        f"{background_status}"
+                    )
+                if background_run.get("id"):
+                    command = (
+                        f"xscientist runs show {background_run['id']} --workspace "
+                        f"{shlex.quote(str(parsed.workspace or '.'))}"
+                    )
+                    print(f"{'查看' if language == 'zh' else 'Inspect'}: {command}")
             if payload["budget"]["available"]:
                 used = payload["budget"]["used"] or {}
                 cost = float(used.get("cost_usd") or 0)
@@ -2327,8 +2536,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_tokens = int(used.get("output_tokens") or 0)
                 if language == "zh":
                     print(
-                        f"预算已用：${cost:.2f}；输入 {input_tokens:,} tokens，"
-                        f"输出 {output_tokens:,} tokens"
+                        f"预算已用：${cost:.2f}；输入令牌 {input_tokens:,}，"
+                        f"输出令牌 {output_tokens:,}"
                     )
                 else:
                     print(
@@ -2346,6 +2555,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "machine_synthesized_unverified": "机器综合，尚未独立验证",
                         "verified": "已验证",
                         "contested": "存在争议",
+                    }.get(status_value, status_value)
+                else:
+                    status_value = {
+                        "machine_synthesized_unverified": (
+                            "machine-synthesized; not independently verified"
+                        ),
+                        "verified": "verified",
+                        "contested": "contested",
                     }.get(status_value, status_value)
                 print(f"{label}: {status_value}")
             for error in payload["errors"]:
@@ -2381,8 +2598,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if parsed.as_json:
             print(json.dumps(payload, indent=2))
         else:
-            for key, value in payload.items():
-                print(f"{key}: {value}")
+            print(f"XScientist {payload['version']}")
+            print(f"Installation: {payload['installation_profile']}")
+            if payload["research_runtime_ready"]:
+                print("Research runtime: ready")
+            else:
+                missing = ", ".join(payload["missing_research_packages"])
+                print(f"Research runtime: not ready (missing: {missing})")
+            if payload["provider_configured"]:
+                print(
+                    f"Provider: {payload['active_provider']} "
+                    f"({payload['provider_client_status']})"
+                )
+            elif payload["suggested_provider"] == "ollama":
+                models = payload["discovered_local_models"]
+                print(
+                    f"Provider: not configured; detected {len(models)} Ollama model(s)"
+                )
+                print(f"Suggested model: {models[0]}")
+            else:
+                print("Provider: not configured")
+            print(f"Recommended install: {payload['recommended_install']}")
+            print(f"Quick start: {payload['quickstart']}")
         return 0
     if parsed.command == "init":
         from .onboarding import WorkspaceInitError, create_workspace

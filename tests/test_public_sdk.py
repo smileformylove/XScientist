@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import contextlib
 import io
+import json
 import shutil
 import sys
 import time
@@ -251,8 +252,16 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIsInstance(payload["research_runtime_ready"], bool)
         self.assertIsInstance(payload["service_ready"], bool)
         self.assertIsInstance(payload["missing_research_packages"], list)
-        self.assertIsInstance(payload["provider_client_ready"], bool)
-        self.assertIsInstance(payload["missing_provider_clients"], list)
+        self.assertIn(payload["provider_client_ready"], {True, False, None})
+        self.assertIn(
+            payload["provider_client_status"],
+            {"ready", "missing", "not_configured"},
+        )
+        self.assertTrue(
+            payload["missing_provider_clients"] is None
+            or isinstance(payload["missing_provider_clients"], list)
+        )
+        self.assertIn("suggested_provider", payload)
         self.assertIn("xscientist[research", payload["recommended_install"])
         self.assertIn(payload["output_root"], {"<configured>", "<default>"})
         self.assertFalse(Path(payload["python_executable"]).is_absolute())
@@ -261,6 +270,32 @@ class PublicSdkTests(unittest.TestCase):
             payload["quickstart"],
             "xscientist demo ./xscientist-demo --autopilot --open",
         )
+
+    def test_cli_info_human_output_does_not_expose_internal_null_fields(self) -> None:
+        payload = {
+            "version": "0.1.3",
+            "installation_profile": "core",
+            "research_runtime_ready": False,
+            "missing_research_packages": ["sklearn"],
+            "provider_configured": False,
+            "active_provider": None,
+            "provider_client_status": "not_configured",
+            "suggested_provider": "ollama",
+            "discovered_local_models": ["ollama/qwen2.5:7b"],
+            "recommended_install": 'python -m pip install "xscientist[research,openai-compatible]"',
+            "quickstart": "xscientist demo ./xscientist-demo --autopilot --open",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch("xscientist.cli._installation_info", return_value=payload),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(["info"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("detected 1 Ollama model", output.getvalue())
+        self.assertIn("Suggested model: ollama/qwen2.5:7b", output.getvalue())
+        self.assertNotIn("provider_client_ready", output.getvalue())
 
     def test_cli_forwards_workflow_arguments_without_parsing_them(self) -> None:
         project = mock.Mock(return_value=0)

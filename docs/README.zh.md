@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo_v1.png" width="220" alt="XScientist 标志">
+  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/logo_v1.png" width="220" alt="XScientist 标志">
 </p>
 
 <h1 align="center">XScientist</h1>
@@ -15,7 +15,7 @@
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/v/xscientist.svg" alt="PyPI 版本"></a>
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/pyversions/xscientist.svg" alt="Python 版本"></a>
   <a href="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml"><img src="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main" alt="Smoke 检查"></a>
-  <a href="../LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 许可证"></a>
+  <a href="https://github.com/smileformylove/XScientist/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 许可证"></a>
   <a href="https://arxiv.org/abs/2607.12301"><img src="https://img.shields.io/badge/arXiv-2607.12301-b31b1b.svg" alt="arXiv 论文"></a>
 </p>
 
@@ -40,8 +40,8 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 > 隔离边界内执行生成代码。机器生成的结论不会自动获得“已验证”状态，只有满足
 > 证据闭环和独立门禁后才能晋级。
 
-本文档覆盖稳定版 `0.1.3` 以及 `main` 上兼容的公开接口；安装前请先看
-[安装与兼容性](#安装与兼容性)。
+本文档覆盖 `main` 上的 `0.1.3` 候选版。PyPI 当前最新正式版为 `0.1.2`；如需使用
+本文的新流程，请按下方源码命令安装。安装前请先看[安装与兼容性](#安装与兼容性)。
 
 ## 先选择你的使用路径
 
@@ -58,7 +58,8 @@ XScientist 既是一套本地优先的自动科研系统，也是一份开放科
 反驳证据、独立拒绝和争议结论；不调用模型或网络。只需要 Python 3.10+ 和 Git。
 
 ```bash
-python -m pip install "xscientist==0.1.3"
+python -m pip install \
+  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist demo ./retrieval-study --lang zh --open
 xscientist status ./retrieval-study --lang zh
 ```
@@ -108,7 +109,7 @@ Autopilot。
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.3"
+  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
 可选 Provider extra 包括 `openai`、`anthropic`、`zhipu`、`bedrock`、
@@ -443,8 +444,8 @@ flowchart TB
 
 | 渠道 | 安装命令 | 使用场景 |
 | --- | --- | --- |
-| 稳定版 `0.1.3` | `python -m pip install "xscientist==0.1.3"` | 需要已发布版本和稳定发布契约 |
-| 当前 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | 需要尚未发布的开发改动，并接受源码版本持续变化 |
+| 正式版 `0.1.2` | `python -m pip install "xscientist==0.1.2"` | 需要 PyPI 当前已发布版本和稳定发布契约 |
+| `0.1.3` 候选版 | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` | 需要本文的新流程，并接受源码版本持续变化 |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` | 修改源码和测试 |
 
 实验需要精确复现时，请固定 commit，不要跟踪 `main`。Python 包遵循语义版本，ARA

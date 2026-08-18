@@ -53,6 +53,10 @@ class LLMBudgetTests(unittest.TestCase):
                 prices_per_million={"custom/broken": {"input": 1.0, "output": -1.0}},
             )
         )
+        self.assertEqual(
+            resolve_model_price("ollama/qwen2.5:7b"),
+            {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+        )
 
     def test_budget_exception_survives_pickle_round_trip(self) -> None:
         original = LLMBudgetExceeded(

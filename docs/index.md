@@ -8,10 +8,14 @@ Start with the provider-free journey. It uses no network or model and costs
 nothing:
 
 ```bash
-python -m pip install "xscientist==0.1.3"
+python -m pip install \
+  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist demo ./retrieval-study --autopilot --open
 xscientist status ./retrieval-study
 ```
+
+This site documents the `0.1.3` release candidate on `main`. The latest
+published PyPI release is `0.1.2`.
 
 The fixture deliberately ends with a contested broad claim. A successful
 software run is therefore not misrepresented as successful scientific closure.

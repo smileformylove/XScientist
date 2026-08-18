@@ -15,7 +15,7 @@ import yaml
 
 from xscientist._version import __version__
 from xscientist.cli import main as cli_main
-from xscientist.cli import _interactive_start_inputs
+from xscientist.cli import _interactive_start_inputs, _prompt_provider_model
 from xscientist.diagnostics import diagnose
 from xscientist.onboarding import (
     WORKSPACE_FILES,
@@ -25,6 +25,7 @@ from xscientist.onboarding import (
 )
 from xscientist.provider_config import (
     discover_provider_models,
+    probe_provider_model,
     validate_provider_model,
 )
 
@@ -58,6 +59,37 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(
             opened.call_args.args[0].full_url, "http://127.0.0.1:11434/api/tags"
         )
+
+    def test_numbered_local_model_selection_selects_the_displayed_model(self) -> None:
+        with (
+            mock.patch(
+                "xscientist.provider_config.discover_provider_models",
+                return_value=["ollama/first", "ollama/second"],
+            ),
+            mock.patch("builtins.input", return_value="2"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            selected = _prompt_provider_model("ollama")
+
+        self.assertEqual(selected, "ollama/second")
+
+    def test_ollama_probe_requires_reachable_service_and_installed_model(self) -> None:
+        response = io.StringIO(json.dumps({"models": [{"name": "qwen2.5:7b"}]}))
+        with mock.patch("urllib.request.OpenerDirector.open", return_value=response):
+            ready = probe_provider_model("ollama", "ollama/qwen2.5:7b")
+
+        self.assertTrue(ready["ok"])
+        self.assertTrue(ready["service_reachable"])
+        self.assertTrue(ready["model_available"])
+
+        with mock.patch(
+            "urllib.request.OpenerDirector.open",
+            side_effect=OSError("not reachable"),
+        ):
+            unavailable = probe_provider_model("ollama", "ollama/qwen2.5:7b")
+
+        self.assertFalse(unavailable["ok"])
+        self.assertIn("ollama serve", unavailable["error"])
 
     def test_interactive_start_fills_only_missing_first_run_choices(self) -> None:
         parsed = argparse.Namespace(
@@ -330,9 +362,10 @@ class OnboardingTests(unittest.TestCase):
             readme = (workspace / "README.md").read_text()
             self.assertIn("BFTS `default` configuration", readme)
             self.assertIn(
-                f"xscientist[research,zhipu]=={__version__}",
+                "xscientist[research,zhipu]",
                 readme,
             )
+            self.assertNotIn("xscientist[research,zhipu]==", readme)
             self.assertIn("xscientist provider add zhipu", readme)
             self.assertIn("xscientist git doctor", readme)
             self.assertIn("--output-root ./outputs", readme)
@@ -346,7 +379,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertNotIn("\n+  --model", readme)
             self.assertEqual(
                 payload["next_steps"][1],
-                f'python -m pip install "xscientist[research,zhipu]=={__version__}"',
+                'python -m pip install "xscientist[research,zhipu]"',
             )
             self.assertEqual(payload["next_steps"][2], "xscientist git doctor")
 
