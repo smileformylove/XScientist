@@ -24,6 +24,7 @@
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#检查审计与复现">审计复现</a> ·
   <a href="#安装方式">安装</a> ·
+  <a href="https://zhuanlan.zhihu.com/p/2027818800238666075">项目随笔</a> ·
   <a href="../README.md">English</a>
 </p>
 

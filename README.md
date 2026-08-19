@@ -25,6 +25,7 @@
   <a href="#inspect-and-reproduce">Audit</a> ·
   <a href="#installation">Install</a> ·
   <a href="https://github.com/smileformylove/XScientist/tree/main/docs">Docs</a> ·
+  <a href="https://zhuanlan.zhihu.com/p/2027818800238666075">Build notes (中文)</a> ·
   <a href="https://github.com/smileformylove/XScientist/blob/main/docs/README.zh.md">中文</a>
 </p>
 
