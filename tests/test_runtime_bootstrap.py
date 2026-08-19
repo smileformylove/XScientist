@@ -51,6 +51,13 @@ class RuntimeBootstrapTests(unittest.TestCase):
             ),
             "outputs/run1",
         )
+        self.assertEqual(
+            format_project_relative_path(
+                Path("/tmp/other/run2"),
+                project_root=project_root,
+            ),
+            "<external>/run2",
+        )
 
     def test_resolve_writing_profile_env_should_fallback_on_invalid_value(self) -> None:
         observed: list[str] = []
@@ -60,9 +67,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
             clear=False,
         ):
             profile = resolve_writing_profile_env(
-                invalid_profile_logger=lambda exc, raw: observed.append(
-                    f"{raw}:{exc}"
-                )
+                invalid_profile_logger=lambda exc, raw: observed.append(f"{raw}:{exc}")
             )
         self.assertEqual(profile, "default")
         self.assertEqual(len(observed), 1)
@@ -98,7 +103,9 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 source_file.resolve().parent,
             )
 
-    def test_require_model_credentials_should_accept_multi_provider_models(self) -> None:
+    def test_require_model_credentials_should_accept_multi_provider_models(
+        self,
+    ) -> None:
         with mock.patch.dict(
             "os.environ",
             {
@@ -116,7 +123,9 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 logger=lambda _: None,
             )
 
-    def test_require_model_credentials_should_raise_with_missing_provider_envs(self) -> None:
+    def test_require_model_credentials_should_raise_with_missing_provider_envs(
+        self,
+    ) -> None:
         messages: list[str] = []
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(SystemExit):

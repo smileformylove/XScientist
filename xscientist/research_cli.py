@@ -502,6 +502,16 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     program_review.add_argument("--record", action="store_true")
     _add_program_save_arguments(program_review)
 
+    program_followup = program_subparsers.add_parser(
+        "followup",
+        help="Queue a finite set of actions from the latest strategy review gaps.",
+    )
+    program_followup.add_argument(
+        "--review", help="Optional recorded research_review object to bind."
+    )
+    program_followup.add_argument("--max-actions", type=int, default=1)
+    _add_program_save_arguments(program_followup)
+
     program_claim = program_subparsers.add_parser(
         "claim", help="Explain one claim's support, refutation, mechanism, and gaps."
     )
@@ -1542,6 +1552,7 @@ def main(
             from .research_strategy import (
                 inspect_claim_depth,
                 rank_experiment_candidates,
+                record_research_followup_queue,
                 research_strategy_template,
                 review_research_program,
                 save_discriminating_prediction,
@@ -1740,6 +1751,24 @@ def main(
                             "Next experiment: "
                             f"{payload['next_experiment']['summary']}"
                         )
+                return 0
+            if args.program_command == "followup":
+                payload = record_research_followup_queue(
+                    args.repo,
+                    review_id=args.review,
+                    max_actions=args.max_actions,
+                    commit=not args.no_commit,
+                )
+                if args.as_json:
+                    _print_json(payload)
+                else:
+                    print(
+                        "Scientific strategy follow-ups: "
+                        f"created {len(payload['queued'])}; "
+                        f"active {len(payload['active'])}/{payload['max_actions']}"
+                    )
+                    for item in payload["active"]:
+                        print(f"  {item['object_id']}: {_display_text(item['action'])}")
                 return 0
             result = review_research_program(
                 args.repo,
@@ -2136,8 +2165,37 @@ def main(
             if args.as_json:
                 _print_json(payload)
             else:
-                print(f"Scientific closure: {payload['status']}")
+                claim_rows = payload["claims"]
+                integrity_ok = not (payload.get("integrity") or {}).get("errors")
+                trace_complete = (
+                    bool(claim_rows)
+                    and integrity_ok
+                    and all(item.get("trace_complete") for item in claim_rows)
+                )
+                replay_complete = trace_complete and all(
+                    item.get("replay_ready") for item in claim_rows
+                )
+                verification_complete = replay_complete and all(
+                    item.get("verified") for item in claim_rows
+                )
+                target_label = {
+                    "trace": "Traceability closure",
+                    "replay": "Replayability closure",
+                    "verify": "Verification closure",
+                }[payload["target_level"]]
+                print(f"{target_label}: {payload['status']}")
                 print(f"Target level:       {payload['target_level']}")
+                print(
+                    "Closure levels:      "
+                    f"trace={'complete' if trace_complete else 'blocked'}, "
+                    f"replay={'complete' if replay_complete else 'blocked'}, "
+                    "verification="
+                    f"{'complete' if verification_complete else 'blocked'}"
+                )
+                print(
+                    "Overall scientific closure: "
+                    f"{'complete' if verification_complete else 'pending'}"
+                )
                 print(f"Commit:             {payload['commit']}")
                 print(f"Claims:             {len(payload['claims'])}")
                 print(f"Blockers:           {len(payload['blockers'])}")

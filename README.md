@@ -84,6 +84,17 @@ refutes an overly broad claim, so XScientist preserves the conflict and asks
 for a boundary experiment instead of manufacturing a positive conclusion. If
 the browser does not open, use the path printed after `Open:`.
 
+The fixture profiles are behaviorally distinct, not labels over the same DAG:
+
+```bash
+xscientist demo ./discovery-demo --autopilot --autopilot-profile discovery
+xscientist demo ./publication-demo --autopilot --autopilot-profile publication
+```
+
+`discovery` adds rival/null hypotheses, condition-matched locked predictions,
+candidate designs, and deterministic information-value ranking. `publication`
+adds independent multi-role reviews and strict hold gates.
+
 You can also run the repeatable first-run benchmark:
 
 ```bash
@@ -168,6 +179,8 @@ xscientist executor prepare --workspace ./ood-reflection
 If Docker is unavailable, the command distinguishes a missing CLI from a
 stopped daemon and links to the official installation guide. The provider-free
 demo and read-only Research Git operations remain usable without Docker.
+Ideation-only project runs with `--skip-experiment` also skip executor
+preflight; isolation is enforced again before any generated code can run.
 
 ### Check readiness before spending money
 
@@ -179,7 +192,9 @@ xscientist doctor --workspace ./ood-reflection --deep
 `provider check` validates credential presence, client availability, and cost
 enforcement. For Ollama it also makes a free local service/model readiness
 request; it never makes a paid hosted-provider request. Doctor prints ordered,
-copyable repairs using the same public commands shown here.
+copyable repairs using the same public commands shown here. The latest result
+is cached under the ignored `.xscientist` runtime state, so `xscientist status`
+continues to show the real blocker after a stopped setup.
 
 Autopilot profiles make the main trade-off explicit:
 
@@ -394,7 +409,15 @@ xscientist research program posterior PORTFOLIO_ID PRIORITY_ID ATTEMPT_ID EVIDEN
 # Read-only review, or append a review plus newly detected anomalies.
 xscientist research program review
 xscientist research program review --record
+
+# Convert the latest gaps into at most one inspectable action proposal.
+xscientist research program followup --max-actions 1
 ```
+
+Discovery Autopilot performs this final conversion automatically. The bounded
+controller queues immutable action proposals with explicit design/experiment
+budgets and stop conditions; it never fabricates an outcome or bypasses the
+locked-design and isolation gates.
 
 Verified `causal` claims require a mechanism whose verified evidence traces to
 a completed intervention attempt, plus a strong/moderate quality assessment by
@@ -519,11 +542,16 @@ contested while both evidence paths are preserved.
 ```bash
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research audit --level verify
 xscientist research reproduce HEAD --execute --record
 
 xscientist research bundle --dest ./study-backup
 xscientist research export --dest ./exchange
 ```
+
+Audit output always reports traceability, replayability, and independent
+verification separately. A complete trace is never presented as overall
+scientific closure when replay or verification remains blocked.
 
 ARA is the node-level handoff format for another agent:
 
@@ -633,6 +661,20 @@ Autonomous-run views live outside the Research Git working tree. A view written
 inside a repository with `research dag --output` is excluded by the scientific
 tracking policy, so regenerating it does not enter a checkpoint. Run progress is
 resumable from `04_logs/progress.json` and valid experiment checkpoints.
+
+Operational feedback is durable across CLI processes:
+
+```bash
+xscientist feedback --feedback-dir ./feedback status
+xscientist feedback --feedback-dir ./feedback add \
+  --category error --priority critical --source experiment \
+  --message "The isolated run failed" --metrics error_rate=1
+xscientist feedback --feedback-dir ./feedback actions
+```
+
+Each accepted item is atomically persisted before success is printed. Empty
+feedback has status `UNKNOWN` rather than a misleading perfect health score;
+concurrent writers merge through a short-lived local lock.
 
 ## Safety and scientific boundaries
 

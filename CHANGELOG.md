@@ -6,6 +6,14 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Added
+
+- Bounded, immutable scientific-strategy follow-up proposals derived from
+  recorded program reviews, with explicit design/experiment budgets and stop
+  conditions.
+- Durable cross-process operational feedback with atomic snapshots,
+  concurrent-writer merging, monotonic resolution, and abandoned-lock recovery.
+
 ### Changed
 
 - Ollama readiness now verifies the local service and selected model, accepts
@@ -17,6 +25,11 @@ for its Python package; the ARA protocol has its own version in
 - English and Chinese install documentation now distinguishes the published
   `0.1.2` package from the `0.1.3` release candidate on `main`, with PyPI-safe
   documentation links.
+- Autopilot demo profiles now exercise materially different scientific
+  structures: discovery adds competitive predictions and information-value
+  ranking, while publication adds independent review boards and hold gates.
+- Status now preserves the latest readiness blocker, filters resolved strategy
+  follow-ups, and emits repository-bound copy/paste research commands.
 
 ### Fixed
 
@@ -26,6 +39,10 @@ for its Python package; the ARA protocol has its own version in
 - Workspace status includes the latest detached run, demo output explains a
   scientifically contested closure, and installation info no longer reports
   contradictory provider-client readiness when no provider is configured.
+- Empty or corrupted feedback no longer appears perfectly healthy; trace,
+  replay, and independent verification closure are reported separately.
+- Generated workspace refreshes preserve canonical formatting and headers, so
+  provider/model updates do not create formatting-only Research VCS changes.
 
 ## [0.1.3] - 2026-08-17
 

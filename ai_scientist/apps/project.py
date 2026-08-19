@@ -328,6 +328,18 @@ def _prepare_project_input(args: argparse.Namespace, dirs: dict[str, Path]) -> N
 def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]]:
     if not args.autopilot:
         return []
+    if bool(getattr(args, "skip_experiment", False)):
+        return [
+            {
+                "label": "Experiment isolation",
+                "ok": True,
+                "severity": "info",
+                "detail": (
+                    "not required because --skip-experiment disables generated-code "
+                    "execution; isolation is checked before any later experiment run"
+                ),
+            }
+        ]
     from ai_scientist.apps.preflight import check_bfts_config
 
     checks = check_bfts_config(args.bfts_config)
@@ -1350,7 +1362,10 @@ def _record_local_research_handoff_objects(
             object_ids.setdefault("gates", {})[idea_index] = gate.object_id
             object_ids.setdefault("contexts", {})[idea_index] = context.object_id
             object_ids.setdefault("manuscripts", {})[idea_index] = manuscript.object_id
-        from xscientist.research_strategy import review_research_program
+        from xscientist.research_strategy import (
+            record_research_followup_queue,
+            review_research_program,
+        )
 
         strategy_review = review_research_program(
             lifecycle.repository.path,
@@ -1359,6 +1374,31 @@ def _record_local_research_handoff_objects(
         )
         if strategy_review.get("object") is not None:
             object_ids["program_review"] = strategy_review["object"].object_id
+        followup_limit = (
+            max(1, int(getattr(args, "autonomous_quality_followup_rounds", 0)))
+            if str(getattr(args, "autopilot", "") or "") == "discovery"
+            else max(0, int(getattr(args, "autonomous_quality_followup_rounds", 0)))
+        )
+        followup_queue = record_research_followup_queue(
+            lifecycle.repository.path,
+            review=strategy_review["report"],
+            review_id=(
+                strategy_review["object"].object_id
+                if strategy_review.get("object") is not None
+                else None
+            ),
+            max_actions=followup_limit,
+            commit=False,
+        )
+        if followup_queue["active"]:
+            object_ids["strategy_followups"] = [
+                item["object_id"] for item in followup_queue["active"]
+            ]
+        atomic_write_json(
+            Path(args.project_dir) / "04_logs" / "research_strategy_followups.json",
+            followup_queue,
+            ensure_ascii=False,
+        )
         args._research_vcs_ids = object_ids
         print(
             "🧬 Research VCS 已投影 "

@@ -15,9 +15,7 @@ from ai_scientist.utils.atomic_io import atomic_write_text
 from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ._version import __version__
 from .dependency_profiles import (
-    capability_installation_command,
     capability_installation_spec,
-    installation_command,
 )
 from .provider_config import (
     DEFAULT_MODELS,
@@ -125,6 +123,32 @@ def _installed_vcs_source() -> tuple[str, str] | None:
     return url, commit.lower()
 
 
+def _workspace_installation_command(
+    *,
+    provider: str,
+    capabilities: tuple[str, ...] | None,
+    provider_required: bool,
+) -> str:
+    """Pin the host runtime to the same immutable source as the executor."""
+
+    selected = capabilities if capabilities is not None else ("research",)
+    package_spec = capability_installation_spec(
+        selected,
+        provider=provider if provider_required else None,
+    )
+    vcs_source = _installed_vcs_source()
+    if vcs_source is not None:
+        source_url, source_revision = vcs_source
+        runtime_spec = f"{package_spec} @ git+{source_url}@{source_revision}"
+    else:
+        runtime_spec = capability_installation_spec(
+            selected,
+            provider=provider if provider_required else None,
+            version=__version__,
+        )
+    return f'python -m pip install "{runtime_spec}"'
+
+
 def _render_dockerfile(
     provider: str,
     *,
@@ -225,13 +249,10 @@ def _render_readme(
     provider_required: bool = True,
 ) -> str:
     image = f"xscientist-exec:{__version__}"
-    install = (
-        installation_command(provider)
-        if capabilities is None
-        else capability_installation_command(
-            capabilities,
-            provider=provider if provider_required else None,
-        )
+    install = _workspace_installation_command(
+        provider=provider,
+        capabilities=capabilities,
+        provider_required=provider_required,
     )
     install_note = (
         f"This installs the selected capabilities and only the `{provider}` client."
@@ -240,12 +261,14 @@ def _render_readme(
     )
     provider_note = (
         f"""```bash
+xscientist provider check {provider}
+# Only when the check reports missing configuration:
 xscientist provider add {provider}
 xscientist provider list
-xscientist provider check {provider}
 ```
 
-The command reuses the model `{model}` selected during setup and prompts for
+`setup` may already have completed this step. `provider add` reuses the model
+`{model}` selected during setup and prompts for
 missing secrets with hidden input. Existing process environment variables take
 precedence and are never copied to disk implicitly."""
         if provider_required
@@ -281,17 +304,20 @@ This verifies task modules, the provider, login, and the local persistence
 backend with the branch/safe-merge capabilities used by Research VCS. It does
 not contact a remote. Use `xscientist git doctor` for the backend-only view.
 
-## 3. Add the provider when required
+## 3. Verify the provider
 
 {provider_note}
 
-## 4. Create a local login
+## 4. Verify the local research identity
 
 ```bash
+xscientist auth status
+# Only when no valid identity is present:
 xscientist auth login
 ```
 
-In a terminal this prompts for the local actor name stored in accountable
+`setup` may already have created the identity. In a terminal, `auth login`
+prompts for the local actor name stored in accountable
 Research VCS history. Automation can pass `--user NAME` explicitly.
 
 ## 5. Build the isolated experiment image
@@ -476,13 +502,10 @@ def create_workspace(
         "secrets_written": False,
         "next_steps": [
             f"cd {workspace_view}",
-            (
-                installation_command(normalized_provider)
-                if selected_capabilities is None
-                else capability_installation_command(
-                    selected_capabilities,
-                    provider=(normalized_provider if provider_required else None),
-                )
+            _workspace_installation_command(
+                provider=normalized_provider,
+                capabilities=selected_capabilities,
+                provider_required=provider_required,
             ),
             "xscientist git doctor",
             f"xscientist provider add {normalized_provider}",

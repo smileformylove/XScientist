@@ -35,6 +35,7 @@ MECHANISM_VALIDATION_POLICY = "xscientist.intervention-lineage.v1"
 TRANSFER_VALIDATION_POLICY = "xscientist.disjoint-boundary-evidence.v1"
 POSTERIOR_UPDATE_POLICY = "xscientist.discrete-bayes.v1"
 RESEARCH_REVIEW_INTERVAL = 5
+RESEARCH_FOLLOWUP_POLICY = "xscientist.bounded-strategy-followup.v1"
 
 
 def _required_text(value: Any, *, label: str) -> str:
@@ -1788,6 +1789,152 @@ def review_research_program(
     }
 
 
+def record_research_followup_queue(
+    repo: str | Path,
+    *,
+    review: Mapping[str, Any] | None = None,
+    review_id: str | None = None,
+    max_actions: int = 1,
+    commit: bool = False,
+) -> dict[str, Any]:
+    """Turn strategy gaps into a finite, inspectable next-action queue.
+
+    The queue deliberately proposes rather than fabricates experiment outcomes.
+    A later model-backed or human step must turn a proposal into a locked design;
+    the one-action budget and stop conditions prevent an unbounded self-loop.
+    """
+
+    if max_actions < 0:
+        raise ResearchGitError("research follow-up max_actions cannot be negative")
+    repository = ResearchRepository(repo)
+    resolved_review_id = None
+    if review_id:
+        resolved_review = _resolve_kind(
+            repository,
+            review_id,
+            kinds={"research_review"},
+            label="research follow-up review",
+        )
+        resolved_review_id = str(resolved_review["object_id"])
+        recorded_report = dict(resolved_review.get("payload") or {})
+        if review is not None and review.get("review_hash") != recorded_report.get(
+            "review_hash"
+        ):
+            raise ResearchGitError(
+                "research follow-up report does not match the bound review object"
+            )
+        report = recorded_report
+    else:
+        report = dict(review or review_research_program(repo, record=False)["report"])
+    recommendations = report.get("recommended_actions") or []
+    if not isinstance(recommendations, list):
+        raise ResearchGitError("research review recommendations must be a list")
+    review_hash = _required_text(
+        report.get("review_hash"), label="research follow-up review hash"
+    )
+    existing_items = [
+        item
+        for item in _effective_objects(repository).values()
+        if item.get("kind") == "action_proposal"
+        and (item.get("payload") or {}).get("policy") == RESEARCH_FOLLOWUP_POLICY
+        and (item.get("payload") or {}).get("execution_status") == "queued"
+        and (
+            resolved_review_id in _targets(item)
+            if resolved_review_id
+            else (item.get("payload") or {}).get("review_hash") == review_hash
+        )
+    ]
+    existing = {
+        str((item.get("payload") or {}).get("gap") or "") for item in existing_items
+    }
+    remaining_actions = max(0, max_actions - len(existing))
+    if commit and remaining_actions:
+        _ensure_stage_available(repository, commit=True)
+    created: list[ResearchObjectResult] = []
+    for recommendation in recommendations:
+        if len(created) >= remaining_actions:
+            break
+        if not isinstance(recommendation, Mapping):
+            continue
+        gap_code = _required_text(recommendation.get("gap"), label="follow-up gap")
+        if gap_code in existing:
+            continue
+        action = _required_text(recommendation.get("action"), label="follow-up action")
+        core = {
+            "protocol_kind": "bounded_research_strategy_followup",
+            "policy": RESEARCH_FOLLOWUP_POLICY,
+            "review_hash": review_hash,
+            "gap": gap_code,
+            "action": action,
+            "summary": f"Resolve research strategy gap: {gap_code}",
+            "execution_status": "queued",
+            "budget": {"max_new_designs": 1, "max_new_experiments": 1},
+            "stop_conditions": [
+                "the gap is resolved by immutable research objects",
+                "the selected test has no positive expected information gain",
+                "the declared project budget is exhausted",
+            ],
+            "requires_locked_design_before_execution": True,
+        }
+        created.append(
+            repository.record(
+                "action_proposal",
+                {**core, "proposal_hash": canonical_content_hash(core)},
+                state="draft",
+                relations=(
+                    [
+                        {
+                            "type": "derived_from",
+                            "target": resolved_review_id,
+                            "role": "strategy_review",
+                        }
+                    ]
+                    if resolved_review_id
+                    else []
+                ),
+                actor={
+                    "actor_id": "research-strategy-controller",
+                    "authority": "research_agent",
+                },
+            )
+        )
+        existing.add(gap_code)
+    checkpoint = None
+    if created and commit:
+        checkpoint = repository.commit(
+            stage="plan",
+            subject="queue bounded scientific strategy follow-ups",
+            status="draft",
+        )
+    created_rows = [
+        {
+            "object_id": item.object_id,
+            "gap": (repository.get(item.object_id).get("payload") or {}).get("gap"),
+            "action": (repository.get(item.object_id).get("payload") or {}).get(
+                "action"
+            ),
+        }
+        for item in created
+    ]
+    existing_rows = [
+        {
+            "object_id": str(item["object_id"]),
+            "gap": (item.get("payload") or {}).get("gap"),
+            "action": (item.get("payload") or {}).get("action"),
+        }
+        for item in existing_items
+    ]
+    return {
+        "policy": RESEARCH_FOLLOWUP_POLICY,
+        "review_id": resolved_review_id,
+        "review_hash": review_hash,
+        "max_actions": max_actions,
+        "queued": created_rows,
+        "active": [*existing_rows, *created_rows],
+        "checkpoint": checkpoint,
+    }
+
+
 def inspect_claim_depth(
     repo: str | Path,
     claim_id: str,
@@ -1985,8 +2132,10 @@ __all__ = [
     "EVIDENCE_QUALITY_DOMAINS",
     "EXPERIMENT_PRIORITY_POLICY_VERSION",
     "RESEARCH_REVIEW_INTERVAL",
+    "RESEARCH_FOLLOWUP_POLICY",
     "inspect_claim_depth",
     "rank_experiment_candidates",
+    "record_research_followup_queue",
     "research_strategy_template",
     "review_research_program",
     "save_discriminating_prediction",

@@ -44,9 +44,11 @@ def format_project_relative_path(
         else Path(os.environ.get(PROJECT_ROOT_ENV_VAR) or Path.cwd()).expanduser()
     )
     try:
-        return os.path.relpath(target, base_root)
-    except ValueError:
-        return str(target)
+        return target.resolve().relative_to(base_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        # Deep ../../ chains are neither useful nor privacy-safe when an output
+        # lives outside the source checkout. Preserve only a stable leaf label.
+        return f"<external>/{target.name or 'project'}"
 
 
 def resolve_writing_profile_env(

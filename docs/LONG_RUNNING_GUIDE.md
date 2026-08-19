@@ -117,7 +117,10 @@ monitor.checkpoint("experiments_complete", metadata={"experiments": 10})
 
 # Get health report
 health_report = feedback_system.get_health_report()
-print(f"Health Score: {health_report['health_score']}/100")
+if health_report["health_score"] is None:
+    print("Health: UNKNOWN (no usable observations yet)")
+else:
+    print(f"Health Score: {health_report['health_score']}/100")
 ```
 
 ### Key Metrics to Monitor
@@ -455,7 +458,7 @@ python3 continuous_research_daemon.py --verbose
 Key log files:
 - `daemon.log`: Daemon operations
 - `project_<name>.log`: Per-project logs
-- `feedback_batch_*.json`: Feedback history
+- `feedback_history.json`: Canonical, atomically updated feedback history
 - `evolution_history.json`: Evolution records
 
 ### Getting Help

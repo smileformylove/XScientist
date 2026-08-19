@@ -71,6 +71,16 @@ xscientist demo ./autopilot-study --autopilot --lang zh
 xscientist benchmark first-run --max-seconds 30
 ```
 
+三个 fixture profile 会生成不同的科研结构，而不是只修改标签：
+
+```bash
+xscientist demo ./discovery-demo --autopilot --autopilot-profile discovery --lang zh
+xscientist demo ./publication-demo --autopilot --autopilot-profile publication --lang zh
+```
+
+`discovery` 会加入 rival/null 假设、逐假设锁定预测、候选设计和信息价值排序；
+`publication` 会加入多角色独立评审与严格 hold gate。
+
 如果浏览器没有自动打开，请打开
 `retrieval-study/research-dag/research-dag.html`。该演示成本为 `$0.00`，结果可
 确定复现，并且会诚实地停在“科学闭环未通过”：留出证据反驳了宽泛的迁移结论。
@@ -161,6 +171,10 @@ xscientist provider check --max-cost-usd 10
 
 如果设置阶段中止，按诊断修复后重新执行同一命令即可。研究问题与完成的工作都会
 保留，系统从有效 checkpoint 继续，而不是悄悄重跑。
+最新 readiness 结果会保存在科研 Git 忽略的 `.xscientist` 运行状态中，因此之后执行
+`xscientist status` 仍会优先显示真正的 Docker、Provider 或运行时阻塞。显式使用
+`--skip-experiment` 的纯构思流程不会要求 Docker；一旦需要执行生成代码，隔离门禁会
+重新生效。
 
 长任务可以放到后台，并在另一个终端中安全管理：
 
@@ -301,7 +315,11 @@ xscientist research program posterior PORTFOLIO_ID PRIORITY_ID ATTEMPT_ID EVIDEN
 # 只读检查结构性短板，或把复盘和新异常写入科研历史。
 xscientist research program review
 xscientist research program review --record
+xscientist research program followup --max-actions 1
 ```
+
+Discovery Autopilot 会自动把结构性缺口转换为有限、可检查的 action proposal。每条
+proposal 都带设计/实验预算和停止条件，不会伪造实验结果，也不会绕过锁定设计与隔离门禁。
 
 已验证的 `causal` 结论必须把机制证据追溯到已完成的干预实验，质量评估者不能出现在
 完整生产者 lineage 中；`transferable` 还要求各条件使用独立 attempt/evidence，并隔离
@@ -403,11 +421,15 @@ xscientist research branch -d challenge/retrieval
 ```bash
 xscientist research audit --level trace
 xscientist research audit --level replay
+xscientist research audit --level verify
 xscientist research reproduce HEAD --execute --record
 
 xscientist research bundle --dest ./study-backup
 xscientist research export --dest ./exchange
 ```
+
+审计会分别显示 traceability、replayability 与 independent verification；即使追踪链
+完整，只要重放或独立验证仍被阻塞，就不会误写成整体科学闭环完成。
 
 ARA 是面向另一个 Agent 的节点级交接格式：
 
@@ -504,6 +526,19 @@ python -m xscientist --version
 Autopilot 生成的视图默认位于科研 Git 工作树之外；手动通过
 `research dag --output` 写在仓库内的视图会被科学暂存策略排除，因此重新生成不会
 进入 checkpoint。系统可以从 `04_logs/progress.json` 和有效实验 checkpoint 安全续跑。
+
+运行反馈会跨 CLI 进程持久保存：
+
+```bash
+xscientist feedback --feedback-dir ./feedback status
+xscientist feedback --feedback-dir ./feedback add \
+  --category error --priority critical --source experiment \
+  --message "隔离运行失败" --metrics error_rate=1
+xscientist feedback --feedback-dir ./feedback actions
+```
+
+每条成功接收的反馈都会先原子写盘，再向用户返回成功。没有观测时状态显示为
+`UNKNOWN`，不会用满分健康度制造误导；并发写入通过短时本地锁合并。
 
 ## 安全与科学边界
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 from unittest import mock
 
@@ -51,6 +53,15 @@ class ProjectCliTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         require_login.assert_not_called()
         initialize_runtime.assert_not_called()
+
+    def test_project_help_is_consistently_english(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            project.main(["--help"])
+
+        rendered = output.getvalue()
+        self.assertIn("Start from a plain-language question", rendered)
+        self.assertNotRegex(rendered, r"[\u4e00-\u9fff]")
 
     def test_workspace_default_model_applies_to_every_role_and_can_be_overridden(
         self,

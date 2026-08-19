@@ -130,6 +130,10 @@ def _call_main(
                 sys.argv = original
     except (OSError, RuntimeError, ValueError) as exc:
         command = module_name.rsplit(".", 1)[-1].removesuffix("_cli")
+        try:
+            sys.stdout.flush()
+        except OSError:
+            pass
         print(
             f"XScientist {command} stopped: {exc}",
             file=sys.stderr,

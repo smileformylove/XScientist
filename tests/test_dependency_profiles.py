@@ -76,6 +76,29 @@ class DependencyProfileTests(unittest.TestCase):
         ):
             self.assertNotIn(requirement, research)
 
+    def test_research_readiness_covers_every_declared_runtime_dependency(self) -> None:
+        import re
+
+        declared = {
+            re.split(r"[<>=!~;\[]", requirement, maxsplit=1)[0].lower()
+            for requirement in self.extras["research"]
+        }
+        import_to_distribution = {
+            "PIL": "pillow",
+            "sklearn": "scikit-learn",
+            "igraph": "python-igraph",
+            "pymupdf": "pymupdf",
+            "dataclasses_json": "dataclasses-json",
+            "huggingface_hub": "huggingface-hub",
+        }
+        from xscientist.dependency_profiles import CAPABILITY_MODULES
+
+        probed = {
+            import_to_distribution.get(module, module).lower()
+            for module in CAPABILITY_MODULES["research"]
+        }
+        self.assertEqual(probed, declared)
+
     def test_provider_profiles_resolve_to_declared_extras(self) -> None:
         for provider, extra in PROVIDER_EXTRA_BY_NAME.items():
             with self.subTest(provider=provider):

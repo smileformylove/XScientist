@@ -264,6 +264,12 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 gate["payload"]["context_hash"], context["payload"]["context_hash"]
             )
+            strategy_followups = json.loads(
+                (root / "04_logs" / "research_strategy_followups.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(strategy_followups["active"], [])
 
 
 if __name__ == "__main__":

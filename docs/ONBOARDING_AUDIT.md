@@ -1,6 +1,6 @@
 # XScientist onboarding and adoption audit
 
-Last updated: 2026-08-17
+Last updated: 2026-08-19
 
 This document measures how difficult XScientist is to adopt, separates
 intentional scientific rigor from accidental product friction, and defines the
@@ -22,7 +22,7 @@ The product is therefore easy to *inspect* but still moderately difficult to
 *operate end to end*. This distinction should remain explicit in all public
 communication.
 
-## 0.1.2 usability implementation update
+## Current `main` usability implementation update
 
 The P0–P2 product work identified below is now implemented on `main`:
 
@@ -38,6 +38,10 @@ The P0–P2 product work identified below is now implemented on `main`:
 - disabled-by-default, fixed-shape, local-only usage counters;
 - a MkDocs site, reproducible example gallery, and MLflow/DVC/notebook adapter
   cookbook.
+- behaviorally distinct `balanced`, `discovery`, and `publication` fixtures;
+- durable cross-process feedback with honest unknown/corruption states;
+- separate traceability, replayability, and verification closure reporting;
+- persistent readiness blockers and bounded scientific-strategy follow-ups.
 
 The remaining adoption work is empirical: collect opt-in aggregate funnel
 counts from willing users, publish multiple real domain studies with their cost
@@ -151,8 +155,9 @@ What works:
 Remaining friction:
 
 - installing `main` from Git is longer and less trustworthy than PyPI;
-- there is no bundled sample repository to explore before creating one;
-- the README has a static logo but no recorded product demonstration.
+- the bundled fixtures are intentionally synthetic and do not replace a real
+  domain study with authentic data, cost, and failure receipts;
+- the README still lacks a short recorded product demonstration.
 
 ### Domain researcher without agent-infrastructure experience
 
@@ -184,8 +189,8 @@ Remaining friction:
 - Docker image build and optional LaTeX/PDF dependencies dominate setup time;
 - provider/model compatibility errors can surface before a user understands
   the model naming convention;
-- there is no small, deterministic end-to-end sample that establishes expected
-  runtime and cost on a clean machine.
+- the deterministic fixture validates product surfaces, not a real provider,
+  Docker engine, or domain workload on every clean host.
 
 ### Agent or platform author
 
@@ -198,8 +203,9 @@ What works:
 
 Remaining friction:
 
-- no standalone conformance kit with “known good” and “known bad” fixtures;
-- adapter examples are less prominent than the built-in implementation;
+- the conformance kit and built-in adapter examples still need adoption by
+  independent producers;
+- third-party adapter examples are less prominent than the built-in implementation;
 - capability negotiation and protocol version compatibility need a compact
   machine-readable discovery document.
 
@@ -221,13 +227,12 @@ or tracking policy.
 
 ### P0 — convert current capability into an honest first success
 
-0.1.2 delivery status (2026-08-17): items 1–4 are implemented. The release
-adds the provider-free contested-evidence demo, runs its exact `demo → status`
-journey from a built wheel across the supported CI matrix, returns stable
-doctor remediation codes, and publishes the guided start/DAG work as a pinned
-package. Item 5 remains open: the offline demo covers the scientific lifecycle,
-but a stubbed model/executor fixture should still exercise the full Autopilot
-orchestrator without cost.
+Delivery status (2026-08-19): items 1–5 are implemented on `main`. The
+provider-free contested-evidence demo and deterministic Autopilot fixtures run
+the exact `demo → status` journey without cost or network; the three profiles
+now produce different scientific structures rather than different labels over
+one DAG. Release publishing remains a release-operation concern, so the README
+continues to distinguish the stable package from source installation.
 
 1. **Publish the next release.** Put guided start, the unified DAG, context
    receipts, branch maintenance, and protocol v2 on PyPI so the first command

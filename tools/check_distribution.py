@@ -228,7 +228,7 @@ with contextlib.redirect_stdout(doctor_output):
         "doctor", "--workspace", str(demo_root), "--task", "research"
     ])
 assert doctor_exit == 1
-assert "capabilities" in doctor_output.getvalue()
+assert "Dependencies" in doctor_output.getvalue()
 assert "Next actions:" in doctor_output.getvalue()
 print(json.dumps({
     "version": xscientist.__version__,

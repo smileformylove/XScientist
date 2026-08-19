@@ -5,6 +5,7 @@ Provides robust feedback collection, aggregation, and action generation
 """
 
 import json
+import os
 import time
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
@@ -13,10 +14,14 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 from enum import Enum
 import statistics
+import uuid
+
+from ai_scientist.utils.atomic_io import atomic_write_json
 
 
 class FeedbackPriority(Enum):
     """Feedback priority levels"""
+
     CRITICAL = "critical"  # Requires immediate action
     HIGH = "high"  # Should be addressed soon
     MEDIUM = "medium"  # Normal priority
@@ -26,6 +31,7 @@ class FeedbackPriority(Enum):
 
 class FeedbackCategory(Enum):
     """Feedback categories"""
+
     QUALITY = "quality"  # Quality-related feedback
     PERFORMANCE = "performance"  # Performance metrics
     RESOURCE = "resource"  # Resource usage
@@ -37,6 +43,7 @@ class FeedbackCategory(Enum):
 @dataclass
 class FeedbackItem:
     """Structured feedback item"""
+
     timestamp: str
     category: str
     priority: str
@@ -47,6 +54,7 @@ class FeedbackItem:
     actionable: bool
     action_taken: Optional[str] = None
     resolved: bool = False
+    item_id: str = ""
 
 
 class EnhancedFeedbackSystem:
@@ -87,6 +95,8 @@ class EnhancedFeedbackSystem:
         # Feedback buffer
         self.feedback_buffer: List[FeedbackItem] = []
         self.feedback_history: List[FeedbackItem] = []
+        self.history_path = self.feedback_dir / "feedback_history.json"
+        self.load_errors: List[str] = []
 
         # Adaptive thresholds
         self.thresholds: Dict[str, Dict[str, float]] = {
@@ -166,6 +176,7 @@ class EnhancedFeedbackSystem:
             metrics=metrics or {},
             context=context or {},
             actionable=actionable,
+            item_id=uuid.uuid4().hex,
         )
 
         self.feedback_buffer.append(item)
@@ -176,9 +187,10 @@ class EnhancedFeedbackSystem:
             if isinstance(value, (int, float)):
                 self.metric_windows[key].append((time.time(), value))
 
-        # Auto-save periodically
-        if len(self.feedback_buffer) >= 10:
-            self._save_feedback_batch()
+        # CLI commands and daemon callbacks may be short-lived processes. Persist
+        # every accepted item before reporting success so feedback can never be
+        # lost merely because a process exits before an arbitrary batch fills.
+        self._save_feedback_batch()
 
         return item
 
@@ -225,12 +237,20 @@ class EnhancedFeedbackSystem:
         sum_x2 = sum(i * i for i in range(n))
 
         slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
-        trend_direction = "increasing" if slope > 0.01 else "decreasing" if slope < -0.01 else "stable"
+        trend_direction = (
+            "increasing"
+            if slope > 0.01
+            else "decreasing" if slope < -0.01 else "stable"
+        )
 
         # Recent vs historical comparison
-        recent_mean = statistics.mean(values[-min(10, len(values)):])
-        historical_mean = statistics.mean(values[:max(1, len(values) - 10)])
-        change_pct = ((recent_mean - historical_mean) / historical_mean * 100) if historical_mean != 0 else 0
+        recent_mean = statistics.mean(values[-min(10, len(values)) :])
+        historical_mean = statistics.mean(values[: max(1, len(values) - 10)])
+        change_pct = (
+            ((recent_mean - historical_mean) / historical_mean * 100)
+            if historical_mean != 0
+            else 0
+        )
 
         return {
             "metric": metric_name,
@@ -262,18 +282,21 @@ class EnhancedFeedbackSystem:
 
         # Analyze critical feedback
         critical_feedback = [
-            item for item in self.feedback_buffer
+            item
+            for item in self.feedback_history
             if item.priority == FeedbackPriority.CRITICAL.value and not item.resolved
         ]
 
         for item in critical_feedback:
-            actions.append({
-                "priority": "critical",
-                "source": item.source,
-                "action": f"Address critical issue: {item.message}",
-                "context": item.context,
-                "estimated_impact": 0.9,
-            })
+            actions.append(
+                {
+                    "priority": "critical",
+                    "source": item.source,
+                    "action": f"Address critical issue: {item.message}",
+                    "context": item.context,
+                    "estimated_impact": 0.9,
+                }
+            )
 
         # Analyze trends and generate actions
         for metric_name in ["quality_score", "success_rate", "error_rate"]:
@@ -293,13 +316,15 @@ class EnhancedFeedbackSystem:
         actions.sort(
             key=lambda x: (
                 priority_order.get(x.get("priority", "low"), 3),
-                -x.get("estimated_impact", 0)
+                -x.get("estimated_impact", 0),
             )
         )
 
         return actions[:max_actions]
 
-    def _generate_action_from_trend(self, metric_name: str, trend: Dict) -> Optional[Dict]:
+    def _generate_action_from_trend(
+        self, metric_name: str, trend: Dict
+    ) -> Optional[Dict]:
         """Generate action based on trend analysis"""
         if metric_name == "quality_score":
             if trend["mean"] < self.thresholds["quality_score"]["high"]:
@@ -310,7 +335,9 @@ class EnhancedFeedbackSystem:
                     "metric": metric_name,
                     "trend": trend["trend_direction"],
                     "current_value": trend["mean"],
-                    "estimated_impact": self.action_templates["low_quality"]["estimated_impact"],
+                    "estimated_impact": self.action_templates["low_quality"][
+                        "estimated_impact"
+                    ],
                 }
 
         elif metric_name == "success_rate":
@@ -323,19 +350,27 @@ class EnhancedFeedbackSystem:
                         "metric": metric_name,
                         "trend": trend["trend_direction"],
                         "current_value": trend["mean"],
-                        "estimated_impact": self.action_templates["declining_success"]["estimated_impact"],
+                        "estimated_impact": self.action_templates["declining_success"][
+                            "estimated_impact"
+                        ],
                     }
 
         elif metric_name == "error_rate":
             if trend["mean"] > self.thresholds["error_rate"]["high"]:
                 return {
-                    "priority": "critical" if trend["mean"] > self.thresholds["error_rate"]["critical"] else "high",
+                    "priority": (
+                        "critical"
+                        if trend["mean"] > self.thresholds["error_rate"]["critical"]
+                        else "high"
+                    ),
                     "source": "trend_analysis",
                     "action": self.action_templates["high_error_rate"]["action"],
                     "metric": metric_name,
                     "trend": trend["trend_direction"],
                     "current_value": trend["mean"],
-                    "estimated_impact": self.action_templates["high_error_rate"]["estimated_impact"],
+                    "estimated_impact": self.action_templates["high_error_rate"][
+                        "estimated_impact"
+                    ],
                 }
 
         return None
@@ -346,21 +381,23 @@ class EnhancedFeedbackSystem:
 
         # Group feedback by category
         category_counts = defaultdict(int)
-        for item in self.feedback_buffer:
+        for item in self.feedback_history:
             if not item.resolved:
                 category_counts[item.category] += 1
 
         # Generate actions for high-frequency categories
         for category, count in category_counts.items():
             if count >= 5:  # Threshold for pattern detection
-                actions.append({
-                    "priority": "medium",
-                    "source": "pattern_analysis",
-                    "action": f"Address recurring {category} issues (detected {count} instances)",
-                    "category": category,
-                    "frequency": count,
-                    "estimated_impact": 0.6,
-                })
+                actions.append(
+                    {
+                        "priority": "medium",
+                        "source": "pattern_analysis",
+                        "action": f"Address recurring {category} issues (detected {count} instances)",
+                        "category": category,
+                        "frequency": count,
+                        "estimated_impact": 0.6,
+                    }
+                )
 
         return actions
 
@@ -371,17 +408,28 @@ class EnhancedFeedbackSystem:
         Returns:
             Health report with metrics and recommendations
         """
+        unresolved = [item for item in self.feedback_history if not item.resolved]
+        has_data = bool(self.feedback_history or self.metric_windows)
         report = {
             "timestamp": datetime.now().isoformat(),
             "feedback_summary": {
                 "total_items": len(self.feedback_history),
-                "unresolved_items": len([item for item in self.feedback_buffer if not item.resolved]),
-                "critical_items": len([item for item in self.feedback_buffer if item.priority == "critical" and not item.resolved]),
+                "unresolved_items": len(unresolved),
+                "critical_items": len(
+                    [item for item in unresolved if item.priority == "critical"]
+                ),
             },
             "metrics": {},
             "trends": {},
             "recommended_actions": [],
-            "health_score": 0.0,
+            "health_score": None,
+            "health_state": (
+                "corrupted"
+                if self.load_errors
+                else "unknown" if not has_data else "measured"
+            ),
+            "has_data": has_data,
+            "load_errors": list(self.load_errors),
         }
 
         # Analyze all tracked metrics
@@ -394,8 +442,9 @@ class EnhancedFeedbackSystem:
         report["recommended_actions"] = self.generate_actions(max_actions=10)
 
         # Calculate health score
-        health_score = self._calculate_health_score(report)
-        report["health_score"] = round(health_score, 2)
+        if has_data and not self.load_errors:
+            health_score = self._calculate_health_score(report)
+            report["health_score"] = round(health_score, 2)
 
         return report
 
@@ -428,40 +477,189 @@ class EnhancedFeedbackSystem:
         """Mark feedback item as resolved"""
         feedback_item.resolved = True
         feedback_item.action_taken = action_taken
+        self._save_feedback_batch()
 
     def clear_resolved(self):
-        """Clear resolved feedback from buffer"""
-        self.feedback_buffer = [item for item in self.feedback_buffer if not item.resolved]
+        """Permanently remove resolved feedback from active history."""
+        return self._save_feedback_batch(prune_resolved=True)
 
-    def _save_feedback_batch(self):
-        """Save feedback batch to disk"""
-        batch_file = self.feedback_dir / f"feedback_batch_{int(time.time())}.json"
-        with open(batch_file, "w") as f:
-            json.dump(
-                [asdict(item) for item in self.feedback_buffer],
-                f,
-                indent=2,
-                ensure_ascii=False,
+    def _save_feedback_batch(self, *, prune_resolved: bool = False) -> int:
+        """Atomically persist the complete feedback history.
+
+        The previous ten-item batch policy was unsafe for CLI use: each command
+        starts a fresh process, so buffers smaller than ten disappeared on exit.
+        A single canonical snapshot also prevents same-second batch collisions.
+        """
+        lock_path = self.feedback_dir / ".feedback-history.lock"
+        owner_path = lock_path / "owner.json"
+        lock_token = uuid.uuid4().hex
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                lock_path.mkdir()
+                try:
+                    atomic_write_json(
+                        owner_path,
+                        {
+                            "pid": os.getpid(),
+                            "created_at": time.time(),
+                            "token": lock_token,
+                        },
+                    )
+                except BaseException:
+                    try:
+                        lock_path.rmdir()
+                    except OSError:
+                        pass
+                    raise
+                break
+            except FileExistsError:
+                if self._reclaim_stale_lock(lock_path, owner_path):
+                    continue
+                if time.monotonic() >= deadline:
+                    raise OSError("timed out waiting for feedback history lock")
+                time.sleep(0.01)
+        try:
+            disk_items: list[FeedbackItem] = []
+            if self.history_path.is_file():
+                raw_items = json.loads(self.history_path.read_text(encoding="utf-8"))
+                if not isinstance(raw_items, list):
+                    raise ValueError("feedback history root must be a list")
+                for payload in raw_items:
+                    identity = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+                    disk_item = FeedbackItem(**payload)
+                    if not disk_item.item_id:
+                        disk_item.item_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+                    disk_items.append(disk_item)
+            current = {item.item_id: item for item in self.feedback_history}
+            merged_order = [item.item_id for item in disk_items]
+            for item in self.feedback_history:
+                if item.item_id not in merged_order:
+                    merged_order.append(item.item_id)
+            disk_by_id = {item.item_id: item for item in disk_items}
+            merged: list[FeedbackItem] = []
+            for item_id in merged_order:
+                local_item = current.get(item_id)
+                disk_item = disk_by_id.get(item_id)
+                item = local_item or disk_item
+                if item is None:
+                    continue
+                # Resolution is monotonic. A stale process that loaded an item
+                # before another process resolved it must never resurrect it.
+                if disk_item is not None and disk_item.resolved and not item.resolved:
+                    item.resolved = True
+                    item.action_taken = disk_item.action_taken
+                merged.append(item)
+            removed = 0
+            if prune_resolved:
+                removed = sum(item.resolved for item in merged)
+                merged = [item for item in merged if not item.resolved]
+            self.feedback_history = merged
+            self.feedback_buffer = [
+                item for item in self.feedback_history if not item.resolved
+            ]
+            self._rebuild_metric_windows()
+            atomic_write_json(
+                self.history_path,
+                [asdict(item) for item in self.feedback_history],
             )
-        self.feedback_buffer = []
+            return removed
+        finally:
+            try:
+                owner = json.loads(owner_path.read_text(encoding="utf-8"))
+                if owner.get("token") == lock_token:
+                    owner_path.unlink(missing_ok=True)
+                    lock_path.rmdir()
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+
+    @staticmethod
+    def _reclaim_stale_lock(lock_path: Path, owner_path: Path) -> bool:
+        """Recover a lock only when its owner is certainly gone.
+
+        A missing/corrupt owner marker gets a grace period so another process
+        cannot delete a lock between directory creation and marker creation.
+        """
+
+        try:
+            owner = json.loads(owner_path.read_text(encoding="utf-8"))
+            pid = int(owner.get("pid"))
+            created_at = float(owner.get("created_at"))
+            if pid <= 0:
+                raise ValueError("lock owner PID must be positive")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            try:
+                stale = time.time() - lock_path.stat().st_mtime > 30.0
+            except OSError:
+                return True
+            if not stale:
+                return False
+        else:
+            try:
+                os.kill(pid, 0)
+                return False
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                return False
+            except OSError:
+                if time.time() - created_at <= 300.0:
+                    return False
+        try:
+            owner_path.unlink(missing_ok=True)
+            lock_path.rmdir()
+            return True
+        except OSError:
+            return False
 
     def _load_feedback_history(self):
-        """Load feedback history from disk"""
-        for batch_file in sorted(self.feedback_dir.glob("feedback_batch_*.json")):
+        """Load canonical history, with read compatibility for legacy batches."""
+        sources = (
+            [self.history_path]
+            if self.history_path.is_file()
+            else sorted(self.feedback_dir.glob("feedback_batch_*.json"))
+        )
+        seen: set[str] = set()
+        for batch_file in sources:
             try:
                 with open(batch_file, "r") as f:
                     items = json.load(f)
                     for item_dict in items:
+                        identity = json.dumps(
+                            item_dict, sort_keys=True, ensure_ascii=False
+                        )
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
                         item = FeedbackItem(**item_dict)
+                        if not item.item_id:
+                            item.item_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
                         self.feedback_history.append(item)
+                        if not item.resolved:
+                            self.feedback_buffer.append(item)
             except Exception as e:
-                print(f"Warning: Failed to load {batch_file}: {e}")
+                message = f"Failed to load {batch_file.name}: {e}"
+                self.load_errors.append(message)
+                print(f"Warning: {message}")
+        self._rebuild_metric_windows()
+
+    def _rebuild_metric_windows(self) -> None:
+        """Keep trend windows consistent with history merged from other processes."""
+
+        self.metric_windows.clear()
+        for item in self.feedback_history:
+            try:
+                timestamp = datetime.fromisoformat(item.timestamp).timestamp()
+            except (TypeError, ValueError):
+                timestamp = time.time()
+            for key, value in item.metrics.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    self.metric_windows[key].append((timestamp, value))
 
     def export_report(self, output_path: Path):
         """Export comprehensive report to file"""
         report = self.get_health_report()
-        with open(output_path, "w") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+        atomic_write_json(output_path, report)
 
 
 class LongRunningTaskMonitor:
@@ -529,7 +727,10 @@ class LongRunningTaskMonitor:
                 priority=FeedbackPriority.HIGH,
                 source=self.task_name,
                 message=f"Task appears stalled (no progress for {time_since_progress/60:.1f} minutes)",
-                metrics={"stall_duration": time_since_progress, "progress": self.progress},
+                metrics={
+                    "stall_duration": time_since_progress,
+                    "progress": self.progress,
+                },
                 context={"status": self.status},
             )
 
@@ -555,7 +756,10 @@ class LongRunningTaskMonitor:
             priority=FeedbackPriority.INFO,
             source=self.task_name,
             message=f"Checkpoint reached: {name}",
-            metrics={"progress": self.progress, "elapsed_time": checkpoint["elapsed_time"]},
+            metrics={
+                "progress": self.progress,
+                "elapsed_time": checkpoint["elapsed_time"],
+            },
             context=checkpoint,
             actionable=False,
         )
@@ -571,5 +775,6 @@ class LongRunningTaskMonitor:
             "time_since_heartbeat": current_time - self.last_heartbeat,
             "time_since_progress": current_time - self.last_progress_update,
             "checkpoints": len(self.checkpoints),
-            "is_stalled": (current_time - self.last_progress_update) > self.stall_threshold,
+            "is_stalled": (current_time - self.last_progress_update)
+            > self.stall_threshold,
         }

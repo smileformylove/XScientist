@@ -27,18 +27,18 @@ def build_parser(
         description="XScientist project runner - process multiple papers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例用法:
+Examples:
 
-1. 从自然语言问题开箱运行（自动预检、恢复、洞见和科研 DAG）:
-   xscientist project my_project --question "为什么这个机制在分布外失效？" --autopilot discovery
+1. Start from a plain-language question with guarded Autopilot:
+   xscientist project my_project --question "Why does this mechanism fail out of distribution?" --autopilot discovery
 
-2. 生成3个想法并并行写成论文:
+2. Generate three ideas and process them in parallel:
    python -m xscientist project my_project --topic topic.md --num-ideas 3 --parallel
 
-3. 并行处理已有想法的前2个:
+3. Process two existing ideas in parallel:
    python -m xscientist project my_project --ideas ideas.json --idea-indices 0,1 --parallel
 
-4. 自动改进2轮:
+4. Run two bounded improvement rounds:
    python -m xscientist project my_project --topic topic.md --improvement-rounds 2
         """,
     )
@@ -46,22 +46,22 @@ def build_parser(
     parser.add_argument(
         "project_dir",
         type=str,
-        help="项目目录路径（相对路径会解析到 --output-root/projects 下）",
+        help="project directory (relative paths resolve below --output-root/projects)",
     )
     parser.add_argument(
         "--output-root",
         type=str,
         default=default_output_root,
-        help="当 project_dir 为相对路径时，作为统一输出根目录",
+        help="shared output root used when project_dir is relative",
     )
 
-    parser.add_argument("--topic", type=str, help="主题描述文件")
+    parser.add_argument("--topic", type=str, help="topic description file")
     parser.add_argument(
         "--question",
         type=str,
-        help="直接输入自然语言科研问题；无需预先创建 topic.md（与 --topic/--ideas 互斥）",
+        help="plain-language research question (mutually exclusive with --topic/--ideas)",
     )
-    parser.add_argument("--ideas", type=str, help="已有想法JSON文件")
+    parser.add_argument("--ideas", type=str, help="existing ideas JSON file")
     parser.add_argument(
         "--autopilot",
         nargs="?",
@@ -69,80 +69,85 @@ def build_parser(
         choices=["balanced", "discovery", "publication"],
         default=None,
         help=(
-            "开箱自动科研预设。balanced 控制成本，discovery 强化反证与探索，"
-            "publication 强化多角色复核和投稿门禁。"
+            "Guarded automation preset: balanced controls cost, discovery increases "
+            "rival/refutation pressure, and publication strengthens review gates."
         ),
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="从 04_logs/progress.json 和最近的 BFTS checkpoint 安全续跑",
+        help="resume safely from progress.json and the latest valid BFTS checkpoint",
     )
     data_group = parser.add_mutually_exclusive_group()
     data_group.add_argument(
         "--data-dir",
         type=str,
         default=None,
-        help="只读实验输入目录；Autopilot 会在模型调用前生成逐文件 SHA-256 清单",
+        help="read-only experiment inputs; Autopilot hashes every file before model calls",
     )
     data_group.add_argument(
         "--allow-synthetic-data",
         action="store_true",
-        help="显式允许合成/计算型数据；其结果保持探索性，不能自动升级为独立验证",
+        help="allow synthetic/computational data; results remain exploratory and unverified",
     )
     parser.add_argument(
         "--max-project-tokens",
         type=int,
         default=None,
-        help="覆盖为更低的整个项目 LLM token 上限（跨构思、排序和所有实验共享）",
+        help="lower project-wide LLM token ceiling shared by all stages",
     )
     parser.add_argument(
         "--max-project-hours",
         type=float,
         default=None,
-        help="覆盖为更低的整个项目 LLM 墙钟时长上限",
+        help="lower project-wide LLM wall-clock ceiling",
     )
     parser.add_argument(
         "--max-cost-usd",
         type=float,
         default=None,
-        help="整个项目美元成本硬上限；未知模型价格会 fail closed",
+        help="hard project-wide USD limit; unknown model prices fail closed",
     )
     parser.add_argument(
         "--model-ideation",
         type=str,
         default=_model_default("IDEATION", "glm-4-flash"),
     )
-    parser.add_argument("--num-ideas", type=int, default=3, help="生成的想法数量")
+    parser.add_argument(
+        "--num-ideas", type=int, default=3, help="number of ideas to generate"
+    )
     parser.add_argument("--num-reflections", type=int, default=5)
 
     parser.add_argument(
         "--parallel",
         action="store_true",
-        help="启用并行处理多个想法",
+        help="process multiple ideas concurrently",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
         default=2,
-        help="并行worker数量",
+        help="number of parallel workers",
     )
     parser.add_argument(
         "--idea-indices",
         type=str,
-        help="要处理的想法索引 (逗号分隔)，如: 0,1,2",
+        help="comma-separated idea indices, for example 0,1,2",
     )
     parser.add_argument(
-        "--rank-ideas", action="store_true", help="先对 idea 排序再选择"
+        "--rank-ideas", action="store_true", help="rank ideas before selecting them"
     )
     parser.add_argument(
-        "--top-k-ideas", type=int, default=None, help="只处理评分最高的前 K 个 idea"
+        "--top-k-ideas",
+        type=int,
+        default=None,
+        help="process only the top K ranked ideas",
     )
     parser.add_argument(
         "--idea-rank-model",
         type=str,
         default=None,
-        help="用于 idea 排序的模型；可用逗号分隔多个独立评审模型",
+        help="idea-ranking model; comma-separate independent reviewer models",
     )
     parser.add_argument("--submission-mode", action="store_true")
     parser.add_argument("--fallback-ranked-ideas", action="store_true")
@@ -152,12 +157,12 @@ def build_parser(
         type=str,
         choices=list(workflow_modes),
         default="adaptive",
-        help="研究编排模式：兼容经典模板流、agentic tree、program-driven、writing-studio、review-board。",
+        help="research orchestration mode, from classic templates to agentic/review-board flows",
     )
     parser.add_argument(
         "--override-strict-fallbacks",
         action="store_true",
-        help="禁用严格兜底拦截（默认投稿/高质量/程序驱动模式会在出现 fallback 时终止）。",
+        help="allow recorded fallbacks that strict publication/high-quality modes normally block",
     )
 
     parser.add_argument(
@@ -165,22 +170,22 @@ def build_parser(
         type=str,
         default=None,
         help=(
-            "路径：一个 `run_ara_fork.py fork` 产生的目录，或一个 ARA 根目录（需配合 --seed-node-id）。"
-            "首个 BFTS draft 会直接使用该目录中的 code，跳过 LLM。"
+            "Directory produced by `run_ara_fork.py fork`, or an ARA root used "
+            "with --seed-node-id. The first BFTS draft reuses its code without an LLM."
         ),
     )
     parser.add_argument(
         "--seed-node-id",
         type=str,
         default=None,
-        help="当 --seed-from-ara 指向 ARA 根目录时，指定要作为种子的 node_id。",
+        help="node_id to seed when --seed-from-ara points to an ARA root",
     )
 
     parser.add_argument(
         "--improvement-rounds",
         type=int,
         default=1,
-        help="每篇论文的反思改进轮数",
+        help="bounded reflection/improvement rounds per paper",
     )
 
     parser.add_argument("--skip-ideation", action="store_true")
@@ -189,7 +194,7 @@ def build_parser(
         "--bfts-config",
         type=str,
         default="bfts_config.yaml",
-        help="BFTS实验配置文件路径 (控制搜索深度、seed、并行度、超时等)",
+        help="BFTS config controlling search depth, seeds, parallelism, and timeouts",
     )
 
     parser.add_argument(
@@ -270,13 +275,13 @@ def build_parser(
         dest="integrity_forensics",
         action="store_true",
         default=None,
-        help="启用最终稿 deterministic integrity forensics 检查。",
+        help="enable deterministic final-manuscript integrity forensics",
     )
     parser.add_argument(
         "--no-integrity-forensics",
         dest="integrity_forensics",
         action="store_false",
-        help="禁用最终稿 deterministic integrity forensics 检查。",
+        help="disable deterministic final-manuscript integrity forensics",
     )
     parser.add_argument("--auto-adjust-paper-type", action="store_true")
     parser.add_argument(
@@ -284,34 +289,34 @@ def build_parser(
         type=str,
         choices=list(writing_profiles),
         default=default_writing_profile,
-        help="写作提示词 profile（影响写作约束与反思自检）",
+        help="writing prompt profile controlling constraints and reflection checks",
     )
     parser.add_argument(
         "--writing-audit-rounds",
         type=int,
         default=0,
-        help="写作反思阶段追加的结构化写作审计轮数",
+        help="additional structured writing-audit rounds during reflection",
     )
     parser.add_argument(
         "--strict-writing-guardrails",
         action="store_true",
-        help="启用严格写作守护：最终稿若存在关键引用/章节缺口则判定失败",
+        help="fail the final draft when critical citation or section gaps remain",
     )
     parser.add_argument(
         "--guardrail-repair-rounds",
         type=int,
         default=1,
-        help="严格写作守护失败前自动尝试的修复轮数",
+        help="automatic repair rounds before strict writing guard failure",
     )
     parser.add_argument(
         "--disable-hostile-critic",
         action="store_true",
-        help="基准 ablation: 关闭独立 hostile critic 通道。",
+        help="benchmark ablation: disable the independent hostile-critic channel",
     )
     parser.add_argument(
         "--disable-owner-aware-repair",
         action="store_true",
-        help="基准 ablation: 关闭 owner-aware reviewer repair routing。",
+        help="benchmark ablation: disable owner-aware reviewer repair routing",
     )
     parser.add_argument(
         "--research-vcs",
@@ -320,8 +325,8 @@ def build_parser(
         choices=["off", "local"],
         default="local",
         help=(
-            "启用 XScientist 原生科研版本库（Git 仅作为可替换存储后端）；"
-            "默认本地启用、无需服务器且永不自动 push。"
+            "Enable native Research VCS (Git is a replaceable storage backend); "
+            "local by default, server-free, and never pushed automatically."
         ),
     )
     parser.add_argument(
@@ -331,8 +336,8 @@ def build_parser(
         choices=["manual", "stage", "milestone"],
         default="milestone",
         help=(
-            "科研 checkpoint 策略。milestone 记录构思、实验、证据和论文等关键状态；"
-            "stage 记录每个请求的阶段。"
+            "Research checkpoint policy: milestone records key scientific states; "
+            "stage records every requested phase."
         ),
     )
     parser.add_argument(
@@ -340,7 +345,7 @@ def build_parser(
         "--research-git-strict",
         dest="research_git_strict",
         action="store_true",
-        help="科研版本库初始化或 checkpoint 失败时终止；默认警告并保留研究产物。",
+        help="stop on Research VCS init/checkpoint failure instead of warning and preserving outputs",
     )
     parser.add_argument("--git-user-name", default=None)
     parser.add_argument("--git-user-email", default=None)

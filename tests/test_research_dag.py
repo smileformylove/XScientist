@@ -26,6 +26,7 @@ from xscientist.research_dag import (
     render_research_dag_html,
 )
 from xscientist.research_journey import (
+    _command_for_repo,
     build_research_guide,
     start_guided_research,
 )
@@ -33,6 +34,19 @@ from xscientist.research_journey import (
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for Research DAG tests")
 class ResearchDagTests(unittest.TestCase):
+    def test_repository_context_preserves_repository_neutral_templates(self) -> None:
+        self.assertEqual(
+            _command_for_repo(
+                "xscientist research discovery template --output discovery.json",
+                "/tmp/study",
+            ),
+            "xscientist research discovery template --output discovery.json",
+        )
+        self.assertEqual(
+            _command_for_repo("xscientist research program review", "/tmp/study"),
+            "xscientist research program review --repo /tmp/study",
+        )
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -132,6 +146,7 @@ class ResearchDagTests(unittest.TestCase):
         )
         self.assertIn("探索", guide["next_steps"][0]["title"])
         self.assertIn("@latest:hypothesis", guide["next_steps"][0]["command"])
+        self.assertIn(f"--repo {self.repo_path}", guide["next_steps"][0]["command"])
         self.assertTrue(self.repository.fsck()["ok"])
 
     def test_guided_start_normalizes_plain_human_actor(self) -> None:

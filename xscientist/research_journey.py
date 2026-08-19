@@ -94,6 +94,26 @@ def _localize_command(language: str, command: str) -> str:
     return rendered
 
 
+def _command_for_repo(command: str, repo: str | Path) -> str:
+    """Keep copy/paste guidance bound to the repository the user inspected."""
+
+    prefix = "xscientist research "
+    if not command.startswith(prefix) or " --repo " in f" {command} ":
+        return command
+    remainder = command[len(prefix) :]
+    subcommand, separator, arguments = remainder.partition(" ")
+    if subcommand in {"program", "literature", "discovery"} and separator:
+        nested, nested_separator, nested_arguments = arguments.partition(" ")
+        # Template generators are intentionally repository-neutral and do not
+        # accept ``--repo``. Keep their copy/paste commands valid.
+        if nested == "template" and subcommand in {"program", "discovery"}:
+            return command
+        contextual = f"{prefix}{subcommand} {nested} --repo {shlex.quote(str(repo))}"
+        return f"{contextual} {nested_arguments}" if nested_separator else contextual
+    contextual = f"{prefix}{subcommand} --repo {shlex.quote(str(repo))}"
+    return f"{contextual} {arguments}" if separator else contextual
+
+
 def _created_at(item: dict[str, Any]) -> str:
     return str(item.get("created_at") or "")
 
@@ -118,6 +138,7 @@ def build_research_guide(
     repo: str | Path,
     *,
     language: str = "auto",
+    command_repo: str | Path | None = None,
 ) -> dict[str, Any]:
     """Explain current progress and return safe copy/paste next actions."""
 
@@ -448,6 +469,35 @@ def build_research_guide(
             }
         )
 
+    from .research_strategy import review_research_program
+
+    program_review = review_research_program(repository.path, record=False)
+    program_report = program_review.get("report") or {}
+    if counts["experiment_attempt"] and program_report.get("gaps"):
+        next_steps.append(
+            _step(
+                selected_language,
+                code="strengthen_research_program",
+                title_en="Review the open scientific-strategy gaps",
+                title_zh="检查尚未解决的科研策略缺口",
+                why_en=(
+                    f"The deterministic review found {len(program_report['gaps'])} "
+                    "open gap(s), such as rival explanations, mechanisms, evidence "
+                    "quality, or transfer boundaries."
+                ),
+                why_zh=(
+                    f"确定性审查发现 {len(program_report['gaps'])} 个尚未解决的缺口，"
+                    "可能涉及竞争解释、机制、证据质量或迁移边界。"
+                ),
+                command="xscientist research program review",
+            ),
+        )
+
+    for step in next_steps:
+        step["command"] = _command_for_repo(
+            step["command"], command_repo if command_repo is not None else repo
+        )
+
     completed_stages = sum(
         bool(counts[kind])
         for kind in (
@@ -474,6 +524,11 @@ def build_research_guide(
         "counts": dict(sorted(counts.items())),
         "next_steps": next_steps,
         "warnings": warnings,
+        "program_review": {
+            "gap_count": len(program_report.get("gaps") or []),
+            "gaps": program_report.get("gaps") or [],
+            "recommendations": program_report.get("recommended_actions") or [],
+        },
     }
 
 

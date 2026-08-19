@@ -43,6 +43,18 @@ class DemoStatusTests(unittest.TestCase):
                 payload["guide"]["next_steps"][0]["code"],
                 "resolve_contested_claim",
             )
+            self.assertEqual(
+                payload["guide"]["next_steps"][1]["code"],
+                "strengthen_research_program",
+            )
+            self.assertEqual(payload["guide"]["program_review"]["gap_count"], 6)
+            commands = {
+                step["code"]: step["command"] for step in payload["guide"]["next_steps"]
+            }
+            self.assertIn(
+                f"program review --repo {workspace.resolve()}",
+                commands["strengthen_research_program"],
+            )
 
     def test_demo_refuses_to_replace_an_existing_destination(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -109,6 +121,59 @@ class DemoStatusTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["errors"][0]["code"], "workspace_state_corrupted")
             self.assertEqual(payload["errors"][0]["file"], "04_logs/progress.json")
+
+    def test_status_prioritizes_the_last_readiness_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "demo"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli_main(["demo", str(workspace)]), 0)
+            readiness = {
+                "schema": "xscientist.doctor.v1",
+                "ok": False,
+                "configuration_ready": True,
+                "runtime_ready": False,
+                "remediations": [
+                    {
+                        "code": "docker_cli_missing",
+                        "command": "https://docs.docker.com/get-started/get-docker/",
+                        "detail": "Install and start Docker before preparing the executor.",
+                        "severity": "error",
+                    }
+                ],
+            }
+            (workspace / ".xscientist" / "readiness.json").write_text(
+                json.dumps(readiness), encoding="utf-8"
+            )
+            followups = {
+                "active": [
+                    {
+                        "object_id": "rso-open-gap",
+                        "gap": "single_hypothesis_bias",
+                        "action": "Record a rival hypothesis.",
+                    },
+                    {
+                        "object_id": "rso-resolved-gap",
+                        "gap": "already_resolved",
+                        "action": "This stale action must stay hidden.",
+                    },
+                ]
+            }
+            (workspace / "04_logs").mkdir(exist_ok=True)
+            (workspace / "04_logs" / "research_strategy_followups.json").write_text(
+                json.dumps(followups), encoding="utf-8"
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["next_steps"][0]["code"], "docker_cli_missing")
+            self.assertEqual(
+                payload["next_steps"][1]["code"],
+                "inspect_scientific_strategy_followup",
+            )
+            self.assertEqual(len(payload["strategy_followups"]["queued"]), 1)
+            self.assertFalse(payload["readiness"]["runtime_ready"])
 
     def test_human_demo_status_journey_names_the_contested_next_step(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -216,6 +281,13 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             demo = json.loads(output.getvalue())
             self.assertEqual(demo["autopilot_fixture"]["profile"], "discovery")
+            self.assertIn(
+                "competitive_hypothesis_portfolio",
+                demo["autopilot_fixture"]["profile_behavior"],
+            )
+            self.assertIn("portfolio", demo["autopilot_fixture"]["profile_objects"])
+            self.assertGreater(demo["dag"]["nodes"], 16)
+            self.assertLessEqual(demo["guide"]["program_review"]["gap_count"], 4)
             self.assertFalse(demo["autopilot_fixture"]["network_used"])
             self.assertFalse(demo["autopilot_fixture"]["generated_code_executed"])
 
@@ -246,6 +318,33 @@ class DemoStatusTests(unittest.TestCase):
             self.assertTrue(
                 (workspace / "04_logs" / "autopilot_fixture_receipt.json").is_file()
             )
+
+    def test_publication_fixture_adds_independent_review_board_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "publication-demo"
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "demo",
+                            str(workspace),
+                            "--autopilot",
+                            "--autopilot-profile",
+                            "publication",
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+
+            payload = json.loads(output.getvalue())
+            fixture = payload["autopilot_fixture"]
+            self.assertIn("multi_role_review", fixture["profile_behavior"])
+            self.assertEqual(len(fixture["profile_objects"]["publication_reviews"]), 2)
+            self.assertEqual(len(fixture["profile_objects"]["publication_gates"]), 2)
+            self.assertEqual(len(fixture["profile_objects"]["decision_contexts"]), 2)
+            self.assertGreater(payload["dag"]["nodes"], 16)
 
 
 if __name__ == "__main__":

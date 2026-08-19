@@ -262,7 +262,9 @@ class PublicSdkTests(unittest.TestCase):
             or isinstance(payload["missing_provider_clients"], list)
         )
         self.assertIn("suggested_provider", payload)
-        self.assertIn("xscientist[research", payload["recommended_install"])
+        if payload["recommended_install"] is not None:
+            self.assertIn("xscientist[research", payload["recommended_install"])
+        self.assertIn("recommended_setup", payload)
         self.assertIn(payload["output_root"], {"<configured>", "<default>"})
         self.assertFalse(Path(payload["python_executable"]).is_absolute())
         self.assertFalse(payload["host_paths_disclosed"])
@@ -283,6 +285,7 @@ class PublicSdkTests(unittest.TestCase):
             "suggested_provider": "ollama",
             "discovered_local_models": ["ollama/qwen2.5:7b"],
             "recommended_install": 'python -m pip install "xscientist[research,openai-compatible]"',
+            "recommended_setup": "xscientist setup my-research --provider ollama --model ollama/qwen2.5:7b",
             "quickstart": "xscientist demo ./xscientist-demo --autopilot --open",
         }
         output = io.StringIO()

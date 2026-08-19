@@ -186,6 +186,21 @@ class ProjectAutopilotTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "before any research-model call"):
                 _run_autopilot_preflight(args)
 
+    def test_ideation_only_autopilot_does_not_require_an_executor(self) -> None:
+        args = argparse.Namespace(
+            autopilot="discovery",
+            bfts_config="demo.yaml",
+            skip_experiment=True,
+        )
+        with mock.patch(
+            "ai_scientist.apps.preflight.check_bfts_config"
+        ) as check_bfts_config:
+            rows = _run_autopilot_preflight(args)
+
+        check_bfts_config.assert_not_called()
+        self.assertEqual(rows[0]["severity"], "info")
+        self.assertIn("--skip-experiment", rows[0]["detail"])
+
     def test_autopilot_derives_finite_isolated_bfts_budget(self) -> None:
         import yaml
 

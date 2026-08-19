@@ -39,7 +39,10 @@ feedback_system.add_feedback(
 
 # Get health report
 report = feedback_system.get_health_report()
-print(f"Health Score: {report['health_score']}/100")
+if report["health_score"] is None:
+    print("Health: UNKNOWN (no usable observations yet)")
+else:
+    print(f"Health Score: {report['health_score']}/100")
 
 # Generate actions
 actions = feedback_system.generate_actions(max_actions=5)
@@ -121,7 +124,7 @@ while running:
 ### Check System Status
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback status
+xscientist feedback --feedback-dir ./feedback status
 ```
 
 Output:
@@ -149,7 +152,7 @@ Key Metrics:
 ### View Recommended Actions
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback actions --max-actions 5
+xscientist feedback --feedback-dir ./feedback actions --max-actions 5
 ```
 
 Output:
@@ -171,7 +174,7 @@ RECOMMENDED ACTIONS
 ### Analyze Trends
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback trends \
+xscientist feedback --feedback-dir ./feedback trends \
   --metrics quality_score success_rate error_rate \
   --hours 24
 ```
@@ -196,7 +199,7 @@ METRIC TRENDS
 ### Export Report
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback report \
+xscientist feedback --feedback-dir ./feedback report \
   --output health_report.json \
   --show
 ```
@@ -204,7 +207,7 @@ python3 feedback_cli.py --feedback-dir ./feedback report \
 ### Add Feedback Manually
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback add \
+xscientist feedback --feedback-dir ./feedback add \
   --category quality \
   --priority high \
   --source manual \
@@ -215,7 +218,7 @@ python3 feedback_cli.py --feedback-dir ./feedback add \
 ### Clear Resolved Feedback
 
 ```bash
-python3 feedback_cli.py --feedback-dir ./feedback clear
+xscientist feedback --feedback-dir ./feedback clear
 ```
 
 ## Integration Examples
@@ -424,11 +427,16 @@ feedback_system.add_feedback(
 )
 ```
 
-### Issue: Health score always 100
+### Issue: Health is `UNKNOWN`
 
-**Cause**: No negative feedback
+**Cause**: No usable observations have been recorded, or the history is unreadable.
 
-**Solution**: System is healthy! Continue monitoring.
+**Solution**: Add a real observation with metrics. If status says `CORRUPTED`, restore
+`feedback_history.json` from a known-good copy before adding more feedback.
+
+Feedback is written atomically to `feedback_history.json` before an add command
+reports success. Concurrent local writers merge under a short-lived lock; legacy
+`feedback_batch_*.json` files remain readable for migration.
 
 ### Issue: Stall detection not working
 

@@ -365,6 +365,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="workspace root (default: discover from the current directory)",
     )
+    provider_list.add_argument(
+        "--all",
+        action="store_true",
+        help="also show providers that are neither configured nor locally detected",
+    )
     provider_list.add_argument("--json", action="store_true", dest="as_json")
     provider_check = provider_subparsers.add_parser(
         "check",
@@ -986,20 +991,44 @@ def _record_local_metric(event: str, *, ok: bool) -> None:
         pass
 
 
+def _persist_readiness_report(
+    workspace: str | Path | None,
+    report: dict[str, object],
+) -> None:
+    """Remember the latest readiness result without entering Research VCS."""
+
+    try:
+        from ai_scientist.utils.atomic_io import atomic_write_json
+        from .provider_config import discover_workspace_root
+
+        root = (
+            Path(workspace).expanduser().resolve()
+            if workspace is not None
+            else discover_workspace_root()
+        )
+        if root is None or not (root / ".xscientist").is_dir():
+            return
+        atomic_write_json(root / ".xscientist" / "readiness.json", report)
+    except (OSError, ValueError):
+        # Readiness caching is advisory and must never change command behavior.
+        return
+
+
 def _installation_info() -> dict[str, object]:
     import importlib.util
     import os
 
-    from ai_scientist.apps.preflight import CORE_PACKAGES
     from ai_scientist.utils.auth_session import validate_session
-    from .dependency_profiles import installation_command, missing_provider_modules
+    from .dependency_profiles import (
+        installation_command,
+        missing_provider_modules,
+        resolve_task_capabilities,
+    )
     from .provider_config import discover_provider_models
 
-    runtime_modules = sorted(CORE_PACKAGES)
     service_modules = ["fastapi", "pydantic", "uvicorn"]
-    missing_runtime = [
-        name for name in runtime_modules if importlib.util.find_spec(name) is None
-    ]
+    runtime_resolution = resolve_task_capabilities("research")
+    missing_runtime = list(runtime_resolution["missing_modules"])
     missing_service = [
         name for name in service_modules if importlib.util.find_spec(name) is None
     ]
@@ -1029,11 +1058,25 @@ def _installation_info() -> dict[str, object]:
     )
     provider_client_ready = not missing_provider_clients if active_provider else None
     suggested_provider = active_provider or ("ollama" if local_models else None)
+    suggested_missing_clients = (
+        missing_provider_modules(suggested_provider) if suggested_provider else []
+    )
+    install_needed = bool(missing_runtime or suggested_missing_clients)
     recommended_install = (
         installation_command(suggested_provider)
-        if suggested_provider
-        else 'python -m pip install "xscientist[research,openai]"'
+        if install_needed and suggested_provider
+        else (
+            'python -m pip install "xscientist[research,openai]"'
+            if install_needed
+            else None
+        )
     )
+    recommended_setup = None
+    if not active_provider and suggested_provider == "ollama" and local_models:
+        recommended_setup = (
+            "xscientist setup my-research --provider ollama --model "
+            + shlex.quote(local_models[0])
+        )
     return {
         "name": "xscientist",
         "version": __version__,
@@ -1053,6 +1096,7 @@ def _installation_info() -> dict[str, object]:
         "suggested_provider": suggested_provider,
         "discovered_local_models": local_models,
         "recommended_install": recommended_install,
+        "recommended_setup": recommended_setup,
         "python_version": sys.version.split()[0],
         "python_executable": Path(sys.executable).name,
         "output_root": (
@@ -1226,15 +1270,36 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             workspace = Path(parsed.workspace).expanduser().resolve()
         if parsed.provider_command == "list":
             rows = provider_statuses(workspace, probe_local=True)
+            rows.sort(
+                key=lambda row: (
+                    not bool(row["active"]),
+                    not bool(row["configured"]),
+                    str(row["provider"]),
+                )
+            )
+            workspace_label = workspace.name or "workspace"
             payload = {
-                "workspace": ".",
+                "workspace": workspace_label,
                 "providers": rows,
             }
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
-                print("Workspace: .")
-                for row in rows:
+                print(f"Workspace: {workspace_label}")
+                visible_rows = (
+                    rows
+                    if parsed.all
+                    else [
+                        row
+                        for row in rows
+                        if row["configured"]
+                        or row["active"]
+                        or row["local_probe"].get("model_available")
+                    ]
+                )
+                if not visible_rows:
+                    print("No provider is configured or locally detected.")
+                for row in visible_rows:
                     marker = "*" if row["active"] else " "
                     if row["ready"]:
                         state = "ready"
@@ -1257,6 +1322,9 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     )
                     if row["configured"] and missing_clients:
                         print(f"    Install: {row['install_command']}")
+                hidden_count = len(rows) - len(visible_rows)
+                if hidden_count:
+                    print(f"Other providers hidden: {hidden_count} (use --all)")
             return 0
 
         if parsed.provider_command == "check":
@@ -1824,7 +1892,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
             raise ProviderConfigError(str(load_result["error"]))
 
         budget_path = workspace / "bfts_config.yaml"
-        budget_payload = yaml.safe_load(budget_path.read_text(encoding="utf-8"))
+        budget_original = budget_path.read_text(encoding="utf-8")
+        budget_payload = yaml.safe_load(budget_original)
         if not isinstance(budget_payload, dict):
             raise ProviderConfigError("BFTS configuration must be a mapping")
         budget_section = budget_payload.setdefault("llm_budget", {})
@@ -1843,9 +1912,15 @@ def _run_start(parsed: argparse.Namespace) -> int:
                     parsed.price_cached_input_per_million
                 )
             custom_prices[selected_model] = explicit_price
+            generated_header = (
+                budget_original.splitlines()[0] + "\n"
+                if budget_original.startswith("# Generated by xscientist init ")
+                else ""
+            )
             atomic_write_text(
                 budget_path,
-                yaml.safe_dump(budget_payload, sort_keys=False, allow_unicode=True),
+                generated_header
+                + yaml.safe_dump(budget_payload, sort_keys=False, allow_unicode=True),
             )
         price = resolve_model_price(
             selected_model,
@@ -1901,6 +1976,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             provider=selected_provider,
             deep=True,
         )
+        _persist_readiness_report(workspace, report)
         phases["doctor"] = report
     except (
         OSError,
@@ -2695,6 +2771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"{'科研流水线' if language == 'zh' else 'Research pipeline'}: {run_state}"
             )
+            background_inspect_command = None
             if isinstance(background_run, dict):
                 background_status = str(background_run.get("status") or "unknown")
                 if language == "zh":
@@ -2721,6 +2798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"xscientist runs show {background_run['id']} --workspace "
                         f"{shlex.quote(str(parsed.workspace or '.'))}"
                     )
+                    background_inspect_command = command
                     print(f"{'查看' if language == 'zh' else 'Inspect'}: {command}")
             if payload["budget"]["available"]:
                 used = payload["budget"]["used"] or {}
@@ -2777,12 +2855,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     and step.get("code") == "repair_failed_background_run"
                 ):
                     step_title = "检查并修复最近失败的后台任务"
-                print(f"{'下一步' if language == 'zh' else 'Next'}: " f"{step_title}")
+                contextual_command = None
                 if step.get("command"):
                     command = step["command"]
                     if " research discovery template " not in f" {command} ":
                         command = _contextual_action(command, parsed.workspace)
-                    print(f"{'运行' if language == 'zh' else 'Run'}:  {command}")
+                    contextual_command = command
+                print(f"{'下一步' if language == 'zh' else 'Next'}: " f"{step_title}")
+                if (
+                    contextual_command
+                    and contextual_command != background_inspect_command
+                ):
+                    print(
+                        f"{'运行' if language == 'zh' else 'Run'}:  "
+                        f"{contextual_command}"
+                    )
         _record_local_metric("status", ok=bool(payload["ok"]))
         return 0 if payload["ok"] else 1
     if parsed.command == "info":
@@ -2810,7 +2897,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Suggested model: {models[0]}")
             else:
                 print("Provider: not configured")
-            print(f"Recommended install: {payload['recommended_install']}")
+            if payload.get("recommended_install"):
+                print(f"Recommended install: {payload['recommended_install']}")
+            elif payload.get("recommended_setup"):
+                print(f"Next setup: {payload['recommended_setup']}")
+            else:
+                print("Runtime dependencies: already installed")
             print(f"Quick start: {payload['quickstart']}")
         return 0
     if parsed.command == "init":
@@ -2955,6 +3047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 deep=parsed.deep,
             )
+            _persist_readiness_report(workspace, report)
         except (OSError, WorkspaceInitError, ProviderConfigError, ValueError) as exc:
             if parsed.as_json:
                 print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
@@ -3004,6 +3097,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 provider=parsed.provider,
                 deep=parsed.deep,
             )
+            _persist_readiness_report(parsed.workspace, payload)
         except (OSError, ProviderConfigError, ValueError) as exc:
             print(f"xscientist doctor: {exc}", file=sys.stderr)
             return 2

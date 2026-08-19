@@ -23,6 +23,7 @@ from xscientist.research_strategy import (
     EVIDENCE_QUALITY_DOMAINS,
     inspect_claim_depth,
     rank_experiment_candidates,
+    record_research_followup_queue,
     review_research_program,
     save_discriminating_prediction,
     save_evidence_quality_assessment,
@@ -298,6 +299,52 @@ class ResearchStrategyTests(unittest.TestCase):
             )
             self.assertEqual(review["object"].kind, "research_review")
             self.assertEqual(len(review["related"]), 1)
+            queue = record_research_followup_queue(
+                repository.path,
+                review=review["report"],
+                review_id=review["object"].object_id,
+                max_actions=2,
+                commit=False,
+            )
+            self.assertEqual(len(queue["queued"]), 2)
+            proposals = [repository.get(item["object_id"]) for item in queue["queued"]]
+            self.assertTrue(
+                all(
+                    item["payload"]["requires_locked_design_before_execution"]
+                    for item in proposals
+                )
+            )
+            self.assertTrue(
+                all(
+                    item["payload"]["budget"]["max_new_experiments"] == 1
+                    for item in proposals
+                )
+            )
+            repeated = record_research_followup_queue(
+                repository.path,
+                review=review["report"],
+                review_id=review["object"].object_id,
+                max_actions=2,
+                commit=False,
+            )
+            self.assertEqual(repeated["queued"], [])
+            self.assertEqual(len(repeated["active"]), 2)
+            from_recorded_review = record_research_followup_queue(
+                repository.path,
+                review_id=review["object"].object_id,
+                max_actions=3,
+                commit=False,
+            )
+            self.assertEqual(len(from_recorded_review["queued"]), 1)
+            self.assertEqual(len(from_recorded_review["active"]), 3)
+            with self.assertRaisesRegex(ResearchGitError, "does not match"):
+                record_research_followup_queue(
+                    repository.path,
+                    review={**review["report"], "review_hash": "mismatch"},
+                    review_id=review["object"].object_id,
+                    max_actions=4,
+                    commit=False,
+                )
             self.assertEqual(
                 scan_research_anomalies(repository.path)["candidate_count"], 0
             )

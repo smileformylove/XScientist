@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from .git_support import inspect_git_backend
 from .provider_config import (
     PROVIDER_NAMES,
     ProviderConfigError,
+    discover_provider_models,
     discover_workspace_root,
     load_provider_config,
     provider_statuses,
@@ -54,7 +56,19 @@ def diagnose(
     ):
         selected_provider = str(config.get("active_provider") or "").strip() or None
 
-    resolver_kwargs = {"provider": selected_provider}
+    detected_local_models = (
+        []
+        if selected_provider
+        or not bool(task_profile and task_profile["provider_required"])
+        else discover_provider_models("ollama", timeout=0.2)
+    )
+    suggested_provider = "ollama" if detected_local_models else None
+    capability_provider = (
+        selected_provider or suggested_provider
+        if bool(task_profile and task_profile["provider_required"])
+        else None
+    )
+    resolver_kwargs = {"provider": capability_provider}
     if find_spec is not None:
         resolver_kwargs["find_spec"] = find_spec
     capabilities = resolve_task_capabilities(task, **resolver_kwargs)
@@ -136,9 +150,14 @@ def diagnose(
             )
 
     if not workspace_ready:
+        setup_command = "xscientist setup my-research"
+        if suggested_provider and detected_local_models:
+            setup_command += " --provider ollama --model " + shlex.quote(
+                detected_local_models[0]
+            )
         add_remediation(
             "workspace_not_configured",
-            "xscientist setup my-research",
+            setup_command,
             "Create a workspace before running this task.",
         )
     if capabilities["missing_modules"]:
@@ -147,11 +166,19 @@ def diagnose(
             str(capabilities["install_command"]),
             "Install the exact optional modules required by the selected task.",
         )
-    if provider_required and not selected_provider:
+    if provider_required and not selected_provider and workspace_ready:
         add_remediation(
             "provider_not_selected",
-            "xscientist provider add <provider>",
-            "Select and configure one model provider.",
+            (
+                "xscientist provider add ollama"
+                if suggested_provider == "ollama"
+                else "xscientist provider add --help"
+            ),
+            (
+                "Configure the detected local Ollama provider."
+                if suggested_provider == "ollama"
+                else "Choose and configure one model provider."
+            ),
         )
     elif provider_required and not provider_ready and selected_provider:
         local_probe = (provider_row or {}).get("local_probe") or {}
@@ -349,6 +376,8 @@ def diagnose(
             "ok": provider_ready,
             "required": provider_required,
             "name": selected_provider,
+            "suggested": suggested_provider,
+            "detected_local_models": detected_local_models,
             "configured": bool(provider_row and provider_row["configured"]),
             "credentials_available": bool(
                 provider_row and provider_row["credentials_available"]

@@ -250,7 +250,7 @@ class ProviderConfigTests(unittest.TestCase):
                 self.assertEqual(cli_main(["provider", "list", "--json"]), 0)
 
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["workspace"], ".")
+            self.assertEqual(payload["workspace"], "study")
             self.assertEqual(len(payload["providers"]), len(PROVIDER_NAMES))
             self.assertNotIn(str(workspace), stdout.getvalue())
 
@@ -623,7 +623,33 @@ class ProviderConfigTests(unittest.TestCase):
                     0,
                 )
             self.assertNotIn(str(workspace), stdout.getvalue())
-            self.assertEqual(json.loads(stdout.getvalue())["workspace"], ".")
+            self.assertEqual(
+                json.loads(stdout.getvalue())["workspace"], "private-workspace"
+            )
+
+    def test_human_provider_list_focuses_on_configured_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "focused-workspace"
+            create_workspace(workspace)
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch(
+                    "xscientist.provider_config.discover_provider_models",
+                    return_value=[],
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    cli_main(["provider", "list", "--workspace", str(workspace)]),
+                    0,
+                )
+
+            rendered = stdout.getvalue()
+            self.assertIn("Workspace: focused-workspace", rendered)
+            self.assertIn("zhipu:", rendered)
+            self.assertIn("Other providers hidden:", rendered)
+            self.assertNotIn("openrouter:", rendered)
 
 
 if __name__ == "__main__":

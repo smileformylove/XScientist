@@ -30,21 +30,30 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("FEEDBACK SYSTEM STATUS")
     print("=" * 70)
     print(f"\nTimestamp: {report['timestamp']}")
-    print(f"Health Score: {report['health_score']}/100")
-
-    # Health interpretation
     score = report["health_score"]
-    if score >= 90:
-        status = "🟢 EXCELLENT"
-    elif score >= 70:
-        status = "🟡 GOOD"
-    elif score >= 50:
-        status = "🟠 FAIR"
-    elif score >= 30:
-        status = "🔴 POOR"
+    if report.get("health_state") == "corrupted":
+        print("Health Score: unavailable (feedback history is unreadable)")
+        print("Status: 🔴 CORRUPTED")
+        for error in report.get("load_errors") or []:
+            print(f"  Error: {error}")
+    elif score is None:
+        print("Health Score: unavailable (insufficient observations)")
+        print("Status: ⚪ UNKNOWN")
     else:
-        status = "🔴 CRITICAL"
-    print(f"Status: {status}")
+        print(f"Health Score: {score}/100")
+
+        # Health interpretation is meaningful only after observations exist.
+        if score >= 90:
+            status = "🟢 EXCELLENT"
+        elif score >= 70:
+            status = "🟡 GOOD"
+        elif score >= 50:
+            status = "🟠 FAIR"
+        elif score >= 30:
+            status = "🔴 POOR"
+        else:
+            status = "🔴 CRITICAL"
+        print(f"Status: {status}")
 
     # Feedback summary
     summary = report["feedback_summary"]
@@ -66,7 +75,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 )
 
     print()
-    return 0
+    return 1 if report.get("health_state") == "corrupted" else 0
 
 
 def cmd_actions(args: argparse.Namespace) -> int:
@@ -82,8 +91,17 @@ def cmd_actions(args: argparse.Namespace) -> int:
     print("=" * 70)
     print()
 
+    if feedback_system.load_errors:
+        print("Cannot recommend actions because feedback history is unreadable.")
+        for error in feedback_system.load_errors:
+            print(f"  Error: {error}")
+        return 1
+
     if not actions:
-        print("✓ No actions needed - system is healthy!")
+        if not feedback_system.feedback_history:
+            print("No observations yet - health cannot be assessed.")
+        else:
+            print("✓ No unresolved feedback currently requires an action.")
         return 0
 
     for i, action in enumerate(actions, 1):
@@ -122,6 +140,12 @@ def cmd_trends(args: argparse.Namespace) -> int:
     print("METRIC TRENDS")
     print("=" * 70)
     print()
+
+    if feedback_system.load_errors:
+        print("Cannot analyze trends because feedback history is unreadable.")
+        for error in feedback_system.load_errors:
+            print(f"  Error: {error}")
+        return 1
 
     for metric in metrics:
         trend = feedback_system.analyze_trends(metric, hours=args.hours)
@@ -167,7 +191,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             report = json.load(f)
         print("\n" + json.dumps(report, indent=2, ensure_ascii=False))
 
-    return 0
+    return 1 if feedback_system.load_errors else 0
 
 
 def cmd_add(args: argparse.Namespace) -> int:
@@ -232,11 +256,10 @@ def cmd_clear(args: argparse.Namespace) -> int:
         feedback_dir=Path(args.feedback_dir),
     )
 
-    before = len(feedback_system.feedback_buffer)
-    feedback_system.clear_resolved()
-    after = len(feedback_system.feedback_buffer)
-
-    cleared = before - after
+    cleared = feedback_system.clear_resolved()
+    after = len(
+        [item for item in feedback_system.feedback_history if not item.resolved]
+    )
     print(f"✓ Cleared {cleared} resolved feedback items")
     print(f"  Remaining: {after} unresolved items")
 

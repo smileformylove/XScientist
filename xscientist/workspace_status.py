@@ -124,7 +124,7 @@ def build_workspace_status(
     if research_enabled and not errors:
         try:
             repo_status = repository_status(root)
-            guide = build_research_guide(root, language=language)
+            guide = build_research_guide(root, language=language, command_repo=".")
             research.update(
                 {
                     "branch": repo_status.get("branch"),
@@ -135,6 +135,7 @@ def build_workspace_status(
                         "progress": guide.get("progress"),
                         "next_steps": guide.get("next_steps"),
                         "warnings": guide.get("warnings"),
+                        "program_review": guide.get("program_review"),
                     },
                 }
             )
@@ -144,13 +145,19 @@ def build_workspace_status(
     progress_path = root / "04_logs" / "progress.json"
     budget_path = root / "04_logs" / "llm_budget.json"
     insight_path = root / "04_logs" / "insight_report.json"
+    readiness_path = root / ".xscientist" / "readiness.json"
+    strategy_followups_path = root / "04_logs" / "research_strategy_followups.json"
     progress, progress_error = _read_json(progress_path)
     budget, budget_error = _read_json(budget_path)
     insight, insight_error = _read_json(insight_path)
+    readiness, readiness_error = _read_json(readiness_path)
+    strategy_followups, strategy_followups_error = _read_json(strategy_followups_path)
     for path, detail in (
         (progress_path, progress_error),
         (budget_path, budget_error),
         (insight_path, insight_error),
+        (readiness_path, readiness_error),
+        (strategy_followups_path, strategy_followups_error),
     ):
         if detail:
             errors.append(
@@ -177,6 +184,59 @@ def build_workspace_status(
     )
     background_run = _latest_background_run(root)
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
+    readiness_blockers = [
+        item
+        for item in readiness.get("remediations") or []
+        if isinstance(item, dict) and item.get("severity") == "error"
+    ]
+    current_program_review = (research.get("guide") or {}).get("program_review")
+    open_strategy_gaps = {
+        str(item.get("code") or "")
+        for item in ((current_program_review or {}).get("gaps") or [])
+        if isinstance(item, dict) and item.get("code")
+    }
+    queued_followups = [
+        item
+        for item in (
+            strategy_followups.get("active") or strategy_followups.get("queued") or []
+        )
+        if isinstance(item, dict)
+        and item.get("object_id")
+        and (
+            not item.get("gap")
+            or not isinstance(current_program_review, dict)
+            or item.get("gap") in open_strategy_gaps
+        )
+    ]
+    if queued_followups:
+        followup = queued_followups[0]
+        next_steps.insert(
+            0,
+            {
+                "code": "inspect_scientific_strategy_followup",
+                "title": str(
+                    followup.get("action")
+                    or "Inspect the next bounded scientific strategy follow-up"
+                ),
+                "command": (
+                    "xscientist research objects "
+                    + str(followup["object_id"])
+                    + " --repo ."
+                ),
+            },
+        )
+    if readiness_blockers:
+        blocker = readiness_blockers[0]
+        next_steps.insert(
+            0,
+            {
+                "code": str(blocker.get("code") or "resolve_readiness_blocker"),
+                "title": str(
+                    blocker.get("detail") or "Resolve the latest readiness blocker"
+                ),
+                "command": str(blocker.get("command") or "xscientist doctor --deep"),
+            },
+        )
     if isinstance(background_run, dict) and background_run.get("status") in {
         "failed",
         "cancelled",
@@ -219,6 +279,26 @@ def build_workspace_status(
             ),
         },
         "background_run": background_run,
+        "readiness": {
+            "available": bool(readiness),
+            "configuration_ready": readiness.get("configuration_ready"),
+            "runtime_ready": readiness.get("runtime_ready"),
+            "blockers": readiness_blockers,
+            "file": (
+                portable_path(readiness_path, base=root)
+                if readiness_path.is_file()
+                else None
+            ),
+        },
+        "strategy_followups": {
+            "available": bool(strategy_followups),
+            "queued": queued_followups,
+            "file": (
+                portable_path(strategy_followups_path, base=root)
+                if strategy_followups_path.is_file()
+                else None
+            ),
+        },
         "budget": {
             "available": bool(budget),
             "limits": budget.get("limits"),

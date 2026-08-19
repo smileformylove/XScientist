@@ -6,6 +6,10 @@ Tests for Enhanced Feedback System
 import unittest
 import tempfile
 import time
+import os
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 from ai_scientist.enhanced_feedback_system import (
@@ -44,6 +48,147 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         self.assertEqual(item.source, "test")
         self.assertTrue(item.actionable)
         self.assertFalse(item.resolved)
+        self.assertTrue((Path(self.temp_dir) / "feedback_history.json").is_file())
+
+        reloaded = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+        self.assertEqual(len(reloaded.feedback_history), 1)
+        self.assertEqual(reloaded.feedback_history[0].message, "Test feedback")
+        self.assertIn("score", reloaded.metric_windows)
+
+    def test_empty_report_is_unknown_instead_of_perfect(self):
+        report = self.feedback_system.get_health_report()
+
+        self.assertFalse(report["has_data"])
+        self.assertEqual(report["health_state"], "unknown")
+        self.assertIsNone(report["health_score"])
+
+    def test_corrupted_history_is_reported_instead_of_treated_as_empty(self):
+        history = Path(self.temp_dir) / "feedback_history.json"
+        history.write_text("{not-json", encoding="utf-8")
+
+        feedback = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+        report = feedback.get_health_report()
+
+        self.assertEqual(report["health_state"], "corrupted")
+        self.assertIsNone(report["health_score"])
+        self.assertTrue(report["load_errors"])
+
+        project_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(project_root), env.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        actions = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xscientist",
+                "feedback",
+                "--feedback-dir",
+                self.temp_dir,
+                "actions",
+            ],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(actions.returncode, 1)
+        self.assertIn("history is unreadable", actions.stdout)
+
+    def test_cli_feedback_survives_a_new_process(self):
+        feedback_dir = Path(self.temp_dir) / "cli-feedback"
+        project_root = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(project_root), env.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        base = [
+            sys.executable,
+            "-m",
+            "xscientist",
+            "feedback",
+            "--feedback-dir",
+            str(feedback_dir),
+        ]
+
+        empty = subprocess.run(
+            [*base, "status"],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertIn("Status: ⚪ UNKNOWN", empty.stdout)
+        self.assertNotIn("EXCELLENT", empty.stdout)
+
+        added = subprocess.run(
+            [
+                *base,
+                "add",
+                "--category",
+                "error",
+                "--priority",
+                "critical",
+                "--source",
+                "test",
+                "--message",
+                "Autonomous run failed",
+                "--metrics",
+                "error_rate=1",
+                "success_rate=0",
+            ],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(added.returncode, 0, added.stderr)
+
+        status = subprocess.run(
+            [*base, "status"],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Total: 1", status.stdout)
+        self.assertIn("Critical: 1", status.stdout)
+        self.assertNotIn("100.0/100", status.stdout)
+
+        concurrent = [
+            subprocess.Popen(
+                [
+                    *base,
+                    "add",
+                    "--category",
+                    "performance",
+                    "--priority",
+                    "info",
+                    "--source",
+                    "parallel-test",
+                    "--message",
+                    f"Concurrent observation {index}",
+                ],
+                cwd=self.temp_dir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for index in range(4)
+        ]
+        for process in concurrent:
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr or stdout)
+        reloaded = EnhancedFeedbackSystem(feedback_dir=feedback_dir)
+        self.assertEqual(len(reloaded.feedback_history), 5)
 
     def test_metric_tracking(self):
         """Test metric tracking and windows"""
@@ -145,6 +290,71 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         self.assertTrue(item.resolved)
         self.assertEqual(item.action_taken, "Fixed the issue")
 
+    def test_stale_writer_cannot_resurrect_resolved_feedback(self):
+        item = self.feedback_system.add_feedback(
+            category=FeedbackCategory.ERROR,
+            priority=FeedbackPriority.HIGH,
+            source="test",
+            message="Concurrent issue",
+        )
+        stale_writer = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+
+        self.feedback_system.mark_resolved(item, "Fixed")
+        stale_writer.add_feedback(
+            category=FeedbackCategory.SUCCESS,
+            priority=FeedbackPriority.INFO,
+            source="test",
+            message="Later observation",
+        )
+
+        reloaded = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+        original = next(
+            feedback
+            for feedback in reloaded.feedback_history
+            if feedback.item_id == item.item_id
+        )
+        self.assertTrue(original.resolved)
+        self.assertEqual(original.action_taken, "Fixed")
+
+    def test_stale_writer_rebuilds_trends_from_merged_history(self):
+        stale_writer = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+        self.feedback_system.add_feedback(
+            category=FeedbackCategory.PERFORMANCE,
+            priority=FeedbackPriority.INFO,
+            source="first",
+            message="First sample",
+            metrics={"error_rate": 0.1},
+        )
+        stale_writer.add_feedback(
+            category=FeedbackCategory.PERFORMANCE,
+            priority=FeedbackPriority.INFO,
+            source="second",
+            message="Second sample",
+            metrics={"error_rate": 0.9},
+        )
+
+        trend = stale_writer.analyze_trends("error_rate")
+        self.assertEqual(trend["data_points"], 2)
+        self.assertEqual(trend["mean"], 0.5)
+
+    def test_abandoned_feedback_lock_is_recovered(self):
+        lock = Path(self.temp_dir) / ".feedback-history.lock"
+        lock.mkdir()
+        (lock / "owner.json").write_text(
+            json.dumps({"pid": 999_999_999, "created_at": 0, "token": "dead"}),
+            encoding="utf-8",
+        )
+
+        self.feedback_system.add_feedback(
+            category=FeedbackCategory.SUCCESS,
+            priority=FeedbackPriority.INFO,
+            source="test",
+            message="Recovered after abandoned lock",
+        )
+
+        self.assertFalse(lock.exists())
+        self.assertEqual(len(self.feedback_system.feedback_history), 1)
+
     def test_clear_resolved(self):
         """Test clearing resolved feedback"""
         # Add multiple items
@@ -165,11 +375,12 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         # Resolve one
         self.feedback_system.mark_resolved(item1, "Fixed")
 
-        initial_count = len(self.feedback_system.feedback_buffer)
-        self.feedback_system.clear_resolved()
+        cleared = self.feedback_system.clear_resolved()
         final_count = len(self.feedback_system.feedback_buffer)
 
-        self.assertEqual(final_count, initial_count - 1)
+        self.assertEqual(cleared, 1)
+        self.assertEqual(final_count, 1)
+        self.assertEqual(len(self.feedback_system.feedback_history), 1)
 
 
 class TestLongRunningTaskMonitor(unittest.TestCase):
@@ -178,9 +389,7 @@ class TestLongRunningTaskMonitor(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.temp_dir = tempfile.mkdtemp()
-        self.feedback_system = EnhancedFeedbackSystem(
-            feedback_dir=Path(self.temp_dir)
-        )
+        self.feedback_system = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
         self.monitor = LongRunningTaskMonitor(
             task_name="test_task",
             feedback_system=self.feedback_system,
@@ -229,7 +438,8 @@ class TestLongRunningTaskMonitor(unittest.TestCase):
 
         # Check if stall feedback was added
         stall_feedback = [
-            item for item in self.feedback_system.feedback_buffer
+            item
+            for item in self.feedback_system.feedback_buffer
             if "stalled" in item.message.lower()
         ]
 
@@ -242,9 +452,7 @@ class TestFeedbackIntegration(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         self.temp_dir = tempfile.mkdtemp()
-        self.feedback_system = EnhancedFeedbackSystem(
-            feedback_dir=Path(self.temp_dir)
-        )
+        self.feedback_system = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
 
     def test_end_to_end_workflow(self):
         """Test complete feedback workflow"""

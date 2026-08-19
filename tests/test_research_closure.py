@@ -231,7 +231,12 @@ class ResearchClosureTests(unittest.TestCase):
                 )
 
             self.assertEqual(status, 0)
-            self.assertIn("Scientific closure: complete", output.getvalue())
+            rendered = output.getvalue()
+            self.assertIn("Traceability closure: complete", rendered)
+            self.assertIn("replay=blocked", rendered)
+            self.assertIn("verification=blocked", rendered)
+            self.assertIn("Overall scientific closure: pending", rendered)
+            self.assertNotIn("Scientific closure: complete", rendered)
 
     def test_complete_high_level_cli_journey_reaches_verified_closure(self) -> None:
         with tempfile.TemporaryDirectory() as td:

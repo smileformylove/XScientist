@@ -238,6 +238,215 @@ def create_demo(
     }
 
 
+def _apply_autopilot_profile_fixture(
+    root: Path,
+    *,
+    profile: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Materially exercise the contract promised by each Autopilot profile."""
+
+    repository = ResearchRepository(root)
+    lifecycle = ResearchLifecycle(repository)
+    profile_objects: dict[str, Any] = {}
+    behavior: list[str] = ["contested_evidence", "failure_preservation"]
+
+    if profile == "discovery":
+        from .research_strategy import (
+            rank_experiment_candidates,
+            save_discriminating_prediction,
+            save_hypothesis_portfolio,
+        )
+
+        primary_id = str(result["objects"]["hypothesis"])
+        rival = repository.record(
+            "hypothesis",
+            {
+                "statement": (
+                    "Retrieval helps only when the retrieved source quality exceeds "
+                    "the model's unaided knowledge quality."
+                ),
+                "falsifier": (
+                    "Source-quality ablation leaves the retrieval effect unchanged."
+                ),
+                "role": "rival_mechanism",
+            },
+            relations=[{"type": "contradicts", "target": primary_id}],
+            actor={"actor_id": "discovery-fixture", "authority": "research_agent"},
+        )
+        null = repository.record(
+            "hypothesis",
+            {
+                "statement": (
+                    "Retrieval does not reliably change unsupported-claim rates "
+                    "outside sampling variation."
+                ),
+                "falsifier": "A preregistered held-out effect is stable and non-zero.",
+                "role": "null",
+            },
+            relations=[{"type": "contradicts", "target": primary_id}],
+            actor={"actor_id": "discovery-fixture", "authority": "research_agent"},
+        )
+        portfolio = save_hypothesis_portfolio(
+            root,
+            question="Which explanation best predicts when retrieval transfers?",
+            primary_id=primary_id,
+            alternative_ids=[rival.object_id],
+            null_id=null.object_id,
+            prior_weights={primary_id: 1, rival.object_id: 1, null.object_id: 1},
+            commit=False,
+        )["object"]
+        hypotheses = [primary_id, rival.object_id, null.object_id]
+        conditions = [
+            (
+                "source-quality-ablation",
+                "Retrieved passages are replaced with low-quality but topic-matched passages.",
+                {
+                    primary_id: "retrieval still lowers unsupported claims",
+                    rival.object_id: "the retrieval benefit disappears",
+                    null.object_id: "rates remain statistically unchanged",
+                },
+            ),
+            (
+                "held-out-domain",
+                "The locked comparison is repeated on a disjoint held-out domain.",
+                {
+                    primary_id: "retrieval lowers unsupported claims",
+                    rival.object_id: "benefit depends on held-out source quality",
+                    null.object_id: "rates remain statistically unchanged",
+                },
+            ),
+        ]
+        predictions_by_condition: dict[str, dict[str, str]] = {}
+        for candidate_id, condition, outcomes in conditions:
+            predictions_by_condition[candidate_id] = {}
+            for hypothesis_id in hypotheses:
+                prediction = save_discriminating_prediction(
+                    root,
+                    portfolio_id=portfolio.object_id,
+                    hypothesis_id=hypothesis_id,
+                    when=condition,
+                    expected_outcome=outcomes[hypothesis_id],
+                    distinguishes_from=[
+                        other for other in hypotheses if other != hypothesis_id
+                    ],
+                    falsifier=(
+                        "The observed outcome matches a competing locked prediction."
+                    ),
+                    commit=False,
+                )["object"]
+                predictions_by_condition[candidate_id][
+                    hypothesis_id
+                ] = prediction.object_id
+        candidates = [
+            {
+                "candidate_id": candidate_id,
+                "summary": f"Run the {candidate_id} discriminating test.",
+                "condition": condition,
+                "predictions": outcomes,
+                "prediction_ids": predictions_by_condition[candidate_id],
+                "interventions": [candidate_id],
+                "novelty": 3,
+                "impact": 3,
+                "transfer_value": 4 if candidate_id == "held-out-domain" else 3,
+                "cost": 1 if candidate_id == "source-quality-ablation" else 2,
+                "risk": 1,
+                "redundancy": 0,
+            }
+            for candidate_id, condition, outcomes in conditions
+        ]
+        priority = rank_experiment_candidates(
+            root,
+            portfolio_id=portfolio.object_id,
+            candidates=candidates,
+            commit=False,
+        )
+        repository.commit(
+            stage="plan",
+            subject="exercise discovery portfolio and information-value ranking",
+            status="locked",
+        )
+        profile_objects = {
+            "rival_hypothesis": rival.object_id,
+            "null_hypothesis": null.object_id,
+            "portfolio": portfolio.object_id,
+            "predictions": [
+                prediction_id
+                for rows in predictions_by_condition.values()
+                for prediction_id in rows.values()
+            ],
+            "priority": priority["object"].object_id,
+            "candidate_designs": [
+                item.object_id for item in priority.get("related") or []
+            ],
+        }
+        behavior.extend(
+            [
+                "competitive_hypothesis_portfolio",
+                "discriminating_predictions",
+                "information_value_ranking",
+            ]
+        )
+    elif profile == "publication":
+        evaluates = [
+            str(result["objects"]["contested_claim"]),
+            str(result["objects"]["bounded_inference"]),
+            str(result["objects"]["supporting_evidence"]),
+            str(result["objects"]["refuting_evidence"]),
+        ]
+        reviews = []
+        gates = []
+        contexts = []
+        for reviewer, focus in (
+            ("human:publication-methods-reviewer", "methods and transfer validity"),
+            ("human:publication-claims-reviewer", "claim scope and evidence binding"),
+        ):
+            evaluation = lifecycle.evaluation(
+                {
+                    "status": "rejected",
+                    "claim_promotion_allowed": False,
+                    "required_failures": ["independent_reproduction_missing"],
+                    "summary": f"Publication board hold: {focus} requires repair.",
+                    "review_focus": focus,
+                },
+                evaluates=evaluates,
+                verifier_id=reviewer,
+                commit=False,
+            )
+            reviews.append(evaluation["review"].object_id)
+            gates.append(evaluation["gate"].object_id)
+            contexts.append(evaluation["context"].object_id)
+        repository.commit(
+            stage="review",
+            subject="exercise publication multi-role review board",
+            status="rejected",
+        )
+        profile_objects = {
+            "publication_reviews": reviews,
+            "publication_gates": gates,
+            "decision_contexts": contexts,
+        }
+        behavior.extend(["multi_role_review", "strict_publication_hold_gates"])
+    else:
+        behavior.append("bounded_first_complete_run")
+
+    result["objects"]["autopilot_profile"] = profile_objects
+    exported = export_research_dag(root, root / "research-dag")
+    graph = exported["graph"]
+    result["dag"].update(
+        {
+            "json": exported["json"],
+            "html": exported["html"],
+            "nodes": len(graph.get("nodes") or []),
+            "relations": len(graph.get("edges") or []),
+            "integrity_ok": bool((graph.get("integrity") or {}).get("is_dag")),
+            "closure": (graph.get("scientific_closure") or {}).get("status"),
+        }
+    )
+    result["guide"] = build_research_guide(root)
+    return {"behavior": behavior, "objects": profile_objects}
+
+
 def create_autopilot_demo(
     destination: str | Path,
     *,
@@ -264,6 +473,11 @@ def create_autopilot_demo(
         git_user_email=git_user_email,
     )
     root = Path(destination).expanduser().resolve()
+    profile_fixture = _apply_autopilot_profile_fixture(
+        root,
+        profile=normalized_profile,
+        result=result,
+    )
     logs = root / "04_logs"
     experiment = root / "02_experiments" / "offline-autopilot-fixture"
     experiment.mkdir(parents=True, exist_ok=True)
@@ -331,6 +545,8 @@ def create_autopilot_demo(
     receipt = {
         "schema": AUTOPILOT_FIXTURE_SCHEMA,
         "profile": normalized_profile,
+        "profile_behavior": profile_fixture["behavior"],
+        "profile_objects": profile_fixture["objects"],
         "provider": "deterministic-fixture",
         "executor": "bundled-trusted-python-fixture",
         "network_used": False,
@@ -348,7 +564,16 @@ def create_autopilot_demo(
             "insight",
             "research_vcs",
             "dag",
-        ],
+        ]
+        + (
+            ["competitive_portfolio", "information_value_ranking"]
+            if normalized_profile == "discovery"
+            else (
+                ["multi_role_review_board"]
+                if normalized_profile == "publication"
+                else []
+            )
+        ),
         "expected_closure": "blocked",
         "resumable": True,
     }

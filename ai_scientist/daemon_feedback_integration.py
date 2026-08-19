@@ -184,9 +184,7 @@ class DaemonFeedbackIntegration:
         issues_resolved: int,
     ):
         """Handle review round completion"""
-        resolution_rate = (
-            issues_resolved / issues_found if issues_found > 0 else 1.0
-        )
+        resolution_rate = issues_resolved / issues_found if issues_found > 0 else 1.0
 
         self.feedback_system.add_feedback(
             category=FeedbackCategory.QUALITY,
@@ -218,7 +216,9 @@ class DaemonFeedbackIntegration:
 
         self.feedback_system.add_feedback(
             category=FeedbackCategory.ERROR,
-            priority=FeedbackPriority.CRITICAL if error_rate > 0.3 else FeedbackPriority.HIGH,
+            priority=(
+                FeedbackPriority.CRITICAL if error_rate > 0.3 else FeedbackPriority.HIGH
+            ),
             source="daemon",
             message=f"{error_type}: {error_message}",
             metrics={"error_rate": error_rate},
@@ -288,7 +288,9 @@ class DaemonFeedbackIntegration:
             "successful_projects": self.success_count,
             "failed_projects": self.failure_count,
             "success_rate": round(success_rate, 3),
-            "projects_per_hour": round(total_projects / elapsed_hours, 2) if elapsed_hours > 0 else 0,
+            "projects_per_hour": (
+                round(total_projects / elapsed_hours, 2) if elapsed_hours > 0 else 0
+            ),
         }
 
         base_report["daemon_metrics"] = daemon_metrics
@@ -322,7 +324,8 @@ class DaemonFeedbackIntegration:
             action["daemon_context"] = {
                 "uptime_hours": (time.time() - self.start_time) / 3600,
                 "total_projects": self.success_count + self.failure_count,
-                "success_rate": self.success_count / max(1, self.success_count + self.failure_count),
+                "success_rate": self.success_count
+                / max(1, self.success_count + self.failure_count),
             }
 
         return actions
@@ -335,10 +338,10 @@ class DaemonFeedbackIntegration:
             (should_pause, reason)
         """
         report = self.get_daemon_health_report()
-        health_score = report.get("health_score", 100)
+        health_score = report.get("health_score")
 
         # Critical health
-        if health_score < 30:
+        if isinstance(health_score, (int, float)) and health_score < 30:
             return True, f"Critical health score: {health_score}/100"
 
         # High error rate
@@ -352,11 +355,16 @@ class DaemonFeedbackIntegration:
             trend = self.feedback_system.analyze_trends(resource)
             if "error" not in trend:
                 if trend.get("mean", 0) > 0.95:
-                    return True, f"Resource exhaustion: {resource} at {trend['mean']*100:.1f}%"
+                    return (
+                        True,
+                        f"Resource exhaustion: {resource} at {trend['mean']*100:.1f}%",
+                    )
 
         return False, ""
 
-    def integrate_with_daemon_status(self, daemon_status: Dict[str, Any]) -> Dict[str, Any]:
+    def integrate_with_daemon_status(
+        self, daemon_status: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Integrate enhanced feedback with existing daemon status
 
@@ -372,7 +380,9 @@ class DaemonFeedbackIntegration:
         daemon_status["health_report"] = health_report
 
         # Add recommended actions
-        daemon_status["recommended_actions"] = self.get_recommended_actions(max_actions=5)
+        daemon_status["recommended_actions"] = self.get_recommended_actions(
+            max_actions=5
+        )
 
         # Add pause recommendation
         should_pause, reason = self.should_pause_daemon()
