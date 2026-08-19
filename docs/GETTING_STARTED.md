@@ -25,17 +25,13 @@ cost, and a next action that asks the user to resolve a contested claim.
 
 ## 2. Optionally add a model
 
-Install the 0.1.3 release candidate from `main` with exactly one provider
-extra. For a repeatable experiment, replace `main` with a commit hash:
+Install the published 0.1.3 release with exactly one provider extra:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.3"
 xscientist start ./my-study
 ```
-
-The latest published PyPI release is `0.1.2`; it does not yet include every
-journey documented on this page.
 
 In a terminal, the question saved by `explore` is reused. Remaining inputs are
 prompted progressively: ready provider/model, evidence mode, and optional cost

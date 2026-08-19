@@ -9,7 +9,7 @@ nothing:
 
 ```bash
 python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist==0.1.3"
 xscientist explore ./my-study
 ```
 
@@ -20,8 +20,7 @@ xscientist demo ./retrieval-study --autopilot --open
 xscientist status ./retrieval-study
 ```
 
-This site documents the `0.1.3` release candidate on `main`. The latest
-published PyPI release is `0.1.2`.
+This site documents the published `0.1.3` release.
 
 The fixture deliberately ends with a contested broad claim. A successful
 software run is therefore not misrepresented as successful scientific closure.

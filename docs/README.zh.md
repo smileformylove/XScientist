@@ -38,8 +38,8 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 > 生成代码必须经过配置好的隔离执行器；机器生成的结论只有补齐证据和独立评审
 > 门禁后，才能成为“已验证”。
 
-本文描述 `main` 上的 `0.1.3` 候选版。PyPI 当前正式版是 `0.1.2`；如需使用下方
-新流程，请从 `main` 安装。
+本文描述已经发布的 `0.1.3` 正式版。需要严格复现实验时，请固定软件版本或源码
+commit。
 
 ## 先选最短路径
 
@@ -58,7 +58,7 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 
 ```bash
 python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist==0.1.3"
 xscientist explore ./my-study --lang zh
 ```
 
@@ -131,7 +131,7 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai-compatible]==0.1.3"
 xscientist provider list
 xscientist start ./my-study
 ```
@@ -147,7 +147,7 @@ xscientist start ./my-study
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.3"
 export OPENAI_API_KEY="..."
 xscientist start ./hosted-study
 ```
@@ -324,8 +324,8 @@ flowchart TB
 
 | 渠道 | 命令 |
 | --- | --- |
-| PyPI 正式版 0.1.2 | `python -m pip install "xscientist==0.1.2"` |
-| 0.1.3 候选版 | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| PyPI 正式版 0.1.3 | `python -m pip install "xscientist==0.1.3"` |
+| 开发版 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 需要实验严格复现时，请固定 commit，不要跟随变化中的 `main`。

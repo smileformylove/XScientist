@@ -6,106 +6,16 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
-### Added
-
-- `xscientist history show` and `history diff` provide compact, payload-free
-  checkpoint inspection and semantic change review without exposing the full
-  advanced Research VCS command surface.
-- `xscientist info --json` now advertises the versioned research-adapter entry
-  point and safely discovered adapters without importing third-party plugins.
-- A compact `xscientist audit` facade and `xscientist history` workflow for
-  checkpoint listing, policy-safe saves, payload-free rollback previews, and
-  explicit append-only reversals that never rewrite scientific history.
-- Public workspace-history SDK functions so integrations can reuse the same
-  safe view/save/preview/rollback semantics without invoking the CLI.
-- A provider-free `xscientist explore` journey that accepts a user's own idea,
-  asks plain-language falsifiability questions, permits honest incomplete states,
-  and records an exact local research history without generating evidence or
-  conclusions.
-- Provider discovery before workspace creation, including safe local Ollama
-  detection and copyable setup commands without reading an unrelated `.env`.
-- Explicit workspace operational states and a compact default status view, with
-  `--verbose` retaining branch, pipeline, token, and background-run detail.
-- Bounded, immutable scientific-strategy follow-up proposals derived from
-  recorded program reviews, with explicit design/experiment budgets and stop
-  conditions.
-- Durable cross-process operational feedback with atomic snapshots,
-  concurrent-writer merging, monotonic resolution, and abandoned-lock recovery.
-
-### Changed
-
-- Default `status` now acts as one research review surface: it reports the
-  current checkpoint and worktree state, the trace/replay/verify ladder,
-  generated-DAG freshness, and—under `--verbose`—agent-evolution receipt counts.
-- Worktree safety classification is shared by status, branch transitions,
-  rollback, and bundling; policy-excluded local views are preserved without
-  being mislabeled as unsaved scientific changes.
-- Package metadata and English/Chinese documentation now explain the system as
-  Git-like evidence history while explicitly separating versioning mechanics
-  from scientific authority.
-- Default help, shell completion, English/Chinese onboarding, and architecture
-  guidance now expose trust and recovery as ordinary workspace actions while
-  keeping branches, deep diffs, bundles, and protocol internals under the
-  advanced `research` surface.
-- English and Chinese READMEs now share one task-first structure: a four-path
-  start table, inspectable workspace map, current Ollama CLI flow, explicit
-  autonomy boundaries, audit-level semantics, conflict-safe rollback wording,
-  and matching SDK examples without duplicating the command decision tree.
-- Model-backed `start` reuses the question from an `explore` workspace and can
-  add missing runtime files without replacing its existing research files.
-- English and Chinese entry documentation is shorter and task-led: the default
-  path now centers on `demo`, `start`, `status`, recovery, and audit, while the
-  complete research protocol remains linked and available.
-- New non-interactive workspaces require an explicit provider; interactive
-  setup reuses one readiness-led provider picker and provider-neutral setup no
-  longer pretends that a model route is configured.
-- Research strategy checkpoints commit only the objects they create instead of
-  sweeping ambient eligible worktree changes into the same scientific decision.
-- Ollama readiness now verifies the local service and selected model, accepts
-  numbered interactive model choices, and treats local inference as zero API
-  cost while preserving token budgets.
-- Human status, detached-run, executor, provider, and upgrade output now uses
-  clearer user-facing states, local timestamps, structured failure summaries,
-  and context-aware next actions.
-- English and Chinese install documentation now distinguishes the published
-  `0.1.2` package from the `0.1.3` release candidate on `main`, with PyPI-safe
-  documentation links.
-- Autopilot demo profiles now exercise materially different scientific
-  structures: discovery adds competitive predictions and information-value
-  ranking, while publication adds independent review boards and hold gates.
-- Status now preserves the latest readiness blocker, filters resolved strategy
-  follow-ups, and emits repository-bound copy/paste research commands.
-
-### Fixed
-
-- Append-only rollback now works when a checkpoint introduced files: staged
-  deletions are retained, the reversal checkpoint is committed atomically, and
-  a failed apply restores tracked state without deleting local generated views.
-- Generated DAG views no longer block rollback merely because they are outside
-  the scientific tracking policy; stale views are detected against the current
-  checkpoint and receive an exact regeneration command.
-- Demo checkpoints now contain code, environment, dependency, data, seed, and
-  measurement provenance, and the Autopilot receipt is included in its final
-  runtime checkpoint.
-- Reproduction bundles allow untracked generated DAG views while still
-  refusing tracked, staged, or research-policy-eligible changes.
-- Structured `start` and research-strategy output no longer mixes Python
-  representations or human-only launch errors into JSON automation streams.
-- Provider checks and Doctor no longer report an unreachable Ollama endpoint
-  as ready, and Docker failures distinguish a missing installation from a
-  stopped daemon.
-- Workspace status includes the latest detached run, demo output explains a
-  scientifically contested closure, and installation info no longer reports
-  contradictory provider-client readiness when no provider is configured.
-- Empty or corrupted feedback no longer appears perfectly healthy; trace,
-  replay, and independent verification closure are reported separately.
-- Generated workspace refreshes preserve canonical formatting and headers, so
-  provider/model updates do not create formatting-only Research VCS changes.
-
-## [0.1.3] - 2026-08-17
+## [0.1.3] - 2026-08-19
 
 ### Added
 
+- A provider-free `xscientist explore` journey that records a user's own idea,
+  asks plain-language falsifiability questions, permits honest incomplete
+  states, and creates no invented evidence or conclusions.
+- Compact `status`, `audit`, and `history` review surfaces with hash-checked
+  checkpoint listing, show, semantic diff, policy-safe save, payload-free
+  rollback preview, and append-only reversal commands plus matching public SDKs.
 - Persistent local detached-run controls and HTTP job log/cancel/resume
   endpoints, including bounded live output, graceful process-group shutdown,
   exact private resume commands, and PID-reuse protection.
@@ -118,9 +28,28 @@ for its Python package; the ARA protocol has its own version in
 - A MkDocs documentation site configuration, reproducible example gallery,
   MLflow/DVC/notebook adapter cookbook, protocol conformance guide, and strict
   documentation build workflow.
+- Provider discovery before workspace creation, including safe local Ollama
+  detection and copyable setup commands without reading unrelated credentials.
+- Explicit workspace operational states, durable cross-process feedback, and
+  bounded immutable scientific-strategy follow-ups with stop conditions.
+- Machine-readable, import-free discovery for the versioned
+  `xscientist.research_adapters` extension point.
 
 ### Changed
 
+- Default `status` is now the single research review surface for checkpoint and
+  worktree state, `trace → replay → verify` gates, generated-DAG freshness,
+  bounded next actions, and optional agent-evolution receipt counts.
+- Worktree safety and closure classification are shared by status, branch
+  transitions, rollback, bundling, and audit so those surfaces cannot silently
+  disagree.
+- English and Chinese entry documentation now uses one short task-first model,
+  explains Git-like evidence history without treating Git as scientific
+  authority, and keeps advanced protocol controls under `research`.
+- Model-backed `start` reuses an existing `explore` question and adds missing
+  runtime files without replacing the workspace's research history.
+- Interactive setup uses one readiness-led provider picker; non-interactive
+  starts require an explicit provider instead of claiming an implicit route.
 - Workspace status uses a stable path-free repository identity, detects
   malformed runtime state instead of treating it as absent, and directs
   contested claims to a boundary-resolving next experiment.
@@ -138,9 +67,25 @@ for its Python package; the ARA protocol has its own version in
   the operator explicitly uses `--force`.
 - Shell completion covers practical subcommands and options, and human status,
   demo, and authentication output now honor a consistent English/Chinese path.
+- Research strategy checkpoints commit only the objects they create instead of
+  sweeping unrelated eligible changes into the same scientific decision.
+- Ollama readiness verifies both service and model, supports numbered choices,
+  and records local inference as zero API cost while preserving token budgets.
+- Autopilot profiles now represent distinct discovery and publication
+  structures, including competitive predictions, information-value ranking,
+  independent review boards, and hold gates.
 
 ### Fixed
 
+- Append-only rollback now reverses checkpoints that introduced files,
+  restores tracked state atomically on failure, preserves policy-excluded
+  generated views, and marks stale DAG output with an exact refresh command.
+- Demo checkpoints include code, environment, dependency, data, seed, and
+  measurement provenance; generated views no longer block reproduction bundles.
+- Structured start and research-strategy commands keep human launch failures
+  out of JSON output.
+- Provider and Doctor checks distinguish unreachable Ollama, missing Docker,
+  stopped Docker, unconfigured clients, and unknown model pricing correctly.
 - Cancellation preserves bounded-output truncation metadata and refuses to
   signal a process whose persisted identity or process group no longer matches.
 - Detached `--detach` parsing is attached to `xscientist start` rather than the
@@ -155,6 +100,10 @@ for its Python package; the ARA protocol has its own version in
   workspace selected by the caller.
 - The HTTP service validates its work directory at startup and exposes a useful
   root discovery response instead of failing the first submitted job.
+- Empty or corrupted feedback no longer appears healthy; traceability,
+  replayability, and independent verification are reported separately.
+- Generated workspace refreshes preserve canonical formatting so provider and
+  model updates do not create formatting-only Research VCS changes.
 
 ## [0.1.2] - 2026-08-17
 

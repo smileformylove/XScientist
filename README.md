@@ -42,8 +42,8 @@ gates actually pass.
 > Machine-generated claims remain unverified until their evidence and
 > independent review gates are complete.
 
-This README describes the `0.1.3` release candidate on `main`. PyPI currently
-publishes `0.1.2`; install from `main` to use the workflows below.
+This README describes the published `0.1.3` release. Pin the package version or
+a source commit when an experiment must remain exactly reproducible.
 
 ## Choose the shortest path
 
@@ -64,7 +64,7 @@ is needed after installation.
 
 ```bash
 python -m pip install \
-  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist==0.1.3"
 xscientist explore ./my-study
 ```
 
@@ -143,7 +143,7 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai-compatible]==0.1.3"
 xscientist provider list
 xscientist start ./my-study
 ```
@@ -161,7 +161,7 @@ Install the research runtime plus one provider client:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
+  "xscientist[research,openai]==0.1.3"
 export OPENAI_API_KEY="..."
 xscientist start ./hosted-study
 ```
@@ -359,8 +359,8 @@ workflow in `ai_scientist/`, and versioned schemas in
 
 | Channel | Command |
 | --- | --- |
-| Published 0.1.2 | `python -m pip install "xscientist==0.1.2"` |
-| 0.1.3 candidate | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| Published 0.1.3 | `python -m pip install "xscientist==0.1.3"` |
+| Development `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 Pin a commit rather than `main` for an exactly repeatable experiment.
