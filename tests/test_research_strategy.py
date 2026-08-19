@@ -914,6 +914,31 @@ class ResearchStrategyTests(unittest.TestCase):
                 "portfolio_missing", {item["code"] for item in report["gaps"]}
             )
 
+            unrelated = repository.path / "04_logs" / "progress.json"
+            unrelated.parent.mkdir(parents=True, exist_ok=True)
+            unrelated.write_text('{"current_stage":"unrelated"}\n', encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = research_main(
+                    [
+                        "program",
+                        "followup",
+                        "--repo",
+                        str(repository.path),
+                        "--message",
+                        "queue one reviewed action",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            followup = json.loads(output.getvalue())
+            self.assertIsInstance(followup["checkpoint"], dict)
+            self.assertEqual(len(followup["queued"]), 1)
+            self.assertNotIn(
+                "04_logs/progress.json", followup["checkpoint"]["staged_paths"]
+            )
+            self.assertTrue(unrelated.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

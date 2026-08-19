@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Feedback System CLI Tool
-
-Command-line interface for monitoring and managing the enhanced feedback system.
-"""
+"""Inspect and manage durable autonomous-research feedback."""
 
 import argparse
 import json
@@ -19,108 +15,111 @@ from ai_scientist.enhanced_feedback_system import (
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Show feedback system status"""
+    """Show one compact feedback health summary."""
     feedback_system = EnhancedFeedbackSystem(
         feedback_dir=Path(args.feedback_dir),
     )
 
     report = feedback_system.get_health_report()
 
-    print("=" * 70)
-    print("FEEDBACK SYSTEM STATUS")
-    print("=" * 70)
-    print(f"\nTimestamp: {report['timestamp']}")
+    corrupted = report.get("health_state") == "corrupted"
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "schema": "xscientist.feedback-status.v1",
+                    "ok": not corrupted,
+                    **report,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 1 if corrupted else 0
+
     score = report["health_score"]
-    if report.get("health_state") == "corrupted":
-        print("Health Score: unavailable (feedback history is unreadable)")
-        print("Status: 🔴 CORRUPTED")
+    if corrupted:
+        print("Feedback: corrupted (history is unreadable)")
         for error in report.get("load_errors") or []:
-            print(f"  Error: {error}")
+            print(f"Error: {error}")
     elif score is None:
-        print("Health Score: unavailable (insufficient observations)")
-        print("Status: ⚪ UNKNOWN")
+        print("Feedback: unknown (no observations yet)")
     else:
-        print(f"Health Score: {score}/100")
-
-        # Health interpretation is meaningful only after observations exist.
         if score >= 90:
-            status = "🟢 EXCELLENT"
+            state = "excellent"
         elif score >= 70:
-            status = "🟡 GOOD"
+            state = "good"
         elif score >= 50:
-            status = "🟠 FAIR"
+            state = "fair"
         elif score >= 30:
-            status = "🔴 POOR"
+            state = "poor"
         else:
-            status = "🔴 CRITICAL"
-        print(f"Status: {status}")
+            state = "critical"
+        print(f"Feedback: {state} ({score}/100)")
 
-    # Feedback summary
     summary = report["feedback_summary"]
-    print(f"\nFeedback Items:")
-    print(f"  Total: {summary['total_items']}")
-    print(f"  Unresolved: {summary['unresolved_items']}")
-    print(f"  Critical: {summary['critical_items']}")
+    print(
+        f"Items: {summary['total_items']} total, "
+        f"{summary['unresolved_items']} unresolved, "
+        f"{summary['critical_items']} critical"
+    )
 
-    # Trends
     if report.get("trends"):
-        print(f"\nKey Metrics:")
+        print("Metrics:")
         for metric, trend in report["trends"].items():
             if "error" not in trend:
-                print(f"  {metric}:")
-                print(f"    Mean: {trend['mean']:.3f}")
-                print(f"    Trend: {trend['trend_direction']}")
                 print(
-                    f"    Recent change: {trend['recent_vs_historical_change_pct']:.1f}%"
+                    f"  {metric}: mean={trend['mean']:.3f}, "
+                    f"trend={trend['trend_direction']}, "
+                    f"recent_change={trend['recent_vs_historical_change_pct']:.1f}%"
                 )
-
-    print()
-    return 1 if report.get("health_state") == "corrupted" else 0
+    return 1 if corrupted else 0
 
 
 def cmd_actions(args: argparse.Namespace) -> int:
-    """Show recommended actions"""
+    """Show the highest-priority unresolved feedback actions."""
     feedback_system = EnhancedFeedbackSystem(
         feedback_dir=Path(args.feedback_dir),
     )
 
     actions = feedback_system.generate_actions(max_actions=args.max_actions)
 
-    print("=" * 70)
-    print("RECOMMENDED ACTIONS")
-    print("=" * 70)
-    print()
+    errors = list(feedback_system.load_errors)
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "schema": "xscientist.feedback-actions.v1",
+                    "ok": not errors,
+                    "actions": actions,
+                    "errors": errors,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 1 if errors else 0
 
-    if feedback_system.load_errors:
+    if errors:
         print("Cannot recommend actions because feedback history is unreadable.")
-        for error in feedback_system.load_errors:
-            print(f"  Error: {error}")
+        for error in errors:
+            print(f"Error: {error}")
         return 1
 
     if not actions:
         if not feedback_system.feedback_history:
-            print("No observations yet - health cannot be assessed.")
+            print("Actions: none (no observations yet; health is unknown)")
         else:
-            print("✓ No unresolved feedback currently requires an action.")
+            print("Actions: none (no unresolved feedback requires action)")
         return 0
 
     for i, action in enumerate(actions, 1):
         priority = action.get("priority", "medium").upper()
-        priority_icon = {
-            "CRITICAL": "🔴",
-            "HIGH": "🟠",
-            "MEDIUM": "🟡",
-            "LOW": "🟢",
-        }.get(priority, "⚪")
-
-        print(f"{i}. {priority_icon} [{priority}]")
-        print(f"   {action['action']}")
+        print(f"{i}. [{priority}] {action['action']}")
         if "estimated_impact" in action:
-            print(f"   Estimated Impact: {action['estimated_impact']*100:.0f}%")
+            print(f"   Impact: {action['estimated_impact']*100:.0f}%")
         if "metric" in action:
             print(f"   Metric: {action['metric']}")
-        print()
-
     return 0
 
 
@@ -268,7 +267,7 @@ def cmd_clear(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Feedback System CLI Tool",
+        description="Inspect durable research feedback and its next actions.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -282,10 +281,12 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     # Status command
-    status_parser = subparsers.add_parser("status", help="Show system status")
+    status_parser = subparsers.add_parser("status", help="Show feedback health")
+    status_parser.add_argument("--json", action="store_true", dest="as_json")
 
     # Actions command
     actions_parser = subparsers.add_parser("actions", help="Show recommended actions")
+    actions_parser.add_argument("--json", action="store_true", dest="as_json")
     actions_parser.add_argument(
         "--max-actions",
         type=int,

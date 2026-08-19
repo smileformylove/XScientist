@@ -118,6 +118,7 @@ DEFAULT_TRACK_PATTERNS = (
     "04_logs/llm_budget.json",
     "04_logs/insight_report.json",
     "04_logs/insight_report.md",
+    "04_logs/autopilot_fixture_receipt.json",
     "pipeline_manifest.json",
     "science_constitution.json",
     "epistemic_graph.json",
@@ -3768,10 +3769,29 @@ def _create_research_bundle_locked(
     if profile not in {"index", "reproduce", "audit"}:
         raise ResearchGitError("bundle profile must be index, reproduce, or audit")
     store_root = _configured_store_root(root)
-    dirty = _run_git(root, ["status", "--porcelain"]).stdout.strip()
+    staged, changed = _changed_paths(root)
+    tracked = (
+        set(
+            _run_git(
+                root,
+                ["ls-files", "--", *sorted(changed)],
+                check=False,
+            ).stdout.splitlines()
+        )
+        if changed
+        else set()
+    )
+    selected, _excluded = _select_paths(
+        root,
+        load_repository_config(root),
+        changed,
+    )
+    dirty = set(staged) | tracked | set(selected)
     if dirty:
         raise ResearchGitError(
-            "bundle refused because the research repository has uncommitted changes"
+            "bundle refused because the research repository has uncommitted "
+            "tracked or research-eligible changes; generated views excluded by "
+            "policy do not block bundling"
         )
     dest = Path(destination).expanduser().resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)

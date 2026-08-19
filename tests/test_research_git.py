@@ -331,6 +331,24 @@ class LocalResearchGitTests(unittest.TestCase):
             )
             self.assertEqual(restored_object.read_bytes(), b"portable evidence")
 
+    def test_bundle_ignores_only_untracked_generated_views(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            generated = root / "research-dag" / "research-dag.html"
+            generated.parent.mkdir(parents=True)
+            generated.write_text("<html>regenerable</html>\n", encoding="utf-8")
+
+            bundle = create_research_bundle(root, base / "clean-view.tar.gz")
+            self.assertTrue(bundle["complete"])
+
+            eligible = root / "04_logs" / "progress.json"
+            eligible.parent.mkdir(parents=True)
+            eligible.write_text('{"current_stage":"running"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ResearchGitError, "research-eligible changes"):
+                create_research_bundle(root, base / "dirty.tar.gz")
+
     def test_bundle_verification_rejects_tampered_member(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

@@ -8,6 +8,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Provider discovery before workspace creation, including safe local Ollama
+  detection and copyable setup commands without reading an unrelated `.env`.
+- Explicit workspace operational states and a compact default status view, with
+  `--verbose` retaining branch, pipeline, token, and background-run detail.
 - Bounded, immutable scientific-strategy follow-up proposals derived from
   recorded program reviews, with explicit design/experiment budgets and stop
   conditions.
@@ -16,6 +20,14 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- English and Chinese entry documentation is shorter and task-led: the default
+  path now centers on `demo`, `start`, `status`, recovery, and audit, while the
+  complete research protocol remains linked and available.
+- New non-interactive workspaces require an explicit provider; interactive
+  setup reuses one readiness-led provider picker and provider-neutral setup no
+  longer pretends that a model route is configured.
+- Research strategy checkpoints commit only the objects they create instead of
+  sweeping ambient eligible worktree changes into the same scientific decision.
 - Ollama readiness now verifies the local service and selected model, accepts
   numbered interactive model choices, and treats local inference as zero API
   cost while preserving token budgets.
@@ -33,6 +45,13 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- Demo checkpoints now contain code, environment, dependency, data, seed, and
+  measurement provenance, and the Autopilot receipt is included in its final
+  runtime checkpoint.
+- Reproduction bundles allow untracked generated DAG views while still
+  refusing tracked, staged, or research-policy-eligible changes.
+- Structured `start` and research-strategy output no longer mixes Python
+  representations or human-only launch errors into JSON automation streams.
 - Provider checks and Doctor no longer report an unreachable Ollama endpoint
   as ready, and Docker failures distinguish a missing installation from a
   stopped daemon.

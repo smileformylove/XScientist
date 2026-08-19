@@ -256,14 +256,22 @@ class LocalRunControlTests(unittest.TestCase):
 
             status = io.StringIO()
             with contextlib.redirect_stdout(status):
-                self.assertEqual(cli_main(["status", str(workspace)]), 0)
-            self.assertIn("Latest background run: d4 / failed", status.getvalue())
+                self.assertEqual(cli_main(["status", str(workspace)]), 1)
+            self.assertIn("State: needs attention", status.getvalue())
+            self.assertNotIn("Latest background run:", status.getvalue())
             self.assertIn("xscientist runs show d4", status.getvalue())
             self.assertIn(
                 "Inspect and repair the latest failed background run",
                 status.getvalue(),
             )
             self.assertNotIn("--repo", status.getvalue().split("Run:", 1)[-1])
+
+            verbose_status = io.StringIO()
+            with contextlib.redirect_stdout(verbose_status):
+                self.assertEqual(cli_main(["status", str(workspace), "--verbose"]), 1)
+            self.assertIn(
+                "Latest background run: d4 / failed", verbose_status.getvalue()
+            )
 
             logs = io.StringIO()
             with contextlib.redirect_stdout(logs):
@@ -397,6 +405,33 @@ class LocalRunControlTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("stopped during startup", stderr.getvalue())
         self.assertNotIn("run started", stderr.getvalue())
+
+    def test_detached_launch_error_is_one_json_document(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "xscientist.run_control.launch_detached_run",
+                side_effect=RunControlError("cannot create run state"),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(
+                [
+                    "start",
+                    "study",
+                    "--question",
+                    "q",
+                    "--allow-synthetic-data",
+                    "--detach",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["phase"], "launch")
+        self.assertEqual(payload["error"], "cannot create run state")
 
     def test_logs_warn_when_structured_tail_starts_mid_document(self) -> None:
         payload = {

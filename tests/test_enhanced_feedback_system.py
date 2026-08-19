@@ -122,8 +122,22 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
             check=False,
         )
         self.assertEqual(empty.returncode, 0, empty.stderr)
-        self.assertIn("Status: ⚪ UNKNOWN", empty.stdout)
-        self.assertNotIn("EXCELLENT", empty.stdout)
+        self.assertIn("Feedback: unknown (no observations yet)", empty.stdout)
+        self.assertIn("Items: 0 total, 0 unresolved, 0 critical", empty.stdout)
+
+        empty_json = subprocess.run(
+            [*base, "status", "--json"],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(empty_json.returncode, 0, empty_json.stderr)
+        empty_payload = json.loads(empty_json.stdout)
+        self.assertEqual(empty_payload["schema"], "xscientist.feedback-status.v1")
+        self.assertTrue(empty_payload["ok"])
+        self.assertEqual(empty_payload["health_state"], "unknown")
 
         added = subprocess.run(
             [
@@ -158,9 +172,21 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
             check=False,
         )
         self.assertEqual(status.returncode, 0, status.stderr)
-        self.assertIn("Total: 1", status.stdout)
-        self.assertIn("Critical: 1", status.stdout)
+        self.assertIn("Items: 1 total, 1 unresolved, 1 critical", status.stdout)
         self.assertNotIn("100.0/100", status.stdout)
+
+        actions_json = subprocess.run(
+            [*base, "actions", "--json"],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(actions_json.returncode, 0, actions_json.stderr)
+        actions_payload = json.loads(actions_json.stdout)
+        self.assertEqual(actions_payload["schema"], "xscientist.feedback-actions.v1")
+        self.assertTrue(actions_payload["actions"])
 
         concurrent = [
             subprocess.Popen(

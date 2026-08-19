@@ -664,9 +664,11 @@ def provider_statuses(
     find_spec: Any = None,
     probe_local: bool = False,
     environ: Mapping[str, str] | None = None,
+    allow_uninitialized: bool = False,
 ) -> list[dict[str, Any]]:
     workspace = Path(root).expanduser().resolve()
-    config = load_provider_config(workspace, missing_ok=False)
+    config = load_provider_config(workspace, missing_ok=allow_uninitialized)
+    initialized = workspace_config_path(workspace).is_file()
     env_file = resolve_env_file(
         workspace, str(config.get("env_file") or DEFAULT_ENV_FILE)
     )
@@ -676,7 +678,10 @@ def provider_statuses(
         if env_file.is_file() and not _env_file_is_private(env_file)
         else ""
     )
-    stored = read_env_file(env_file)
+    # Never treat an arbitrary directory's .env as provider configuration.
+    # Discovery-only listing is allowed to inspect process environment and
+    # free local services, but local files require an initialized workspace.
+    stored = read_env_file(env_file) if initialized else {}
     effective_environ = {**stored, **dict(os.environ if environ is None else environ)}
     active = str(config.get("active_provider") or "")
     configured_entries = config.get("providers", {})
@@ -701,7 +706,8 @@ def provider_statuses(
                 model,
                 environ=effective_environ,
             )
-            if probe_local and isinstance(entry, dict) and bool(entry)
+            if probe_local
+            and (provider == "ollama" or (isinstance(entry, dict) and bool(entry)))
             else {
                 "checked": False,
                 "ok": True,
@@ -711,6 +717,15 @@ def provider_statuses(
                 "error": None,
             }
         )
+        local_models = list(local_probe.get("models") or [])
+        local_detected = bool(local_probe.get("service_reachable") and local_models)
+        if local_detected and not model:
+            local_probe = {
+                **local_probe,
+                "ok": True,
+                "model_available": True,
+                "error": None,
+            }
         rows.append(
             {
                 "provider": provider,
@@ -730,6 +745,8 @@ def provider_statuses(
                     and local_probe["ok"]
                 ),
                 "model": model,
+                "suggested_model": model or (local_models[0] if local_models else ""),
+                "local_detected": local_detected,
                 "missing": missing,
                 "error": env_error,
                 "local_probe": local_probe,
@@ -742,6 +759,7 @@ __all__ = [
     "CONFIG_RELATIVE_PATH",
     "DEFAULT_MODELS",
     "discover_provider_models",
+    "empty_provider_config",
     "normalize_provider_model",
     "PROVIDER_FIELDS",
     "PROVIDER_NAMES",

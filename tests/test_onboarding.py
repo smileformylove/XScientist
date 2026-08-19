@@ -124,6 +124,10 @@ class OnboardingTests(unittest.TestCase):
                 "xscientist.provider_config.configured_field_value",
                 return_value="configured",
             ),
+            mock.patch(
+                "xscientist.provider_config.discover_provider_models",
+                return_value=[],
+            ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             _interactive_start_inputs(parsed, new_workspace=True)
@@ -238,6 +242,8 @@ class OnboardingTests(unittest.TestCase):
                         "--question",
                         "Does X affect Y?",
                         "--allow-synthetic-data",
+                        "--provider",
+                        "zhipu",
                         "--skip-credentials",
                         "--non-interactive",
                     ]
@@ -274,6 +280,8 @@ class OnboardingTests(unittest.TestCase):
                         "--question",
                         "Does X affect Y?",
                         "--prepare-only",
+                        "--provider",
+                        "zhipu",
                         "--skip-credentials",
                         "--non-interactive",
                         "--max-cost-usd",
@@ -322,6 +330,8 @@ class OnboardingTests(unittest.TestCase):
                         "--question",
                         "Does X affect Y?",
                         "--prepare-only",
+                        "--provider",
+                        "zhipu",
                         "--skip-credentials",
                         "--non-interactive",
                         "--max-cost-usd",
@@ -602,6 +612,11 @@ class OnboardingTests(unittest.TestCase):
             self.assertTrue((workspace / "research.yaml").is_file())
             self.assertTrue(payload["research_vcs"]["initialized"])
             self.assertIsNotNone(payload["research_vcs"]["checkpoint_id"])
+            provider_config = json.loads(
+                (workspace / ".xscientist" / "providers.json").read_text()
+            )
+            self.assertIsNone(provider_config["active_provider"])
+            self.assertEqual(provider_config["providers"], {})
             dockerfile = (workspace / "Dockerfile.executor").read_text()
             self.assertIn(f"xscientist==${{XSCIENTIST_VERSION}}", dockerfile)
             self.assertNotIn("torch --index-url", dockerfile)
@@ -628,6 +643,8 @@ class OnboardingTests(unittest.TestCase):
                         str(workspace),
                         "--task",
                         "research",
+                        "--provider",
+                        "zhipu",
                         "--skip-credentials",
                         "--non-interactive",
                         "--json",
@@ -635,6 +652,55 @@ class OnboardingTests(unittest.TestCase):
                 )
 
             self.assertEqual(exit_code, 1)
+
+    def test_noninteractive_setup_requires_an_explicit_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli_main(
+                    [
+                        "setup",
+                        str(workspace),
+                        "--task",
+                        "research",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(workspace.exists())
+            payload = json.loads(stderr.getvalue())
+            self.assertIn("--provider is required", payload["error"])
+
+    def test_start_json_input_error_is_one_machine_readable_document(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--allow-synthetic-data",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr.getvalue(), "")
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["phase"], "input")
+            self.assertIn("--provider is required", payload["error"])
 
     def test_deep_doctor_redacts_paths_from_runtime_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as td:

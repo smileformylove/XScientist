@@ -56,6 +56,26 @@ class DemoStatusTests(unittest.TestCase):
                 commands["strengthen_research_program"],
             )
 
+            audit_output = io.StringIO()
+            with contextlib.redirect_stdout(audit_output):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "research",
+                            "audit",
+                            "--repo",
+                            str(workspace),
+                            "--level",
+                            "replay",
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+            audit = json.loads(audit_output.getvalue())
+            self.assertTrue(audit["complete"])
+            self.assertTrue(all(row["replay_ready"] for row in audit["claims"]))
+
     def test_demo_refuses_to_replace_an_existing_destination(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "demo"
@@ -94,6 +114,8 @@ class DemoStatusTests(unittest.TestCase):
             )
             self.assertEqual(payload["workspace"], "demo")
             self.assertIsNone(payload["background_run"])
+            self.assertEqual(payload["operational_state"], "scientific_followup")
+            self.assertFalse(payload["attention_required"])
             self.assertTrue(payload["workspace_id"].startswith("ws-"))
             repository_config = yaml.safe_load(
                 (workspace / "research.yaml").read_text(encoding="utf-8")
@@ -165,8 +187,10 @@ class DemoStatusTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 0)
+                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 1)
             payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "needs_attention")
+            self.assertTrue(payload["attention_required"])
             self.assertEqual(payload["next_steps"][0]["code"], "docker_cli_missing")
             self.assertEqual(
                 payload["next_steps"][1]["code"],
@@ -192,6 +216,7 @@ class DemoStatusTests(unittest.TestCase):
             self.assertIn("Next: xscientist status", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("Workspace: demo", rendered)
+            self.assertIn("State: run complete; more evidence needed", rendered)
             self.assertIn("Scientific progress: 7/8", rendered)
             self.assertIn("Resolve or narrow the contested claim", rendered)
             self.assertIn(f"--repo {workspace}", rendered)
@@ -257,6 +282,7 @@ class DemoStatusTests(unittest.TestCase):
             self.assertIn("演示成功", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("工作区：demo", rendered)
+            self.assertIn("状态：运行完成，仍需补充证据", rendered)
             self.assertIn("科学进度", rendered)
             self.assertIn("下一步", rendered)
             self.assertIn("检验存在争议的边界", rendered)
@@ -312,12 +338,44 @@ class DemoStatusTests(unittest.TestCase):
                     0,
                 )
             self.assertIn(
-                "Research pipeline: run complete; scientific closure pending",
+                "State: run complete; more evidence needed",
                 human_status.getvalue(),
+            )
+            self.assertNotIn("Research pipeline:", human_status.getvalue())
+            verbose_status = io.StringIO()
+            with contextlib.redirect_stdout(verbose_status):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en", "--verbose"]),
+                    0,
+                )
+            self.assertIn(
+                "Research pipeline: run complete; scientific closure pending",
+                verbose_status.getvalue(),
             )
             self.assertTrue(
                 (workspace / "04_logs" / "autopilot_fixture_receipt.json").is_file()
             )
+            self.assertIn(
+                "04_logs/autopilot_fixture_receipt.json",
+                demo["runtime_checkpoint"]["staged_paths"],
+            )
+            research_status = io.StringIO()
+            with contextlib.redirect_stdout(research_status):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "research",
+                            "status",
+                            "--repo",
+                            str(workspace),
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+            vcs_status = json.loads(research_status.getvalue())
+            self.assertEqual(vcs_status["eligible_changes"], [])
+            self.assertEqual(vcs_status["staged_paths"], [])
 
     def test_publication_fixture_adds_independent_review_board_objects(self) -> None:
         with tempfile.TemporaryDirectory() as td:

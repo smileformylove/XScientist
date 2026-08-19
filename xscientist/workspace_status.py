@@ -252,6 +252,21 @@ def build_workspace_status(
                     "command": (f"xscientist runs show {run_id} --workspace ."),
                 },
             )
+    elif isinstance(background_run, dict) and background_run.get("status") in {
+        "queued",
+        "running",
+        "cancelling",
+    }:
+        run_id = str(background_run.get("id") or "").strip()
+        if run_id:
+            next_steps.insert(
+                0,
+                {
+                    "code": "watch_background_run",
+                    "title": "Watch the active background run",
+                    "command": (f"xscientist runs watch {run_id} --workspace ."),
+                },
+            )
     if not next_steps and not research_enabled and not errors:
         next_steps = [
             {
@@ -261,9 +276,43 @@ def build_workspace_status(
             }
         ]
     workspace_name, workspace_id = _workspace_identity(root)
+    background_status = str((background_run or {}).get("status") or "")
+    guide_progress = (research.get("guide") or {}).get("progress") or {}
+    scientific_work_exists = int(guide_progress.get("completed_stages") or 0) > 0
+    attention_required = bool(
+        errors
+        or readiness_blockers
+        or background_status in {"failed", "cancelled", "interrupted"}
+    )
+    if errors:
+        operational_state = "invalid"
+    elif attention_required:
+        operational_state = "needs_attention"
+    elif background_status in {"queued", "running", "cancelling"}:
+        operational_state = "running"
+    elif progress.get("current_stage") == "complete":
+        operational_state = (
+            "complete"
+            if insight.get("epistemic_status") == "verified"
+            else "scientific_followup"
+        )
+    elif progress:
+        operational_state = "running"
+    elif scientific_work_exists:
+        operational_state = (
+            "complete"
+            if insight.get("epistemic_status") == "verified"
+            else "scientific_followup"
+        )
+    elif research_enabled:
+        operational_state = "ready"
+    else:
+        operational_state = "not_started"
     payload = {
         "schema": STATUS_SCHEMA,
         "ok": not errors,
+        "operational_state": operational_state,
+        "attention_required": attention_required,
         "workspace": workspace_name,
         "workspace_id": workspace_id,
         "research": research,

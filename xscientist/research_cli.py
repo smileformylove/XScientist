@@ -1757,10 +1757,19 @@ def main(
                     args.repo,
                     review_id=args.review,
                     max_actions=args.max_actions,
+                    message=args.message,
                     commit=not args.no_commit,
                 )
                 if args.as_json:
-                    _print_json(payload)
+                    checkpoint = payload.get("checkpoint")
+                    _print_json(
+                        {
+                            **payload,
+                            "checkpoint": (
+                                checkpoint.to_dict() if checkpoint is not None else None
+                            ),
+                        }
+                    )
                 else:
                     print(
                         "Scientific strategy follow-ups: "
@@ -2203,8 +2212,10 @@ def main(
                     target = f" ({item['object_id']})" if item["object_id"] else ""
                     print(f"  {item['code']}{target}: {_display_text(item['message'])}")
                 for item in payload["warnings"]:
+                    target = f" ({item['object_id']})" if item["object_id"] else ""
                     print(
-                        f"warning: {item['code']}: {_display_text(item['message'])}",
+                        f"warning: {item['code']}{target}: "
+                        f"{_display_text(item['message'])}",
                         file=sys.stderr,
                     )
             return 0 if payload["complete"] else 1
@@ -2957,7 +2968,8 @@ def main(
                 )
             if args.record and not args.reproduces:
                 raise ResearchGitError(
-                    "--record requires at least one --reproduces object"
+                    "--record requires at least one --reproduces object; for the "
+                    "current claim use `--reproduces @latest:claim`"
                 )
             if args.verified and not str(args.verifier or "").strip():
                 raise ResearchGitError("--verified requires --verifier")

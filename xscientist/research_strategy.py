@@ -17,7 +17,7 @@ from typing import Any
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 
 from .research_authority import require_independent_evaluator
-from .research_git import ResearchGitError, ResearchObjectResult, create_checkpoint
+from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
 from .research_vcs import ResearchRepository
 
 EVIDENCE_QUALITY_DOMAINS = (
@@ -70,21 +70,49 @@ def _checkpoint_results(
 ) -> dict[str, Any]:
     checkpoint = None
     if commit:
-        checkpoint = create_checkpoint(
-            repository.path,
+        checkpoint = _checkpoint_exact_paths(
+            repository,
+            [item for item in (primary, *related) if item.created],
             stage=stage,
             subject=subject,
             status=status,
-            include=[
-                item.path.relative_to(repository.path).as_posix()
-                for item in (primary, *related)
-            ],
         )
     return {
         "object": primary,
         "related": list(related),
         "checkpoint": checkpoint,
     }
+
+
+def _checkpoint_exact_paths(
+    repository: ResearchRepository,
+    items: Sequence[ResearchObjectResult],
+    *,
+    stage: str,
+    subject: str,
+    status: str,
+) -> CheckpointResult:
+    """Commit only objects created by one operation, never ambient worktree changes."""
+
+    paths = [item.path.relative_to(repository.path).as_posix() for item in items]
+    if not paths:
+        return CheckpointResult(
+            created=False,
+            committed=False,
+            reason="no new research object was created",
+        )
+    _ensure_stage_available(repository, commit=True)
+    repository.stage(paths)
+    try:
+        return repository.commit(
+            stage=stage,
+            subject=subject,
+            status=status,
+            staged_only=True,
+        )
+    except BaseException:
+        repository.unstage(all_paths=True)
+        raise
 
 
 def _ensure_stage_available(repository: ResearchRepository, *, commit: bool) -> None:
@@ -1795,6 +1823,7 @@ def record_research_followup_queue(
     review: Mapping[str, Any] | None = None,
     review_id: str | None = None,
     max_actions: int = 1,
+    message: str | None = None,
     commit: bool = False,
 ) -> dict[str, Any]:
     """Turn strategy gaps into a finite, inspectable next-action queue.
@@ -1901,9 +1930,11 @@ def record_research_followup_queue(
         existing.add(gap_code)
     checkpoint = None
     if created and commit:
-        checkpoint = repository.commit(
+        checkpoint = _checkpoint_exact_paths(
+            repository,
+            created,
             stage="plan",
-            subject="queue bounded scientific strategy follow-ups",
+            subject=message or "queue bounded scientific strategy follow-ups",
             status="draft",
         )
     created_rows = [

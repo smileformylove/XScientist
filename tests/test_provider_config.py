@@ -86,6 +86,96 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertTrue(ready_row["client_available"])
             self.assertTrue(ready_row["ready"])
 
+    def test_provider_list_discovers_local_models_before_workspace_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            stdout = io.StringIO()
+            human_stdout = io.StringIO()
+            local_probe = {
+                "checked": True,
+                "ok": False,
+                "service_reachable": True,
+                "model_available": False,
+                "models": ["ollama/qwen2.5:7b"],
+                "error": "No Ollama model is selected",
+            }
+            with (
+                mock.patch(
+                    "xscientist.cli.discover_workspace_root",
+                    create=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.discover_workspace_root",
+                    return_value=None,
+                ),
+                mock.patch("xscientist.cli.Path.cwd", return_value=Path(td)),
+                mock.patch(
+                    "xscientist.provider_config.probe_provider_model",
+                    side_effect=lambda provider, _model, **_kwargs: (
+                        local_probe
+                        if provider == "ollama"
+                        else {
+                            "checked": False,
+                            "ok": True,
+                            "service_reachable": None,
+                            "model_available": None,
+                            "models": [],
+                            "error": None,
+                        }
+                    ),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    side_effect=lambda provider: (
+                        ["openai"] if provider == "ollama" else []
+                    ),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(cli_main(["provider", "list", "--json"]), 0)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["workspace_initialized"])
+            self.assertTrue(payload["discovery_only"])
+            ollama = next(
+                row for row in payload["providers"] if row["provider"] == "ollama"
+            )
+            self.assertTrue(ollama["local_detected"])
+            self.assertEqual(ollama["suggested_model"], "ollama/qwen2.5:7b")
+            with (
+                mock.patch(
+                    "xscientist.provider_config.probe_provider_model",
+                    side_effect=lambda provider, _model, **_kwargs: (
+                        local_probe
+                        if provider == "ollama"
+                        else {
+                            "checked": False,
+                            "ok": True,
+                            "service_reachable": None,
+                            "model_available": None,
+                            "models": [],
+                            "error": None,
+                        }
+                    ),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    side_effect=lambda provider: (
+                        ["openai"] if provider == "ollama" else []
+                    ),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.discover_workspace_root",
+                    return_value=None,
+                ),
+                mock.patch("xscientist.cli.Path.cwd", return_value=Path(td)),
+                contextlib.redirect_stdout(human_stdout),
+            ):
+                self.assertEqual(cli_main(["provider", "list"]), 0)
+            self.assertIn(
+                'Install: python -m pip install "xscientist[research,openai-compatible]"',
+                human_stdout.getvalue(),
+            )
+
     def test_provider_check_discloses_presence_only_validation_and_price(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"

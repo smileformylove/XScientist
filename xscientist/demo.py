@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from ai_scientist.utils.atomic_io import atomic_write_json, atomic_write_text
 
 from .research_dag import export_research_dag
-from .research_git import ResearchGitError
+from .research_git import ResearchGitError, create_checkpoint
 from .research_journey import build_research_guide, start_guided_research
 from .research_lifecycle import ResearchLifecycle
 from .research_vcs import ResearchRepository
 
 DEMO_SCHEMA = "xscientist.demo.v1"
 AUTOPILOT_FIXTURE_SCHEMA = "xscientist.autopilot-fixture.v1"
+
+_DEMO_CODE = """# Bundled trusted fixture; no generated code is executed.
+development_effect = 0.18 - 0.31
+heldout_effect = 0.29 - 0.27
+print({'development_effect': development_effect, 'heldout_effect': heldout_effect})
+"""
+
+
+def _fixture_hash(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_DEMO_CODE_HASH = _fixture_hash(_DEMO_CODE)
+_DEMO_ENVIRONMENT_HASH = _fixture_hash(
+    "xscientist trusted offline fixture environment v1"
+)
+_DEMO_DEPENDENCY_HASH = _fixture_hash("python-standard-library-only")
 
 
 def _ensure_empty_destination(path: Path) -> None:
@@ -52,6 +70,9 @@ def create_demo(
     repository = ResearchRepository(root)
     lifecycle = ResearchLifecycle(repository)
     hypothesis_id = str(started["hypothesis_id"])
+    experiment = root / "02_experiments" / "offline-autopilot-fixture"
+    experiment.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(experiment / "code.py", _DEMO_CODE)
 
     plan = repository.record(
         "research_plan",
@@ -76,6 +97,13 @@ def create_demo(
             "seed": 17,
         },
         plan_id=plan.object_id,
+        provenance={
+            "code_hash": _DEMO_CODE_HASH,
+            "environment_hash": _DEMO_ENVIRONMENT_HASH,
+            "dependency_lock_hashes": [_DEMO_DEPENDENCY_HASH],
+            "dataset_hashes": [_fixture_hash("malformed-demo-fixture")],
+            "seeds": [17],
+        },
         commit=False,
     )["attempt"]
     development_attempt = lifecycle.experiment_attempt(
@@ -91,6 +119,13 @@ def create_demo(
             },
         },
         plan_id=plan.object_id,
+        provenance={
+            "code_hash": _DEMO_CODE_HASH,
+            "environment_hash": _DEMO_ENVIRONMENT_HASH,
+            "dependency_lock_hashes": [_DEMO_DEPENDENCY_HASH],
+            "dataset_hashes": [_fixture_hash("bundled-demo-development")],
+            "seeds": [42],
+        },
         commit=False,
     )["attempt"]
     supporting = lifecycle.evidence(
@@ -99,6 +134,9 @@ def create_demo(
             "effect": -0.13,
             "metric": "unsupported_claim_rate",
             "scope": "development set",
+            "measurement_hash": _fixture_hash(
+                "development:retrieval=0.18;baseline=0.31"
+            ),
         },
         attempt_ids=[development_attempt.object_id],
         supports=[hypothesis_id],
@@ -129,6 +167,13 @@ def create_demo(
             },
         },
         plan_id=plan.object_id,
+        provenance={
+            "code_hash": _DEMO_CODE_HASH,
+            "environment_hash": _DEMO_ENVIRONMENT_HASH,
+            "dependency_lock_hashes": [_DEMO_DEPENDENCY_HASH],
+            "dataset_hashes": [_fixture_hash("bundled-demo-heldout")],
+            "seeds": [43],
+        },
         commit=False,
     )["attempt"]
     refuting = lifecycle.evidence(
@@ -137,6 +182,7 @@ def create_demo(
             "effect": 0.02,
             "metric": "unsupported_claim_rate",
             "scope": "held-out set",
+            "measurement_hash": _fixture_hash("heldout:retrieval=0.29;baseline=0.27"),
         },
         attempt_ids=[heldout_attempt.object_id],
         refutes=[hypothesis_id, claim.object_id],
@@ -196,10 +242,12 @@ def create_demo(
         final=False,
         commit=False,
     )["manuscript"]
-    checkpoint = repository.commit(
+    checkpoint = create_checkpoint(
+        root,
         stage="paper",
         subject="complete provider-free contested-evidence demo",
         status="draft",
+        reproduce_command=("python 02_experiments/offline-autopilot-fixture/code.py"),
     )
 
     exported = export_research_dag(root, root / "research-dag")
@@ -480,17 +528,7 @@ def create_autopilot_demo(
     )
     logs = root / "04_logs"
     experiment = root / "02_experiments" / "offline-autopilot-fixture"
-    experiment.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        experiment / "code.py",
-        (
-            "# Bundled trusted fixture; no generated code is executed.\n"
-            "development_effect = 0.18 - 0.31\n"
-            "heldout_effect = 0.29 - 0.27\n"
-            "print({'development_effect': development_effect, "
-            "'heldout_effect': heldout_effect})\n"
-        ),
-    )
+    atomic_write_text(experiment / "code.py", _DEMO_CODE)
     atomic_write_text(
         experiment / "term_out.log",
         "{'development_effect': -0.13, 'heldout_effect': 0.02}\n",
@@ -581,6 +619,30 @@ def create_autopilot_demo(
     atomic_write_json(logs / "llm_budget.json", budget)
     atomic_write_json(logs / "insight_report.json", insight)
     atomic_write_json(logs / "autopilot_fixture_receipt.json", receipt)
+    runtime_checkpoint = create_checkpoint(
+        root,
+        stage="experiment",
+        subject="record deterministic offline runtime surfaces",
+        status="completed",
+        reproduce_command=("python 02_experiments/offline-autopilot-fixture/code.py"),
+        include=[
+            "02_experiments/offline-autopilot-fixture/code.py",
+            "02_experiments/offline-autopilot-fixture/metrics.json",
+            "04_logs/progress.json",
+            "04_logs/llm_budget.json",
+            "04_logs/insight_report.json",
+            "04_logs/autopilot_fixture_receipt.json",
+        ],
+    )
+    scientific_checkpoint_id = result["checkpoint_id"]
+    result["scientific_checkpoint_id"] = scientific_checkpoint_id
+    result["checkpoint_id"] = runtime_checkpoint.checkpoint_id
+    result["runtime_checkpoint"] = {
+        "checkpoint_id": runtime_checkpoint.checkpoint_id,
+        "commit": runtime_checkpoint.commit,
+        "content_hash": runtime_checkpoint.content_hash,
+        "staged_paths": list(runtime_checkpoint.staged_paths),
+    }
     result["autopilot_fixture"] = receipt
     result["runtime"] = {
         "progress": "04_logs/progress.json",
@@ -589,6 +651,19 @@ def create_autopilot_demo(
         "experiment": "02_experiments/offline-autopilot-fixture",
         "receipt": "04_logs/autopilot_fixture_receipt.json",
     }
+    exported = export_research_dag(root, root / "research-dag")
+    graph = exported["graph"]
+    result["dag"].update(
+        {
+            "json": exported["json"],
+            "html": exported["html"],
+            "nodes": len(graph.get("nodes") or []),
+            "relations": len(graph.get("edges") or []),
+            "integrity_ok": bool((graph.get("integrity") or {}).get("is_dag")),
+            "closure": (graph.get("scientific_closure") or {}).get("status"),
+        }
+    )
+    result["guide"] = build_research_guide(root, language=language)
     return result
 
 

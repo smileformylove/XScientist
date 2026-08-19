@@ -176,6 +176,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument("workspace", nargs="?", default=None)
     status_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    status_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="also show branch, pipeline, token, and background-run details",
+    )
     status_parser.add_argument("--json", action="store_true", dest="as_json")
     runs_parser = subparsers.add_parser(
         "runs",
@@ -363,7 +368,10 @@ def _build_parser() -> argparse.ArgumentParser:
     provider_list.add_argument(
         "--workspace",
         default=None,
-        help="workspace root (default: discover from the current directory)",
+        help=(
+            "workspace root (default: discover from the current directory; "
+            "without one, show safe provider discovery only)"
+        ),
     )
     provider_list.add_argument(
         "--all",
@@ -482,7 +490,11 @@ def _build_setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         choices=_PROVIDER_CHOICES,
-        default="zhipu",
+        default=None,
+        help=(
+            "model provider; required for provider-backed non-interactive setup, "
+            "prompted interactively when omitted"
+        ),
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--force", action="store_true")
@@ -513,23 +525,26 @@ def _build_setup_parser() -> argparse.ArgumentParser:
 def _build_start_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xscientist start",
+        usage="xscientist start DIRECTORY [study options] [safety options]",
         description=(
             "Create or reuse one workspace, validate every prerequisite, and run "
             "a traceable automated research project."
         ),
     )
     parser.add_argument("directory", help="workspace and Research VCS root")
-    parser.add_argument(
+    study = parser.add_argument_group("study")
+    study.add_argument(
         "--question",
         required=False,
         help="one concrete research question; prompted interactively when omitted",
     )
-    parser.add_argument(
+    study.add_argument(
         "--autopilot",
         choices=["balanced", "discovery", "publication"],
         default="balanced",
+        help="research behavior (default: balanced)",
     )
-    parser.add_argument(
+    study.add_argument(
         "--task",
         choices=["research", "paper", "pdf-review", "ml-study"],
         default=None,
@@ -538,15 +553,20 @@ def _build_start_parser() -> argparse.ArgumentParser:
             "publication autopilot"
         ),
     )
-    parser.add_argument(
+    study.add_argument(
         "--provider",
         choices=_PROVIDER_CHOICES,
         default=None,
         help="provider for a new workspace; existing workspaces reuse their active provider",
     )
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--profile", choices=["default", "deep"], default="default")
-    parser.add_argument(
+    study.add_argument(
+        "--model",
+        default=None,
+        help="provider-compatible model ID; prompted when needed",
+    )
+
+    evidence = parser.add_argument_group("evidence and accountability")
+    evidence.add_argument(
         "--user",
         default=None,
         help=(
@@ -554,54 +574,91 @@ def _build_start_parser() -> argparse.ArgumentParser:
             "creates one when no login exists"
         ),
     )
-    parser.add_argument(
+    evidence.add_argument(
         "--data-dir", default=None, help="read-only empirical input directory"
     )
-    parser.add_argument(
+    evidence.add_argument(
         "--allow-synthetic-data",
         action="store_true",
         help="explicitly permit exploratory synthetic/computational evidence",
     )
-    parser.add_argument("--max-project-tokens", type=int, default=None)
-    parser.add_argument("--max-project-hours", type=float, default=None)
-    parser.add_argument("--max-cost-usd", type=float, default=None)
-    parser.add_argument(
+    limits = parser.add_argument_group("limits")
+    limits.add_argument(
+        "--max-project-tokens",
+        type=int,
+        default=None,
+        help="hard project token limit",
+    )
+    limits.add_argument(
+        "--max-project-hours",
+        type=float,
+        default=None,
+        help="hard wall-clock hour limit",
+    )
+    limits.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help="hard model-cost limit in USD",
+    )
+    limits.add_argument(
         "--price-input-per-million",
         type=float,
         default=None,
         help="explicit USD input-token price for models without a bundled price",
     )
-    parser.add_argument(
+    limits.add_argument(
         "--price-output-per-million",
         type=float,
         default=None,
         help="explicit USD output-token price for models without a bundled price",
     )
-    parser.add_argument(
+    limits.add_argument(
         "--price-cached-input-per-million",
         type=float,
         default=None,
         help="optional USD cached-input price; defaults to the input price",
     )
-    parser.add_argument(
+    safety = parser.add_argument_group("safety and automation")
+    safety.add_argument(
+        "--profile",
+        choices=["default", "deep"],
+        default="default",
+        help="experiment-search configuration (default: default)",
+    )
+    safety.add_argument(
         "--build-executor",
         action="store_true",
         help="explicitly build the generated isolated Docker image before diagnosis",
     )
-    parser.add_argument("--skip-credentials", action="store_true")
-    parser.add_argument("--non-interactive", action="store_true")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument(
+    safety.add_argument(
+        "--skip-credentials",
+        action="store_true",
+        help="prepare configuration without requiring credential values",
+    )
+    safety.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; require every missing choice explicitly",
+    )
+    safety.add_argument(
+        "--force",
+        action="store_true",
+        help="refresh only XScientist-managed workspace files",
+    )
+    safety.add_argument(
         "--detach",
         action="store_true",
         help="run in the background and manage it with `xscientist runs`",
     )
-    parser.add_argument(
+    safety.add_argument(
         "--prepare-only",
         action="store_true",
         help="stop after workspace, login, provider, and deep runtime validation",
     )
-    parser.add_argument("--json", action="store_true", dest="as_json")
+    safety.add_argument(
+        "--json", action="store_true", dest="as_json", help="emit structured JSON"
+    )
     return parser
 
 
@@ -848,6 +905,60 @@ def _prompt_provider_model(provider: str, *, default: str | None = None) -> str:
     return normalize_provider_model(provider, entered or suggested)
 
 
+def _prompt_provider_choice() -> str:
+    """Choose from a short readiness-led list without silently picking a vendor."""
+
+    from .dependency_profiles import missing_provider_modules
+    from .provider_config import (
+        PROVIDER_FIELDS,
+        PROVIDER_NAMES,
+        configured_field_value,
+        discover_provider_models,
+    )
+
+    rows = []
+    for name in PROVIDER_NAMES:
+        credentials = all(
+            not field.required or bool(configured_field_value(field, {}))
+            for field in PROVIDER_FIELDS[name]
+        )
+        client = not missing_provider_modules(name)
+        local_models = discover_provider_models(name)
+        rows.append((name, credentials, client, local_models))
+    ready_rows = [row for row in rows if row[3] or (row[1] and row[2])]
+    if len(ready_rows) == 1:
+        selected = str(ready_rows[0][0])
+        print(f"Using detected provider: {selected}")
+        return selected
+    visible = ready_rows or [
+        row for row in rows if row[0] in {"ollama", "openai", "anthropic", "zhipu"}
+    ]
+    print("Choose a model provider:")
+    for index, (name, credentials, client, local_models) in enumerate(visible, start=1):
+        state = (
+            f"local service ({len(local_models)} model(s))"
+            if local_models
+            else (
+                "locally configured"
+                if credentials and client
+                else ("client installed" if client else "client not installed")
+            )
+        )
+        print(f"  {index}. {name:<14} {state}")
+    print("  More providers are available through `xscientist start --help`.")
+    answer = input("Provider [1]: ").strip()
+    if not answer:
+        selected_index = 1
+    elif answer.isdigit() and 1 <= int(answer) <= len(visible):
+        selected_index = int(answer)
+    else:
+        matches = [index for index, row in enumerate(rows, start=1) if row[0] == answer]
+        if not matches:
+            raise ValueError("provider selection is not in the displayed list")
+        return str(rows[matches[0] - 1][0])
+    return str(visible[selected_index - 1][0])
+
+
 def _interactive_start_inputs(
     parsed: argparse.Namespace, *, new_workspace: bool
 ) -> None:
@@ -858,47 +969,9 @@ def _interactive_start_inputs(
     if not str(parsed.question or "").strip():
         parsed.question = input("Research question: ").strip()
     if new_workspace and not parsed.provider:
-        from .dependency_profiles import missing_provider_modules
-        from .provider_config import (
-            DEFAULT_MODELS,
-            PROVIDER_FIELDS,
-            PROVIDER_NAMES,
-            configured_field_value,
-        )
+        from .provider_config import DEFAULT_MODELS
 
-        rows = []
-        for name in PROVIDER_NAMES:
-            credentials = all(
-                not field.required or bool(configured_field_value(field, {}))
-                for field in PROVIDER_FIELDS[name]
-            )
-            client = not missing_provider_modules(name)
-            rows.append((name, credentials, client))
-        print("Available model providers:")
-        for index, (name, credentials, client) in enumerate(rows, start=1):
-            state = (
-                "locally configured"
-                if credentials and client
-                else ("client installed" if client else "client not installed")
-            )
-            print(f"  {index}. {name:<14} {state}")
-        ready = next(
-            (index for index, row in enumerate(rows, start=1) if row[1] and row[2]),
-            1,
-        )
-        answer = input(f"Provider [{ready}]: ").strip()
-        if not answer:
-            selected_index = ready
-        elif answer.isdigit() and 1 <= int(answer) <= len(rows):
-            selected_index = int(answer)
-        else:
-            matches = [
-                index for index, row in enumerate(rows, start=1) if row[0] == answer
-            ]
-            if not matches:
-                raise ValueError("provider selection is not in the displayed list")
-            selected_index = matches[0]
-        parsed.provider = rows[selected_index - 1][0]
+        parsed.provider = _prompt_provider_choice()
         if not parsed.model:
             parsed.model = _prompt_provider_model(
                 parsed.provider,
@@ -1256,45 +1329,60 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         provider_statuses,
         remove_provider,
         update_bfts_models,
+        workspace_config_path,
     )
 
     try:
+        discovery_only = False
         if parsed.workspace is None:
             workspace = discover_workspace_root()
             if workspace is None:
-                raise ProviderConfigError(
-                    "provider configuration not found in the current directory or its parents; "
-                    "run `xscientist init` first or pass --workspace"
-                )
+                if parsed.provider_command == "list":
+                    workspace = Path.cwd().resolve()
+                    discovery_only = True
+                else:
+                    raise ProviderConfigError(
+                        "provider configuration not found in the current directory or its parents; "
+                        "run `xscientist setup WORKSPACE` first or pass --workspace"
+                    )
         else:
             workspace = Path(parsed.workspace).expanduser().resolve()
         if parsed.provider_command == "list":
-            rows = provider_statuses(workspace, probe_local=True)
+            initialized = workspace_config_path(workspace).is_file()
+            rows = provider_statuses(
+                workspace,
+                probe_local=True,
+                allow_uninitialized=discovery_only,
+            )
             rows.sort(
                 key=lambda row: (
                     not bool(row["active"]),
                     not bool(row["configured"]),
+                    not bool(row["local_detected"]),
                     str(row["provider"]),
                 )
             )
-            workspace_label = workspace.name or "workspace"
+            workspace_label = (workspace.name or "workspace") if initialized else None
             payload = {
                 "workspace": workspace_label,
+                "workspace_initialized": initialized,
+                "discovery_only": discovery_only,
                 "providers": rows,
             }
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
-                print(f"Workspace: {workspace_label}")
+                if initialized:
+                    print(f"Workspace: {workspace_label}")
+                else:
+                    print("Workspace: not initialized (provider discovery only)")
                 visible_rows = (
                     rows
                     if parsed.all
                     else [
                         row
                         for row in rows
-                        if row["configured"]
-                        or row["active"]
-                        or row["local_probe"].get("model_available")
+                        if row["configured"] or row["active"] or row["local_detected"]
                     ]
                 )
                 if not visible_rows:
@@ -1305,9 +1393,11 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         state = "ready"
                     elif row["configured"]:
                         state = "configured, not ready"
+                    elif row["local_detected"]:
+                        state = "locally detected, not configured"
                     else:
                         state = "not configured"
-                    model = row["model"] or "-"
+                    model = row["model"] or row["suggested_model"] or "-"
                     missing = ", ".join(row["missing"])
                     suffix = f"; missing: {missing}" if missing else ""
                     missing_clients = ", ".join(row["missing_client_modules"])
@@ -1320,8 +1410,14 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     print(
                         f"{marker} {row['provider']}: {state}; model: {model}{suffix}"
                     )
-                    if row["configured"] and missing_clients:
+                    if (row["configured"] or row["local_detected"]) and missing_clients:
                         print(f"    Install: {row['install_command']}")
+                    if row["local_detected"] and not row["configured"]:
+                        print(
+                            "    Setup: xscientist setup my-research "
+                            f"--provider {row['provider']} --model "
+                            f"{shlex.quote(str(row['suggested_model']))}"
+                        )
                 hidden_count = len(rows) - len(visible_rows)
                 if hidden_count:
                     print(f"Other providers hidden: {hidden_count} (use --all)")
@@ -1581,7 +1677,20 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"Install: {payload['install_command']}")
         return 0
     except (OSError, ProviderConfigError) as exc:
-        print(f"xscientist provider: {exc}", file=sys.stderr)
+        if getattr(parsed, "as_json", False):
+            print(
+                json.dumps(
+                    {
+                        "schema": "xscientist.provider-error.v1",
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(f"xscientist provider: {exc}", file=sys.stderr)
         return 2
 
 
@@ -1657,6 +1766,37 @@ def _run_evolution_gate(parsed: argparse.Namespace) -> int:
     return 0 if report.get("decision") in {"promote_to_canary", "approved"} else 3
 
 
+def _start_input_error(
+    parsed: argparse.Namespace,
+    message: str,
+    *,
+    returncode: int = 2,
+    next_actions: Sequence[str] = (),
+    phase: str = "input",
+) -> int:
+    """Keep semantic input failures useful for both people and automation."""
+
+    if parsed.as_json:
+        print(
+            json.dumps(
+                {
+                    "schema": "xscientist.start.v1",
+                    "ok": False,
+                    "phase": phase,
+                    "workspace": Path(parsed.directory).name or ".",
+                    "returncode": returncode,
+                    "error": str(message),
+                    "next_actions": list(next_actions),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print(f"xscientist start: {message}", file=sys.stderr)
+    return returncode
+
+
 def _run_start(parsed: argparse.Namespace) -> int:
     """Orchestrate the safe first-run path without hiding scientific gates."""
 
@@ -1683,67 +1823,54 @@ def _run_start(parsed: argparse.Namespace) -> int:
     from .research_vcs import ResearchRepository
 
     workspace = Path(parsed.directory).expanduser().resolve()
+    new_workspace = not (workspace / ".xscientist" / "providers.json").is_file()
     try:
         _interactive_start_inputs(
             parsed,
-            new_workspace=not (workspace / ".xscientist" / "providers.json").is_file(),
+            new_workspace=new_workspace,
         )
     except KeyboardInterrupt:
-        print("\nxscientist start: cancelled by user", file=sys.stderr)
-        return 130
+        return _start_input_error(parsed, "cancelled by user", returncode=130)
     except (EOFError, ValueError) as exc:
-        print(f"xscientist start: {exc}", file=sys.stderr)
-        return 2
+        return _start_input_error(parsed, str(exc))
     question = str(parsed.question or "").strip()
     if not question:
-        print("xscientist start: --question cannot be empty", file=sys.stderr)
-        return 2
+        return _start_input_error(parsed, "--question cannot be empty")
     if parsed.data_dir and parsed.allow_synthetic_data:
-        print(
-            "xscientist start: --data-dir and --allow-synthetic-data are mutually exclusive",
-            file=sys.stderr,
+        return _start_input_error(
+            parsed,
+            "--data-dir and --allow-synthetic-data are mutually exclusive",
         )
-        return 2
     if (
         not parsed.prepare_only
         and not parsed.data_dir
         and not parsed.allow_synthetic_data
     ):
-        print(
-            "xscientist start: choose --data-dir PATH for empirical evidence or "
+        return _start_input_error(
+            parsed,
+            "choose --data-dir PATH for empirical evidence or "
             "--allow-synthetic-data for an explicitly exploratory study",
-            file=sys.stderr,
         )
-        return 2
     for label, value in (
         ("--max-project-tokens", parsed.max_project_tokens),
         ("--max-project-hours", parsed.max_project_hours),
         ("--max-cost-usd", parsed.max_cost_usd),
     ):
         if value is not None and float(value) <= 0:
-            print(
-                f"xscientist start: {label} must be greater than zero", file=sys.stderr
-            )
-            return 2
+            return _start_input_error(parsed, f"{label} must be greater than zero")
     price_values = (
         parsed.price_input_per_million,
         parsed.price_output_per_million,
         parsed.price_cached_input_per_million,
     )
     if any(value is not None and float(value) < 0 for value in price_values):
-        print(
-            "xscientist start: explicit model prices must be non-negative",
-            file=sys.stderr,
-        )
-        return 2
+        return _start_input_error(parsed, "explicit model prices must be non-negative")
     if (parsed.price_input_per_million is None) != (
         parsed.price_output_per_million is None
     ):
-        print(
-            "xscientist start: input and output prices must be supplied together",
-            file=sys.stderr,
+        return _start_input_error(
+            parsed, "input and output prices must be supplied together"
         )
-        return 2
 
     requested_user = str(parsed.user or "").strip()
     authenticated, auth_status, session = validate_session()
@@ -1752,13 +1879,20 @@ def _run_start(parsed: argparse.Namespace) -> int:
     )
     if requested_user and active_user and requested_user != active_user:
         switch_command = "xscientist auth login --user " + shlex.quote(requested_user)
-        print(
-            f"xscientist start: --user {requested_user!r} conflicts with the "
+        return _start_input_error(
+            parsed,
+            f"--user {requested_user!r} conflicts with the "
             f"active research identity {active_user!r}; switch explicitly with "
             f"`{switch_command}`",
-            file=sys.stderr,
+            next_actions=[switch_command],
         )
-        return 2
+    if new_workspace and not parsed.provider:
+        return _start_input_error(
+            parsed,
+            "--provider is required for a new workspace in non-interactive mode; "
+            "inspect safe local choices with `xscientist provider list`",
+            next_actions=["xscientist provider list", "xscientist start --help"],
+        )
 
     phases: dict[str, object] = {}
     try:
@@ -1767,8 +1901,12 @@ def _run_start(parsed: argparse.Namespace) -> int:
             load_provider_config(workspace, missing_ok=False) if config_exists else {}
         )
         selected_provider = str(
-            parsed.provider or existing_config.get("active_provider") or "zhipu"
+            parsed.provider or existing_config.get("active_provider") or ""
         )
+        if not selected_provider:
+            raise ProviderConfigError(
+                "no active provider is configured; pass --provider and --model"
+            )
         provider_entry = (existing_config.get("providers") or {}).get(
             selected_provider, {}
         )
@@ -2198,8 +2336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 payload = launch_detached_run(parsed.directory, raw_argv)
             except (OSError, RunControlError, ValueError) as exc:
-                print(f"xscientist start: {exc}", file=sys.stderr)
-                return 2
+                return _start_input_error(parsed, str(exc), phase="launch")
             detached_status = str(payload.get("status") or "unknown")
             startup_failed = detached_status in {
                 "failed",
@@ -2711,24 +2848,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             run = payload["run"]
             result = payload["result"]
             background_run = payload.get("background_run")
+            state_labels = {
+                "en": {
+                    "invalid": "invalid workspace state",
+                    "needs_attention": "needs attention",
+                    "running": "running",
+                    "scientific_followup": "run complete; more evidence needed",
+                    "complete": "complete and independently verified",
+                    "ready": "ready",
+                    "not_started": "not started",
+                },
+                "zh": {
+                    "invalid": "工作区状态无效",
+                    "needs_attention": "需要处理",
+                    "running": "运行中",
+                    "scientific_followup": "运行完成，仍需补充证据",
+                    "complete": "已完成并通过独立验证",
+                    "ready": "已就绪",
+                    "not_started": "尚未开始",
+                },
+            }
             if language == "zh":
                 print(f"工作区：{payload['workspace']}")
-                print(
-                    "科研历史："
-                    + (
-                        f"{research['branch']} / 暂存={research['staged']}"
-                        if research["initialized"]
-                        else "未初始化"
-                    )
-                )
+                print(f"状态：{state_labels['zh'][payload['operational_state']]}")
             else:
                 print(f"Workspace: {payload['workspace']}")
+                print(f"State: {state_labels['en'][payload['operational_state']]}")
+            if parsed.verbose or research["staged"]:
                 print(
-                    "Research: "
+                    ("科研历史：" if language == "zh" else "Research: ")
                     + (
-                        f"{research['branch']} / staged={research['staged']}"
+                        (
+                            f"{research['branch']} / 暂存={research['staged']}"
+                            if language == "zh"
+                            else f"{research['branch']} / staged={research['staged']}"
+                        )
                         if research["initialized"]
-                        else "not initialized"
+                        else ("未初始化" if language == "zh" else "not initialized")
                     )
                 )
             if (research.get("guide") or {}).get("progress"):
@@ -2768,11 +2924,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 run_state = "未启动" if language == "zh" else "not started"
-            print(
-                f"{'科研流水线' if language == 'zh' else 'Research pipeline'}: {run_state}"
-            )
+            if parsed.verbose:
+                print(
+                    f"{'科研流水线' if language == 'zh' else 'Research pipeline'}: {run_state}"
+                )
             background_inspect_command = None
-            if isinstance(background_run, dict):
+            if isinstance(background_run, dict) and parsed.verbose:
                 background_status = str(background_run.get("status") or "unknown")
                 if language == "zh":
                     background_status = {
@@ -2805,16 +2962,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cost = float(used.get("cost_usd") or 0)
                 input_tokens = int(used.get("input_tokens") or 0)
                 output_tokens = int(used.get("output_tokens") or 0)
-                if language == "zh":
+                if language == "zh" and parsed.verbose:
                     print(
                         f"预算已用：${cost:.2f}；输入令牌 {input_tokens:,}，"
                         f"输出令牌 {output_tokens:,}"
                     )
-                else:
+                elif language == "en" and parsed.verbose:
                     print(
                         f"Budget used: ${cost:.2f}; {input_tokens:,} input tokens; "
                         f"{output_tokens:,} output tokens"
                     )
+                else:
+                    print(f"{'成本' if language == 'zh' else 'Cost'}: ${cost:.2f}")
             if result["dag_html"]:
                 label = "证据 DAG" if language == "zh" else "Evidence DAG"
                 print(f"{label}: {result['dag_html']}")
@@ -2870,8 +3029,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"{'运行' if language == 'zh' else 'Run'}:  "
                         f"{contextual_command}"
                     )
-        _record_local_metric("status", ok=bool(payload["ok"]))
-        return 0 if payload["ok"] else 1
+        status_ok = bool(payload["ok"] and not payload["attention_required"])
+        _record_local_metric("status", ok=status_ok)
+        return 0 if status_ok else 1
     if parsed.command == "info":
         payload = _installation_info()
         if parsed.as_json:
@@ -2941,19 +3101,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .provider_config import DEFAULT_MODELS, ProviderConfigError
 
         try:
-            selected_model = parsed.model
             task_profile = TASK_PROFILES[parsed.task]
-            if not selected_model and not DEFAULT_MODELS.get(parsed.provider):
+            selected_provider = parsed.provider
+            if task_profile["provider_required"] and not selected_provider:
                 if parsed.non_interactive or not sys.stdin.isatty():
                     raise ProviderConfigError(
-                        f"--model is required for provider {parsed.provider!r} "
+                        "--provider is required for provider-backed non-interactive "
+                        "setup; inspect safe local choices with `xscientist provider list`"
+                    )
+                selected_provider = _prompt_provider_choice()
+            # Provider-neutral workspaces keep a dormant compatibility template,
+            # but no provider is presented as configured or required to the user.
+            workspace_template_provider = selected_provider or "zhipu"
+            selected_model = parsed.model
+            if not selected_model and not DEFAULT_MODELS.get(
+                workspace_template_provider
+            ):
+                if parsed.non_interactive or not sys.stdin.isatty():
+                    raise ProviderConfigError(
+                        f"--model is required for provider {workspace_template_provider!r} "
                         "in non-interactive mode"
                     )
-                selected_model = _prompt_provider_model(parsed.provider)
+                selected_model = _prompt_provider_model(workspace_template_provider)
             onboarding = create_workspace(
                 parsed.directory,
                 profile=parsed.profile,
-                provider=parsed.provider,
+                provider=workspace_template_provider,
                 model=selected_model,
                 force=parsed.force,
                 task=parsed.task,
@@ -3023,7 +3196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 try:
                     provider_setup = _configure_provider(
                         workspace,
-                        name=parsed.provider,
+                        name=workspace_template_provider,
                         model_value=selected_model,
                         non_interactive=parsed.non_interactive,
                     )
@@ -3043,7 +3216,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 workspace,
                 task=parsed.task,
                 provider=(
-                    parsed.provider if task_profile["provider_required"] else None
+                    workspace_template_provider
+                    if task_profile["provider_required"]
+                    else None
                 ),
                 deep=parsed.deep,
             )
