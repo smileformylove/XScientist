@@ -455,6 +455,7 @@ def create_workspace(
     task: str = "research",
     capabilities: Iterable[str] | None = None,
     provider_required: bool = True,
+    preserve_existing: bool = False,
 ) -> dict[str, Any]:
     """Create a safe, installed-package-first XScientist workspace."""
     normalized_profile = str(profile or "default").strip().lower()
@@ -489,7 +490,7 @@ def create_workspace(
             "workspace contains directories where files are required: "
             + ", ".join(directory_conflicts)
         )
-    if conflicts and not force:
+    if conflicts and not force and not preserve_existing:
         raise WorkspaceInitError(
             "refusing to overwrite existing workspace files: "
             + ", ".join(conflicts)
@@ -498,6 +499,8 @@ def create_workspace(
 
     root.mkdir(parents=True, exist_ok=True)
     for relative, content in files.items():
+        if preserve_existing and (root / relative).exists():
+            continue
         atomic_write_text(root / relative, content)
 
     workspace_view = portable_path(root, base=Path.cwd())
@@ -531,6 +534,7 @@ def create_workspace(
         "provider": normalized_provider if provider_required else None,
         "model": selected_model if provider_required else None,
         "files": list(WORKSPACE_FILES),
+        "preserved_files": conflicts if preserve_existing else [],
         "secrets_written": False,
         "next_steps": next_steps,
     }

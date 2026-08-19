@@ -180,7 +180,9 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_chinese_readme_toc_tracks_quick_start_sections(self) -> None:
         text = self.chinese_readme_path.read_text(encoding="utf-8")
         expected_navigation = {
-            '<a href="#不配置模型先体验">快速体验</a>': "## 不配置模型先体验",
+            '<a href="#从自己的想法开始不需要-api-key">快速开始</a>': (
+                "## 从自己的想法开始：不需要 API Key"
+            ),
             '<a href="#运行自主研究">自主研究</a>': "## 运行自主研究",
             '<a href="#检查审计与复现">审计复现</a>': "## 检查、审计与复现",
             '<a href="#安装方式">安装</a>': "## 安装方式",

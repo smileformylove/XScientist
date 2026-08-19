@@ -7,7 +7,7 @@ This guide covers best practices for running XScientist in long-running, product
 ## Table of Contents
 
 - [Daemon Mode](#daemon-mode)
-- [Monitoring & Health Checks](#monitoring--health-checks)
+- [Monitoring & Health Checks](#monitoring-health-checks)
 - [Feedback Mechanisms](#feedback-mechanisms)
 - [Resource Management](#resource-management)
 - [Error Recovery](#error-recovery)

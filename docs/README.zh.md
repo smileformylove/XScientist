@@ -7,8 +7,8 @@
 <p align="center"><strong>能检查、能挑战、能复现的自主科研。</strong></p>
 
 <p align="center">
-  从一个可证伪问题开始，把假设、实验、失败、证据、评审和结论
-  保存为一条有版本的科学历史。
+  只带来一个想法也可以——不要求先懂模型或 API Key。先把它变成可证伪计划，
+  再让每次检验、失败、评审和结论都可检查。
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="#不配置模型先体验">快速体验</a> ·
+  <a href="#从自己的想法开始不需要-api-key">快速开始</a> ·
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#检查审计与复现">审计复现</a> ·
   <a href="#安装方式">安装</a> ·
@@ -38,25 +38,46 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 本文描述 `main` 上的 `0.1.3` 候选版。PyPI 当前正式版是 `0.1.2`；如需使用下方
 新流程，请从 `main` 安装。
 
-## 不配置模型先体验
+## 从自己的想法开始：不需要 API Key
 
 只需要 Python 3.10+ 和 Git。安装完成后，不需要 API Key、模型、Docker 或网络调用。
 
 ```bash
 python -m pip install \
   "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+xscientist explore ./my-study --lang zh
+```
+
+引导过程不要求理解 Provider 或科研协议，只会问四个普通问题：
+
+- 你想研究什么想法？
+- 如果想法成立，你预计能观察到什么变化？
+- 什么结果会让你改变看法？
+- 先做哪一个公平比较或检验？
+
+只回答第一个问题也可以，之后再次运行同一命令继续。XScientist 会把真实状态明确
+保存为“想法已保存”“可证伪”或“已有计划”，绝不会为了显得完整而替用户编造答案。
+这条路径不使用 Provider，不调用模型，不执行生成代码，也不会伪造证据或结论。
+
+脚本或自动化环境可以显式传入同样的信息：
+
+```bash
+xscientist explore ./my-study \
+  --idea "每天散步是否改善睡眠质量？" \
+  --expect "每天散步会改善预先选定的睡眠评分。" \
+  --disprove "评分没有改善或变差。" \
+  --test "比较散步阶段和日常活动阶段。" \
+  --lang zh --non-interactive
+```
+
+如果想先看一条完整但存在争议的证据历史，可运行内置 `$0.00` 样例：
+
+```bash
 xscientist demo ./first-study --autopilot --lang zh --open
 xscientist status ./first-study --lang zh
 ```
 
-几秒钟后你会得到：
-
-- 一项有版本记录的研究，包含失败尝试、支持证据和反驳证据；
-- 一张可离线浏览的证据 DAG，以及精确复现回执；
-- `$0.00` 模型成本，且不会执行生成代码；
-- 一个可以直接复制的下一步动作。
-
-演示会诚实停在“运行完成，仍需补充证据”。因为留出结果挑战了过度宽泛的结论。
+演示会诚实停在“运行完成，仍需补充证据”，因为留出结果挑战了过度宽泛的结论。
 保留冲突是正确的科学行为，不是程序失败。
 
 日常只看 `status` 即可。需要分支、流水线、Token 或后台任务细节时再加
@@ -64,8 +85,12 @@ xscientist status ./first-study --lang zh
 
 ## 运行自主研究
 
-先查看当前可用的模型来源。这个命令不要求已有工作区，也能发现正在运行的本地
-Ollama 服务：
+离线引导能够整理用户亲自给出的判断，但不能诚实地凭空产生领域知识、数据或科研
+发现。需要 AI 辅助探索时，再为已经保存的问题添加模型；同一个工作区可以安全升级，
+不会替换原有科研历史。
+
+先查看当前可用模型。这个命令不要求已有工作区，会优先发现正在运行的本地 Ollama，
+再显示托管服务：
 
 ```bash
 xscientist provider list
@@ -73,14 +98,19 @@ xscientist provider list
 
 ### 本地模型
 
+[下载 Ollama](https://ollama.com/download) 后打开终端运行 `ollama`，选择一次
+**Run a model** 即可；不需要 API Key。之后 XScientist 会自动发现本地模型：
+
 ```bash
 python -m pip install \
   "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
-xscientist start ./local-study
+xscientist provider list
+xscientist start ./my-study
 ```
 
 交互流程只询问缺失的信息：问题、Provider/模型、证据来源、本地科研身份和可选
-预算。如果只发现一个可用 Provider，会自动选择，不要求用户重复确认。
+预算。如果只发现一个可用 Provider，会自动选择，不要求用户重复确认。对于
+`explore` 创建的工作区，会直接复用已保存的问题，并保留已有科研文件。
 
 ### 托管模型
 
@@ -213,7 +243,7 @@ xscientist research merge challenge/boundary --repo ./first-study --preview
 
 ```mermaid
 flowchart TB
-  U["start · status · runs"] --> O["自主科研循环"]
+  U["explore · start · status"] --> O["自主科研循环"]
   O --> E["隔离实验与模型来源"]
   O --> R["有类型的科研 Git 历史"]
   E --> D["证据 DAG 与 ARA 产物"]
@@ -223,6 +253,7 @@ flowchart TB
 
 | 需求 | 日常命令 |
 | --- | --- |
+| 把自己的想法变成可检验计划 | `xscientist explore` |
 | 验证安装 | `xscientist demo` |
 | 运行或继续研究 | `xscientist start` |
 | 理解当前状态 | `xscientist status` |
@@ -288,8 +319,10 @@ flowchart TB
 
 项目处于积极开发的 Alpha 阶段。贡献需包含测试，保持协议和 schema 兼容，并且
 不能削弱来源追踪、隔离、成本或科学门禁。参见
-[CONTRIBUTING.md](../.github/CONTRIBUTING.md)和[CHANGELOG.md](../CHANGELOG.md)。
+[CONTRIBUTING.md](https://github.com/smileformylove/XScientist/blob/main/.github/CONTRIBUTING.md)
+和[CHANGELOG.md](https://github.com/smileformylove/XScientist/blob/main/CHANGELOG.md)。
 
 论文：[XScientist: Towards an AI-Driven Scientific Research Ecosystem](https://arxiv.org/abs/2607.12301)。
 
-许可证：Apache-2.0，见 [LICENSE](../LICENSE)。
+许可证：Apache-2.0，见
+[LICENSE](https://github.com/smileformylove/XScientist/blob/main/LICENSE)。

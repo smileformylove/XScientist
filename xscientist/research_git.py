@@ -213,6 +213,7 @@ secrets.json
 .ara-store/
 
 # Generated caches and raw logs
+.xscientist/readiness.json
 __pycache__/
 *.py[cod]
 *.log

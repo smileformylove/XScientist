@@ -23,6 +23,19 @@ def _required(value: str, *, label: str) -> str:
     return normalized
 
 
+def _optional(value: str | None) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _human_actor(value: str) -> str:
+    raw_actor = _required(value, label="actor")
+    if ":" not in raw_actor:
+        return "human:" + raw_actor
+    if raw_actor.startswith("human:") and raw_actor != "human:":
+        return raw_actor
+    raise ResearchGitError("guided research actor must be a human identity")
+
+
 def _language(value: str) -> str:
     normalized = str(value or "auto").strip().lower()
     if normalized == "auto":
@@ -97,6 +110,10 @@ def _localize_command(language: str, command: str) -> str:
 def _command_for_repo(command: str, repo: str | Path) -> str:
     """Keep copy/paste guidance bound to the repository the user inspected."""
 
+    if command == "xscientist explore .":
+        return "xscientist explore " + shlex.quote(str(repo))
+    if command == "xscientist explore . --lang zh":
+        return "xscientist explore " + shlex.quote(str(repo)) + " --lang zh"
     prefix = "xscientist research "
     if not command.startswith(prefix) or " --repo " in f" {command} ":
         return command
@@ -123,6 +140,37 @@ def _latest(items: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     return max(matches, key=_created_at) if matches else None
 
 
+def inspect_idea_research(path: str | Path) -> dict[str, Any]:
+    """Return the plain-language framing state of an existing repository."""
+
+    repository = ResearchRepository(path)
+    objects = repository.objects()
+    question = _latest(objects, "question")
+    if question is None:
+        raise ResearchGitError(
+            "research repository has no recorded question; use a new directory or "
+            "record a question first"
+        )
+    hypothesis = _latest(objects, "hypothesis")
+    plan = _latest(objects, "research_plan")
+    question_payload = question.get("payload") or {}
+    hypothesis_payload = (hypothesis or {}).get("payload") or {}
+    plan_payload = (plan or {}).get("payload") or {}
+    return {
+        "repository": repository.path.as_posix(),
+        "idea": str(question_payload.get("question") or "").strip(),
+        "question_id": question["object_id"],
+        "expectation": str(hypothesis_payload.get("statement") or "").strip(),
+        "disconfirming_result": str(hypothesis_payload.get("falsifier") or "").strip(),
+        "hypothesis_id": (hypothesis or {}).get("object_id"),
+        "first_test": str(
+            (plan_payload.get("discriminating_tests") or [""])[0]
+        ).strip(),
+        "success_rule": str(plan_payload.get("success_rule") or "").strip(),
+        "plan_id": (plan or {}).get("object_id"),
+    }
+
+
 def _latest_after(
     items: list[dict[str, Any]], kind: str, created_at: str
 ) -> dict[str, Any] | None:
@@ -146,6 +194,11 @@ def build_research_guide(
     repository = ResearchRepository(repo)
     objects = repository.objects()
     counts = Counter(str(item["kind"]) for item in objects)
+    user_idea_entry = any(
+        item.get("kind") == "question"
+        and (item.get("payload") or {}).get("source") == "user_idea"
+        for item in objects
+    )
     relations = [
         (str(item["object_id"]), relation)
         for item in objects
@@ -173,65 +226,101 @@ def build_research_guide(
             _step(
                 selected_language,
                 code="record_hypothesis",
-                title_en="Write one falsifiable hypothesis",
-                title_zh="写下一个可证伪假设",
+                title_en=(
+                    "Make your idea testable"
+                    if user_idea_entry
+                    else "Write one falsifiable hypothesis"
+                ),
+                title_zh=(
+                    "把想法变成可以检验的问题"
+                    if user_idea_entry
+                    else "写下一个可证伪假设"
+                ),
                 why_en="A scientific question becomes testable only after you state what would prove it wrong.",
                 why_zh="只有同时说明什么结果会推翻它，研究问题才真正可检验。",
                 command=(
-                    'xscientist research hypothesis "YOUR HYPOTHESIS" '
-                    '--falsifier "WHAT RESULT WOULD DISPROVE IT"'
+                    (
+                        "xscientist explore ."
+                        + (" --lang zh" if selected_language == "zh" else "")
+                    )
+                    if user_idea_entry
+                    else (
+                        'xscientist research hypothesis "YOUR HYPOTHESIS" '
+                        '--falsifier "WHAT RESULT WOULD DISPROVE IT"'
+                    )
                 ),
             )
         )
     elif not counts["research_plan"]:
-        next_steps.append(
-            _step(
-                selected_language,
-                code="choose_study_mode",
-                title_en="Option A — plan exploratory work",
-                title_zh="选项 A — 规划探索性研究",
-                why_en="Use this while comparing explanations or discovering which test is most informative.",
-                why_zh="当你仍在比较不同解释，或寻找最有信息量的检验时，使用这条路径。",
-                command=(
-                    'xscientist research plan @latest:hypothesis "WHAT TO TEST" '
-                    '--test "WHAT RESULT SEPARATES THE EXPLANATIONS"'
-                ),
+        if user_idea_entry:
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="choose_first_test",
+                    title_en="Choose the first fair comparison",
+                    title_zh="选择第一个公平比较",
+                    why_en=(
+                        "A small discriminating test is more useful than collecting "
+                        "only examples that support the idea."
+                    ),
+                    why_zh=(
+                        "先做一个能够区分不同解释的小检验，比只收集支持想法的例子更有用。"
+                    ),
+                    command=(
+                        "xscientist explore ."
+                        + (" --lang zh" if selected_language == "zh" else "")
+                    ),
+                )
             )
-        )
-        next_steps.append(
-            _step(
-                selected_language,
-                code="preregister_confirmatory",
-                title_en="Option B — lock a confirmatory study",
-                title_zh="选项 B — 锁定确证性研究",
-                why_en="Use this when the metric, baseline, data split, and success rule are fixed before the test.",
-                why_zh="当指标、基线、数据切分和成功标准都能在实验前确定时，使用这条路径。",
-                command=(
-                    "xscientist research preregister @latest:hypothesis "
-                    "--dataset DATASET --metric METRIC --baseline BASELINE "
-                    "--split-file SPLIT_FILE --registered-by human:YOUR_NAME"
-                ),
+        else:
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="choose_study_mode",
+                    title_en="Option A — plan exploratory work",
+                    title_zh="选项 A — 规划探索性研究",
+                    why_en="Use this while comparing explanations or discovering which test is most informative.",
+                    why_zh="当你仍在比较不同解释，或寻找最有信息量的检验时，使用这条路径。",
+                    command=(
+                        'xscientist research plan @latest:hypothesis "WHAT TO TEST" '
+                        '--test "WHAT RESULT SEPARATES THE EXPLANATIONS"'
+                    ),
+                )
             )
-        )
-        next_steps.append(
-            _step(
-                selected_language,
-                code="lock_method_discovery",
-                title_en="Option C — test a transferable method",
-                title_zh="选项 C — 检验可迁移的新方法",
-                why_en=(
-                    "Use a generated contract to prevent a local score gain or "
-                    "larger resource budget from being mislabeled as discovery."
-                ),
-                why_zh=(
-                    "用生成的契约隔离变量、锁定资源和盲测条件，避免把局部分数提升"
-                    "或扩大算力误称为方法发现。"
-                ),
-                command=(
-                    "xscientist research discovery template --output discovery.json"
-                ),
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="preregister_confirmatory",
+                    title_en="Option B — lock a confirmatory study",
+                    title_zh="选项 B — 锁定确证性研究",
+                    why_en="Use this when the metric, baseline, data split, and success rule are fixed before the test.",
+                    why_zh="当指标、基线、数据切分和成功标准都能在实验前确定时，使用这条路径。",
+                    command=(
+                        "xscientist research preregister @latest:hypothesis "
+                        "--dataset DATASET --metric METRIC --baseline BASELINE "
+                        "--split-file SPLIT_FILE --registered-by human:YOUR_NAME"
+                    ),
+                )
             )
-        )
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="lock_method_discovery",
+                    title_en="Option C — test a transferable method",
+                    title_zh="选项 C — 检验可迁移的新方法",
+                    why_en=(
+                        "Use a generated contract to prevent a local score gain or "
+                        "larger resource budget from being mislabeled as discovery."
+                    ),
+                    why_zh=(
+                        "用生成的契约隔离变量、锁定资源和盲测条件，避免把局部分数提升"
+                        "或扩大算力误称为方法发现。"
+                    ),
+                    command=(
+                        "xscientist research discovery template --output discovery.json"
+                    ),
+                )
+            )
     elif not counts["experiment_attempt"]:
         next_steps.append(
             _step(
@@ -532,6 +621,244 @@ def build_research_guide(
     }
 
 
+def explore_research_idea(
+    path: str | Path,
+    *,
+    idea: str | None = None,
+    expectation: str | None = None,
+    disconfirming_result: str | None = None,
+    first_test: str | None = None,
+    success_rule: str | None = None,
+    name: str | None = None,
+    actor: str = "human:researcher",
+    language: str = "auto",
+    git_user_name: str | None = None,
+    git_user_email: str | None = None,
+) -> dict[str, Any]:
+    """Turn a user's idea into an honest, provider-free research scaffold.
+
+    The function records only text supplied by the user. It never invents a
+    hypothesis, evidence, or conclusion to make an incomplete study look done.
+    Re-running it on the same repository can add the next missing framing step.
+    """
+
+    selected_language = _language(language)
+    root = Path(path).expanduser().resolve()
+    existing = (root / "research.yaml").is_file()
+    actor_id = _human_actor(actor)
+    idea_text = _optional(idea)
+    expectation_text = _optional(expectation)
+    disconfirming_text = _optional(disconfirming_result)
+    first_test_text = _optional(first_test)
+    success_rule_text = _optional(success_rule)
+
+    if bool(expectation_text) != bool(disconfirming_text):
+        raise ResearchGitError(
+            "an expected result and a result that would disprove it must be "
+            "provided together"
+        )
+    if first_test_text and not expectation_text and not existing:
+        raise ResearchGitError(
+            "a first test requires an expected result and a result that would "
+            "disprove it"
+        )
+    if success_rule_text and not first_test_text:
+        raise ResearchGitError("a success rule requires a first test")
+
+    created_paths: list[str] = []
+    checkpoint = None
+    if existing:
+        current = inspect_idea_research(root)
+        if idea_text and idea_text != current["idea"]:
+            raise ResearchGitError(
+                "this workspace already records a different idea; use a new "
+                "directory so the two research histories stay separate"
+            )
+        idea_text = str(current["idea"])
+        repository = ResearchRepository(root)
+        status = repository.status()
+        if (expectation_text or first_test_text) and status["research_stage"]["paths"]:
+            raise ResearchGitError(
+                "the research stage already contains pending work; commit or "
+                "unstage it before continuing this guided exploration"
+            )
+        if (expectation_text or first_test_text) and status["staged_paths"]:
+            raise ResearchGitError(
+                "the Git index already contains staged work; commit or unstage it "
+                "before continuing this guided exploration"
+            )
+        question_id = str(current["question_id"])
+        goal = _latest(repository.objects(), "research_goal")
+        goal_id = str(goal["object_id"]) if goal is not None else None
+        hypothesis_id = (
+            str(current["hypothesis_id"]) if current["hypothesis_id"] else None
+        )
+        plan_id = str(current["plan_id"]) if current["plan_id"] else None
+        if expectation_text and hypothesis_id:
+            raise ResearchGitError(
+                "this workspace already has a falsifiable expectation; use "
+                "`xscientist research hypothesis` to add a competing one"
+            )
+        if first_test_text and plan_id:
+            raise ResearchGitError(
+                "this workspace already has a research plan; use `xscientist "
+                "research plan` to add another test"
+            )
+    else:
+        if not idea_text:
+            raise ResearchGitError("idea cannot be empty")
+        if root.exists() and any(root.iterdir()):
+            raise ResearchGitError(
+                "research destination must be absent or empty; choose a new directory"
+            )
+        init_repository(
+            root,
+            name=name,
+            question=f"# Research question\n\n{idea_text}\n",
+            actor=actor_id,
+            git_user_name=git_user_name,
+            git_user_email=git_user_email,
+            commit=False,
+        )
+        repository = ResearchRepository(root)
+        question_object = repository.record(
+            "question",
+            {"question": idea_text, "source": "user_idea"},
+            actor={"actor_id": actor_id, "authority": "human"},
+        )
+        question_id = question_object.object_id
+        goal_core = {
+            "question": idea_text,
+            "objective": (
+                "Turn the user's idea into a falsifiable study without treating "
+                "a plan as evidence."
+            ),
+            "success_condition": (
+                "Reach an evidence-bounded conclusion that can be independently "
+                "reviewed."
+            ),
+            "authority_policy": (
+                "User-supplied assumptions stay explicit and independent "
+                "evaluation is required for verification."
+            ),
+        }
+        goal_object = repository.record(
+            "research_goal",
+            {**goal_core, "goal_hash": canonical_content_hash(goal_core)},
+            state="locked",
+            relations=[{"type": "depends_on", "target": question_id}],
+            actor={"actor_id": actor_id, "authority": "human"},
+        )
+        goal_id = goal_object.object_id
+        hypothesis_id = None
+        plan_id = None
+
+    if expectation_text:
+        relations = [{"type": "depends_on", "target": question_id}]
+        if goal_id:
+            relations.append({"type": "depends_on", "target": goal_id, "role": "goal"})
+        hypothesis_object = repository.record(
+            "hypothesis",
+            {
+                "statement": expectation_text,
+                "falsifier": disconfirming_text,
+                "source": "user_answer",
+            },
+            relations=relations,
+            actor={"actor_id": actor_id, "authority": "human"},
+        )
+        hypothesis_id = hypothesis_object.object_id
+        if hypothesis_object.created:
+            created_paths.append(hypothesis_object.path.relative_to(root).as_posix())
+
+    if first_test_text:
+        if not hypothesis_id:
+            raise ResearchGitError(
+                "a first test requires a recorded falsifiable expectation"
+            )
+        plan_payload: dict[str, Any] = {
+            "summary": first_test_text,
+            "study_phase": "exploratory",
+            "hypothesis_id": hypothesis_id,
+            "discriminating_tests": [first_test_text],
+            "source": "user_answer",
+        }
+        if success_rule_text:
+            plan_payload["success_rule"] = success_rule_text
+        plan_object = repository.record(
+            "research_plan",
+            plan_payload,
+            relations=[{"type": "depends_on", "target": hypothesis_id}],
+            actor={"actor_id": actor_id, "authority": "human"},
+        )
+        plan_id = plan_object.object_id
+        if plan_object.created:
+            created_paths.append(plan_object.path.relative_to(root).as_posix())
+
+    if not existing:
+        # The destination was verified empty, so every eligible path belongs to
+        # this initialization and can safely enter its first exact checkpoint.
+        created_paths = list(repository.status()["eligible_changes"])
+    if created_paths:
+        repository.stage(created_paths)
+        checkpoint = repository.commit(
+            stage="plan" if plan_id else "idea-framing",
+            subject=(
+                "record first user-supplied research plan"
+                if plan_id
+                else "record user-supplied research idea"
+            ),
+            status="draft",
+            actor=actor_id,
+            staged_only=True,
+        )
+
+    current = inspect_idea_research(root)
+    missing: list[str] = []
+    if not current["hypothesis_id"]:
+        missing.extend(["expected_observation", "disconfirming_result"])
+    elif not current["plan_id"]:
+        missing.append("first_fair_test")
+    framing_status = (
+        "planned"
+        if current["plan_id"]
+        else ("falsifiable" if current["hypothesis_id"] else "idea_saved")
+    )
+    continue_command = "xscientist explore " + shlex.quote(str(root))
+    if selected_language == "zh":
+        continue_command += " --lang zh"
+    status_command = "xscientist status " + shlex.quote(str(root))
+    if selected_language == "zh":
+        status_command += " --lang zh"
+    guide = build_research_guide(root, language=selected_language)
+    return {
+        "schema_version": "xscientist.idea-exploration.v1",
+        "ok": True,
+        "repository": root.as_posix(),
+        "language": selected_language,
+        "idea": current["idea"],
+        "framing": {
+            "status": framing_status,
+            "missing": missing,
+            "question_id": current["question_id"],
+            "hypothesis_id": current["hypothesis_id"],
+            "plan_id": current["plan_id"],
+        },
+        "checkpoint": checkpoint.to_dict() if checkpoint is not None else None,
+        "safety": {
+            "api_key_required": False,
+            "provider_used": False,
+            "external_network_used": False,
+            "generated_code_executed": False,
+            "evidence_generated": False,
+            "conclusion_generated": False,
+        },
+        "guide": guide,
+        "continue_command": continue_command,
+        "status_command": status_command,
+    }
+
+
 def start_guided_research(
     path: str | Path,
     *,
@@ -549,13 +876,7 @@ def start_guided_research(
     question_text = _required(question, label="research question")
     hypothesis_text = _required(hypothesis, label="hypothesis")
     falsifier_text = _required(falsifier, label="falsifier")
-    raw_actor = _required(actor, label="actor")
-    if ":" not in raw_actor:
-        actor_id = "human:" + raw_actor
-    elif raw_actor.startswith("human:") and raw_actor != "human:":
-        actor_id = raw_actor
-    else:
-        raise ResearchGitError("guided research actor must be a human identity")
+    actor_id = _human_actor(actor)
     root = Path(path).expanduser().resolve()
     init_repository(
         root,
@@ -614,5 +935,7 @@ def start_guided_research(
 __all__ = [
     "GUIDE_SCHEMA",
     "build_research_guide",
+    "explore_research_idea",
+    "inspect_idea_research",
     "start_guided_research",
 ]

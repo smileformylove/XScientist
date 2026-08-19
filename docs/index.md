@@ -1,15 +1,21 @@
 # XScientist
 
-XScientist turns a falsifiable question into an inspectable research history:
-experiments, failures, evidence, bounded inferences, reviews, claims, and the
-next scientific action are connected in one offline DAG.
+XScientist turns your idea into an inspectable research history: the question,
+falsifiable expectations, experiments, failures, evidence, bounded inferences,
+reviews, claims, and next scientific action stay connected.
 
-Start with the provider-free journey. It uses no network or model and costs
+Start with your own idea. This first step uses no network or model and costs
 nothing:
 
 ```bash
 python -m pip install \
   "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+xscientist explore ./my-study
+```
+
+To inspect a complete contested evidence history, run the bundled fixture:
+
+```bash
 xscientist demo ./retrieval-study --autopilot --open
 xscientist status ./retrieval-study
 ```
@@ -24,6 +30,7 @@ software run is therefore not misrepresented as successful scientific closure.
 
 | Goal | Start | Provider needed |
 | --- | --- | --- |
+| Turn your idea into a testable plan | `xscientist explore DIR` | No |
 | See an evidence DAG | `xscientist demo DIR --autopilot` | No |
 | Diagnose a workspace | `xscientist doctor --workspace DIR` | No paid call |
 | Run a guarded study | `xscientist start DIR` | Yes |

@@ -8,6 +8,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- A provider-free `xscientist explore` journey that accepts a user's own idea,
+  asks plain-language falsifiability questions, permits honest incomplete states,
+  and records an exact local research history without generating evidence or
+  conclusions.
 - Provider discovery before workspace creation, including safe local Ollama
   detection and copyable setup commands without reading an unrelated `.env`.
 - Explicit workspace operational states and a compact default status view, with
@@ -20,6 +24,8 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- Model-backed `start` reuses the question from an `explore` workspace and can
+  add missing runtime files without replacing its existing research files.
 - English and Chinese entry documentation is shorter and task-led: the default
   path now centers on `demo`, `start`, `status`, recovery, and audit, while the
   complete research protocol remains linked and available.

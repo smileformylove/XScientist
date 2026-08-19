@@ -7,8 +7,8 @@
 <p align="center"><strong>Autonomous research you can inspect, challenge, and reproduce.</strong></p>
 
 <p align="center">
-  Start with a falsifiable question. Keep the hypotheses, experiments, failures,
-  evidence, reviews, and claims as one versioned scientific history.
+  Bring one idea—even if you do not know models or API keys. Turn it into a
+  falsifiable plan, then keep every test, failure, review, and claim inspectable.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="#start-without-a-provider">Quick start</a> ·
+  <a href="#start-with-your-own-idea--no-api-key">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous study</a> ·
   <a href="#inspect-and-reproduce">Audit</a> ·
   <a href="#installation">Install</a> ·
@@ -42,7 +42,7 @@ whole path as typed, machine-readable research objects.
 This README describes the `0.1.3` release candidate on `main`. PyPI currently
 publishes `0.1.2`; install from `main` to use the workflows below.
 
-## Start without a provider
+## Start with your own idea — no API key
 
 Requirements: Python 3.10+ and Git. No API key, model, Docker, or network call
 is needed after installation.
@@ -50,18 +50,41 @@ is needed after installation.
 ```bash
 python -m pip install \
   "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
+xscientist explore ./my-study
+```
+
+The guided flow uses ordinary questions instead of provider or protocol terms:
+
+- What idea do you want to investigate?
+- What observable change do you expect?
+- What result would make you change your mind?
+- What fair comparison or test could you run first?
+
+You may stop after the first answer and run the same command later. XScientist
+versions the exact state as `idea saved`, `falsifiable`, or `planned`; it never
+fills a blank with invented science. This path uses no provider, makes no model
+call, executes no generated code, and creates no evidence or conclusion.
+
+For a scripted start, the same path is explicit:
+
+```bash
+xscientist explore ./my-study \
+  --idea "Does daily walking improve sleep quality?" \
+  --expect "Daily walking improves a preregistered sleep score." \
+  --disprove "The score is unchanged or worse." \
+  --test "Compare walking and usual-activity periods." \
+  --non-interactive
+```
+
+To see what a complete but contested evidence history looks like, run the
+bundled `$0.00` example:
+
+```bash
 xscientist demo ./first-study --autopilot --open
 xscientist status ./first-study
 ```
 
-In a few seconds you get:
-
-- a versioned study with a failed attempt and both supporting and refuting evidence;
-- an offline evidence DAG and an exact reproduction receipt;
-- `$0.00` model cost and no generated-code execution;
-- one copyable next action.
-
-The demo intentionally ends with “more evidence needed.” Its held-out result
+The demo intentionally ends with “more evidence needed”: held-out evidence
 challenges an over-broad claim. Preserving that conflict is a successful
 scientific outcome, not a software failure.
 
@@ -70,8 +93,13 @@ pipeline, token, or background-run details. Use `--json` for automation.
 
 ## Run an autonomous study
 
-First discover usable providers. This works before a workspace exists and can
-detect a running local Ollama service.
+Offline guidance can structure user-supplied reasoning, but it cannot honestly
+invent domain knowledge, data, or findings. For AI-assisted exploration, add a
+model only after the research question is safely recorded. The same workspace
+can be upgraded without replacing its history.
+
+First discover usable models. This works before a workspace exists and detects
+a running local Ollama service before suggesting hosted services.
 
 ```bash
 xscientist provider list
@@ -79,15 +107,21 @@ xscientist provider list
 
 ### Local model
 
+[Download Ollama](https://ollama.com/download), open a terminal, run `ollama`,
+and choose **Run a model** once. No API key is needed. XScientist then discovers
+the running local model automatically:
+
 ```bash
 python -m pip install \
   "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
-xscientist start ./local-study
+xscientist provider list
+xscientist start ./my-study
 ```
 
 The interactive flow asks only for missing choices: question, provider/model,
 evidence source, local research identity, and optional budget. If one usable
-provider is detected, it is selected automatically.
+provider is detected, it is selected automatically. For an `explore` workspace,
+the saved question is reused and existing research files are preserved.
 
 ### Hosted model
 
@@ -232,7 +266,7 @@ xscientist research merge challenge/boundary --repo ./first-study --preview
 
 ```mermaid
 flowchart TB
-  U["start · status · runs"] --> O["Autonomous research loop"]
+  U["explore · start · status"] --> O["Autonomous research loop"]
   O --> E["Isolated experiments and providers"]
   O --> R["Typed Research Git history"]
   E --> D["Evidence DAG and ARA artifacts"]
@@ -244,6 +278,7 @@ The default path is intentionally small:
 
 | Need | Command |
 | --- | --- |
+| Turn your own idea into a testable plan | `xscientist explore` |
 | Prove the installation | `xscientist demo` |
 | Run or continue research | `xscientist start` |
 | Understand the current state | `xscientist status` |

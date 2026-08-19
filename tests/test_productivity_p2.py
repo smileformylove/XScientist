@@ -113,6 +113,7 @@ class ProductivityP2Tests(unittest.TestCase):
         for shell in ("bash", "zsh", "fish"):
             script = completion_script(shell)
             for command in (
+                "explore",
                 "demo",
                 "start",
                 "status",

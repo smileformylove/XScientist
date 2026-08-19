@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 COMMANDS = (
-    "demo start status runs doctor setup auth provider capability executor research "
+    "explore demo start status runs doctor setup auth provider capability executor research "
     "upgrade conformance benchmark metrics completion info init privacy serve help"
 )
 
@@ -25,6 +25,10 @@ SUBCOMMANDS = {
 }
 
 OPTIONS = {
+    "explore": (
+        "--idea --expect --hypothesis --disprove --falsifier --test --success-rule "
+        "--name --actor --lang --non-interactive --json"
+    ),
     "demo": "--lang --open --autopilot --autopilot-profile --json",
     "start": (
         "--question --autopilot --task --provider --model --user --data-dir "

@@ -1,6 +1,18 @@
 # Getting started
 
-## 1. Prove the installation works at zero cost
+## 1. Start with your own idea at zero cost
+
+No model, API key, Docker installation, or provider configuration is needed:
+
+```bash
+xscientist explore ./my-study
+```
+
+Answer only what you know. The command records the idea first, then guides you
+through an expected observation, a disconfirming result, and a fair first test.
+It does not invent missing answers, evidence, or conclusions.
+
+To inspect a complete provider-free example as well:
 
 ```bash
 xscientist demo ./first-study --autopilot
@@ -11,7 +23,7 @@ xscientist benchmark first-run --max-seconds 30
 Expected outcome: an offline DAG, deterministic runtime receipts, zero model
 cost, and a next action that asks the user to resolve a contested claim.
 
-## 2. Prepare a model-backed workspace
+## 2. Optionally add a model
 
 Install the 0.1.3 release candidate from `main` with exactly one provider
 extra. For a repeatable experiment, replace `main` with a commit hash:
@@ -25,9 +37,10 @@ xscientist start ./my-study
 The latest published PyPI release is `0.1.2`; it does not yet include every
 journey documented on this page.
 
-In a terminal, missing inputs are prompted progressively: question, ready
-provider, model, evidence mode, and optional cost limit. Automation should pass
-the same choices explicitly with `--non-interactive`.
+In a terminal, the question saved by `explore` is reused. Remaining inputs are
+prompted progressively: ready provider/model, evidence mode, and optional cost
+limit. A local Ollama model needs no API key. Automation should pass the same
+choices explicitly with `--non-interactive`.
 
 Before spending money:
 

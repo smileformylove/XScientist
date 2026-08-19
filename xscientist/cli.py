@@ -73,8 +73,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="xscientist",
         description="XScientist SDK, workflow CLI, and API service.",
         epilog=(
-            "Start simple: `xscientist demo ./demo-study`, then use "
-            "`xscientist start --help` for model-backed research."
+            "Start with your own idea: `xscientist explore`, then use "
+            "`xscientist start --help` only when you want model-backed research."
         ),
     )
     parser.add_argument("--version", action="version", version=__version__)
@@ -150,6 +150,44 @@ def _build_parser() -> argparse.ArgumentParser:
 
     info_parser = subparsers.add_parser("info", help="Print installation metadata.")
     info_parser.add_argument("--json", action="store_true", dest="as_json")
+    explore_parser = subparsers.add_parser(
+        "explore",
+        help="Turn your own idea into a testable offline research start.",
+    )
+    explore_parser.add_argument("directory", nargs="?", default="./my-study")
+    explore_parser.add_argument(
+        "--idea", help="the idea or question you want to investigate"
+    )
+    explore_parser.add_argument(
+        "--expect",
+        "--hypothesis",
+        dest="expectation",
+        help="the observable result you expect if the idea is right",
+    )
+    explore_parser.add_argument(
+        "--disprove",
+        "--falsifier",
+        dest="disconfirming_result",
+        help="the result that would make you doubt or reject that expectation",
+    )
+    explore_parser.add_argument(
+        "--test", dest="first_test", help="the first fair comparison or test to run"
+    )
+    explore_parser.add_argument(
+        "--success-rule",
+        help="the rule for deciding what the first test means",
+    )
+    explore_parser.add_argument("--name")
+    explore_parser.add_argument("--actor", default="human:researcher")
+    explore_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
+    explore_parser.add_argument("--git-user-name")
+    explore_parser.add_argument("--git-user-email")
+    explore_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; saving only --idea is valid and honestly incomplete",
+    )
+    explore_parser.add_argument("--json", action="store_true", dest="as_json")
     demo_parser = subparsers.add_parser(
         "demo",
         help="Create a complete provider-free evidence demo and offline DAG.",
@@ -666,6 +704,7 @@ def _print_curated_help(*, include_advanced: bool = False) -> None:
     print("usage: xscientist COMMAND [options]")
     print()
     print("Start here:")
+    print("  explore    Make your own idea testable; no API key needed")
     print("  demo       Create a free, offline contested-evidence example")
     print("  start      Prepare and run one guarded autonomous study")
     print("  status     Show progress, budget, outputs, and the next action")
@@ -701,6 +740,84 @@ def _selected_language(value: str) -> str:
 
     detected = (locale.getlocale()[0] or "en").lower()
     return "zh" if detected.startswith("zh") else "en"
+
+
+def _interactive_explore_inputs(
+    parsed: argparse.Namespace,
+    *,
+    existing: dict[str, object] | None,
+) -> None:
+    """Ask only plain-language questions that are still scientifically missing."""
+
+    interactive = (
+        not parsed.non_interactive and not parsed.as_json and sys.stdin.isatty()
+    )
+    language = _selected_language(parsed.lang)
+    if existing is not None and not parsed.idea:
+        parsed.idea = str(existing["idea"])
+    if not parsed.idea and interactive:
+        parsed.idea = input(
+            "你想研究什么想法或问题？ "
+            if language == "zh"
+            else "What idea or question do you want to investigate? "
+        ).strip()
+    if not parsed.idea:
+        raise ValueError(
+            "--idea is required when input is not interactive"
+            if language == "en"
+            else "非交互模式必须提供 --idea"
+        )
+
+    has_hypothesis = bool(existing and existing.get("hypothesis_id"))
+    has_plan = bool(existing and existing.get("plan_id"))
+    if not has_hypothesis and not parsed.expectation and interactive:
+        parsed.expectation = input(
+            ("如果这个想法成立，你预计能观察到什么变化？" "（暂时不知道可直接回车） ")
+            if language == "zh"
+            else (
+                "If the idea is right, what observable change do you expect? "
+                "(Press Enter to decide later) "
+            )
+        ).strip()
+    if not has_hypothesis and parsed.expectation and not parsed.disconfirming_result:
+        if interactive:
+            parsed.disconfirming_result = input(
+                ("什么结果会让你怀疑或放弃这个预期？" "（暂时不知道可直接回车） ")
+                if language == "zh"
+                else (
+                    "What result would make you doubt or reject that expectation? "
+                    "(Press Enter to decide later) "
+                )
+            ).strip()
+            if not parsed.disconfirming_result:
+                # A one-sided prediction is not persisted as if it were already
+                # falsifiable. The original idea is still saved below.
+                parsed.expectation = None
+        else:
+            raise ValueError("--expect and --disprove must be provided together")
+
+    will_have_hypothesis = has_hypothesis or bool(
+        parsed.expectation and parsed.disconfirming_result
+    )
+    if will_have_hypothesis and not has_plan and not parsed.first_test and interactive:
+        parsed.first_test = input(
+            (
+                "你能先做哪一个公平比较或检验？（暂时不知道可直接回车） "
+                if language == "zh"
+                else (
+                    "What fair comparison or test could you run first? "
+                    "(Press Enter to decide later) "
+                )
+            )
+        ).strip()
+    if parsed.first_test and not parsed.success_rule and interactive:
+        parsed.success_rule = input(
+            (
+                "看到什么结果时，你会认为这次检验支持预期？（可选） "
+                if language == "zh"
+                else ("What result would count as support in this test? (Optional) ")
+            )
+        ).strip()
 
 
 def _command_with_workspace(
@@ -1180,7 +1297,7 @@ def _installation_info() -> dict[str, object]:
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
-        "quickstart": "xscientist demo ./xscientist-demo --autopilot --open",
+        "quickstart": "xscientist explore ./my-study",
         "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
     }
@@ -1824,6 +1941,17 @@ def _run_start(parsed: argparse.Namespace) -> int:
 
     workspace = Path(parsed.directory).expanduser().resolve()
     new_workspace = not (workspace / ".xscientist" / "providers.json").is_file()
+    existing_research = (workspace / "research.yaml").is_file()
+    if not str(parsed.question or "").strip() and existing_research:
+        try:
+            from .research_journey import inspect_idea_research
+
+            parsed.question = inspect_idea_research(workspace)["idea"]
+        except (OSError, ResearchGitError):
+            # A repository created through another workflow may not have the
+            # idea-exploration object. The normal prompt/validation below still
+            # handles it without weakening startup checks.
+            pass
     try:
         _interactive_start_inputs(
             parsed,
@@ -1938,8 +2066,9 @@ def _run_start(parsed: argparse.Namespace) -> int:
         selected_provider, selected_model = validate_provider_model(
             selected_provider, selected_model
         )
+        workspace_creation: dict[str, object] | None = None
         if not config_exists:
-            create_workspace(
+            workspace_creation = create_workspace(
                 workspace,
                 profile=parsed.profile,
                 provider=selected_provider,
@@ -1948,6 +2077,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 task=selected_task,
                 capabilities=selected_capabilities,
                 provider_required=True,
+                preserve_existing=existing_research,
             )
         phases["workspace"] = {
             "ok": True,
@@ -2075,6 +2205,28 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 else ("bundled" if price is not None else None)
             ),
         }
+        if existing_research and workspace_creation is not None:
+            repository = ResearchRepository(workspace)
+            generated_paths = set(workspace_creation["files"]) - set(
+                workspace_creation.get("preserved_files") or []
+            )
+            changed_runtime_paths = [
+                path
+                for path in repository.status()["eligible_changes"]
+                if path in generated_paths
+            ]
+            if changed_runtime_paths:
+                repository.stage(changed_runtime_paths)
+                setup_checkpoint = repository.commit(
+                    stage="setup",
+                    subject="add optional model-backed research runtime",
+                    status="draft",
+                    actor=resolved_actor or None,
+                    staged_only=True,
+                )
+                workspace_phase = phases.get("workspace")
+                if isinstance(workspace_phase, dict):
+                    workspace_phase["checkpoint_id"] = setup_checkpoint.checkpoint_id
         if parsed.max_cost_usd is not None and price is None:
             payload = {
                 "schema": "xscientist.start.v1",
@@ -2264,6 +2416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         in {
             "provider",
             "init",
+            "explore",
             "start",
             "runs",
             "executor",
@@ -2281,7 +2434,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if workspace_state.get("error") and (
         not raw_argv
         or raw_argv[0]
-        not in {"provider", "info", "init", "start", "setup", "doctor", "capability"}
+        not in {
+            "provider",
+            "info",
+            "init",
+            "explore",
+            "start",
+            "setup",
+            "doctor",
+            "capability",
+        }
     ):
         print(
             f"XScientist workspace configuration error: {workspace_state['error']}",
@@ -2741,6 +2903,143 @@ def main(argv: Sequence[str] | None = None) -> int:
             if parsed.metrics_command == "export":
                 for event in payload["events"]:
                     print(json.dumps(event, sort_keys=True))
+        return 0
+    if parsed.command == "explore":
+        from .research_git import ResearchGitError
+        from .research_journey import (
+            explore_research_idea,
+            inspect_idea_research,
+        )
+
+        try:
+            destination = Path(parsed.directory).expanduser()
+            existing = (
+                inspect_idea_research(destination)
+                if (destination / "research.yaml").is_file()
+                else None
+            )
+            _interactive_explore_inputs(parsed, existing=existing)
+            payload = explore_research_idea(
+                destination,
+                idea=parsed.idea,
+                expectation=parsed.expectation,
+                disconfirming_result=parsed.disconfirming_result,
+                first_test=parsed.first_test,
+                success_rule=parsed.success_rule,
+                name=parsed.name,
+                actor=parsed.actor,
+                language=parsed.lang,
+                git_user_name=parsed.git_user_name,
+                git_user_email=parsed.git_user_email,
+            )
+        except (OSError, ResearchGitError, ValueError) as exc:
+            if parsed.as_json:
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": "xscientist.idea-exploration.v1",
+                            "ok": False,
+                            "error_code": "idea_exploration_failed",
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print(f"xscientist explore: {exc}", file=sys.stderr)
+            return 2
+        if parsed.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            language = payload["language"]
+            framing = payload["framing"]
+            complete = {
+                "question": True,
+                "expectation": bool(framing["hypothesis_id"]),
+                "disproof": bool(framing["hypothesis_id"]),
+                "test": bool(framing["plan_id"]),
+            }
+            if language == "zh":
+                print(f"研究工作区：{payload['repository']}")
+                print(f"你的想法：{payload['idea']}")
+                print("严谨性检查：")
+                print("  ✓ 已原样保存研究问题")
+                print(
+                    "  "
+                    + ("✓" if complete["expectation"] else "○")
+                    + " 已说明预期观察到的变化"
+                )
+                print(
+                    "  "
+                    + ("✓" if complete["disproof"] else "○")
+                    + " 已说明什么结果会推翻预期"
+                )
+                print(
+                    "  "
+                    + ("✓" if complete["test"] else "○")
+                    + " 已记录第一个公平比较或检验"
+                )
+                print(
+                    "边界：未调用 API、模型或外部网络，未执行代码，也未生成证据或结论。"
+                )
+                if framing["status"] == "planned":
+                    print(
+                        "提醒：这只是第一版探索计划；运行前仍要检查替代解释、"
+                        "真实数据、指标和独立复核。"
+                    )
+                    print("下一步：先准备真实数据或执行已记录的比较，再记录结果。")
+                    print(f"查看：{payload['status_command']}")
+                else:
+                    print("下一步：继续回答当前缺少的一个问题。")
+                    print(f"继续：{payload['continue_command']}")
+                print(
+                    "可选：需要 AI 自主推进时再运行 `xscientist provider list`；"
+                    "它会优先发现免 Key 的本地 Ollama。"
+                )
+            else:
+                print(f"Research workspace: {payload['repository']}")
+                print(f"Your idea: {payload['idea']}")
+                print("Rigor check:")
+                print("  ✓ Research question saved exactly as supplied")
+                print(
+                    "  "
+                    + ("✓" if complete["expectation"] else "○")
+                    + " Expected observable change stated"
+                )
+                print(
+                    "  "
+                    + ("✓" if complete["disproof"] else "○")
+                    + " Result that would disprove it stated"
+                )
+                print(
+                    "  "
+                    + ("✓" if complete["test"] else "○")
+                    + " First fair comparison or test recorded"
+                )
+                print(
+                    "Boundary: no API, model, external network, or generated code "
+                    "was used; no evidence or conclusion was generated."
+                )
+                if framing["status"] == "planned":
+                    print(
+                        "Reminder: this is a first exploratory plan; check rival "
+                        "explanations, real data, metrics, and independent review "
+                        "before drawing conclusions."
+                    )
+                    print(
+                        "Next: prepare real data or run the recorded comparison, "
+                        "then record the result."
+                    )
+                    print(f"Inspect: {payload['status_command']}")
+                else:
+                    print("Next: answer the next missing framing question.")
+                    print(f"Continue: {payload['continue_command']}")
+                print(
+                    "Optional: run `xscientist provider list` only when you want AI "
+                    "help; it detects key-free local Ollama first."
+                )
+        _record_local_metric("explore", ok=True)
         return 0
     if parsed.command == "demo":
         import webbrowser

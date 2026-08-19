@@ -146,6 +146,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(cli_main(["help", "--all"]), 0)
 
         self.assertIn("Start here:", concise.getvalue())
+        self.assertIn("explore", concise.getvalue())
         self.assertIn("runs", concise.getvalue())
         self.assertNotIn("evolution-gate", concise.getvalue())
         self.assertIn("evolution-gate", advanced.getvalue())

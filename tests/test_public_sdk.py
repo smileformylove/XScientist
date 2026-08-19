@@ -270,7 +270,7 @@ class PublicSdkTests(unittest.TestCase):
         self.assertFalse(payload["host_paths_disclosed"])
         self.assertEqual(
             payload["quickstart"],
-            "xscientist demo ./xscientist-demo --autopilot --open",
+            "xscientist explore ./my-study",
         )
 
     def test_cli_info_human_output_does_not_expose_internal_null_fields(self) -> None:
@@ -286,7 +286,7 @@ class PublicSdkTests(unittest.TestCase):
             "discovered_local_models": ["ollama/qwen2.5:7b"],
             "recommended_install": 'python -m pip install "xscientist[research,openai-compatible]"',
             "recommended_setup": "xscientist setup my-research --provider ollama --model ollama/qwen2.5:7b",
-            "quickstart": "xscientist demo ./xscientist-demo --autopilot --open",
+            "quickstart": "xscientist explore ./my-study",
         }
         output = io.StringIO()
         with (
