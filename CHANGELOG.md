@@ -33,6 +33,10 @@ for its Python package; the ARA protocol has its own version in
   guidance now expose trust and recovery as ordinary workspace actions while
   keeping branches, deep diffs, bundles, and protocol internals under the
   advanced `research` surface.
+- English and Chinese READMEs now share one task-first structure: a four-path
+  start table, inspectable workspace map, current Ollama CLI flow, explicit
+  autonomy boundaries, audit-level semantics, conflict-safe rollback wording,
+  and matching SDK examples without duplicating the command decision tree.
 - Model-backed `start` reuses the question from an `explore` workspace and can
   add missing runtime files without replacing its existing research files.
 - English and Chinese entry documentation is shorter and task-led: the default

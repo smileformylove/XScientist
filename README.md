@@ -4,11 +4,11 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>Autonomous research you can inspect, challenge, and reproduce.</strong></p>
+<p align="center"><strong>From one idea to an inspectable, reproducible, and reversible research history.</strong></p>
 
 <p align="center">
-  Bring one idea—even if you do not know models or API keys. Turn it into a
-  falsifiable plan, then keep every test, failure, review, and claim inspectable.
+  Bring one idea—even if you do not know models or API keys. XScientist helps
+  test it without hiding uncertainty, failed attempts, or contrary evidence.
 </p>
 
 <p align="center">
@@ -31,7 +31,9 @@
 XScientist is a local-first research system and an open scientific protocol. It
 can explore competing explanations, choose informative experiments, execute
 them behind an isolation boundary, criticize its own results, and preserve the
-whole path as typed, machine-readable research objects.
+whole path as typed, machine-readable research objects. A completed run is
+never presented as a verified scientific claim unless its evidence and review
+gates actually pass.
 
 > [!IMPORTANT]
 > XScientist is alpha research software, not an oracle. Autonomous runs may use
@@ -41,6 +43,18 @@ whole path as typed, machine-readable research objects.
 
 This README describes the `0.1.3` release candidate on `main`. PyPI currently
 publishes `0.1.2`; install from `main` to use the workflows below.
+
+## Choose the shortest path
+
+| Your starting point | Run first | Provider or cost | Immediate result |
+| --- | --- | --- | --- |
+| An idea, but no model or API key | `xscientist explore ./my-study` | None | A local, versioned, falsifiable research start |
+| You want to see the system before using your idea | `xscientist demo ./first-study --autopilot --open` | None; `$0.00` | A complete but deliberately contested evidence history |
+| You have a local Ollama model | `xscientist provider list` | Local compute; no hosted key | Detected models and the next setup command |
+| You have a hosted-model key | `xscientist start ./my-study` | May incur provider cost | A guarded autonomous study in the same history |
+
+If you are unsure, start with `explore`. It records what you know and leaves
+unknown fields honestly incomplete.
 
 ## Start with your own idea — no API key
 
@@ -76,6 +90,16 @@ xscientist explore ./my-study \
   --non-interactive
 ```
 
+The workspace is understandable without reading internal logs:
+
+- `question.md` is the human-readable research framing;
+- `research.yaml` records local policy and workspace identity;
+- `.xscientist/objects/` and `checkpoints/` preserve typed decisions and history;
+- the local Git repository has no remote and never pushes itself.
+
+Use `status` and `history` to inspect these records; new users should not need
+to edit the internal object store directly.
+
 To see what a complete but contested evidence history looks like, run the
 bundled `$0.00` example:
 
@@ -107,11 +131,16 @@ xscientist provider list
 
 ### Local model
 
-[Download Ollama](https://ollama.com/download), open a terminal, run `ollama`,
-and choose **Run a model** once. No API key is needed. XScientist then discovers
-the running local model automatically:
+[Install Ollama](https://ollama.com/download), download a local model, and make
+sure its local service is running. The desktop app starts the service; a
+headless setup can use `ollama serve`. No hosted API key is needed. The current
+[official CLI reference](https://docs.ollama.com/cli) uses `ollama pull` to
+download and `ollama ls` to list local models:
 
 ```bash
+ollama pull gemma3
+ollama ls
+
 python -m pip install \
   "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist provider list
@@ -121,7 +150,9 @@ xscientist start ./my-study
 The interactive flow asks only for missing choices: question, provider/model,
 evidence source, local research identity, and optional budget. If one usable
 provider is detected, it is selected automatically. For an `explore` workspace,
-the saved question is reused and existing research files are preserved.
+the saved question is reused and existing research files are preserved. A local
+model removes hosted API cost, but it still uses your machine's compute and
+does not remove Docker isolation requirements for generated experiment code.
 
 ### Hosted model
 
@@ -201,6 +232,11 @@ selected profile, XScientist can:
 5. run independent review roles, repair bounded defects, and stop at hard gates;
 6. package the paper, evidence DAG, provenance, and exact continuation context.
 
+Autonomy does not bypass scientific authority. XScientist does not silently
+invent missing user answers, label synthetic data as empirical, run generated
+code on the host, promote an unreviewed claim, publish research, or push a
+workspace remote.
+
 Profiles expose one meaningful trade-off:
 
 | Profile | Use it for | Emphasis |
@@ -234,6 +270,11 @@ Audit answers three different questions and never conflates them:
 - `replay`: are code, data, environment, seed, and command sufficient to rerun it?
 - `verify`: was the result independently checked under the required gates?
 
+These levels form a one-way ladder: a recorded claim may be traceable without
+being replayable, and replayable without being independently verified. A
+blocked audit is an actionable scientific gap, not necessarily a software
+failure.
+
 Save a meaningful manual change before trying a risky alternative. Rollback is
 preview-only unless `--apply` is explicit. Applying it appends a reversal
 checkpoint: it never deletes or rewrites the original result.
@@ -246,6 +287,10 @@ xscientist history rollback ./first-study --commit HEAD --apply
 ```
 
 Unsaved research changes and the repository's first checkpoint block rollback.
+The preview checks those local prerequisites; reverting an older checkpoint can
+still conflict with newer work, in which case `--apply` stops without discarding
+the current history.
+
 For reproduction, bundles, object inspection, context snapshots, deep diffs,
 and branches, use the advanced protocol surface:
 
@@ -284,19 +329,10 @@ flowchart TB
   D --> A["audit · history · reproduce"]
 ```
 
-The default path is intentionally small:
-
-| Need | Command |
-| --- | --- |
-| Turn your own idea into a testable plan | `xscientist explore` |
-| Prove the installation | `xscientist demo` |
-| Run or continue research | `xscientist start` |
-| Understand the current state | `xscientist status` |
-| Check scientific trust levels | `xscientist audit` |
-| Save or safely reverse a checkpoint | `xscientist history` |
-| Repair configuration | `xscientist doctor --deep` |
-| Inspect a long run | `xscientist runs` |
-| Use the complete research protocol | `xscientist research` |
+The everyday surface stays small: `explore`, `start`, `status`, `audit`, and
+`history`. Readiness repair lives under `doctor`, detached execution under
+`runs`, and the complete scientific protocol under `research`. The first table
+in this README is the only decision tree a new user needs.
 
 The public orchestration surface lives in `xscientist/`, the experiment
 workflow in `ai_scientist/`, and versioned schemas in

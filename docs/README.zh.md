@@ -4,11 +4,11 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>能检查、能挑战、能复现的自主科研。</strong></p>
+<p align="center"><strong>把一个想法变成可检查、可复现、可回滚的科研历史。</strong></p>
 
 <p align="center">
-  只带来一个想法也可以——不要求先懂模型或 API Key。先把它变成可证伪计划，
-  再让每次检验、失败、评审和结论都可检查。
+  只带来一个想法也可以——不要求先懂模型或 API Key。XScientist 会帮助检验它，
+  但不会隐藏不确定性、失败尝试或相反证据。
 </p>
 
 <p align="center">
@@ -16,6 +16,7 @@
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/pyversions/xscientist.svg" alt="Python 版本"></a>
   <a href="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml"><img src="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main" alt="Smoke 检查"></a>
   <a href="https://github.com/smileformylove/XScientist/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 许可证"></a>
+  <a href="https://arxiv.org/abs/2607.12301"><img src="https://img.shields.io/badge/arXiv-2607.12301-b31b1b.svg" alt="arXiv 论文"></a>
 </p>
 
 <p align="center">
@@ -28,7 +29,8 @@
 
 XScientist 既是本地优先的自主科研系统，也是一套开放科学协议。它可以比较竞争
 解释、选择更有信息量的实验、在隔离边界内执行、主动批判结果，并把整个过程保存
-为带类型、机器可读的科研对象。
+为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；只有证据
+和评审门禁真正通过后，系统才会把它标记为已验证。
 
 > [!IMPORTANT]
 > XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
@@ -37,6 +39,17 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 
 本文描述 `main` 上的 `0.1.3` 候选版。PyPI 当前正式版是 `0.1.2`；如需使用下方
 新流程，请从 `main` 安装。
+
+## 先选最短路径
+
+| 你的起点 | 先运行 | Provider 或成本 | 立即得到什么 |
+| --- | --- | --- | --- |
+| 有想法，但没有模型或 API Key | `xscientist explore ./my-study --lang zh` | 无 | 本地保存、带版本、可证伪的科研起点 |
+| 想先看看系统是否实用 | `xscientist demo ./first-study --autopilot --lang zh --open` | 无；`$0.00` | 完整但故意保留争议的证据历史 |
+| 已有本地 Ollama 模型 | `xscientist provider list` | 本地算力；无需托管 Key | 可用模型和下一条配置命令 |
+| 已有托管模型 Key | `xscientist start ./my-study` | 可能产生模型费用 | 在同一历史中启动受控自主科研 |
+
+如果不确定，从 `explore` 开始。它只记录你真正知道的内容，未知项会诚实保持为空。
 
 ## 从自己的想法开始：不需要 API Key
 
@@ -70,6 +83,15 @@ xscientist explore ./my-study \
   --lang zh --non-interactive
 ```
 
+无需阅读内部日志，也能理解工作区：
+
+- `question.md` 保存人可以直接阅读的科研问题；
+- `research.yaml` 保存本地策略与工作区身份；
+- `.xscientist/objects/` 和 `checkpoints/` 保存有类型的决策与历史；
+- 本地 Git 仓库没有远端，也不会自行推送。
+
+日常使用 `status` 和 `history` 查看即可；新用户无需直接修改内部对象仓库。
+
 如果想先看一条完整但存在争议的证据历史，可运行内置 `$0.00` 样例：
 
 ```bash
@@ -98,10 +120,15 @@ xscientist provider list
 
 ### 本地模型
 
-[下载 Ollama](https://ollama.com/download) 后打开终端运行 `ollama`，选择一次
-**Run a model** 即可；不需要 API Key。之后 XScientist 会自动发现本地模型：
+[安装 Ollama](https://ollama.com/download)，下载一个本地模型，并确认本地服务正在
+运行。桌面应用会启动服务；无界面环境可使用 `ollama serve`。这条路径不需要托管
+API Key。当前[官方 CLI 文档](https://docs.ollama.com/cli)使用 `ollama pull` 下载、
+`ollama ls` 查看本地模型：
 
 ```bash
+ollama pull gemma3
+ollama ls
+
 python -m pip install \
   "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist provider list
@@ -110,7 +137,8 @@ xscientist start ./my-study
 
 交互流程只询问缺失的信息：问题、Provider/模型、证据来源、本地科研身份和可选
 预算。如果只发现一个可用 Provider，会自动选择，不要求用户重复确认。对于
-`explore` 创建的工作区，会直接复用已保存的问题，并保留已有科研文件。
+`explore` 创建的工作区，会直接复用已保存的问题，并保留已有科研文件。本地模型
+可以避免托管 API 费用，但仍会占用本机算力；生成实验代码仍需经过 Docker 隔离。
 
 ### 托管模型
 
@@ -186,6 +214,10 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 5. 运行独立评审、有限修复，并在硬门禁处停止；
 6. 打包论文、证据 DAG、来源信息和精确续研上下文。
 
+自主不等于绕过科研权限。XScientist 不会静默编造用户没有回答的内容，不会把合成
+数据冒充真实数据，不会在宿主机直接执行生成代码，不会晋级未经评审的结论，也不会
+自行发表研究或推送工作区远端。
+
 | Profile | 适用场景 | 侧重点 |
 | --- | --- | --- |
 | `balanced` | 第一次完整研究 | 有界搜索和标准评审 |
@@ -213,6 +245,9 @@ xscientist audit ./first-study --level verify
 - `replay`：代码、数据、环境、随机种子和命令是否足以重跑？
 - `verify`：是否经过了要求的独立验证门禁？
 
+三个层级只能逐级增强：已记录的结论可能可追踪但不可重放，也可能可重放但尚未经过
+独立验证。审计显示阻塞，通常意味着存在明确的科研缺口，不一定是软件运行失败。
+
 手工修改到达一个有意义的状态时，可以先保存检查点，再尝试风险更高的替代方案。
 回滚默认只预览；显式使用 `--apply` 后也只会追加一条反向检查点，不删除、不改写
 原始结果。
@@ -224,8 +259,10 @@ xscientist history rollback ./first-study --commit HEAD
 xscientist history rollback ./first-study --commit HEAD --apply
 ```
 
-尚未保存的科研改动和仓库的第一个检查点都会阻止回滚。复现、打包、对象检查、
-决策上下文、深度差异与分支仍保留在完整协议入口中：
+尚未保存的科研改动和仓库的第一个检查点都会阻止回滚。预览会检查这些本地前置
+条件；撤销较早的检查点仍可能与后续工作冲突，此时
+`--apply` 会停止，不会丢弃当前历史。复现、打包、对象检查、决策上下文、深度差异
+与分支仍保留在完整协议入口中：
 
 ```bash
 xscientist research reproduce HEAD --repo ./first-study --execute --record \
@@ -260,17 +297,9 @@ flowchart TB
   D --> A["审计 · 历史 · 复现"]
 ```
 
-| 需求 | 日常命令 |
-| --- | --- |
-| 把自己的想法变成可检验计划 | `xscientist explore` |
-| 验证安装 | `xscientist demo` |
-| 运行或继续研究 | `xscientist start` |
-| 理解当前状态 | `xscientist status` |
-| 检查科研可信度层级 | `xscientist audit` |
-| 保存或安全撤销检查点 | `xscientist history` |
-| 修复配置 | `xscientist doctor --deep` |
-| 管理长任务 | `xscientist runs` |
-| 使用完整科研协议 | `xscientist research` |
+日常入口只保留 `explore`、`start`、`status`、`audit` 和 `history`。环境修复放在
+`doctor`，后台运行放在 `runs`，完整科研协议放在 `research`。文档开头的路径表就是
+新用户需要的全部决策树。
 
 公开编排层位于 `xscientist/`，实验工作流位于 `ai_scientist/`，版本化协议位于
 `ai_scientist/protocol/`。更多细节见[架构文档](ARCHITECTURE.md)。
@@ -315,7 +344,23 @@ flowchart TB
 敏感领域应把 XScientist 视为科研基础设施，而不是领域专家、伦理审查或合规验证的
 替代品。
 
-## 文档与项目状态
+## SDK 与文档
+
+```python
+from xscientist import ProjectRequest, XScientist
+
+client = XScientist(output_root="./research-output")
+result = client.run_project(
+    ProjectRequest(
+        project="retrieval-study",
+        question="检索增强反思会在什么条件下失效？",
+        autopilot="discovery",
+        allow_synthetic_data=True,
+        max_cost_usd=10,
+    )
+)
+print(result.returncode)
+```
 
 | 需求 | 文档 |
 | --- | --- |
@@ -327,6 +372,8 @@ flowchart TB
 
 日常命令看 `xscientist --help`；完整科研协议命令看
 `xscientist research --help`。
+
+## 项目状态
 
 项目处于积极开发的 Alpha 阶段。贡献需包含测试，保持协议和 schema 兼容，并且
 不能削弱来源追踪、隔离、成本或科学门禁。参见
