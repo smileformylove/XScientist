@@ -74,6 +74,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/run_control.py",
             "xscientist/upgrade_check.py",
             "xscientist/usage_metrics.py",
+            "xscientist/workspace_history.py",
             "xscientist/workspace_status.py",
             "ai_scientist/resources/configs/bfts_default.yaml",
             "ai_scientist/protocol/schemas/research_closure.schema.json",
@@ -162,13 +163,27 @@ import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import xscientist
-from xscientist import ResearchEvolution, ResearchLifecycle, ResearchRepository
+from xscientist import (
+    ResearchEvolution,
+    ResearchLifecycle,
+    ResearchRepository,
+    inspect_workspace_history,
+    preview_workspace_rollback,
+    rollback_workspace_checkpoint,
+    save_workspace_checkpoint,
+)
 from xscientist.cli import main as cli_main
 from xscientist.research_authority import require_independent_evaluator
 from ai_scientist.protocol.schemas import available_schemas, load_schema
 from ai_scientist.resources import bfts_config_path, latex_template_dir
 assert xscientist.__version__
 assert all((ResearchRepository, ResearchLifecycle, ResearchEvolution))
+assert all(callable(item) for item in (
+    inspect_workspace_history,
+    preview_workspace_rollback,
+    rollback_workspace_checkpoint,
+    save_workspace_checkpoint,
+))
 assert callable(require_independent_evaluator)
 assert load_schema("manifest")["type"] == "object"
 assert "context_pack" in available_schemas()
@@ -204,6 +219,19 @@ with contextlib.redirect_stdout(human_status_output):
 assert human_status_exit == 0
 assert "Scientific progress:" in human_status_output.getvalue()
 assert "Resolve or narrow the contested claim" in human_status_output.getvalue()
+history_output = io.StringIO()
+with contextlib.redirect_stdout(history_output):
+    history_exit = cli_main(["history", "list", str(demo_root), "--json"])
+history = json.loads(history_output.getvalue())
+assert history_exit == 0 and history["entries"]
+assert history["auto_push"] is False
+assert history["pending"]["eligible"] == []
+audit_output = io.StringIO()
+with contextlib.redirect_stdout(audit_output):
+    audit_exit = cli_main(["audit", str(demo_root), "--level", "trace", "--json"])
+audit = json.loads(audit_output.getvalue())
+assert audit_exit == 0 and audit["target_level"] == "trace"
+assert audit["integrity"]["ok"] is True and audit["payloads_disclosed"] is False
 completion_output = io.StringIO()
 with contextlib.redirect_stdout(completion_output):
     assert cli_main(["completion", "bash"]) == 0
@@ -236,6 +264,7 @@ print(json.dumps({
     "demo_nodes": demo["dag"]["nodes"],
     "demo_closure": demo["dag"]["closure"],
     "human_cli_smoke": True,
+    "history_cli_smoke": True,
 }))
 """
         try:

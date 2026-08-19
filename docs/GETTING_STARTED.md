@@ -70,7 +70,29 @@ xscientist runs resume RUN_ID --workspace ./my-study
 Detached run metadata is local and private. Public run views omit the research
 question and exact resume arguments.
 
-## 4. Keep the installation healthy
+## 4. Audit, save, and recover
+
+The everyday history surface is intentionally small:
+
+```bash
+xscientist history list ./my-study
+xscientist audit ./my-study --level trace
+xscientist audit ./my-study --level replay
+xscientist audit ./my-study --level verify
+
+xscientist history save ./my-study -m "record corrected measurement rule"
+xscientist history rollback ./my-study --commit HEAD
+```
+
+The rollback command above is a read-only preview. It reports the exact target,
+scientific impact, blockers, and an apply command. `--apply` appends a reversal
+checkpoint instead of deleting history. It refuses unsaved research changes
+and never permits the repository's first checkpoint to be reversed.
+
+Use `xscientist research --help` only when you need branching, deep semantic
+diffs, reproduction execution, bundles, or other protocol-level controls.
+
+## 5. Keep the installation healthy
 
 ```bash
 xscientist upgrade check --workspace ./my-study

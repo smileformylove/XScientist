@@ -222,12 +222,10 @@ GitHub account or remote is required, and XScientist never pushes research by
 itself.
 
 ```bash
-xscientist research log --repo ./first-study --limit 20
-xscientist research show HEAD --repo ./first-study
-xscientist research diff HEAD~1 HEAD --repo ./first-study --deep
-xscientist research objects --repo ./first-study --kind evidence
-xscientist research context @latest:claim \
-  --repo ./first-study --intent continue --budget 8000 --record
+xscientist history list ./first-study
+xscientist audit ./first-study --level trace
+xscientist audit ./first-study --level replay
+xscientist audit ./first-study --level verify
 ```
 
 Audit answers three different questions and never conflates them:
@@ -236,12 +234,24 @@ Audit answers three different questions and never conflates them:
 - `replay`: are code, data, environment, seed, and command sufficient to rerun it?
 - `verify`: was the result independently checked under the required gates?
 
+Save a meaningful manual change before trying a risky alternative. Rollback is
+preview-only unless `--apply` is explicit. Applying it appends a reversal
+checkpoint: it never deletes or rewrites the original result.
+
 ```bash
-xscientist research audit --repo ./first-study --level trace
-xscientist research audit --repo ./first-study --level replay
-xscientist research audit --repo ./first-study --level verify
+xscientist history save ./first-study -m "record corrected measurement rule"
+xscientist history rollback ./first-study --commit HEAD
+# Review the target, impact, blockers, and generated apply command first.
+xscientist history rollback ./first-study --commit HEAD --apply
+```
+
+Unsaved research changes and the repository's first checkpoint block rollback.
+For reproduction, bundles, object inspection, context snapshots, deep diffs,
+and branches, use the advanced protocol surface:
+
+```bash
 xscientist research reproduce HEAD --repo ./first-study --execute --record \
-  --reproduces @latest:claim
+  --reproduces @latest:claim --verifier human:REPRODUCER
 
 xscientist research bundle --repo ./first-study --dest ./study-backup
 xscientist research export --repo ./first-study --dest ./exchange
@@ -271,7 +281,7 @@ flowchart TB
   O --> R["Typed Research Git history"]
   E --> D["Evidence DAG and ARA artifacts"]
   R --> D
-  D --> A["audit · reproduce · export"]
+  D --> A["audit · history · reproduce"]
 ```
 
 The default path is intentionally small:
@@ -282,9 +292,11 @@ The default path is intentionally small:
 | Prove the installation | `xscientist demo` |
 | Run or continue research | `xscientist start` |
 | Understand the current state | `xscientist status` |
+| Check scientific trust levels | `xscientist audit` |
+| Save or safely reverse a checkpoint | `xscientist history` |
 | Repair configuration | `xscientist doctor --deep` |
 | Inspect a long run | `xscientist runs` |
-| Audit scientific history | `xscientist research` |
+| Use the complete research protocol | `xscientist research` |
 
 The public orchestration surface lives in `xscientist/`, the experiment
 workflow in `ai_scientist/`, and versioned schemas in

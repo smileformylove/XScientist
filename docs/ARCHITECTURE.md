@@ -18,6 +18,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Manager CLI | `ai_scientist/apps/manager_cli.py` | Internal adapter | Argument parsing and terminal presentation for `ResearchManager` |
 | HTTP job runtime | `xscientist/service_jobs.py` | Internal to public service | Persistent job model, thread-pool execution, output truncation, and restart recovery |
 | Native Research VCS | `xscientist/research_vcs.py`, `xscientist/research_lifecycle.py`, `xscientist/research_evolution.py` | Semver-managed public API | Typed objects, semantic staging/diff/merge, evidence gates, self-evolution promotion, and rollback |
+| Workspace history facade | `xscientist/workspace_history.py` | Semver-managed public API | Small payload-free view/save/preview/reversal API over Research VCS; no persistence logic |
 | Guided research journey | `xscientist/research_journey.py` | Semver-managed public API | Plain-language start, progress, falsification warnings, and exact next actions |
 | Unified scientific DAG | `xscientist/research_dag.py` | Artifact-compatible public projection | Research VCS + ARA evidence/evolution graph, layered proof checks, JSON, and offline browser |
 | Platform adapter boundary | `xscientist/research_adapters.py` | Versioned plugin protocol | Safe discovery, conformance, explicit publication, and hash-bound receipts |
@@ -79,6 +80,12 @@ immutable payloads remain in `.ara-store/`. The current Git adapter uses a
 deny-first file policy, refuses external staged state, creates no remote, and
 enforces `auto_push: false`. See
 [Native Research Version Control](LOCAL_RESEARCH_GIT.md).
+
+`workspace_history.py` is a deliberately thin facade over that public VCS. It
+adds no second state store: beginner operations inspect the same checkpoints,
+save selected or policy-eligible paths, preview one exact reversal, and append
+a `revert` checkpoint only after explicit confirmation. Advanced callers keep
+using `ResearchRepository` and the full protocol without translation loss.
 
 The DAG projection reads one immutable Research VCS ref and never mutates it.
 ARA experiment graphs join only through matching manifest hashes. External

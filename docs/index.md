@@ -32,6 +32,8 @@ software run is therefore not misrepresented as successful scientific closure.
 | --- | --- | --- |
 | Turn your idea into a testable plan | `xscientist explore DIR` | No |
 | See an evidence DAG | `xscientist demo DIR --autopilot` | No |
+| Audit trace/replay/verification | `xscientist audit DIR` | No |
+| Save or safely reverse history | `xscientist history` | No |
 | Diagnose a workspace | `xscientist doctor --workspace DIR` | No paid call |
 | Run a guarded study | `xscientist start DIR` | Yes |
 | Manage a long run | `xscientist runs list --workspace DIR` | No additional call |

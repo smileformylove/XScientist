@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 COMMANDS = (
-    "explore demo start status runs doctor setup auth provider capability executor research "
+    "explore demo start status audit history runs doctor setup auth provider capability executor research "
     "upgrade conformance benchmark metrics completion info init privacy serve help"
 )
 
@@ -18,6 +18,7 @@ SUBCOMMANDS = {
     "metrics": "status enable disable export",
     "capability": "list check",
     "privacy": "audit",
+    "history": "list save rollback",
     "research": (
         "guide start hypothesis plan preregister experiment evidence infer review "
         "claim status log dag"
@@ -35,7 +36,9 @@ OPTIONS = {
         "--allow-synthetic-data --max-project-tokens --max-project-hours "
         "--max-cost-usd --non-interactive --force --detach --prepare-only --json"
     ),
-    "status": "--lang --json",
+    "status": "--lang --verbose --json",
+    "audit": "--ref --level --no-objects --json",
+    "history": "--limit --message --summary --actor --commit --apply --json",
     "runs": "--workspace --json --interval --stream --tail --force",
     "doctor": "--workspace --task --provider --deep --json",
     "setup": "--task --provider --model --skip-credentials --deep --json",

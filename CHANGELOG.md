@@ -8,6 +8,11 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- A compact `xscientist audit` facade and `xscientist history` workflow for
+  checkpoint listing, policy-safe saves, payload-free rollback previews, and
+  explicit append-only reversals that never rewrite scientific history.
+- Public workspace-history SDK functions so integrations can reuse the same
+  safe view/save/preview/rollback semantics without invoking the CLI.
 - A provider-free `xscientist explore` journey that accepts a user's own idea,
   asks plain-language falsifiability questions, permits honest incomplete states,
   and records an exact local research history without generating evidence or
@@ -24,6 +29,10 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- Default help, shell completion, English/Chinese onboarding, and architecture
+  guidance now expose trust and recovery as ordinary workspace actions while
+  keeping branches, deep diffs, bundles, and protocol internals under the
+  advanced `research` surface.
 - Model-backed `start` reuses the question from an `explore` workspace and can
   add missing runtime files without replacing its existing research files.
 - English and Chinese entry documentation is shorter and task-led: the default

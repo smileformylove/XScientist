@@ -220,6 +220,51 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also show branch, pipeline, token, and background-run details",
     )
     status_parser.add_argument("--json", action="store_true", dest="as_json")
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Check traceability, replayability, or independent verification.",
+    )
+    audit_parser.add_argument("workspace", nargs="?", default=".")
+    audit_parser.add_argument("--ref", default="HEAD")
+    audit_parser.add_argument(
+        "--level", choices=["trace", "replay", "verify"], default="trace"
+    )
+    audit_parser.add_argument("--no-objects", action="store_true")
+    audit_parser.add_argument("--json", action="store_true", dest="as_json")
+    history_parser = subparsers.add_parser(
+        "history",
+        help="Review, save, or safely roll back local scientific history.",
+    )
+    history_subparsers = history_parser.add_subparsers(
+        dest="history_command", required=True
+    )
+    history_list = history_subparsers.add_parser(
+        "list", help="Show checkpoints and unsaved research changes."
+    )
+    history_list.add_argument("workspace", nargs="?", default=".")
+    history_list.add_argument("--limit", type=int, default=20)
+    history_list.add_argument("--json", action="store_true", dest="as_json")
+    history_save = history_subparsers.add_parser(
+        "save", help="Save selected or eligible research changes as one checkpoint."
+    )
+    history_save.add_argument("workspace", nargs="?", default=".")
+    history_save.add_argument("-m", "--message", default="save current research state")
+    history_save.add_argument("--summary", default="")
+    history_save.add_argument("--actor")
+    history_save.add_argument("--json", action="store_true", dest="as_json")
+    history_rollback = history_subparsers.add_parser(
+        "rollback",
+        help="Preview or append a reversal checkpoint without rewriting history.",
+    )
+    history_rollback.add_argument("workspace", nargs="?", default=".")
+    history_rollback.add_argument("--commit", default="HEAD")
+    history_rollback.add_argument("-m", "--message")
+    history_rollback.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the previewed reversal as a new checkpoint",
+    )
+    history_rollback.add_argument("--json", action="store_true", dest="as_json")
     runs_parser = subparsers.add_parser(
         "runs",
         help="Start, inspect, watch, cancel, and resume detached research runs.",
@@ -719,8 +764,10 @@ def _print_curated_help(*, include_advanced: bool = False) -> None:
     print("  upgrade    Check package and workspace compatibility (read-only)")
     print("  completion Generate bash, zsh, or fish completion")
     print()
-    print("Scientific history:")
-    print("  research   Plan, record, review, branch, diff, and reproduce")
+    print("Trust and recovery:")
+    print("  audit      Check traceability, replayability, and independent review")
+    print("  history    Review, save, or safely roll back scientific checkpoints")
+    print("  research   Use advanced planning, review, branching, and reproduction")
     if include_advanced:
         print()
         print("Advanced and compatibility commands:")
@@ -2417,6 +2464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "provider",
             "init",
             "explore",
+            "audit",
+            "history",
             "start",
             "runs",
             "executor",
@@ -3135,6 +3184,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
         _record_local_metric("demo", ok=True)
         return 0
+    if parsed.command == "audit":
+        forwarded = [
+            "audit",
+            parsed.ref,
+            "--repo",
+            parsed.workspace,
+            "--level",
+            parsed.level,
+        ]
+        if parsed.no_objects:
+            forwarded.append("--no-objects")
+        if parsed.as_json:
+            forwarded.append("--json")
+        return research_main(forwarded)
+    if parsed.command == "history":
+        from .workspace_history import run_history_cli
+
+        return run_history_cli(parsed)
     if parsed.command == "status":
         from .workspace_status import build_workspace_status
 

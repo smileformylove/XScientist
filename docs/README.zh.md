@@ -201,12 +201,10 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 当前的本地存储适配器；无需 GitHub 账号或远端，XScientist 也不会自行推送研究。
 
 ```bash
-xscientist research log --repo ./first-study --limit 20
-xscientist research show HEAD --repo ./first-study
-xscientist research diff HEAD~1 HEAD --repo ./first-study --deep
-xscientist research objects --repo ./first-study --kind evidence
-xscientist research context @latest:claim \
-  --repo ./first-study --intent continue --budget 8000 --record
+xscientist history list ./first-study
+xscientist audit ./first-study --level trace
+xscientist audit ./first-study --level replay
+xscientist audit ./first-study --level verify
 ```
 
 审计会严格区分三个问题：
@@ -215,12 +213,23 @@ xscientist research context @latest:claim \
 - `replay`：代码、数据、环境、随机种子和命令是否足以重跑？
 - `verify`：是否经过了要求的独立验证门禁？
 
+手工修改到达一个有意义的状态时，可以先保存检查点，再尝试风险更高的替代方案。
+回滚默认只预览；显式使用 `--apply` 后也只会追加一条反向检查点，不删除、不改写
+原始结果。
+
 ```bash
-xscientist research audit --repo ./first-study --level trace
-xscientist research audit --repo ./first-study --level replay
-xscientist research audit --repo ./first-study --level verify
+xscientist history save ./first-study -m "记录修正后的测量规则"
+xscientist history rollback ./first-study --commit HEAD
+# 先检查目标、影响、阻塞项以及自动生成的执行命令。
+xscientist history rollback ./first-study --commit HEAD --apply
+```
+
+尚未保存的科研改动和仓库的第一个检查点都会阻止回滚。复现、打包、对象检查、
+决策上下文、深度差异与分支仍保留在完整协议入口中：
+
+```bash
 xscientist research reproduce HEAD --repo ./first-study --execute --record \
-  --reproduces @latest:claim
+  --reproduces @latest:claim --verifier human:REPRODUCER
 
 xscientist research bundle --repo ./first-study --dest ./study-backup
 xscientist research export --repo ./first-study --dest ./exchange
@@ -248,7 +257,7 @@ flowchart TB
   O --> R["有类型的科研 Git 历史"]
   E --> D["证据 DAG 与 ARA 产物"]
   R --> D
-  D --> A["审计 · 复现 · 导出"]
+  D --> A["审计 · 历史 · 复现"]
 ```
 
 | 需求 | 日常命令 |
@@ -257,9 +266,11 @@ flowchart TB
 | 验证安装 | `xscientist demo` |
 | 运行或继续研究 | `xscientist start` |
 | 理解当前状态 | `xscientist status` |
+| 检查科研可信度层级 | `xscientist audit` |
+| 保存或安全撤销检查点 | `xscientist history` |
 | 修复配置 | `xscientist doctor --deep` |
 | 管理长任务 | `xscientist runs` |
-| 审计科研历史 | `xscientist research` |
+| 使用完整科研协议 | `xscientist research` |
 
 公开编排层位于 `xscientist/`，实验工作流位于 `ai_scientist/`，版本化协议位于
 `ai_scientist/protocol/`。更多细节见[架构文档](ARCHITECTURE.md)。

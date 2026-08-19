@@ -38,6 +38,12 @@ if TYPE_CHECKING:
     )
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
+    from .workspace_history import (
+        inspect_workspace_history,
+        preview_workspace_rollback,
+        rollback_workspace_checkpoint,
+        save_workspace_checkpoint,
+    )
 
 _MODEL_EXPORTS = {"CommandResult", "ProjectRequest", "ServiceSettings"}
 _DISCOVERY_EXPORTS = {
@@ -116,6 +122,15 @@ def __getattr__(name: str) -> Any:
         from .research_tools import ingest_tool_evidence
 
         value = ingest_tool_evidence
+    elif name in {
+        "inspect_workspace_history",
+        "preview_workspace_rollback",
+        "rollback_workspace_checkpoint",
+        "save_workspace_checkpoint",
+    }:
+        from . import workspace_history
+
+        value = getattr(workspace_history, name)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals()[name] = value
@@ -155,7 +170,9 @@ __all__ = [
     "render_research_context_for_prompt",
     "start_guided_research",
     "ingest_tool_evidence",
+    "inspect_workspace_history",
     "inspect_claim_depth",
+    "preview_workspace_rollback",
     "rank_experiment_candidates",
     "research_strategy_template",
     "review_research_program",
@@ -167,7 +184,9 @@ __all__ = [
     "save_mechanism_model",
     "save_posterior_update",
     "save_transfer_matrix",
+    "save_workspace_checkpoint",
     "scan_research_anomalies",
+    "rollback_workspace_checkpoint",
     "__version__",
     "create_app",
 ]

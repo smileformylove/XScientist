@@ -16,6 +16,19 @@ The design separates three concerns:
 | Local CAS | Datasets, models, binaries, full logs, and other immutable payloads | Complete storage without inflating Git |
 | Git adapter | Durable commit graph and optional interoperability | Replaceable implementation detail |
 
+For everyday use, the small facade is usually enough:
+
+```bash
+xscientist history list ./my-research
+xscientist history save ./my-research -m "record measurement decision"
+xscientist history rollback ./my-research --commit HEAD
+xscientist audit ./my-research --level trace
+```
+
+Rollback is preview-only by default and appends a reversal checkpoint only with
+`--apply`; it never rewrites history. The rest of this page documents the full
+protocol surface for advanced workflows and integrations.
+
 XScientist never creates a remote and never pushes automatically. Every backend
 mutation is scoped to the research repository and uses an explicit privacy and
 file policy; it never stages the whole working tree implicitly.

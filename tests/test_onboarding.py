@@ -148,6 +148,8 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Start here:", concise.getvalue())
         self.assertIn("explore", concise.getvalue())
         self.assertIn("runs", concise.getvalue())
+        self.assertIn("audit", concise.getvalue())
+        self.assertIn("history", concise.getvalue())
         self.assertNotIn("evolution-gate", concise.getvalue())
         self.assertIn("evolution-gate", advanced.getvalue())
 

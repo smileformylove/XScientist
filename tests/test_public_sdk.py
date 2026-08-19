@@ -32,6 +32,10 @@ class PublicSdkTests(unittest.TestCase):
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
         self.assertTrue(callable(xscientist.build_research_guide))
+        self.assertTrue(callable(xscientist.inspect_workspace_history))
+        self.assertTrue(callable(xscientist.save_workspace_checkpoint))
+        self.assertTrue(callable(xscientist.preview_workspace_rollback))
+        self.assertTrue(callable(xscientist.rollback_workspace_checkpoint))
 
     def test_packaged_runtime_resources_exist(self) -> None:
         self.assertTrue(bfts_config_path("default").is_file())
