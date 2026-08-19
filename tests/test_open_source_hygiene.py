@@ -4,6 +4,8 @@ import re
 import unittest
 from pathlib import Path
 
+from xscientist._version import __version__
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
@@ -155,10 +157,11 @@ class OpenSourceHygieneTests(unittest.TestCase):
             self.assertIn("PyPI", text)
         english = self.readme_path.read_text(encoding="utf-8")
         chinese = self.chinese_readme_path.read_text(encoding="utf-8")
-        self.assertIn("xscientist==0.1.2", english)
-        self.assertIn("`0.1.3` release candidate", english)
-        self.assertIn("xscientist==0.1.2", chinese)
-        self.assertIn("`0.1.3` 候选版", chinese)
+        install_spec = f"xscientist=={__version__}"
+        self.assertIn(install_spec, english)
+        self.assertIn(f"published `{__version__}` release", english)
+        self.assertIn(install_spec, chinese)
+        self.assertIn(f"`{__version__}` 正式版", chinese)
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (
