@@ -4,7 +4,7 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>From one idea to an inspectable, reproducible, and reversible research history.</strong></p>
+<p align="center"><strong>From one idea to a Git-like research history: inspectable, reproducible, and reversible.</strong></p>
 
 <p align="center">
   Bring one idea—even if you do not know models or API keys. XScientist helps

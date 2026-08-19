@@ -4,7 +4,7 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>把一个想法变成可检查、可复现、可回滚的科研历史。</strong></p>
+<p align="center"><strong>把一个想法变成 Git 式科研历史：可检查、可复现、可回滚。</strong></p>
 
 <p align="center">
   只带来一个想法也可以——不要求先懂模型或 API Key。XScientist 会帮助检验它，
