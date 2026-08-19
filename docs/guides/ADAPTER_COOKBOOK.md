@@ -85,10 +85,15 @@ options=...)` using `ResearchAdapterDescriptor`. Test the object with
 `validate_research_adapter()`, then run:
 
 ```bash
+xscientist info --json
 xscientist research adapter list
 xscientist research adapter doctor lab-platform
 xscientist research adapter sync lab-platform --repo ./study --dest lab://study-42
 ```
+
+`info --json` exposes the adapter API version, entry-point group, and available
+adapters without importing third-party plugin code. This makes installation
+discovery safe for package managers, launchers, and automated diagnostics.
 
 `publish` receives only a temporary committed exchange package. Returned data
 must not contain credentials; XScientist rejects a sensitive result rather than

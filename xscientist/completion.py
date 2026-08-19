@@ -18,7 +18,7 @@ SUBCOMMANDS = {
     "metrics": "status enable disable export",
     "capability": "list check",
     "privacy": "audit",
-    "history": "list save rollback",
+    "history": "list show diff save rollback",
     "research": (
         "guide start hypothesis plan preregister experiment evidence infer review "
         "claim status log dag"
@@ -38,7 +38,9 @@ OPTIONS = {
     ),
     "status": "--lang --verbose --json",
     "audit": "--ref --level --no-objects --json",
-    "history": "--limit --message --summary --actor --commit --apply --json",
+    "history": (
+        "--limit --message --summary --actor --commit --from --to --deep --apply --json"
+    ),
     "runs": "--workspace --json --interval --stream --tail --force",
     "doctor": "--workspace --task --provider --deep --json",
     "setup": "--task --provider --model --skip-credentials --deep --json",

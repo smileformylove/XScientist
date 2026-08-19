@@ -1048,8 +1048,36 @@ def audit_research_closure(
     return result
 
 
+def summarize_closure_levels(report: Mapping[str, Any]) -> dict[str, bool]:
+    """Derive the monotonic trace → replay → verify ladder from one audit.
+
+    Keeping this calculation beside the closure model prevents status, audit,
+    and future clients from assigning different meanings to the same gates.
+    """
+
+    claims = list(report.get("claims") or [])
+    integrity_ok = not (report.get("integrity") or {}).get("errors")
+    trace_complete = (
+        bool(claims)
+        and integrity_ok
+        and all(bool(item.get("trace_complete")) for item in claims)
+    )
+    replay_complete = trace_complete and all(
+        bool(item.get("replay_ready")) for item in claims
+    )
+    verification_complete = replay_complete and all(
+        bool(item.get("verified")) for item in claims
+    )
+    return {
+        "trace": trace_complete,
+        "replay": replay_complete,
+        "verify": verification_complete,
+    }
+
+
 __all__ = [
     "RESEARCH_CLOSURE_LEVELS",
     "RESEARCH_CLOSURE_SCHEMA",
     "audit_research_closure",
+    "summarize_closure_levels",
 ]

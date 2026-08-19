@@ -75,7 +75,10 @@ question and exact resume arguments.
 The everyday history surface is intentionally small:
 
 ```bash
+xscientist status ./my-study
 xscientist history list ./my-study
+xscientist history show ./my-study --commit HEAD
+xscientist history diff ./my-study --from HEAD^ --to HEAD
 xscientist audit ./my-study --level trace
 xscientist audit ./my-study --level replay
 xscientist audit ./my-study --level verify
@@ -84,10 +87,17 @@ xscientist history save ./my-study -m "record corrected measurement rule"
 xscientist history rollback ./my-study --commit HEAD
 ```
 
+`status` is the default review page: it shows the current checkpoint, pending
+research changes, and the trace/replay/verify check ladder. `show` inspects one
+checkpoint and `diff` explains the scientific change between two checkpoints.
+
 The rollback command above is a read-only preview. It reports the exact target,
 scientific impact, blockers, and an apply command. `--apply` appends a reversal
-checkpoint instead of deleting history. It refuses unsaved research changes
-and never permits the repository's first checkpoint to be reversed.
+checkpoint instead of deleting history. It refuses tracked, staged, selected,
+or policy-eligible unsaved research changes and never permits the repository's
+first checkpoint to be reversed. Generated DAG views are preserved; if a view
+represents an older checkpoint, `status` marks it stale and prints the refresh
+command.
 
 Use `xscientist research --help` only when you need branching, deep semantic
 diffs, reproduction execution, bundles, or other protocol-level controls.

@@ -42,6 +42,11 @@ The P0–P2 product work identified below is now implemented on `main`:
 - durable cross-process feedback with honest unknown/corruption states;
 - separate traceability, replayability, and verification closure reporting;
 - persistent readiness blockers and bounded scientific-strategy follow-ups.
+- a GitHub-like default review surface showing clean/pending history,
+  trace/replay/verify checks, compact checkpoint diffs, and stale DAG views;
+- rollback that preserves policy-excluded generated views while atomically
+  reversing checkpoints that added, changed, or removed tracked research files;
+- machine-readable adapter API discovery through `xscientist info --json`.
 
 The remaining adoption work is empirical: collect opt-in aggregate funnel
 counts from willing users, publish multiple real domain studies with their cost
@@ -206,8 +211,8 @@ Remaining friction:
 - the conformance kit and built-in adapter examples still need adoption by
   independent producers;
 - third-party adapter examples are less prominent than the built-in implementation;
-- capability negotiation and protocol version compatibility need a compact
-  machine-readable discovery document.
+- third-party consumers still need to adopt the advertised adapter entry point
+  and conformance fixtures before ecosystem compatibility is proven in use.
 
 ### Small CLI consistency gaps found during this audit
 

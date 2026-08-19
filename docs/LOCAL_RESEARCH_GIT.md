@@ -19,15 +19,27 @@ The design separates three concerns:
 For everyday use, the small facade is usually enough:
 
 ```bash
+xscientist status ./my-research
 xscientist history list ./my-research
+xscientist history show ./my-research --commit HEAD
+xscientist history diff ./my-research
 xscientist history save ./my-research -m "record measurement decision"
 xscientist history rollback ./my-research --commit HEAD
 xscientist audit ./my-research --level trace
 ```
 
 Rollback is preview-only by default and appends a reversal checkpoint only with
-`--apply`; it never rewrites history. The rest of this page documents the full
-protocol surface for advanced workflows and integrations.
+`--apply`; it never rewrites history. Tracked or research-eligible work blocks a
+transition, while policy-excluded generated views are preserved. After any new
+checkpoint, `status` compares the generated DAG's recorded commit with `HEAD`,
+marks a stale view, and prints a safe refresh command. The rest of this page
+documents the full protocol surface for advanced workflows and integrations.
+
+The GitHub analogy applies to the versioning mechanics, not scientific
+authority: checkpoints resemble commits, `history diff` resembles Files
+changed, competing research lines resemble branches, audit gates resemble
+required checks, and append-only rollback resembles revert. A passing local
+check still does not replace independent scientific review.
 
 XScientist never creates a remote and never pushes automatically. Every backend
 mutation is scoped to the research repository and uses an explicit privacy and

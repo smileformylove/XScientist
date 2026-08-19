@@ -32,6 +32,8 @@ class PublicSdkTests(unittest.TestCase):
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
         self.assertTrue(callable(xscientist.build_research_guide))
+        self.assertTrue(callable(xscientist.compare_workspace_history))
+        self.assertTrue(callable(xscientist.inspect_workspace_checkpoint))
         self.assertTrue(callable(xscientist.inspect_workspace_history))
         self.assertTrue(callable(xscientist.save_workspace_checkpoint))
         self.assertTrue(callable(xscientist.preview_workspace_rollback))
@@ -272,6 +274,11 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIn(payload["output_root"], {"<configured>", "<default>"})
         self.assertFalse(Path(payload["python_executable"]).is_absolute())
         self.assertFalse(payload["host_paths_disclosed"])
+        adapters = payload["extensions"]["research_adapters"]
+        self.assertEqual(adapters["api_version"], "1.0")
+        self.assertEqual(adapters["entry_point_group"], "xscientist.research_adapters")
+        self.assertIn("filesystem", adapters["available"])
+        self.assertIn("--json", adapters["discovery_command"])
         self.assertEqual(
             payload["quickstart"],
             "xscientist explore ./my-study",

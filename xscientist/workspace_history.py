@@ -26,6 +26,8 @@ from .research_git import (
 )
 
 HISTORY_SCHEMA = "xscientist.workspace-history.v1"
+CHECKPOINT_SCHEMA = "xscientist.workspace-checkpoint-inspection.v1"
+DIFF_SCHEMA = "xscientist.workspace-history-diff.v1"
 ROLLBACK_PREVIEW_SCHEMA = "xscientist.rollback-preview.v1"
 
 
@@ -38,6 +40,8 @@ def inspect_workspace_history(
 
     status = repository_status(workspace)
     entries = research_log(workspace, limit=limit)
+    tracked = list(status.get("tracked_changes") or [])
+    eligible = [path for path in status["eligible_changes"] if path not in set(tracked)]
     return {
         "schema_version": HISTORY_SCHEMA,
         "workspace": status["repository"],
@@ -45,13 +49,83 @@ def inspect_workspace_history(
         "head": status["head"],
         "checkpoint_policy": status["checkpoint_policy"],
         "auto_push": status["auto_push"],
+        "clean": bool(status.get("worktree_clean")),
         "pending": {
             "backend_staged": list(status["staged_paths"]),
             "selected": list(status["research_stage"]["paths"]),
-            "eligible": list(status["eligible_changes"]),
+            "tracked": tracked,
+            "eligible": eligible,
+            "preserved": list(status["excluded_changes"]),
+            # Compatibility alias for clients of the 0.1 facade.
             "excluded": list(status["excluded_changes"]),
         },
         "entries": entries,
+    }
+
+
+def inspect_workspace_checkpoint(
+    workspace: str | Path,
+    *,
+    commit: str = "HEAD",
+) -> dict[str, Any]:
+    """Return one hash-checked checkpoint without exposing research payloads."""
+
+    shown = show_checkpoint(workspace, commit)
+    checkpoint = shown["checkpoint"]
+    return {
+        "schema_version": CHECKPOINT_SCHEMA,
+        "commit": shown["commit"],
+        "checkpoint_hash_valid": shown["checkpoint_hash_valid"],
+        "checkpoint": {
+            "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "sequence": checkpoint.get("sequence"),
+            "stage": checkpoint.get("stage"),
+            "status": checkpoint.get("status"),
+            "subject": checkpoint.get("subject"),
+            "summary": checkpoint.get("summary"),
+            "actor": checkpoint.get("actor"),
+            "branch": checkpoint.get("branch"),
+            "created_at": checkpoint.get("created_at"),
+            "parent_commit": checkpoint.get("parent_commit"),
+            "changed_paths": list(checkpoint.get("changed_paths") or []),
+            "object_refs": list(checkpoint.get("object_refs") or []),
+            "claims": list(checkpoint.get("claims") or []),
+            "reproduce": checkpoint.get("reproduce"),
+            "content_hash": checkpoint.get("content_hash"),
+        },
+        "payloads_disclosed": False,
+    }
+
+
+def compare_workspace_history(
+    workspace: str | Path,
+    *,
+    before: str = "HEAD^",
+    after: str = "HEAD",
+    deep: bool = False,
+) -> dict[str, Any]:
+    """Return a compact scientific diff suitable for review before promotion."""
+
+    diff = research_diff(workspace, before, after, deep=deep)
+    semantic = diff["semantic"]
+    return {
+        "schema_version": DIFF_SCHEMA,
+        "before": diff["before"],
+        "after": diff["after"],
+        "changes": list(diff["changes"]),
+        "stat": diff["stat"],
+        "checkpoint": {
+            "before": semantic.get("before_checkpoint"),
+            "after": semantic.get("after_checkpoint"),
+            "fields": semantic.get("fields") or {},
+        },
+        "claims": semantic.get("claims") or {},
+        "research_objects": semantic.get("research_objects") or {},
+        "ara_manifests": semantic.get("ara_manifests") or {},
+        "environment_changed": bool(semantic.get("environment_changed")),
+        "structured_changes": list(semantic.get("structured_changes") or []),
+        "warnings": list(semantic.get("warnings") or []),
+        "payloads_disclosed": False,
     }
 
 
@@ -99,7 +173,8 @@ def preview_workspace_rollback(
     is_initial_commit = len(ancestry) == 1
     backend_staged = list(status["staged_paths"])
     selected = list(status["research_stage"]["paths"])
-    eligible = list(status["eligible_changes"])
+    tracked = list(status.get("tracked_changes") or [])
+    eligible = [path for path in status["eligible_changes"] if path not in set(tracked)]
     excluded = list(status["excluded_changes"])
     blockers: list[dict[str, str]] = []
     if backend_staged:
@@ -116,21 +191,18 @@ def preview_workspace_rollback(
                 "detail": "save or unstage the selected research changes first",
             }
         )
+    if tracked:
+        blockers.append(
+            {
+                "code": "tracked_worktree_changes",
+                "detail": "save or restore tracked research changes first",
+            }
+        )
     if eligible:
         blockers.append(
             {
                 "code": "unsaved_research_changes",
                 "detail": "save or discard eligible research changes first",
-            }
-        )
-    if excluded:
-        blockers.append(
-            {
-                "code": "excluded_worktree_changes",
-                "detail": (
-                    "move or resolve untracked or policy-excluded files before "
-                    "changing scientific history"
-                ),
             }
         )
     if is_initial_commit:
@@ -183,10 +255,16 @@ def preview_workspace_rollback(
         ),
         "ready_to_apply": not blockers,
         "blockers": blockers,
+        "preserved": {
+            "policy_excluded": excluded,
+            "count": len(excluded),
+        },
         "limitations": [
             "the preview validates local preconditions but cannot promise that an "
             "older reversal will be conflict-free; apply reports conflicts without "
-            "discarding current history"
+            "discarding current history",
+            "policy-excluded local files are preserved and generated views may need "
+            "to be refreshed after rollback",
         ],
         "apply_command": (
             "xscientist history rollback "
@@ -212,6 +290,9 @@ def rollback_workspace_checkpoint(
         preview["target"]["commit"],
         subject=message,
     )
+    workspace_path = Path(workspace).expanduser()
+    quoted_workspace = shlex.quote(str(workspace_path))
+    quoted_view = shlex.quote(str(workspace_path / "research-dag"))
     return {
         "schema_version": "xscientist.workspace-rollback.v1",
         "workspace": preview["workspace"],
@@ -219,6 +300,13 @@ def rollback_workspace_checkpoint(
         "history_rewritten": False,
         "preview": preview,
         "result": result,
+        "next_actions": [
+            f"xscientist status {quoted_workspace}",
+            (
+                f"xscientist research dag --repo {quoted_workspace} "
+                f"--output {quoted_view}"
+            ),
+        ],
     }
 
 
@@ -228,6 +316,18 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
     try:
         if parsed.history_command == "list":
             payload = inspect_workspace_history(parsed.workspace, limit=parsed.limit)
+        elif parsed.history_command == "show":
+            payload = inspect_workspace_checkpoint(
+                parsed.workspace,
+                commit=parsed.commit,
+            )
+        elif parsed.history_command == "diff":
+            payload = compare_workspace_history(
+                parsed.workspace,
+                before=parsed.before,
+                after=parsed.after,
+                deep=parsed.deep,
+            )
         elif parsed.history_command == "save":
             payload = save_workspace_checkpoint(
                 parsed.workspace,
@@ -272,19 +372,66 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
         print(f"Workspace: {payload['workspace']}")
         print(f"Branch:    {payload['branch']}")
         pending = payload["pending"]
-        print(
-            "Unsaved:   "
-            f"{len(pending['selected'])} selected / "
-            f"{len(pending['eligible'])} eligible / "
-            f"{len(pending['excluded'])} excluded / "
-            f"{len(pending['backend_staged'])} backend-staged"
+        blocking_count = sum(
+            len(pending[name])
+            for name in ("selected", "tracked", "eligible", "backend_staged")
         )
+        print(
+            "Research changes: "
+            + (
+                "clean"
+                if not blocking_count
+                else (
+                    f"{len(pending['selected'])} selected / "
+                    f"{len(pending['tracked'])} tracked / "
+                    f"{len(pending['eligible'])} eligible / "
+                    f"{len(pending['backend_staged'])} backend-staged"
+                )
+            )
+        )
+        if pending["preserved"]:
+            print(f"Preserved local views/files: {len(pending['preserved'])}")
         for entry in payload["entries"]:
             stage = (entry["trailers"].get("Research-Stage") or ["-"])[0]
             print(
                 f"{entry['short_commit']} {entry['authored_at']} "
                 f"[{stage}] {entry['subject']}"
             )
+    elif parsed.history_command == "show":
+        checkpoint = payload["checkpoint"]
+        print(
+            f"Checkpoint: {checkpoint['checkpoint_id']} " f"({payload['commit'][:12]})"
+        )
+        print(f"Stage/state: {checkpoint['stage']} / {checkpoint['status']}")
+        print(f"Subject:     {checkpoint['subject']}")
+        print(f"Actor:       {checkpoint['actor']}")
+        print(f"Files:       {len(checkpoint['changed_paths'])}")
+        print(
+            "Hash:        "
+            + ("valid" if payload["checkpoint_hash_valid"] else "INVALID")
+        )
+        reproduce = checkpoint.get("reproduce") or {}
+        if reproduce.get("command"):
+            print(f"Reproduce:   {reproduce['command']}")
+    elif parsed.history_command == "diff":
+        print(f"Compare: {payload['before'][:12]}..{payload['after'][:12]}")
+        print(f"Files:   {len(payload['changes'])}")
+        fields = payload["checkpoint"]["fields"]
+        for name in ("stage", "status", "subject"):
+            field = fields.get(name) or {}
+            if field.get("changed"):
+                print(f"{name.title()}: {field.get('before')} -> {field.get('after')}")
+        for label, key in (("Claims", "claims"), ("Objects", "research_objects")):
+            section = payload[key]
+            print(
+                f"{label}:  +{len(section.get('added') or [])} "
+                f"-{len(section.get('removed') or [])}"
+            )
+        print(f"Environment changed: {payload['environment_changed']}")
+        for change in payload["changes"][:10]:
+            print(f"  {change}")
+        if len(payload["changes"]) > 10:
+            print(f"  ... {len(payload['changes']) - 10} more")
     elif parsed.history_command == "save":
         checkpoint = payload["checkpoint"]
         if checkpoint["committed"]:
@@ -301,6 +448,8 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
         print("Rollback recorded; existing history was not rewritten.")
         print(f"Reversed commit:  {result['reverted']}")
         print(f"New checkpoint:   {result['checkpoint']['checkpoint_id']}")
+        print(f"Inspect:          {payload['next_actions'][0]}")
+        print(f"Refresh view:     {payload['next_actions'][1]}")
     else:
         target = payload["target"]
         print("Rollback preview only; no files were changed.")
@@ -310,6 +459,12 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
         print(f"Subject:    {target['subject']}")
         impact = payload.get("impact") or {}
         print(f"Files:      {len(impact.get('changes') or [])}")
+        preserved = payload.get("preserved") or {}
+        if preserved.get("count"):
+            print(
+                "Preserved:  "
+                f"{preserved['count']} policy-excluded local view/file(s)"
+            )
         if payload["blockers"]:
             print("Blocked:")
             for blocker in payload["blockers"]:
@@ -320,6 +475,8 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
 
 
 __all__ = [
+    "compare_workspace_history",
+    "inspect_workspace_checkpoint",
     "inspect_workspace_history",
     "preview_workspace_rollback",
     "rollback_workspace_checkpoint",

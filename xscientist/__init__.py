@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
     from .workspace_history import (
+        compare_workspace_history,
+        inspect_workspace_checkpoint,
         inspect_workspace_history,
         preview_workspace_rollback,
         rollback_workspace_checkpoint,
@@ -123,6 +125,8 @@ def __getattr__(name: str) -> Any:
 
         value = ingest_tool_evidence
     elif name in {
+        "compare_workspace_history",
+        "inspect_workspace_checkpoint",
         "inspect_workspace_history",
         "preview_workspace_rollback",
         "rollback_workspace_checkpoint",
@@ -165,12 +169,14 @@ __all__ = [
     "build_research_dag",
     "build_research_context_snapshot",
     "build_research_guide",
+    "compare_workspace_history",
     "discovery_contract_template",
     "export_research_dag",
     "render_research_context_for_prompt",
     "start_guided_research",
     "ingest_tool_evidence",
     "inspect_workspace_history",
+    "inspect_workspace_checkpoint",
     "inspect_claim_depth",
     "preview_workspace_rollback",
     "rank_experiment_candidates",

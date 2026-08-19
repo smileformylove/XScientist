@@ -131,6 +131,8 @@ class ProductivityP2Tests(unittest.TestCase):
             self.assertIn("guide", script)
             self.assertIn("prepare", script)
             self.assertIn("rollback", script)
+            self.assertIn("show", script)
+            self.assertIn("diff", script)
             self.assertTrue("--workspace" in script or "-l workspace" in script)
 
     def test_conformance_kit_expects_the_bad_fixture_to_fail(self) -> None:

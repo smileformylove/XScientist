@@ -108,6 +108,13 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(payload["research"]["branch"], "main")
             self.assertFalse(payload["run"]["started"])
             self.assertTrue(payload["result"]["dag_html"])
+            self.assertTrue(payload["result"]["dag_current"])
+            self.assertTrue(payload["review"]["clean"])
+            self.assertEqual(payload["review"]["checks"]["trace"], "pass")
+            self.assertEqual(payload["review"]["checks"]["replay"], "pass")
+            self.assertEqual(payload["review"]["checks"]["verify"], "pending")
+            self.assertFalse(payload["review"]["promotion_ready"])
+            self.assertTrue(payload["review"]["commands"]["diff"])
             self.assertTrue(payload["next_steps"])
             self.assertEqual(
                 payload["next_steps"][0]["code"], "resolve_contested_claim"
@@ -218,6 +225,8 @@ class DemoStatusTests(unittest.TestCase):
             self.assertIn("Workspace: demo", rendered)
             self.assertIn("State: run complete; more evidence needed", rendered)
             self.assertIn("Scientific progress: 7/8", rendered)
+            self.assertIn("History: main@", rendered)
+            self.assertIn("Checks: trace=pass, replay=pass, verify=pending", rendered)
             self.assertIn("Resolve or narrow the contested claim", rendered)
             self.assertIn(f"--repo {workspace}", rendered)
 
@@ -265,6 +274,8 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(
                 payload["next_steps"][0]["code"], "run_resolution_experiment"
             )
+            self.assertFalse(payload["result"]["dag_current"])
+            self.assertEqual(payload["warnings"][0]["code"], "generated_view_stale")
 
     def test_chinese_demo_and_status_render_complete_primary_labels(self) -> None:
         with tempfile.TemporaryDirectory() as td:

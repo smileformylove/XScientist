@@ -1093,6 +1093,42 @@ def _changed_paths(repo: Path) -> tuple[set[str], set[str]]:
     return staged, unstaged | untracked
 
 
+def _worktree_change_summary(
+    repo: Path,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify changes by whether a scientific transition may overwrite them.
+
+    Generated views and other policy-excluded untracked files are preserved by
+    Git operations and therefore do not make the scientific worktree dirty.
+    Tracked, staged, research-eligible, and explicitly selected changes do.
+    """
+
+    repository_config = config or load_repository_config(repo)
+    backend_staged, changed = _changed_paths(repo)
+    tracked = (
+        _git_paths(repo, ["ls-files", "-z", "--", *sorted(changed)])
+        if changed
+        else set()
+    )
+    eligible, excluded = _select_paths(repo, repository_config, changed)
+    research_stage_payload = _load_research_stage(repo)
+    research_stage = [
+        str(item["path"]) for item in research_stage_payload.get("entries") or []
+    ]
+    blocking = set(backend_staged) | tracked | set(eligible) | set(research_stage)
+    return {
+        "clean": not blocking,
+        "backend_staged": sorted(backend_staged),
+        "tracked": sorted(tracked),
+        "eligible": eligible,
+        "excluded": excluded,
+        "research_stage_head": research_stage_payload.get("head"),
+        "research_stage": sorted(research_stage),
+        "blocking": sorted(blocking),
+    }
+
+
 def _research_stage_path(repo: Path) -> Path:
     raw = _run_git(repo, ["rev-parse", "--git-path", "xscientist/stage.json"]).stdout
     path = Path(raw.strip())
@@ -1957,7 +1993,14 @@ def _create_checkpoint_locked(
         )
 
     try:
-        _run_git(root, ["add", "--", *stage_paths])
+        # ``-A`` is required when a semantic transition removes files, as a
+        # rollback of a checkpoint that originally introduced them will do.
+        # A deletion created by ``git revert --no-commit`` is already staged
+        # and no longer matches a pathspec, so only add paths not already in
+        # the backend index.
+        paths_to_add = sorted(set(stage_paths) - set(staged_before))
+        if paths_to_add:
+            _run_git(root, ["add", "-A", "--", *paths_to_add])
         if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
             raise ResearchGitError("checkpoint produced no staged Git change")
         trailers = [
@@ -2142,8 +2185,7 @@ def auto_checkpoint(
 def repository_status(repo: str | Path) -> dict[str, Any]:
     root = _repository_root(repo)
     config = load_repository_config(root)
-    staged, changed = _changed_paths(root)
-    selected, excluded = _select_paths(root, config, changed)
+    worktree = _worktree_change_summary(root, config)
     previous = _previous_checkpoint(root)
     store = _resolve_configured_path(
         root,
@@ -2153,7 +2195,6 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
     object_files = (
         [path for path in store.rglob("*") if path.is_file()] if store.exists() else []
     )
-    research_stage_payload = _load_research_stage(root)
     return {
         "repository": str(root),
         "name": config.get("name"),
@@ -2162,16 +2203,15 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
         "checkpoint_policy": config["git"].get("checkpoint_policy"),
         "auto_commit": bool(config["git"].get("auto_commit", True)),
         "auto_push": False,
-        "staged_paths": sorted(staged),
+        "worktree_clean": worktree["clean"],
+        "staged_paths": worktree["backend_staged"],
+        "tracked_changes": worktree["tracked"],
         "research_stage": {
-            "head": research_stage_payload.get("head"),
-            "paths": [
-                str(item["path"])
-                for item in research_stage_payload.get("entries") or []
-            ],
+            "head": worktree["research_stage_head"],
+            "paths": worktree["research_stage"],
         },
-        "eligible_changes": selected,
-        "excluded_changes": excluded,
+        "eligible_changes": worktree["eligible"],
+        "excluded_changes": worktree["excluded"],
         "last_checkpoint": previous,
         "object_store": {
             "path": str(store),
@@ -2266,11 +2306,12 @@ def create_research_branch(
 
 
 def _require_clean_research_switch(root: Path) -> None:
-    git_staged, changed = _changed_paths(root)
-    semantic_stage = _load_research_stage(root).get("entries") or []
-    if git_staged or changed or semantic_stage:
+    worktree = _worktree_change_summary(root)
+    if not worktree["clean"]:
         raise ResearchGitError(
-            "research branch switch requires a clean working state and empty research stage"
+            "research transition requires a clean working state: no staged, "
+            "tracked, research-eligible, or selected changes; policy-excluded "
+            "generated views are preserved"
         )
 
 
@@ -2462,6 +2503,15 @@ def revert_research_checkpoint(
             )
         except Exception:
             _run_git(root, ["revert", "--abort"], check=False)
+            # ``git revert --no-commit`` does not always leave sequencer state
+            # for ``--abort`` (notably for a single commit). The transition
+            # started from a verified clean state, so restoring tracked files
+            # to HEAD is lossless and preserves policy-excluded local views.
+            _run_git(
+                root,
+                ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
+                check=False,
+            )
             raise
         return {
             "reverted": resolved_commit,
@@ -3770,29 +3820,12 @@ def _create_research_bundle_locked(
     if profile not in {"index", "reproduce", "audit"}:
         raise ResearchGitError("bundle profile must be index, reproduce, or audit")
     store_root = _configured_store_root(root)
-    staged, changed = _changed_paths(root)
-    tracked = (
-        set(
-            _run_git(
-                root,
-                ["ls-files", "--", *sorted(changed)],
-                check=False,
-            ).stdout.splitlines()
-        )
-        if changed
-        else set()
-    )
-    selected, _excluded = _select_paths(
-        root,
-        load_repository_config(root),
-        changed,
-    )
-    dirty = set(staged) | tracked | set(selected)
-    if dirty:
+    worktree = _worktree_change_summary(root)
+    if not worktree["clean"]:
         raise ResearchGitError(
             "bundle refused because the research repository has uncommitted "
-            "tracked or research-eligible changes; generated views excluded by "
-            "policy do not block bundling"
+            "tracked or research-eligible changes, a backend stage, or selected "
+            "changes; generated views excluded by policy do not block bundling"
         )
     dest = Path(destination).expanduser().resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)

@@ -12,6 +12,7 @@ import yaml
 from ai_scientist.utils.privacy import portable_path, redact_sensitive_payload
 
 from .provider_config import discover_workspace_root
+from .research_closure import audit_research_closure, summarize_closure_levels
 from .research_git import ResearchGitError, repository_status
 from .research_journey import build_research_guide
 
@@ -85,6 +86,127 @@ def _latest_background_run(root: Path) -> dict[str, Any] | None:
     }
 
 
+def _review_summary(root: Path, status: dict[str, Any]) -> dict[str, Any]:
+    """Build one compact, GitHub-check-like view over existing scientific gates."""
+
+    tracked = list(status.get("tracked_changes") or [])
+    tracked_set = set(tracked)
+    eligible = [
+        path for path in status.get("eligible_changes") or [] if path not in tracked_set
+    ]
+    last_checkpoint = status.get("last_checkpoint") or {}
+    base: dict[str, Any] = {
+        "available": False,
+        "head": status.get("head"),
+        "clean": bool(status.get("worktree_clean")),
+        "pending": {
+            "backend_staged": list(status.get("staged_paths") or []),
+            "selected": list((status.get("research_stage") or {}).get("paths") or []),
+            "tracked": tracked,
+            "eligible": eligible,
+            "preserved": list(status.get("excluded_changes") or []),
+        },
+        "checks": {
+            "trace": "unavailable",
+            "replay": "unavailable",
+            "verify": "unavailable",
+        },
+        "promotion_ready": False,
+        "blocker_codes": [],
+        "object_counts": {},
+        "evolution": {"candidates": 0, "evaluations": 0, "gate_decisions": 0},
+        "commands": {
+            "audit": "xscientist audit . --level verify",
+            "diff": (
+                "xscientist history diff ."
+                if last_checkpoint.get("parent_commit")
+                else None
+            ),
+        },
+        "error": None,
+    }
+    try:
+        closure = audit_research_closure(
+            root,
+            ref=str(status.get("head") or "HEAD"),
+            level="verify",
+            verify_objects=False,
+        )
+    except (OSError, ResearchGitError, ValueError) as exc:
+        base["error"] = str(exc)
+        return base
+
+    levels = summarize_closure_levels(closure)
+    claim_count = len(closure.get("claims") or [])
+    integrity_errors = list((closure.get("integrity") or {}).get("errors") or [])
+    checks = {
+        name: (
+            "pass"
+            if complete
+            else "not_ready" if not claim_count and not integrity_errors else "pending"
+        )
+        for name, complete in levels.items()
+    }
+    counts = dict(closure.get("counts") or {})
+    base.update(
+        {
+            "available": True,
+            "checks": checks,
+            "promotion_ready": levels["verify"],
+            "blocker_codes": sorted(
+                {str(item.get("code") or "") for item in closure.get("blockers") or []}
+                - {""}
+            ),
+            "object_counts": counts,
+            "evolution": {
+                "candidates": int(counts.get("agent_candidate") or 0),
+                "evaluations": int(counts.get("agent_evaluation") or 0),
+                "gate_decisions": int(counts.get("gate_decision") or 0),
+            },
+        }
+    )
+    return base
+
+
+def _dag_view_status(
+    root: Path,
+    dag_path: Path | None,
+    *,
+    head: str | None,
+) -> dict[str, Any]:
+    if dag_path is None:
+        return {
+            "html": None,
+            "json": None,
+            "commit": None,
+            "current": None,
+            "warning": None,
+            "refresh_command": None,
+        }
+    metadata_path = dag_path.with_name("research-dag.json")
+    metadata, error = _read_json(metadata_path)
+    recorded_commit = str(metadata.get("commit") or "") or None
+    current = bool(recorded_commit and head and recorded_commit == head)
+    warning = None
+    if error:
+        warning = f"generated DAG metadata is unreadable: {error}"
+        current = False
+    elif not recorded_commit:
+        warning = "generated DAG does not record the checkpoint it represents"
+    elif head and not current:
+        warning = "generated DAG represents an older checkpoint"
+    return {
+        "html": portable_path(dag_path, base=root),
+        "json": (
+            portable_path(metadata_path, base=root) if metadata_path.is_file() else None
+        ),
+        "commit": recorded_commit,
+        "current": current,
+        "warning": warning,
+        "refresh_command": "xscientist research dag --repo . --output research-dag",
+    }
+
+
 def build_workspace_status(
     workspace: str | Path | None = None,
     *,
@@ -101,10 +223,13 @@ def build_workspace_status(
         "branch": None,
         "head": None,
         "staged": 0,
+        "worktree_clean": None,
         "last_checkpoint": None,
         "guide": None,
     }
     errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    repo_status: dict[str, Any] | None = None
     if not root.exists():
         errors.append(
             {
@@ -129,7 +254,9 @@ def build_workspace_status(
                 {
                     "branch": repo_status.get("branch"),
                     "head": repo_status.get("head"),
-                    "staged": repo_status.get("staged_count", 0),
+                    "staged": len(repo_status.get("staged_paths") or [])
+                    + len((repo_status.get("research_stage") or {}).get("paths") or []),
+                    "worktree_clean": repo_status.get("worktree_clean"),
                     "last_checkpoint": repo_status.get("last_checkpoint"),
                     "guide": {
                         "progress": guide.get("progress"),
@@ -182,6 +309,48 @@ def build_workspace_status(
             / "research-dag.html",
         ]
     )
+    review = (
+        _review_summary(root, repo_status)
+        if repo_status is not None
+        else {
+            "available": False,
+            "head": None,
+            "clean": None,
+            "pending": {},
+            "checks": {
+                "trace": "unavailable",
+                "replay": "unavailable",
+                "verify": "unavailable",
+            },
+            "promotion_ready": False,
+            "blocker_codes": [],
+            "object_counts": {},
+            "evolution": {
+                "candidates": 0,
+                "evaluations": 0,
+                "gate_decisions": 0,
+            },
+            "commands": {"audit": None, "diff": None},
+            "error": None,
+        }
+    )
+    if review.get("error"):
+        warnings.append(
+            {
+                "code": "review_status_unavailable",
+                "detail": str(review["error"]),
+                "remediation": "run `xscientist audit . --level trace` for details",
+            }
+        )
+    dag_view = _dag_view_status(root, dag_path, head=research.get("head"))
+    if dag_view.get("warning"):
+        warnings.append(
+            {
+                "code": "generated_view_stale",
+                "detail": str(dag_view["warning"]),
+                "remediation": str(dag_view["refresh_command"]),
+            }
+        )
     background_run = _latest_background_run(root)
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
     readiness_blockers = [
@@ -348,6 +517,7 @@ def build_workspace_status(
                 else None
             ),
         },
+        "review": review,
         "budget": {
             "available": bool(budget),
             "limits": budget.get("limits"),
@@ -365,12 +535,15 @@ def build_workspace_status(
                 if insight_path.is_file()
                 else None
             ),
-            "dag_html": (
-                portable_path(dag_path, base=root) if dag_path is not None else None
-            ),
+            "dag_html": dag_view["html"],
+            "dag_json": dag_view["json"],
+            "dag_commit": dag_view["commit"],
+            "dag_current": dag_view["current"],
+            "dag_refresh_command": dag_view["refresh_command"],
         },
         "next_steps": next_steps,
         "errors": errors,
+        "warnings": warnings,
         "host_paths_disclosed": False,
     }
     return redact_sensitive_payload(payload)

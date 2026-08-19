@@ -10,6 +10,8 @@ from pathlib import Path
 from xscientist.cli import main as cli_main
 from xscientist.research_journey import explore_research_idea
 from xscientist.workspace_history import (
+    compare_workspace_history,
+    inspect_workspace_checkpoint,
     inspect_workspace_history,
     preview_workspace_rollback,
     rollback_workspace_checkpoint,
@@ -46,11 +48,15 @@ class WorkspaceHistoryTests(unittest.TestCase):
             )
             self.assertTrue(saved["checkpoint"]["committed"])
             saved_commit = saved["checkpoint"]["commit"]
+            generated = workspace / "research-dag" / "research-dag.html"
+            generated.parent.mkdir()
+            generated.write_text("<html>rebuildable</html>\n", encoding="utf-8")
             preview = preview_workspace_rollback(workspace, commit=saved_commit)
             self.assertTrue(preview["ready_to_apply"])
             self.assertFalse(preview["history_rewritten"])
             self.assertIn("question.md", "\n".join(preview["impact"]["changes"]))
             self.assertIn("--apply", preview["apply_command"])
+            self.assertEqual(preview["preserved"]["count"], 1)
             self.assertIn("A deliberately bounded note", question.read_text())
 
             rolled_back = rollback_workspace_checkpoint(
@@ -59,6 +65,8 @@ class WorkspaceHistoryTests(unittest.TestCase):
             )
             self.assertFalse(rolled_back["history_rewritten"])
             self.assertEqual(question.read_text(encoding="utf-8"), original)
+            self.assertTrue(generated.is_file())
+            self.assertIn("research dag", rolled_back["next_actions"][1])
             history = inspect_workspace_history(workspace)
             self.assertEqual(
                 history["entries"][0]["trailers"]["Research-Stage"], ["revert"]
@@ -79,11 +87,40 @@ class WorkspaceHistoryTests(unittest.TestCase):
             self.assertEqual(
                 {item["code"] for item in preview["blockers"]},
                 {
-                    "unsaved_research_changes",
-                    "excluded_worktree_changes",
+                    "tracked_worktree_changes",
                     "initial_checkpoint",
                 },
             )
+            self.assertEqual(preview["preserved"]["count"], 1)
+            self.assertIn("scratch.tmp", preview["preserved"]["policy_excluded"][0])
+
+    def test_rollback_removes_files_added_by_checkpoint_and_preserves_views(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self._workspace(Path(tmp))
+            added = workspace / "04_logs" / "progress.json"
+            added.parent.mkdir()
+            added.write_text('{"current_stage":"planned"}\n', encoding="utf-8")
+            saved = save_workspace_checkpoint(workspace, message="record progress")
+            view = workspace / "research-dag" / "research-dag.html"
+            view.parent.mkdir()
+            view.write_text("<html>rebuildable</html>\n", encoding="utf-8")
+
+            preview = preview_workspace_rollback(
+                workspace,
+                commit=saved["checkpoint"]["commit"],
+            )
+            self.assertTrue(preview["ready_to_apply"])
+            rolled_back = rollback_workspace_checkpoint(
+                workspace,
+                commit=saved["checkpoint"]["commit"],
+            )
+
+            self.assertFalse(added.exists())
+            self.assertTrue(view.is_file())
+            self.assertTrue(inspect_workspace_history(workspace)["clean"])
+            self.assertTrue(rolled_back["result"]["checkpoint"]["committed"])
 
     def test_cli_history_and_audit_facades_are_structured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,6 +147,44 @@ class WorkspaceHistoryTests(unittest.TestCase):
             self.assertEqual(audit_code, 1)
             self.assertEqual(audit["target_level"], "trace")
             self.assertFalse(audit["complete"])
+
+    def test_checkpoint_show_and_semantic_diff_are_compact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = self._workspace(Path(tmp))
+            question = workspace / "question.md"
+            question.write_text(
+                question.read_text(encoding="utf-8") + "\nBounded note.\n",
+                encoding="utf-8",
+            )
+            saved = save_workspace_checkpoint(workspace, message="record bounded note")
+
+            shown = inspect_workspace_checkpoint(
+                workspace,
+                commit=saved["checkpoint"]["commit"],
+            )
+            compared = compare_workspace_history(workspace)
+
+            self.assertTrue(shown["checkpoint_hash_valid"])
+            self.assertFalse(shown["payloads_disclosed"])
+            self.assertEqual(shown["checkpoint"]["subject"], "record bounded note")
+            self.assertIn("question.md", shown["checkpoint"]["changed_paths"])
+            self.assertFalse(compared["payloads_disclosed"])
+            self.assertIn("M\tquestion.md", compared["changes"])
+
+            show_output = io.StringIO()
+            diff_output = io.StringIO()
+            with contextlib.redirect_stdout(show_output):
+                self.assertEqual(
+                    cli_main(["history", "show", str(workspace)]),
+                    0,
+                )
+            with contextlib.redirect_stdout(diff_output):
+                self.assertEqual(
+                    cli_main(["history", "diff", str(workspace)]),
+                    0,
+                )
+            self.assertIn("Hash:        valid", show_output.getvalue())
+            self.assertIn("Environment changed:", diff_output.getvalue())
 
     def test_cli_rollback_requires_explicit_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

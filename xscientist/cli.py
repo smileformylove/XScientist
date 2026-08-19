@@ -244,6 +244,20 @@ def _build_parser() -> argparse.ArgumentParser:
     history_list.add_argument("workspace", nargs="?", default=".")
     history_list.add_argument("--limit", type=int, default=20)
     history_list.add_argument("--json", action="store_true", dest="as_json")
+    history_show = history_subparsers.add_parser(
+        "show", help="Inspect one hash-checked scientific checkpoint."
+    )
+    history_show.add_argument("workspace", nargs="?", default=".")
+    history_show.add_argument("--commit", default="HEAD")
+    history_show.add_argument("--json", action="store_true", dest="as_json")
+    history_diff = history_subparsers.add_parser(
+        "diff", help="Review file and semantic changes between two checkpoints."
+    )
+    history_diff.add_argument("workspace", nargs="?", default=".")
+    history_diff.add_argument("--from", dest="before", default="HEAD^")
+    history_diff.add_argument("--to", dest="after", default="HEAD")
+    history_diff.add_argument("--deep", action="store_true")
+    history_diff.add_argument("--json", action="store_true", dest="as_json")
     history_save = history_subparsers.add_parser(
         "save", help="Save selected or eligible research changes as one checkpoint."
     )
@@ -887,7 +901,13 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     if "--workspace ." in command:
         return command.replace("--workspace .", f"--workspace {quoted}")
     if "--repo ." in command:
-        return command.replace("--repo .", f"--repo {quoted}")
+        contextual = command.replace("--repo .", f"--repo {quoted}")
+        if "--output research-dag" in contextual:
+            output = shlex.quote(str(Path(workspace).expanduser() / "research-dag"))
+            contextual = contextual.replace(
+                "--output research-dag", f"--output {output}"
+            )
+        return contextual
     if command == "xscientist research init .":
         return f"xscientist research init {quoted}"
     if command.startswith("xscientist provider add "):
@@ -1262,6 +1282,11 @@ def _installation_info() -> dict[str, object]:
         resolve_task_capabilities,
     )
     from .provider_config import discover_provider_models
+    from .research_adapters import (
+        ADAPTER_API_VERSION,
+        ADAPTER_ENTRYPOINT_GROUP,
+        available_research_adapters,
+    )
 
     service_modules = ["fastapi", "pydantic", "uvicorn"]
     runtime_resolution = resolve_task_capabilities("research")
@@ -1314,6 +1339,7 @@ def _installation_info() -> dict[str, object]:
             "xscientist setup my-research --provider ollama --model "
             + shlex.quote(local_models[0])
         )
+    adapters = available_research_adapters()
     return {
         "name": "xscientist",
         "version": __version__,
@@ -1344,6 +1370,14 @@ def _installation_info() -> dict[str, object]:
         "auth_status": auth_status,
         "python_api": "from xscientist import XScientist, ProjectRequest",
         "http_factory": "from xscientist import create_app",
+        "extensions": {
+            "research_adapters": {
+                "api_version": ADAPTER_API_VERSION,
+                "entry_point_group": ADAPTER_ENTRYPOINT_GROUP,
+                "available": [item["name"] for item in adapters],
+                "discovery_command": "xscientist research adapter list --json",
+            }
+        },
         "quickstart": "xscientist explore ./my-study",
         "active_provider": active_provider or None,
         "default_model": os.environ.get("AI_SCIENTIST_DEFAULT_MODEL"),
@@ -3213,6 +3247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             research = payload["research"]
             run = payload["run"]
             result = payload["result"]
+            review = payload["review"]
             background_run = payload.get("background_run")
             state_labels = {
                 "en": {
@@ -3240,18 +3275,64 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"Workspace: {payload['workspace']}")
                 print(f"State: {state_labels['en'][payload['operational_state']]}")
-            if parsed.verbose or research["staged"]:
-                print(
-                    ("科研历史：" if language == "zh" else "Research: ")
-                    + (
-                        (
-                            f"{research['branch']} / 暂存={research['staged']}"
-                            if language == "zh"
-                            else f"{research['branch']} / staged={research['staged']}"
+            if research["initialized"]:
+                head = str(research.get("head") or "-")[:12]
+                clean = bool(review.get("clean"))
+                pending = review.get("pending") or {}
+                pending_count = sum(
+                    len(pending.get(name) or [])
+                    for name in ("backend_staged", "selected", "tracked", "eligible")
+                )
+                if language == "zh":
+                    history_state = "干净" if clean else f"待保存={pending_count}"
+                    print(f"科研历史：{research['branch']}@{head} / {history_state}")
+                else:
+                    history_state = "clean" if clean else f"pending={pending_count}"
+                    print(f"History: {research['branch']}@{head} / {history_state}")
+                if review.get("available"):
+                    check_labels = {
+                        "en": {
+                            "pass": "pass",
+                            "pending": "pending",
+                            "not_ready": "not ready",
+                            "unavailable": "unavailable",
+                        },
+                        "zh": {
+                            "pass": "通过",
+                            "pending": "待补充",
+                            "not_ready": "尚未产生结论",
+                            "unavailable": "不可用",
+                        },
+                    }[language]
+                    checks = review["checks"]
+                    label = "科研门禁" if language == "zh" else "Checks"
+                    print(
+                        f"{label}: "
+                        + ", ".join(
+                            f"{name}={check_labels.get(checks[name], checks[name])}"
+                            for name in ("trace", "replay", "verify")
                         )
-                        if research["initialized"]
-                        else ("未初始化" if language == "zh" else "not initialized")
                     )
+                if parsed.verbose and pending.get("preserved"):
+                    label = (
+                        "保留的可重建/策略排除文件"
+                        if language == "zh"
+                        else "Preserved local views/files"
+                    )
+                    print(f"{label}: {len(pending['preserved'])}")
+                evolution = review.get("evolution") or {}
+                if parsed.verbose and any(evolution.values()):
+                    label = "自主进化记录" if language == "zh" else "Evolution records"
+                    print(
+                        f"{label}: candidates={evolution.get('candidates', 0)}, "
+                        f"evaluations={evolution.get('evaluations', 0)}, "
+                        f"gates={evolution.get('gate_decisions', 0)}"
+                    )
+            elif parsed.verbose:
+                print(
+                    "科研历史：未初始化"
+                    if language == "zh"
+                    else "History: not initialized"
                 )
             if (research.get("guide") or {}).get("progress"):
                 progress = research["guide"]["progress"]
@@ -3342,7 +3423,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"{'成本' if language == 'zh' else 'Cost'}: ${cost:.2f}")
             if result["dag_html"]:
                 label = "证据 DAG" if language == "zh" else "Evidence DAG"
-                print(f"{label}: {result['dag_html']}")
+                freshness = ""
+                if result.get("dag_current") is False:
+                    freshness = "（需要刷新）" if language == "zh" else " (stale)"
+                print(f"{label}: {result['dag_html']}{freshness}")
+                if result.get("dag_current") is False:
+                    refresh_label = "刷新" if language == "zh" else "Refresh"
+                    refresh_command = _contextual_action(
+                        result["dag_refresh_command"], parsed.workspace
+                    )
+                    print(f"{refresh_label}: {refresh_command}")
             if result.get("epistemic_status"):
                 label = "结论状态" if language == "zh" else "Result status"
                 status_value = result["epistemic_status"]
@@ -3372,6 +3462,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if error.get("remediation"):
                     repair_label = "修复" if language == "zh" else "Repair"
                     print(f"{repair_label}: {error['remediation']}", file=sys.stderr)
+            for warning in payload.get("warnings") or []:
+                if warning.get("code") == "generated_view_stale":
+                    continue
+                warning_label = "提示" if language == "zh" else "Warning"
+                print(
+                    f"{warning_label}: {warning.get('detail', '')}",
+                    file=sys.stderr,
+                )
+                if warning.get("remediation"):
+                    repair_label = "处理" if language == "zh" else "Action"
+                    print(
+                        f"{repair_label}: {warning['remediation']}",
+                        file=sys.stderr,
+                    )
             if payload["next_steps"]:
                 step = payload["next_steps"][0]
                 step_title = step.get("title") or step.get("code")
@@ -3429,6 +3533,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Next setup: {payload['recommended_setup']}")
             else:
                 print("Runtime dependencies: already installed")
+            adapters = (payload.get("extensions") or {}).get("research_adapters", {})
+            if adapters:
+                print(
+                    "Research adapters: "
+                    + ", ".join(adapters.get("available") or ["none"])
+                    + f" (API {adapters.get('api_version')})"
+                )
             print(f"Quick start: {payload['quickstart']}")
         return 0
     if parsed.command == "init":

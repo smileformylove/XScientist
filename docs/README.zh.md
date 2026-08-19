@@ -232,8 +232,22 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 科研 Git 保存的是有明确科学含义的对象，不要求用户从日志目录猜测上下文。Git 是
 当前的本地存储适配器；无需 GitHub 账号或远端，XScientist 也不会自行推送研究。
 
+如果熟悉 GitHub，可以直接使用下面这组对应关系：
+
+| GitHub | XScientist |
+| --- | --- |
+| Repository | 一个本地科研工作区 |
+| Commit 与 Activity | 经过哈希检查的 checkpoint 与 `history list` |
+| Files changed | 同时比较文件、结论和科研对象的 `history diff` |
+| Branch 与 Pull Request | 竞争科研分支与语义合并预览 |
+| Required checks | `trace → replay → verify` 科研门禁 |
+| Revert 与 Actions 产物 | 追加式回滚、可复现实验与离线 bundle |
+
 ```bash
+xscientist status ./first-study --lang zh
 xscientist history list ./first-study
+xscientist history show ./first-study --commit HEAD
+xscientist history diff ./first-study
 xscientist audit ./first-study --level trace
 xscientist audit ./first-study --level replay
 xscientist audit ./first-study --level verify
@@ -259,10 +273,11 @@ xscientist history rollback ./first-study --commit HEAD
 xscientist history rollback ./first-study --commit HEAD --apply
 ```
 
-尚未保存的科研改动和仓库的第一个检查点都会阻止回滚。预览会检查这些本地前置
-条件；撤销较早的检查点仍可能与后续工作冲突，此时
-`--apply` 会停止，不会丢弃当前历史。复现、打包、对象检查、决策上下文、深度差异
-与分支仍保留在完整协议入口中：
+尚未保存的已跟踪、已暂存、已选择或符合科研策略的改动，以及仓库的第一个检查点，
+都会阻止回滚。策略排除的生成视图会原样保留，不会阻塞回滚；回滚后如果 DAG 已经
+过期，`status` 会明确标记并给出刷新命令。撤销较早的检查点仍可能与后续工作冲突，
+此时 `--apply` 会停止，不会丢弃当前历史。复现、打包、对象检查、决策上下文、深度
+差异与分支仍保留在完整协议入口中：
 
 ```bash
 xscientist research reproduce HEAD --repo ./first-study --execute --record \

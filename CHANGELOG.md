@@ -8,6 +8,11 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- `xscientist history show` and `history diff` provide compact, payload-free
+  checkpoint inspection and semantic change review without exposing the full
+  advanced Research VCS command surface.
+- `xscientist info --json` now advertises the versioned research-adapter entry
+  point and safely discovered adapters without importing third-party plugins.
 - A compact `xscientist audit` facade and `xscientist history` workflow for
   checkpoint listing, policy-safe saves, payload-free rollback previews, and
   explicit append-only reversals that never rewrite scientific history.
@@ -29,6 +34,15 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- Default `status` now acts as one research review surface: it reports the
+  current checkpoint and worktree state, the trace/replay/verify ladder,
+  generated-DAG freshness, and—under `--verbose`—agent-evolution receipt counts.
+- Worktree safety classification is shared by status, branch transitions,
+  rollback, and bundling; policy-excluded local views are preserved without
+  being mislabeled as unsaved scientific changes.
+- Package metadata and English/Chinese documentation now explain the system as
+  Git-like evidence history while explicitly separating versioning mechanics
+  from scientific authority.
 - Default help, shell completion, English/Chinese onboarding, and architecture
   guidance now expose trust and recovery as ordinary workspace actions while
   keeping branches, deep diffs, bundles, and protocol internals under the
@@ -64,6 +78,12 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- Append-only rollback now works when a checkpoint introduced files: staged
+  deletions are retained, the reversal checkpoint is committed atomically, and
+  a failed apply restores tracked state without deleting local generated views.
+- Generated DAG views no longer block rollback merely because they are outside
+  the scientific tracking policy; stale views are detected against the current
+  checkpoint and receive an exact regeneration command.
 - Demo checkpoints now contain code, environment, dependency, data, seed, and
   measurement provenance, and the Autopilot receipt is included in its final
   runtime checkpoint.

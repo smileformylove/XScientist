@@ -257,8 +257,22 @@ meaning from a folder of logs. Git is the current local storage adapter; no
 GitHub account or remote is required, and XScientist never pushes research by
 itself.
 
+If you know GitHub, the mental model is deliberately familiar:
+
+| GitHub | XScientist |
+| --- | --- |
+| Repository | One local research workspace |
+| Commit and activity | Hash-checked checkpoint and `history list` |
+| Files changed | Scientific `history diff`, including claim/object changes |
+| Branch and pull request | Competing research line and semantic merge preview |
+| Required checks | `trace → replay → verify` scientific gates |
+| Revert and Actions artifacts | Append-only rollback, reproducible run, and bundle |
+
 ```bash
+xscientist status ./first-study
 xscientist history list ./first-study
+xscientist history show ./first-study --commit HEAD
+xscientist history diff ./first-study
 xscientist audit ./first-study --level trace
 xscientist audit ./first-study --level replay
 xscientist audit ./first-study --level verify
@@ -286,10 +300,12 @@ xscientist history rollback ./first-study --commit HEAD
 xscientist history rollback ./first-study --commit HEAD --apply
 ```
 
-Unsaved research changes and the repository's first checkpoint block rollback.
-The preview checks those local prerequisites; reverting an older checkpoint can
-still conflict with newer work, in which case `--apply` stops without discarding
-the current history.
+Unsaved tracked, staged, selected, or research-eligible changes and the first
+checkpoint block rollback. Policy-excluded generated views are preserved and do
+not block it; after a reversal, `status` marks an older DAG as stale and prints
+the exact refresh command. Reverting an older checkpoint can still conflict
+with newer work, in which case `--apply` stops without discarding current
+history.
 
 For reproduction, bundles, object inspection, context snapshots, deep diffs,
 and branches, use the advanced protocol surface:

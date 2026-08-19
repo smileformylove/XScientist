@@ -2163,7 +2163,10 @@ def main(
             return 0
 
         if args.command == "audit":
-            from .research_closure import audit_research_closure
+            from .research_closure import (
+                audit_research_closure,
+                summarize_closure_levels,
+            )
 
             payload = audit_research_closure(
                 args.repo,
@@ -2174,19 +2177,7 @@ def main(
             if args.as_json:
                 _print_json(payload)
             else:
-                claim_rows = payload["claims"]
-                integrity_ok = not (payload.get("integrity") or {}).get("errors")
-                trace_complete = (
-                    bool(claim_rows)
-                    and integrity_ok
-                    and all(item.get("trace_complete") for item in claim_rows)
-                )
-                replay_complete = trace_complete and all(
-                    item.get("replay_ready") for item in claim_rows
-                )
-                verification_complete = replay_complete and all(
-                    item.get("verified") for item in claim_rows
-                )
+                levels = summarize_closure_levels(payload)
                 target_label = {
                     "trace": "Traceability closure",
                     "replay": "Replayability closure",
@@ -2196,14 +2187,14 @@ def main(
                 print(f"Target level:       {payload['target_level']}")
                 print(
                     "Closure levels:      "
-                    f"trace={'complete' if trace_complete else 'blocked'}, "
-                    f"replay={'complete' if replay_complete else 'blocked'}, "
+                    f"trace={'complete' if levels['trace'] else 'blocked'}, "
+                    f"replay={'complete' if levels['replay'] else 'blocked'}, "
                     "verification="
-                    f"{'complete' if verification_complete else 'blocked'}"
+                    f"{'complete' if levels['verify'] else 'blocked'}"
                 )
                 print(
                     "Overall scientific closure: "
-                    f"{'complete' if verification_complete else 'pending'}"
+                    f"{'complete' if levels['verify'] else 'pending'}"
                 )
                 print(f"Commit:             {payload['commit']}")
                 print(f"Claims:             {len(payload['claims'])}")
