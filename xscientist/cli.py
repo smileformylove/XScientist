@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from collections.abc import Sequence
@@ -540,7 +541,14 @@ def _build_start_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", default=None)
     parser.add_argument("--profile", choices=["default", "deep"], default="default")
-    parser.add_argument("--user", default=None, help="local research actor name")
+    parser.add_argument(
+        "--user",
+        default=None,
+        help=(
+            "accountable research actor; must match the active local login, or "
+            "creates one when no login exists"
+        ),
+    )
     parser.add_argument(
         "--data-dir", default=None, help="read-only empirical input directory"
     )
@@ -652,6 +660,8 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     quoted = shlex.quote(str(workspace))
     if "--workspace ." in command:
         return command.replace("--workspace .", f"--workspace {quoted}")
+    if "--repo ." in command:
+        return command.replace("--repo .", f"--repo {quoted}")
     if command == "xscientist research init .":
         return f"xscientist research init {quoted}"
     if command.startswith("xscientist provider add "):
@@ -662,6 +672,8 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
         return _command_with_workspace(command, workspace)
     if command.startswith("xscientist preflight "):
         return f"cd {quoted} && {command}"
+    if command.startswith("xscientist research "):
+        return _command_with_workspace(command, workspace, flag="--repo")
     return command
 
 
@@ -704,24 +716,92 @@ def _nested_first(payload: object, key: str) -> object | None:
 
 
 def _run_failure_summary(logs: dict[str, object]) -> str | None:
-    for stream in ("stderr", "stdout"):
-        lines = [str(line) for line in logs.get(stream, [])]
+    streams = [
+        [str(line) for line in logs.get(stream, [])] for stream in ("stderr", "stdout")
+    ]
+
+    # Structured prerequisite reports are the strongest signal, regardless of
+    # which stream also happens to contain a trailing warning.
+    for lines in streams:
         payload = _parse_structured_log(lines)
-        if payload is not None:
-            error = _nested_first(payload, "error")
-            if isinstance(error, str):
-                return error
-            actions = _nested_first(payload, "next_actions")
-            if isinstance(actions, list) and actions:
-                return f"Prerequisite check failed; next: {actions[0]}"
-            codes = _nested_first(payload, "error_codes")
-            if isinstance(codes, list) and codes:
-                return "Run failed: " + ", ".join(str(code) for code in codes[:3])
+        if payload is None:
+            continue
+        error = _nested_first(payload, "error")
+        if isinstance(error, str):
+            return error
+        actions = _nested_first(payload, "next_actions")
+        if isinstance(actions, list) and actions:
+            return f"Prerequisite check failed; next: {actions[0]}"
+        codes = _nested_first(payload, "error_codes")
+        if isinstance(codes, list) and codes:
+            return "Run failed: " + ", ".join(str(code) for code in codes[:3])
+
+    # Human start output lists repairs in priority order. Select the first
+    # repair instead of the trailing preflight command.
+    action_markers = ("resolve these items", "next actions", "next steps")
+    for lines in streams:
+        for index, line in enumerate(lines):
+            candidate = line.strip()
+            lowered = candidate.lower()
+            if lowered.startswith("next:"):
+                action = candidate.split(":", 1)[1].strip()
+                if action:
+                    return f"Prerequisite check failed; next: {action}"
+            if not any(marker in lowered for marker in action_markers):
+                continue
+            for following in lines[index + 1 :]:
+                action = following.strip().lstrip("-*").strip()
+                if action:
+                    return f"Prerequisite check failed; next: {action}"
+
+    for lines in streams:
+        for line in lines:
+            candidate = line.strip()
+            lowered = candidate.lower()
+            if lowered.startswith(("problem:", "error:", "xscientist start:")):
+                return candidate
+
+    fallbacks: list[str] = []
+    for lines in streams:
         for line in reversed(lines):
             candidate = line.strip()
             if candidate and candidate not in {"{", "}", "[", "]", "},", "],"}:
-                return candidate
-    return None
+                fallbacks.append(candidate)
+                break
+    return fallbacks[0] if fallbacks else None
+
+
+def _readiness_state(value: object) -> str:
+    if value is None:
+        return "not checked"
+    return "ready" if bool(value) else "needs attention"
+
+
+def _doctor_check_state(name: str, check: dict[str, object]) -> str:
+    required = check.get("required")
+    if required is False and name in {"provider", "auth", "runtime"}:
+        return "not required"
+    value = check.get("ok", check.get("ready"))
+    if name == "runtime" and not check.get("checked"):
+        return "not checked"
+    if name == "provider" and value:
+        probe = check.get("local_probe")
+        if isinstance(probe, dict) and probe.get("checked"):
+            return "ready (local service and model verified)"
+        if check.get("credentials_available"):
+            return "configured (credentials present; not live-verified)"
+    return _readiness_state(value)
+
+
+_DOCTOR_CHECK_LABELS = {
+    "workspace": "Workspace",
+    "git": "Git",
+    "research_vcs": "Research history",
+    "capabilities": "Dependencies",
+    "provider": "Provider",
+    "auth": "Research identity",
+    "runtime": "Isolated runtime",
+}
 
 
 def _format_run_timestamp(value: object) -> str:
@@ -1317,7 +1397,16 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 state = (
                     "local service and model verified"
                     if local_probe["checked"] and payload["ok"]
-                    else ("local checks passed" if payload["ok"] else "not ready")
+                    else (
+                        "configuration checks passed; credentials not live-verified"
+                        if payload["ok"]
+                        and any(field.required for field in PROVIDER_FIELDS[provider])
+                        else (
+                            "configuration checks passed"
+                            if payload["ok"]
+                            else "not ready"
+                        )
+                    )
                 )
                 print(f"Provider {provider}: {state}")
                 print(f"Model: {model or '-'}")
@@ -1588,6 +1677,21 @@ def _run_start(parsed: argparse.Namespace) -> int:
         )
         return 2
 
+    requested_user = str(parsed.user or "").strip()
+    authenticated, auth_status, session = validate_session()
+    active_user = (
+        str((session or {}).get("username") or "").strip() if authenticated else ""
+    )
+    if requested_user and active_user and requested_user != active_user:
+        switch_command = "xscientist auth login --user " + shlex.quote(requested_user)
+        print(
+            f"xscientist start: --user {requested_user!r} conflicts with the "
+            f"active research identity {active_user!r}; switch explicitly with "
+            f"`{switch_command}`",
+            file=sys.stderr,
+        )
+        return 2
+
     phases: dict[str, object] = {}
     try:
         config_exists = (workspace / ".xscientist" / "providers.json").is_file()
@@ -1646,6 +1750,23 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "capabilities": list(selected_capabilities),
         }
 
+        if not authenticated:
+            username = requested_user
+            if not username and not parsed.non_interactive and sys.stdin.isatty():
+                username = input("Local research actor name: ").strip()
+            if username:
+                session = create_session(username=username)
+                authenticated, auth_status = True, "ok"
+        resolved_actor = (
+            str((session or {}).get("username") or "").strip() if authenticated else ""
+        )
+        phases["auth"] = {
+            "ok": authenticated,
+            "status": auth_status,
+            "user": resolved_actor or None,
+            "session_created": bool(authenticated and not active_user),
+        }
+
         topic = f"# Research question\n\n{question}\n"
         established_topic = workspace / "00_config" / "topic.md"
         if (
@@ -1663,7 +1784,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 name=workspace.name,
                 question=topic,
                 policy="milestone",
-                actor=parsed.user or "xscientist",
+                actor=resolved_actor or "xscientist",
             )
             status = repository.status()
             vcs_created = True
@@ -1696,20 +1817,6 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "provider": selected_provider,
             "model": selected_model,
             "reason": provider_result.get("reason"),
-        }
-
-        authenticated, auth_status, session = validate_session()
-        if not authenticated:
-            username = str(parsed.user or "").strip()
-            if not username and not parsed.non_interactive and sys.stdin.isatty():
-                username = input("Local research actor name: ").strip()
-            if username:
-                session = create_session(username=username)
-                authenticated, auth_status = True, "ok"
-        phases["auth"] = {
-            "ok": authenticated,
-            "status": auth_status,
-            "user": (session or {}).get("username") if authenticated else None,
         }
 
         load_result = load_workspace_environment(workspace)
@@ -1831,9 +1938,15 @@ def _run_start(parsed: argparse.Namespace) -> int:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print("XScientist is configured, but the automated run is not ready.")
-            print("Resolve these items, then rerun the same command:")
+            if resolved_actor:
+                print(f"Research actor: {resolved_actor}")
+            print("Resolve these items in order:")
             for action in report["next_actions"]:
                 print(f"  {_contextual_action(action, parsed.directory)}")
+            print(
+                "Retry: after fixing the first blocker, press Up in this shell "
+                "and rerun the same start command."
+            )
         return 1
 
     if parsed.prepare_only:
@@ -1848,6 +1961,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print("Workspace is ready for automated research.")
+            if resolved_actor:
+                print(f"Research actor: {resolved_actor}")
         return 0
 
     project_args = [
@@ -2000,6 +2115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             begin_active_run,
             finish_active_run,
             launch_detached_run,
+            read_run_logs,
         )
 
         if parsed.detach:
@@ -2008,8 +2124,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, RunControlError, ValueError) as exc:
                 print(f"xscientist start: {exc}", file=sys.stderr)
                 return 2
+            detached_status = str(payload.get("status") or "unknown")
+            startup_failed = detached_status in {
+                "failed",
+                "cancelled",
+                "interrupted",
+            }
+            if startup_failed:
+                try:
+                    logs = read_run_logs(
+                        parsed.directory,
+                        str(payload["id"]),
+                        stream="both",
+                        tail=500,
+                    )
+                except (OSError, RunControlError, ValueError):
+                    logs = {}
+                payload["failure_summary"] = _run_failure_summary(logs)
             if parsed.as_json:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
+            elif startup_failed:
+                print(
+                    f"Detached research run stopped during startup: {payload['id']} "
+                    f"({detached_status})",
+                    file=sys.stderr,
+                )
+                if payload.get("failure_summary"):
+                    print(f"Failure: {payload['failure_summary']}", file=sys.stderr)
+                print(
+                    "Inspect: xscientist runs show "
+                    f"{payload['id']} --workspace "
+                    f"{shlex.quote(str(parsed.directory))}",
+                    file=sys.stderr,
+                )
+                print(
+                    "Retry after repair: xscientist runs resume "
+                    f"{payload['id']} --workspace "
+                    f"{shlex.quote(str(parsed.directory))}",
+                    file=sys.stderr,
+                )
+            elif detached_status == "succeeded":
+                print(f"Detached research run completed: {payload['id']}")
+                print(f"Workspace: {payload['workspace']}")
             else:
                 print(f"Detached research run started: {payload['id']}")
                 print(f"Workspace: {payload['workspace']}")
@@ -2018,7 +2174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{payload['id']} --workspace "
                     f"{shlex.quote(str(parsed.directory))}"
                 )
-            return 0
+            return 1 if startup_failed else 0
         active_run = begin_active_run()
         returncode = 1
         try:
@@ -2082,6 +2238,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if status not in {"queued", "running", "cancelling"}:
                         break
                     time.sleep(parsed.interval)
+                if payload.get("status") in {
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    logs = read_run_logs(
+                        parsed.workspace,
+                        parsed.run_id,
+                        stream="both",
+                        tail=500,
+                    )
+                    payload["failure_summary"] = _run_failure_summary(logs)
         except (OSError, RunControlError, ValueError) as exc:
             if getattr(parsed, "as_json", False):
                 print(
@@ -2136,7 +2304,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if payload["stderr"]:
                 print("--- stderr ---", file=sys.stderr)
                 print("\n".join(payload["stderr"]), file=sys.stderr)
-        elif parsed.runs_command != "watch":
+        elif parsed.runs_command == "watch":
+            if payload.get("failure_summary"):
+                print(f"Failure: {payload['failure_summary']}")
+            if payload.get("status") in {"failed", "cancelled", "interrupted"}:
+                print(
+                    f"Logs: xscientist runs logs {payload['id']} --workspace "
+                    f"{shlex.quote(str(parsed.workspace))}"
+                )
+        else:
             print(f"Run {payload['id']}: {payload['status']}")
             if parsed.runs_command == "show":
                 print(f"Profile: {payload.get('profile') or 'balanced'}")
@@ -2159,6 +2335,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Watch: xscientist runs watch {payload['id']} "
                     f"--workspace {shlex.quote(str(parsed.workspace))}"
                 )
+        if parsed.runs_command in {"show", "watch"} and payload.get("status") in {
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            return 1
         return 0
     if parsed.command == "executor":
         from .executor_manager import (
@@ -2484,7 +2666,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_state = run["current_stage"] or (
                     "已启动" if language == "zh" else "started"
                 )
-                if language == "zh":
+                progress = (research.get("guide") or {}).get("progress") or {}
+                closure_pending = str(run_state) == "complete" and (
+                    float(progress.get("percent") or 0) < 100
+                    or result.get("epistemic_status") != "verified"
+                )
+                if closure_pending:
+                    run_state = (
+                        "运行已完成；科学闭环待完成"
+                        if language == "zh"
+                        else "run complete; scientific closure pending"
+                    )
+                elif language == "zh":
                     run_state = {
                         "complete": "已完成",
                         "failed": "失败",
@@ -2578,18 +2771,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"{repair_label}: {error['remediation']}", file=sys.stderr)
             if payload["next_steps"]:
                 step = payload["next_steps"][0]
-                print(
-                    f"{'下一步' if language == 'zh' else 'Next'}: "
-                    f"{step.get('title') or step.get('code')}"
-                )
+                step_title = step.get("title") or step.get("code")
+                if (
+                    language == "zh"
+                    and step.get("code") == "repair_failed_background_run"
+                ):
+                    step_title = "检查并修复最近失败的后台任务"
+                print(f"{'下一步' if language == 'zh' else 'Next'}: " f"{step_title}")
                 if step.get("command"):
                     command = step["command"]
                     if " research discovery template " not in f" {command} ":
-                        command = _command_with_workspace(
-                            command,
-                            parsed.workspace,
-                            flag="--repo",
-                        )
+                        command = _contextual_action(command, parsed.workspace)
                     print(f"{'运行' if language == 'zh' else 'Run'}:  {command}")
         _record_local_metric("status", ok=bool(payload["ok"]))
         return 0 if payload["ok"] else 1
@@ -2785,9 +2977,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(f"Created XScientist workspace: {payload['workspace']}")
             print(f"Task profile: {parsed.task}")
-            print(f"Configuration ready: {report['configuration_ready']}")
-            print(f"Runtime ready: {report['runtime_ready']}")
-            print(f"Research VCS: {research_vcs['initialized']}")
+            print(
+                "Configuration: " f"{_readiness_state(report['configuration_ready'])}"
+            )
+            print(f"Isolated runtime: {_readiness_state(report['runtime_ready'])}")
+            print(
+                "Research history: " f"{_readiness_state(research_vcs['initialized'])}"
+            )
             if provider_setup.get("reason"):
                 print(f"Provider setup: {provider_setup['reason']}")
             if payload["next_actions"]:
@@ -2815,14 +3011,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print(
-                f"XScientist configuration ready for {payload['task']}: "
-                f"{payload['configuration_ready']}"
+                f"XScientist configuration for {payload['task']}: "
+                f"{_readiness_state(payload['configuration_ready'])}"
             )
-            print(f"Deep runtime ready: {payload['runtime_ready']}")
+            print("Deep runtime: " f"{_readiness_state(payload['runtime_ready'])}")
             for name, check in payload["checks"].items():
-                state = check.get("ok", check.get("ready"))
-                rendered = "not checked" if state is None else str(bool(state))
-                print(f"{name:<14} {rendered}")
+                label = _DOCTOR_CHECK_LABELS.get(name, name.replace("_", " ").title())
+                rendered = _doctor_check_state(name, check)
+                print(f"{label:<20} {rendered}")
             if payload["next_actions"]:
                 print("Next actions:")
                 for action in payload["next_actions"]:

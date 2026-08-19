@@ -233,6 +233,16 @@ class DemoStatusTests(unittest.TestCase):
                 status["result"]["epistemic_status"],
                 "machine_synthesized_unverified",
             )
+            human_status = io.StringIO()
+            with contextlib.redirect_stdout(human_status):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en"]),
+                    0,
+                )
+            self.assertIn(
+                "Research pipeline: run complete; scientific closure pending",
+                human_status.getvalue(),
+            )
             self.assertTrue(
                 (workspace / "04_logs" / "autopilot_fixture_receipt.json").is_file()
             )

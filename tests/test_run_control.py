@@ -248,7 +248,7 @@ class LocalRunControlTests(unittest.TestCase):
             with contextlib.redirect_stdout(shown):
                 self.assertEqual(
                     cli_main(["runs", "show", "d4", "--workspace", str(workspace)]),
-                    0,
+                    1,
                 )
             self.assertIn("Prerequisite check failed", shown.getvalue())
             self.assertIn("xscientist[research]", shown.getvalue())
@@ -259,6 +259,11 @@ class LocalRunControlTests(unittest.TestCase):
                 self.assertEqual(cli_main(["status", str(workspace)]), 0)
             self.assertIn("Latest background run: d4 / failed", status.getvalue())
             self.assertIn("xscientist runs show d4", status.getvalue())
+            self.assertIn(
+                "Inspect and repair the latest failed background run",
+                status.getvalue(),
+            )
+            self.assertNotIn("--repo", status.getvalue().split("Run:", 1)[-1])
 
             logs = io.StringIO()
             with contextlib.redirect_stdout(logs):
@@ -267,6 +272,131 @@ class LocalRunControlTests(unittest.TestCase):
                     0,
                 )
             self.assertIn("--- stdout ---", logs.getvalue())
+
+            watched = io.StringIO()
+            with contextlib.redirect_stdout(watched):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "runs",
+                            "watch",
+                            "d4",
+                            "--workspace",
+                            str(workspace),
+                            "--interval",
+                            "0.1",
+                        ]
+                    ),
+                    1,
+                )
+            self.assertIn("failed", watched.getvalue())
+            self.assertIn("Prerequisite check failed", watched.getvalue())
+
+    def test_plaintext_failure_logs_choose_the_first_repair_without_crashing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True)
+            state = {
+                "schema": RUN_SCHEMA,
+                "id": "e5",
+                "status": "failed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "stdout": "e5.out.log",
+                "stderr": "e5.err.log",
+                "resume_argv": ["start"],
+            }
+            (runs / "e5.json").write_text(json.dumps(state), encoding="utf-8")
+            (runs / "e5.out.log").write_text(
+                "XScientist is configured, but the automated run is not ready.\n"
+                "Resolve these items in order:\n"
+                '  python -m pip install "xscientist[research]"\n'
+                "  xscientist auth login\n"
+                "Retry: press Up and rerun.\n",
+                encoding="utf-8",
+            )
+            (runs / "e5.err.log").write_text("", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(
+                    ["runs", "logs", "e5", "--workspace", str(workspace)]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn(
+                'Summary: Prerequisite check failed; next: python -m pip install "xscientist[research]"',
+                output.getvalue(),
+            )
+
+    def test_immediate_detached_exit_is_reported_as_startup_failure(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch("xscientist.run_control.subprocess.Popen") as popen,
+            mock.patch(
+                "xscientist.run_control._process_identity",
+                return_value="short-lived-process",
+            ),
+        ):
+            popen.return_value.pid = 12345
+            popen.return_value.poll.return_value = 1
+            workspace = Path(td) / "study"
+
+            payload = launch_detached_run(
+                workspace,
+                [
+                    "start",
+                    str(workspace),
+                    "--question",
+                    "q",
+                    "--provider",
+                    "ollama",
+                    "--model",
+                    "qwen2.5:7b",
+                    "--allow-synthetic-data",
+                ],
+                startup_grace_seconds=0,
+            )
+
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["returncode"], 1)
+            self.assertEqual(payload["model"], "ollama/qwen2.5:7b")
+
+    def test_detached_cli_does_not_announce_a_terminal_run_as_started(self) -> None:
+        payload = {
+            "schema": RUN_SCHEMA,
+            "id": "f6",
+            "status": "failed",
+            "workspace": "study",
+        }
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "xscientist.run_control.launch_detached_run",
+                return_value=payload,
+            ),
+            mock.patch(
+                "xscientist.run_control.read_run_logs",
+                return_value={"stdout": ["Problem: missing dependency"], "stderr": []},
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = cli_main(
+                [
+                    "start",
+                    "study",
+                    "--question",
+                    "q",
+                    "--allow-synthetic-data",
+                    "--detach",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("stopped during startup", stderr.getvalue())
+        self.assertNotIn("run started", stderr.getvalue())
 
     def test_logs_warn_when_structured_tail_starts_mid_document(self) -> None:
         payload = {

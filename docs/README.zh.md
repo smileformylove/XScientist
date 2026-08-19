@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/logo_v1.png" width="220" alt="XScientist 标志">
+  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/xscientist-evidence-mark.png" width="220" alt="XScientist 证据路径标志">
 </p>
 
 <h1 align="center">XScientist</h1>
@@ -104,6 +104,10 @@ xscientist research preregister @latest:hypothesis \
 `xscientist start` 是带安全门禁的一站式入口：创建或复用工作区、配置一个模型
 供应商、建立本地科研身份、初始化科研 Git、检查隔离执行器，然后从一个问题启动
 Autopilot。
+
+科研身份是可追责身份，不是单次运行的显示昵称。`--user` 必须与当前本地登录身份
+一致；如不一致，XScientist 会停止并给出明确的
+`xscientist auth login --user ...` 切换命令，不会把研究静默记到错误的人名下。
 
 ### 1. 只安装需要的 Provider
 

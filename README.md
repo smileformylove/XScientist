@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/logo_v1.png" width="220" alt="XScientist logo">
+  <img src="https://raw.githubusercontent.com/smileformylove/XScientist/main/docs/xscientist-evidence-mark.png" width="220" alt="XScientist evidence-path mark">
 </p>
 
 <h1 align="center">XScientist</h1>
@@ -96,6 +96,11 @@ xscientist benchmark first-run --max-seconds 30
 workspace, configures one provider, asks for a local research actor name,
 initializes Research Git, checks the isolated executor, and starts from one
 question.
+
+The actor is an accountable identity, not a per-run display label. `--user`
+must match the active local login; if it differs, XScientist stops and prints
+the explicit `xscientist auth login --user ...` command instead of silently
+attributing work to the wrong person.
 
 Before continuing, choose one provider route.
 
@@ -204,6 +209,8 @@ bounded failure summary. Questions and exact resume arguments remain private.
 Resume rechecks local prerequisites before relaunching; `--force` is available
 for an intentional bypass. `xscientist status` also surfaces the latest
 detached run, so a fast startup failure is not mistaken for a healthy pipeline.
+`runs show` and `runs watch` return a non-zero status for failed, cancelled, or
+interrupted runs, while `runs logs` remains a successful inspection command.
 
 ### Recover from a stopped setup or run
 

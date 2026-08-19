@@ -160,6 +160,49 @@ class OnboardingTests(unittest.TestCase):
             self.assertFalse(workspace.exists())
             self.assertIn("--data-dir", stderr.getvalue())
 
+    def test_start_refuses_to_silently_override_the_active_research_actor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            stderr = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(
+                        True,
+                        "ok",
+                        {"username": "ExistingUser"},
+                    ),
+                ),
+                mock.patch(
+                    "ai_scientist.utils.auth_session.create_session"
+                ) as create_session,
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--allow-synthetic-data",
+                        "--user",
+                        "RequestedUser",
+                        "--non-interactive",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(workspace.exists())
+            self.assertIn(
+                "conflicts with the active research identity", stderr.getvalue()
+            )
+            self.assertIn(
+                "xscientist auth login --user RequestedUser", stderr.getvalue()
+            )
+            create_session.assert_not_called()
+
     def test_start_reuses_one_workspace_and_forwards_guarded_autopilot(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
@@ -622,9 +665,42 @@ class OnboardingTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
-            self.assertIn("capabilities", rendered)
-            self.assertIn("runtime", rendered)
+            self.assertIn("Dependencies", rendered)
+            self.assertIn("Isolated runtime", rendered)
+            self.assertIn("not checked", rendered)
             self.assertIn("Next actions:", rendered)
+
+    def test_human_doctor_distinguishes_configured_from_live_verified(self) -> None:
+        report = {
+            "schema": "xscientist.doctor.v1",
+            "ok": True,
+            "configuration_ready": True,
+            "runtime_ready": None,
+            "task": "research",
+            "checks": {
+                "provider": {
+                    "ok": True,
+                    "required": True,
+                    "credentials_available": True,
+                    "local_probe": {"checked": False},
+                },
+                "runtime": {"ok": None, "required": True, "checked": False},
+            },
+            "next_actions": [],
+        }
+        output = io.StringIO()
+        with (
+            mock.patch("xscientist.diagnostics.diagnose", return_value=report),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(["doctor", "--workspace", "."])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(
+            "configured (credentials present; not live-verified)",
+            output.getvalue(),
+        )
+        self.assertIn("Deep runtime: not checked", output.getvalue())
 
 
 if __name__ == "__main__":

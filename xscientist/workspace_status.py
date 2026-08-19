@@ -175,7 +175,23 @@ def build_workspace_status(
             / "research-dag.html",
         ]
     )
+    background_run = _latest_background_run(root)
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
+    if isinstance(background_run, dict) and background_run.get("status") in {
+        "failed",
+        "cancelled",
+        "interrupted",
+    }:
+        run_id = str(background_run.get("id") or "").strip()
+        if run_id:
+            next_steps.insert(
+                0,
+                {
+                    "code": "repair_failed_background_run",
+                    "title": "Inspect and repair the latest failed background run",
+                    "command": (f"xscientist runs show {run_id} --workspace ."),
+                },
+            )
     if not next_steps and not research_enabled and not errors:
         next_steps = [
             {
@@ -202,7 +218,7 @@ def build_workspace_status(
                 else None
             ),
         },
-        "background_run": _latest_background_run(root),
+        "background_run": background_run,
         "budget": {
             "available": bool(budget),
             "limits": budget.get("limits"),

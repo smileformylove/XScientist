@@ -20,6 +20,7 @@ from ai_scientist.utils.atomic_io import atomic_write_json
 
 RUN_SCHEMA = "xscientist.local-run.v1"
 RUN_STATE_ENV = "XSCIENTIST_RUN_STATE"
+DETACHED_STARTUP_GRACE_SECONDS = 1.0
 
 
 class RunControlError(RuntimeError):
@@ -146,6 +147,15 @@ def _run_descriptor(workspace: Path, argv: Sequence[str]) -> dict[str, str | Non
                 model = model or str(entry.get("model") or "") or None
         except (OSError, ValueError):
             pass
+    if provider and model:
+        try:
+            from .provider_config import normalize_provider_model
+
+            model = normalize_provider_model(provider, model)
+        except ValueError:
+            # Preserve the submitted descriptor when a legacy/custom provider
+            # cannot be normalized; start itself remains the authority.
+            pass
     return {
         "provider": provider,
         "model": model,
@@ -179,6 +189,7 @@ def launch_detached_run(
     start_argv: Sequence[str],
     *,
     resume_of: str | None = None,
+    startup_grace_seconds: float = DETACHED_STARTUP_GRACE_SECONDS,
 ) -> dict[str, Any]:
     """Launch the exact public ``start`` command in a detached process."""
 
@@ -250,6 +261,33 @@ def launch_detached_run(
     payload["status"] = "running"
     payload["started_at"] = _now_iso()
     _write_state(state_path, payload)
+
+    # Observe a short startup window so missing dependencies, identity, or
+    # runtime prerequisites do not produce a misleading "started" success.
+    # Long-running studies still detach after this bounded grace period.
+    deadline = time.monotonic() + max(0.0, float(startup_grace_seconds))
+    while True:
+        returncode = process.poll()
+        if returncode is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+            continue
+        if not isinstance(returncode, int):
+            # Test doubles and non-standard Popen wrappers may not implement a
+            # concrete poll result. In that case retain the running state.
+            break
+        latest = _read_state(state_path)
+        if latest.get("status") in {"queued", "running", "cancelling"}:
+            if latest.get("cancel_requested_at"):
+                latest["status"] = "cancelled"
+            else:
+                latest["status"] = "succeeded" if returncode == 0 else "failed"
+            latest["returncode"] = returncode
+            latest["finished_at"] = latest.get("finished_at") or _now_iso()
+            _write_state(state_path, latest)
+        return public_run_view(latest)
     return public_run_view(payload)
 
 
