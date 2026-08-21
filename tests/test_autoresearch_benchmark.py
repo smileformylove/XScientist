@@ -260,6 +260,13 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["branch_topology"]["branch_count"], 2)
         self.assertTrue(report["branch_topology"]["branching_observed"])
         self.assertGreaterEqual(len(report["commits"]), 3)
+        # Checkpoint timestamps can share a second; the process view must use
+        # Git parentage so the visible trail remains causal rather than hash
+        # sorted.
+        stages = [row["stage"] for row in report["commits"]]
+        self.assertLess(stages.index("init"), stages.index("ideation"))
+        self.assertLess(stages.index("ideation"), stages.index("experiment"))
+        self.assertRegex(report["commits"][-1]["short_commit"], r"^[0-9a-f]{7,12}$")
         self.assertGreater(report["intermediate"]["object_count"], 0)
         self.assertEqual(report["fairness"]["task_manifest_sha256"], "sha256:manifest")
         self.assertFalse(report["fairness"]["gold_fields_used"])

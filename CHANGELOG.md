@@ -36,6 +36,9 @@ for its Python package; the ARA protocol has its own version in
 - Versioned `process_audit` schema coverage now keeps available and unavailable
   process reports machine-valid and distinguishes bounded samples from source
   totals.
+- Process timelines now retain Git short hashes and use bounded parent-first
+  ordering when checkpoint timestamps collide, making branch reasoning easier
+  to review without exposing commit subjects.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 

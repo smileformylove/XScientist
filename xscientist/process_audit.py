@@ -183,6 +183,23 @@ def _short_hash(value: Any) -> str | None:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _short_commit(value: Any) -> str | None:
+    """Keep Git's short commit token when it is already a hash.
+
+    ``research_log`` returns Git's 12-character abbreviated hash.  Passing it
+    through ``_short_hash`` used to digest that value again because the
+    generic helper intentionally required a longer token.  The extra digest
+    was safe, but it made a process timeline harder to join to ``git log``.
+    Only hexadecimal commit tokens are preserved; arbitrary subjects/IDs still
+    take the opaque digest path.
+    """
+
+    text = " ".join(str(value or "").split()).strip()
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", text):
+        return text[:12]
+    return _short_hash(value)
+
+
 def _safe_token(value: Any, *, default: str = "unknown", limit: int = 64) -> str:
     """Keep protocol tokens bounded without exposing arbitrary payload text."""
 
@@ -624,7 +641,7 @@ def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
     row: dict[str, Any] = {
         # Full commit hashes are not needed for a shareable process report.
         "commit": _short_hash(commit),
-        "short_commit": _short_hash(entry.get("short_commit") or commit),
+        "short_commit": _short_commit(entry.get("short_commit") or commit),
         "authored_at": _safe_timestamp(entry.get("authored_at")),
         "stage": stage,
         "status": status,
@@ -671,6 +688,78 @@ def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError, KeyError, ResearchGitError):
         pass
     return row
+
+
+def _order_commit_entries(
+    root: Path, entries: list[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    """Order a bounded commit union chronologically and parent-first.
+
+    Git log is returned newest-first for each ref.  Sorting only by author
+    timestamp is not enough: checkpoint commits often share a second, and a
+    lexical hash tie-breaker can put an ``ideation`` commit before ``init``.
+    A small topological sort over the bounded union gives reviewers a stable
+    causal timeline while retaining deterministic ordering for unrelated
+    roots.  Parents outside the bounded union are treated as already
+    satisfied, and no commit message is read.
+    """
+
+    if not entries:
+        return []
+    by_commit: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        commit = str(entry.get("commit") or "")
+        if commit:
+            by_commit.setdefault(commit, entry)
+    if not by_commit:
+        return list(entries)
+
+    # Use the hash as the deterministic fallback for unrelated roots.  The
+    # timestamp is only a tie-breaker after parent relationships are honored.
+    ordered_keys = sorted(by_commit)
+    input_order = {commit: index for index, commit in enumerate(ordered_keys)}
+    children: dict[str, set[str]] = {commit: set() for commit in by_commit}
+    indegree: dict[str, int] = {commit: 0 for commit in by_commit}
+    for commit in by_commit:
+        known_parents = {
+            parent for parent in _git_parent_hashes(root, commit) if parent in by_commit
+        }
+        indegree[commit] = len(known_parents)
+        for parent in known_parents:
+            children.setdefault(parent, set()).add(commit)
+
+    def key(commit: str) -> tuple[str, int, str]:
+        return (
+            str(by_commit[commit].get("authored_at") or ""),
+            input_order.get(commit, 0),
+            commit,
+        )
+
+    ready = [commit for commit, degree in indegree.items() if degree == 0]
+    result: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    # Re-sort the small ready set after each pop.  The public cap is 128, so a
+    # simple list keeps the ordering rule obvious and avoids exposing a
+    # dependency on Git's locale-specific log order.
+    while ready:
+        ready.sort(key=key)
+        commit = ready.pop(0)
+        if commit in seen:
+            continue
+        seen.add(commit)
+        result.append(by_commit[commit])
+        for child in sorted(children.get(commit, ())):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+
+    # Malformed or shallow Git metadata should not make the audit fail.  Any
+    # unresolved cycle/entry is appended in a deterministic order and remains
+    # visible as a normal bounded commit row.
+    result.extend(
+        by_commit[commit] for commit in sorted(by_commit, key=key) if commit not in seen
+    )
+    return result
 
 
 def _unavailable_summary(
@@ -991,13 +1080,7 @@ def build_process_summary(
             commit = str(entry.get("commit") or "")
             if commit:
                 unique_commits.setdefault(commit, entry)
-    all_ordered_entries = sorted(
-        unique_commits.values(),
-        key=lambda item: (
-            str(item.get("authored_at") or ""),
-            str(item.get("commit") or ""),
-        ),
-    )
+    all_ordered_entries = _order_commit_entries(root, list(unique_commits.values()))
     # If branch rows were capped, omitted branch logs may contain additional
     # commits even when the visible union fits the commit limit.
     branch_log_truncated = any(
