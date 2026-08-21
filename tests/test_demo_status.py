@@ -128,6 +128,19 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(payload["review"]["checks"]["trace"], "pass")
             self.assertEqual(payload["review"]["checks"]["replay"], "pass")
             self.assertEqual(payload["review"]["checks"]["verify"], "pending")
+            self.assertEqual(payload["review"]["target_level"], "verify")
+            self.assertGreaterEqual(payload["review"]["blocker_count"], 0)
+            self.assertTrue(
+                set(payload["review"]["blocker_codes"]).issubset(
+                    set(payload["review"]["closure_levels"]["verify"]["blocker_codes"])
+                )
+            )
+            self.assertEqual(
+                set(payload["review"]["closure_levels"]),
+                {"trace", "replay", "verify"},
+            )
+            self.assertTrue(payload["review"]["closure_levels"]["trace"]["complete"])
+            self.assertFalse(payload["review"]["closure_levels"]["verify"]["complete"])
             self.assertFalse(payload["review"]["promotion_ready"])
             self.assertTrue(payload["review"]["commands"]["diff"])
             self.assertTrue(payload["next_steps"])

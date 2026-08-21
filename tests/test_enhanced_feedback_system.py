@@ -216,6 +216,66 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         reloaded = EnhancedFeedbackSystem(feedback_dir=feedback_dir)
         self.assertEqual(len(reloaded.feedback_history), 5)
 
+        attribution_dir = Path(self.temp_dir) / "attribution-feedback"
+        attributed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xscientist",
+                "feedback",
+                "--feedback-dir",
+                str(attribution_dir),
+                "add",
+                "--category",
+                "strategy",
+                "--priority",
+                "info",
+                "--source",
+                "evolution",
+                "--message",
+                "Try candidate 42",
+                "--intervention-id",
+                "candidate-42",
+                "--json",
+            ],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(attributed.returncode, 0, attributed.stderr)
+        attributed_payload = json.loads(attributed.stdout)
+        item_id = attributed_payload["item"]["item_id"]
+        linked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xscientist",
+                "feedback",
+                "--feedback-dir",
+                str(attribution_dir),
+                "link-outcome",
+                "--item-id",
+                item_id,
+                "--outcome-id",
+                "outcome-42",
+                "--evaluation-scope",
+                "independent",
+                "--evaluator-id",
+                "reviewer-42",
+                "--json",
+            ],
+            cwd=self.temp_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        linked_payload = json.loads(linked.stdout)
+        self.assertEqual(linked_payload["attribution"]["status"], "independent_paired")
+
     def test_metric_tracking(self):
         """Test metric tracking and windows"""
         # Add multiple metrics
@@ -299,6 +359,71 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         self.assertIn("health_score", report)
         self.assertGreaterEqual(report["health_score"], 0)
         self.assertLessEqual(report["health_score"], 100)
+        self.assertEqual(
+            report["feedback_summary"]["attribution"]["status"],
+            "unattributed",
+        )
+        self.assertFalse(
+            report["feedback_summary"]["attribution"]["causal_attribution_established"]
+        )
+
+    def test_feedback_attribution_is_explicit_and_conservative(self):
+        observational = self.feedback_system.add_feedback(
+            category=FeedbackCategory.STRATEGY,
+            priority=FeedbackPriority.INFO,
+            source="experiment",
+            message="Candidate strategy observed",
+            intervention_id="candidate-1",
+        )
+        self.feedback_system.add_feedback(
+            category=FeedbackCategory.SUCCESS,
+            priority=FeedbackPriority.INFO,
+            source="evaluator",
+            message="Outcome measured",
+            intervention_id="candidate-1",
+            outcome_id="outcome-1",
+            evaluation_scope="independent",
+            evaluator_id="reviewer-1",
+        )
+
+        summary = self.feedback_system.attribution_summary()
+        self.assertEqual(summary["status"], "independent_paired")
+        self.assertEqual(summary["independent_paired_items"], 1)
+        self.assertEqual(summary["intervention_only_items"], 1)
+        self.assertFalse(summary["causal_attribution_established"])
+        self.assertFalse(summary["promotion_signal_allowed"])
+        report = self.feedback_system.get_health_report()
+        self.assertEqual(report["feedback_summary"]["attribution"]["paired_items"], 1)
+        self.assertEqual(
+            observational.evaluation_scope,
+            "observational",
+        )
+
+    def test_record_outcome_is_persistent_and_monotonic(self):
+        item = self.feedback_system.add_feedback(
+            category=FeedbackCategory.STRATEGY,
+            priority=FeedbackPriority.HIGH,
+            source="evolution",
+            message="Try candidate configuration",
+            intervention_id="candidate-2",
+        )
+
+        linked = self.feedback_system.record_outcome(
+            item,
+            "outcome-2",
+            evaluation_scope="independent",
+            evaluator_id="reviewer-2",
+        )
+        self.assertEqual(linked.outcome_id, "outcome-2")
+        self.assertEqual(linked.evaluation_scope, "independent")
+        with self.assertRaises(ValueError):
+            self.feedback_system.record_outcome(item, "different-outcome")
+
+        reloaded = EnhancedFeedbackSystem(feedback_dir=Path(self.temp_dir))
+        restored = reloaded.feedback_history[0]
+        self.assertEqual(restored.intervention_id, "candidate-2")
+        self.assertEqual(restored.outcome_id, "outcome-2")
+        self.assertEqual(restored.evaluator_id, "reviewer-2")
 
     def test_feedback_resolution(self):
         """Test marking feedback as resolved"""

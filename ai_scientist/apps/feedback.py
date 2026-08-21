@@ -4,6 +4,7 @@
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +63,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         f"Items: {summary['total_items']} total, "
         f"{summary['unresolved_items']} unresolved, "
         f"{summary['critical_items']} critical"
+    )
+    attribution = summary.get("attribution") or {}
+    print(
+        "Attribution: "
+        f"{attribution.get('status', 'unknown')} "
+        f"({attribution.get('paired_items', 0)} paired, "
+        f"{attribution.get('unattributed_items', 0)} unattributed)"
     )
 
     if report.get("trends"):
@@ -229,23 +237,128 @@ def cmd_add(args: argparse.Namespace) -> int:
                 print(f"Warning: Invalid metric format '{metric_str}', skipping")
 
     # Add feedback
-    item = feedback_system.add_feedback(
-        category=category,
-        priority=priority,
-        source=args.source,
-        message=args.message,
-        metrics=metrics,
-        context={},
-        actionable=not args.not_actionable,
-    )
+    try:
+        item = feedback_system.add_feedback(
+            category=category,
+            priority=priority,
+            source=args.source,
+            message=args.message,
+            metrics=metrics,
+            context={},
+            actionable=not args.not_actionable,
+            intervention_id=args.intervention_id,
+            outcome_id=args.outcome_id,
+            evaluation_scope=args.evaluation_scope,
+            evaluator_id=args.evaluator_id,
+        )
+    except ValueError as exc:
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "schema": "xscientist.feedback-item.v1",
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"Error: {exc}")
+        return 1
+
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "schema": "xscientist.feedback-item.v1",
+                    "ok": True,
+                    "item": asdict(item),
+                    "attribution": feedback_system.attribution_summary(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     print(f"✓ Feedback added:")
+    print(f"  Item ID: {item.item_id}")
     print(f"  Category: {item.category}")
     print(f"  Priority: {item.priority}")
     print(f"  Source: {item.source}")
     print(f"  Message: {item.message}")
     print(f"  Actionable: {item.actionable}")
+    print(f"  Attribution: {feedback_system.item_attribution_status(item)}")
 
+    return 0
+
+
+def cmd_link_outcome(args: argparse.Namespace) -> int:
+    """Attach one measured outcome to a prior feedback observation."""
+
+    feedback_system = EnhancedFeedbackSystem(
+        feedback_dir=Path(args.feedback_dir),
+    )
+    if feedback_system.load_errors:
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "schema": "xscientist.feedback-outcome-link.v1",
+                        "ok": False,
+                        "errors": list(feedback_system.load_errors),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 1
+        print("Cannot link an outcome because feedback history is unreadable.")
+        for error in feedback_system.load_errors:
+            print(f"Error: {error}")
+        return 1
+    try:
+        item = feedback_system.record_outcome(
+            args.item_id,
+            args.outcome_id,
+            evaluation_scope=args.evaluation_scope,
+            evaluator_id=args.evaluator_id,
+        )
+    except ValueError as exc:
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "schema": "xscientist.feedback-outcome-link.v1",
+                        "ok": False,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"Error: {exc}")
+        return 1
+    if args.as_json:
+        print(
+            json.dumps(
+                {
+                    "schema": "xscientist.feedback-outcome-link.v1",
+                    "ok": True,
+                    "item": asdict(item),
+                    "attribution": feedback_system.attribution_summary(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print(f"✓ Outcome linked to feedback item {item.item_id}")
+        print(f"  Outcome: {item.outcome_id}")
+        print(f"  Attribution: {feedback_system.item_attribution_status(item)}")
     return 0
 
 
@@ -353,6 +466,39 @@ def main() -> int:
         action="store_true",
         help="Mark as not actionable",
     )
+    add_parser.add_argument(
+        "--intervention-id",
+        help="Stable strategy/configuration identifier being evaluated",
+    )
+    add_parser.add_argument(
+        "--outcome-id",
+        help="Stable measured outcome identifier, when already available",
+    )
+    add_parser.add_argument(
+        "--evaluation-scope",
+        choices=["observational", "controlled", "independent"],
+        default="observational",
+        help="How the linked outcome was evaluated (default: observational)",
+    )
+    add_parser.add_argument(
+        "--evaluator-id",
+        help="Accountable evaluator ID for an independent outcome",
+    )
+    add_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    link_parser = subparsers.add_parser(
+        "link-outcome",
+        help="Link a measured outcome to an existing feedback item",
+    )
+    link_parser.add_argument("--item-id", required=True)
+    link_parser.add_argument("--outcome-id", required=True)
+    link_parser.add_argument(
+        "--evaluation-scope",
+        choices=["observational", "controlled", "independent"],
+        default="observational",
+    )
+    link_parser.add_argument("--evaluator-id")
+    link_parser.add_argument("--json", action="store_true", dest="as_json")
 
     # Clear command
     clear_parser = subparsers.add_parser("clear", help="Clear resolved feedback")
@@ -370,6 +516,7 @@ def main() -> int:
         "trends": cmd_trends,
         "report": cmd_report,
         "add": cmd_add,
+        "link-outcome": cmd_link_outcome,
         "clear": cmd_clear,
     }
 

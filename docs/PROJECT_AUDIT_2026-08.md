@@ -1,6 +1,6 @@
 # XScientist 项目劣势与科研可信度审计（2026-08）
 
-> 审计对象：`main`（本次审计基线为 `f47de60`）
+> 审计对象：`main`（含本轮闭环、provider 和反馈优化；历史基线仍保留在 Git 中）
 > 审计方式：源码审查、临时工作区 CLI 旅程、真实 OpenAI-compatible provider 最小请求、协议/隐私/定向测试。
 > 结论性质：这是工程和科研治理审计，不是对任何模型、论文或科学结论的独立复核。
 
@@ -17,6 +17,16 @@ XScientist 的优势已经不在“能否生成一篇论文”，而在于它把
 - 网关返回带路由前缀的模型别名时，之前只有布尔 mismatch；现在输出 `exact/alias/mismatch/unavailable`，仍对严格验证 fail-closed。
 - LLM 调用之前只记录 provider/model；现在记录无密钥的 provider provenance（client model、endpoint 指纹、配置指纹和环境变量名）。`research blame` 的 `@latest:<kind>` 也改为按指定历史 commit 解析。
 
+本轮继续收紧三个容易被误读的表面：
+
+- `provider check` 默认仍是零请求；只有显式 `--live` 才做一次最小请求，并将
+  `configuration_only`、`local_service`、`live_request` 分开报告。
+- 每份 closure audit 一次性包含 `trace`、`replay`、`verify` 三层的完成状态、claim
+  覆盖数、blocker/warning 计数和代码列表；workspace `status.review` 复用同一摘要。
+- feedback 可绑定 `intervention_id → outcome_id → evaluator_id`。默认状态是
+  observational，报告明确显示未归因/部分绑定/独立成对，并且任何反馈都不能绕过
+  Research VCS evolution gate。
+
 这些修复提高了“记录是否与实际调用一致”的能力，但没有把本地记录变成不可伪造的第三方证明。
 
 ## 证据与可重复测试
@@ -25,11 +35,14 @@ XScientist 的优势已经不在“能否生成一篇论文”，而在于它把
 
 | 检查 | 结果 | 能说明什么 | 不能说明什么 |
 |---|---|---|---|
-| `python -m pytest --collect-only -q` | 可收集 1368 项 | 测试入口可发现 | 不代表真实 provider 或 Docker 可用 |
-| `PYTHONPATH=. pytest -q`（修复前基线） | 1368 passed，5 warnings，53 subtests | 当前源码大部分回归通过 | 测试主要是本地 mock/fixture |
-| provider/trace/research 定向回归 | 88 passed，11 subtests | 本次改动覆盖的隔离、探测、trace、历史 selector 成立 | 不代表跨平台和外部服务稳定 |
+| `python -m pytest --collect-only -q` | 可收集 1379 项 | 测试入口可发现 | 不代表真实 provider 或 Docker 可用 |
+| `python -m pytest -q`（本轮） | 1379 passed，5 warnings，53 subtests | 当前源码全量回归通过 | 测试主要是本地 mock/fixture |
+| provider/closure/feedback 定向回归 | 155 passed，13 subtests | 本轮改动覆盖的 live 探针、闭环摘要、反馈归因和跨进程持久化成立 | 不代表跨平台和外部服务稳定 |
 | 临时工作区 `setup → provider add → provider test` | 配置成功；真实最小请求成功 | 自定义 OpenAI-compatible 路由可被调用，返回了模型身份和 token 汇总 | 不代表完整科研运行成功 |
 | `provider check --json` | 明确区分 configuration-only 与 live verification | 不再把“有 key”当成“API 已验证” | hosted provider 仍需 opt-in live test |
+| `provider check --live --json` | 一次显式最小请求 | 验证传输和模型身份，不保存响应正文 | 不代表科学质量或完整运行成功 |
+| closure audit / workspace status | 一次输出三层闭环摘要 | 审查者可直接看到每层 blocker/warning 数 | 本地账本仍不是第三方证明 |
+| feedback attribution | 干预、结果、评估者可寻址 | 自进化线索不再只有无因果的趋势分数 | 成对观察仍需独立门禁才可晋级 |
 | `privacy_audit.py . --json` | 0 findings | 当前仓库没有扫描到明显凭据/隐私泄露 | 不能证明未来输入不会泄露 |
 
 完整自动科研旅程在本机仍受到环境前置条件限制（例如可选 `sklearn`、认证会话和 Docker executable）。这不是测试失败应被掩盖的细节，而是首次运行体验的核心风险：用户很容易把“provider ready”误读成“研究可以运行”。
@@ -167,6 +180,11 @@ Research VCS 的 typed object、relation、checkpoint、diff、blame 和 offline
 
 - 把 `explore`/Research VCS 当作低成本研究线索和审查入口。
 - 把 `provider check` 理解为配置检查；要确认远端才运行明确收费提示的 `provider test`。
+- 也可以使用 `provider check --live`，但必须把它视为一次明确授权、可能计费的最小
+  请求；默认 `provider check` 永远不做网络调用。
 - 把 `trace`、`replay`、`verify` 当作不同门槛；任何 `unknown` 或 `awaiting_independent_verification` 都不能写成已证实。
+- 查看 audit/status 中的 `closure_levels`，不要只看顶层 `ok` 或 `promotion_ready`。
+- 反馈自进化前先记录 intervention/outcome/evaluator 链；没有成对结果时只能当作观察，
+  不能宣称策略导致改进。
 - 生产或投稿前固定 provider/model/endpoint 指纹、数据 hash、代码 revision、依赖锁、seed 和独立 evaluator 身份。
 - 不要把合成数据、模型自评、用户自报 gate 或本地 hash 当作第三方科学证明。

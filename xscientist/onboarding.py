@@ -266,6 +266,8 @@ def _render_readme(
     provider_note = (
         f"""```bash
 xscientist provider check {provider}
+# Optional, explicit one-request verification (may incur provider cost):
+# xscientist provider check {provider} --live --json
 # Only when the check reports missing configuration:
 xscientist provider add {provider}
 xscientist provider list

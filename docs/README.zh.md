@@ -202,7 +202,15 @@ xscientist doctor --workspace ./ood-study --deep
 ```
 
 检查会区分客户端、凭据、本地模型、Docker CLI、Docker daemon 和执行器镜像等
-问题，并按顺序给出修复命令；检查本身不会发起付费模型请求。
+问题，并按顺序给出修复命令；默认检查本身不会发起付费模型请求。如果要明确
+验证一次远端模型，可单独选择：
+
+```bash
+xscientist provider check --workspace ./ood-study --live --timeout 30 --json
+```
+
+`--live` 可能产生 Provider 费用，只记录传输结果、模型身份和 token 汇总，不保存
+响应正文；不加该参数时仍然是 configuration-only 检查。
 
 ### 长任务
 

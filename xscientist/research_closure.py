@@ -996,31 +996,73 @@ def audit_research_closure(
     integrity = {key: value for key, value in fsck.items() if key != "repository"}
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
-    claim_rows: list[dict[str, Any]] = []
-    if not claims:
-        blockers.append(
-            _blocker("no_claims", "", "selected ref contains no typed claim objects")
+    # Compute all three levels from the same immutable object set.  Historically
+    # an audit only reported blockers for its requested level, which forced
+    # reviewers to run the command three times and made a trace-complete report
+    # look deceptively close to verification-complete.  Keeping the per-level
+    # rows in one payload makes the scientific ladder inspectable at a glance.
+    level_rows: dict[str, list[dict[str, Any]]] = {}
+    level_blockers: dict[str, list[dict[str, str]]] = {}
+    level_warnings: dict[str, list[dict[str, str]]] = {}
+    for closure_level in RESEARCH_CLOSURE_LEVELS:
+        rows: list[dict[str, Any]] = []
+        level_specific_blockers: list[dict[str, str]] = []
+        level_specific_warnings: list[dict[str, str]] = []
+        if not claims:
+            level_specific_blockers.append(
+                _blocker(
+                    "no_claims", "", "selected ref contains no typed claim objects"
+                )
+            )
+        for claim in claims:
+            row, row_blockers, row_warnings = _claim_closure(
+                claim, objects, target_level=closure_level
+            )
+            rows.append(row)
+            level_specific_blockers.extend(row_blockers)
+            level_specific_warnings.extend(row_warnings)
+        for error in integrity["errors"]:
+            level_specific_blockers.append(
+                _blocker("repository_integrity_failure", "", str(error))
+            )
+        for warning in integrity["warnings"]:
+            level_specific_warnings.append(
+                _blocker("repository_integrity_warning", "", str(warning))
+            )
+        level_blockers[closure_level] = sorted(
+            {content_hash(item): item for item in level_specific_blockers}.values(),
+            key=lambda item: (item["code"], item["object_id"], item["message"]),
         )
-    for claim in claims:
-        row, row_blockers, row_warnings = _claim_closure(
-            claim, objects, target_level=level
+        level_warnings[closure_level] = sorted(
+            {content_hash(item): item for item in level_specific_warnings}.values(),
+            key=lambda item: (item["code"], item["object_id"], item["message"]),
         )
-        claim_rows.append(row)
-        blockers.extend(row_blockers)
-        warnings.extend(row_warnings)
-    for error in integrity["errors"]:
-        blockers.append(_blocker("repository_integrity_failure", "", str(error)))
-    for warning in integrity["warnings"]:
-        warnings.append(_blocker("repository_integrity_warning", "", str(warning)))
+        level_rows[closure_level] = rows
 
-    blockers = sorted(
-        {content_hash(item): item for item in blockers}.values(),
-        key=lambda item: (item["code"], item["object_id"], item["message"]),
-    )
-    warnings = sorted(
-        {content_hash(item): item for item in warnings}.values(),
-        key=lambda item: (item["code"], item["object_id"], item["message"]),
-    )
+    claim_rows = level_rows[level]
+    blockers = level_blockers[level]
+    warnings = level_warnings[level]
+    closure_levels = {
+        closure_level: {
+            "complete": not level_blockers[closure_level],
+            "status": "complete" if not level_blockers[closure_level] else "blocked",
+            "claim_count": len(level_rows[closure_level]),
+            "complete_claim_count": sum(
+                bool(row.get("complete")) for row in level_rows[closure_level]
+            ),
+            "blocker_count": len(level_blockers[closure_level]),
+            "warning_count": len(level_warnings[closure_level]),
+            "blocker_codes": sorted(
+                {str(item.get("code") or "") for item in level_blockers[closure_level]}
+                - {""}
+            ),
+            "warning_codes": sorted(
+                {str(item.get("code") or "") for item in level_warnings[closure_level]}
+                - {""}
+            ),
+        }
+        for closure_level in RESEARCH_CLOSURE_LEVELS
+    }
     base: dict[str, Any] = {
         "schema_version": RESEARCH_CLOSURE_SCHEMA,
         "ref": ref,
@@ -1035,6 +1077,7 @@ def audit_research_closure(
         "claims": claim_rows,
         "blockers": blockers,
         "warnings": warnings,
+        "closure_levels": closure_levels,
         "integrity": integrity,
         "payloads_disclosed": False,
     }
@@ -1075,9 +1118,54 @@ def summarize_closure_levels(report: Mapping[str, Any]) -> dict[str, bool]:
     }
 
 
+def closure_level_summary(report: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the machine-readable status of every closure level.
+
+    New audits include exact blocker/warning counts and code lists for all
+    levels.  The small fallback keeps callers compatible with reports created
+    by older XScientist versions; in that case only the requested level's
+    issue counts are known and the other levels are marked as derived.
+    """
+
+    raw = report.get("closure_levels")
+    if isinstance(raw, Mapping):
+        result: dict[str, dict[str, Any]] = {}
+        for level in RESEARCH_CLOSURE_LEVELS:
+            value = raw.get(level)
+            if isinstance(value, Mapping):
+                result[level] = dict(value)
+        if len(result) == len(RESEARCH_CLOSURE_LEVELS):
+            return result
+
+    levels = summarize_closure_levels(report)
+    target = str(report.get("target_level") or "")
+    blockers = list(report.get("blockers") or [])
+    warnings = list(report.get("warnings") or [])
+    blocker_codes = sorted({str(item.get("code") or "") for item in blockers} - {""})
+    warning_codes = sorted({str(item.get("code") or "") for item in warnings} - {""})
+    result = {}
+    for level in RESEARCH_CLOSURE_LEVELS:
+        known = level == target
+        result[level] = {
+            "complete": bool(levels[level]),
+            "status": "complete" if levels[level] else "blocked",
+            "claim_count": len(list(report.get("claims") or [])),
+            "complete_claim_count": sum(
+                bool(item.get("complete")) for item in list(report.get("claims") or [])
+            ),
+            "blocker_count": len(blockers) if known else None,
+            "warning_count": len(warnings) if known else None,
+            "blocker_codes": blocker_codes if known else [],
+            "warning_codes": warning_codes if known else [],
+            "counts_scope": "target_level" if known else "derived",
+        }
+    return result
+
+
 __all__ = [
     "RESEARCH_CLOSURE_LEVELS",
     "RESEARCH_CLOSURE_SCHEMA",
     "audit_research_closure",
+    "closure_level_summary",
     "summarize_closure_levels",
 ]

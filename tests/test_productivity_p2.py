@@ -133,6 +133,8 @@ class ProductivityP2Tests(unittest.TestCase):
             self.assertIn("rollback", script)
             self.assertIn("show", script)
             self.assertIn("diff", script)
+            self.assertIn("provider", script)
+            self.assertTrue("--live" in script or "-l live" in script)
             self.assertTrue("--workspace" in script or "-l workspace" in script)
 
     def test_conformance_kit_expects_the_bad_fixture_to_fail(self) -> None:

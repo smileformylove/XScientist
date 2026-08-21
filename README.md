@@ -220,7 +220,16 @@ xscientist doctor --workspace ./ood-study --deep
 
 The commands distinguish missing clients, credentials, local models, Docker
 CLI, Docker daemon, and executor-image mismatches. They print ordered repair
-commands without making a paid provider request.
+commands without making a paid provider request. If you explicitly want one
+minimal remote verification, opt in separately:
+
+```bash
+xscientist provider check --workspace ./ood-study --live --timeout 30 --json
+```
+
+`--live` may incur provider cost and reports transport/model identity only;
+response content is never recorded. The default check remains configuration
+only.
 
 ### Long-running studies
 

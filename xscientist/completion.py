@@ -10,7 +10,7 @@ COMMANDS = (
 SUBCOMMANDS = {
     "runs": "list show watch logs cancel resume",
     "auth": "login status logout",
-    "provider": "list check add activate remove",
+    "provider": "list check add activate remove test",
     "executor": "check build prepare update",
     "upgrade": "check",
     "conformance": "init check",
@@ -44,7 +44,10 @@ OPTIONS = {
     "runs": "--workspace --json --interval --stream --tail --force",
     "doctor": "--workspace --task --provider --deep --json",
     "setup": "--task --provider --model --skip-credentials --deep --json",
-    "provider": "--workspace --model --max-cost-usd --non-interactive --json",
+    "provider": (
+        "--workspace --model --max-cost-usd --live --timeout "
+        "--non-interactive --json"
+    ),
     "executor": "--workspace --json",
     "upgrade": "--workspace --online --timeout --json",
     "conformance": "--schema --json",

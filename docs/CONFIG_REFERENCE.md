@@ -16,6 +16,8 @@ the active model through `xscientist provider`:
 xscientist provider add openai --model "openai/your-model-id"
 xscientist provider list
 xscientist provider check openai --max-cost-usd 10
+# Optional, explicit one-request verification (may incur provider cost)
+xscientist provider check openai --live --timeout 30 --json
 xscientist provider activate openai
 ```
 
@@ -41,12 +43,35 @@ without displaying credential values. Commands started below the workspace root
 discover `.xscientist/providers.json` through parent directories, so nested
 notebooks and experiment folders do not need repeated `--workspace` flags.
 
-`provider check` is intentionally non-billing: it validates metadata,
-credential presence, the installed client, and (when `--max-cost-usd` is
-supplied) a complete non-negative model price. It does **not** call the model
-API, and its JSON output reports `credential_validation: presence_only` and
-`live_api_verified: false` so local readiness is not confused with a live
-account/model test.
+`provider check` is intentionally non-billing by default: it validates
+metadata, credential presence, the installed client, and (when
+`--max-cost-usd` is supplied) a complete non-negative model price. Its JSON
+output reports `credential_validation: presence_only` and
+`verification_scope: configuration_only` so local readiness is not confused
+with a live account/model test. Add `--live` only when you explicitly approve
+one minimal request; the response records transport/model identity and token
+totals but never response content. `provider test` remains the equivalent
+standalone live-probe command.
+
+## Feedback attribution
+
+Feedback trends are observations, not proof that a strategy improved. To make
+self-evolution clues auditable, attach a stable intervention and later outcome:
+
+```bash
+xscientist feedback --feedback-dir ./feedback add \
+  --category strategy --priority info --source evolution \
+  --message "try candidate configuration" \
+  --intervention-id candidate-42 --json
+xscientist feedback --feedback-dir ./feedback link-outcome \
+  --item-id ITEM_ID --outcome-id outcome-42 \
+  --evaluation-scope independent --evaluator-id reviewer-1 --json
+xscientist feedback --feedback-dir ./feedback status --json
+```
+
+Reports distinguish `unattributed`, partially linked, observationally paired,
+and independently paired items. Even an independent pair does not authorize
+promotion: the fixed Research VCS evolution gate remains mandatory.
 
 For models without a bundled price, either configure
 `llm_budget.prices_per_million` in `bfts_config.yaml` or supply explicit prices

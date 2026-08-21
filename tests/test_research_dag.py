@@ -178,6 +178,14 @@ class ResearchDagTests(unittest.TestCase):
         self.assertEqual(nodes[ids["attempt"]]["proof"]["level"], "replayable")
         self.assertEqual(nodes[ids["evidence"]]["proof"]["level"], "replayable")
         self.assertIn("missing_passing_gate", nodes[ids["claim"]]["proof"]["blockers"])
+        self.assertEqual(
+            set(graph["scientific_closure"]["closure_levels"]),
+            {"trace", "replay", "verify"},
+        )
+        self.assertGreater(
+            graph["scientific_closure"]["closure_levels"]["verify"]["blocker_count"],
+            0,
+        )
         challenge_edges = [
             edge for edge in graph["edges"] if edge["category"] == "challenge"
         ]

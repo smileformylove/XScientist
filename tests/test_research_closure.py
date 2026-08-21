@@ -83,6 +83,14 @@ class ResearchClosureTests(unittest.TestCase):
             self.assertEqual(audit["claims"][0]["evidence_ids"], [evidence_id])
             self.assertEqual(audit["claims"][0]["attempt_ids"], [attempt_id])
             self.assertNotIn("payload", audit["claims"][0])
+            self.assertEqual(
+                set(audit["closure_levels"]), {"trace", "replay", "verify"}
+            )
+            self.assertTrue(audit["closure_levels"]["trace"]["complete"])
+            self.assertEqual(audit["closure_levels"]["trace"]["blocker_count"], 0)
+            self.assertGreaterEqual(
+                audit["closure_levels"]["verify"]["blocker_count"], 1
+            )
             validate(audit, load_schema("research_closure"))
 
     def test_replay_audit_distinguishes_saved_from_replay_ready(self) -> None:

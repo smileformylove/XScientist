@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from .models import CommandResult, ProjectRequest, ServiceSettings
     from .research_evolution import ResearchEvolution
     from .research_lifecycle import ResearchLifecycle
-    from .research_closure import audit_research_closure
+    from .research_closure import audit_research_closure, closure_level_summary
     from .research_dag import build_research_dag, export_research_dag
     from .research_discovery import (
         assess_generalization,
@@ -97,6 +97,10 @@ def __getattr__(name: str) -> Any:
         from .research_closure import audit_research_closure
 
         value = audit_research_closure
+    elif name == "closure_level_summary":
+        from .research_closure import closure_level_summary
+
+        value = closure_level_summary
     elif name in {"build_research_dag", "export_research_dag"}:
         from . import research_dag
 
@@ -164,6 +168,7 @@ __all__ = [
     "ServiceSettings",
     "XScientist",
     "audit_research_closure",
+    "closure_level_summary",
     "assess_generalization",
     "build_discovery_contract",
     "build_research_dag",

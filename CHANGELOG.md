@@ -12,6 +12,13 @@ for its Python package; the ARA protocol has its own version in
   secret-free resolved model/endpoint fingerprints, distinguish configuration
   checks from live verification, and return structured unsupported live-probe
   results for non-OpenAI-compatible clients.
+- `provider check` keeps its zero-request default and now supports an explicit
+  `--live` minimal probe with model-identity scope and no response-content
+  recording.
+- Closure audits and workspace status expose one shared trace/replay/verify
+  summary with per-level blocker and warning counts; durable feedback can link
+  interventions to outcomes and accountable evaluators without treating the
+  link as automatic causal proof.
 - LLM call provenance records the resolved provider contract without API keys;
   historical `research blame` selectors resolve against the requested commit.
 - Source-checkout test discovery is deterministic through the configured

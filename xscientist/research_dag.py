@@ -2407,6 +2407,7 @@ def build_research_dag(
             "claim_count": len(claims),
             "blocker_count": len((closure or {}).get("blockers") or []),
             "warning_count": len((closure or {}).get("warnings") or []),
+            "closure_levels": dict((closure or {}).get("closure_levels") or {}),
             "content_hash": (closure or {}).get("content_hash"),
         },
         "integrity": analysis,

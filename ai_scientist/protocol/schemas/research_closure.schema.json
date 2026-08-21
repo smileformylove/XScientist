@@ -49,6 +49,17 @@
     "superseded_claim_ids": {"$ref": "#/$defs/objectIds"},
     "blockers": {"$ref": "#/$defs/issues"},
     "warnings": {"$ref": "#/$defs/issues"},
+    "closure_levels": {
+      "type": "object",
+      "description": "One-shot trace/replay/verify readiness summary; issue payloads remain in the selected level's blockers/warnings arrays.",
+      "required": ["trace", "replay", "verify"],
+      "properties": {
+        "trace": {"$ref": "#/$defs/closureLevel"},
+        "replay": {"$ref": "#/$defs/closureLevel"},
+        "verify": {"$ref": "#/$defs/closureLevel"}
+      },
+      "additionalProperties": false
+    },
     "integrity": {"type": "object"},
     "payloads_disclosed": {"type": "boolean", "const": false},
     "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
@@ -71,6 +82,30 @@
         },
         "additionalProperties": false
       }
+    },
+    "closureLevel": {
+      "type": "object",
+      "required": [
+        "complete",
+        "status",
+        "claim_count",
+        "complete_claim_count",
+        "blocker_count",
+        "warning_count",
+        "blocker_codes",
+        "warning_codes"
+      ],
+      "properties": {
+        "complete": {"type": "boolean"},
+        "status": {"type": "string", "enum": ["complete", "blocked"]},
+        "claim_count": {"type": "integer", "minimum": 0},
+        "complete_claim_count": {"type": "integer", "minimum": 0},
+        "blocker_count": {"type": "integer", "minimum": 0},
+        "warning_count": {"type": "integer", "minimum": 0},
+        "blocker_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "warning_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

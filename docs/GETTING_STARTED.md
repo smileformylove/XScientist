@@ -47,7 +47,9 @@ xscientist doctor --workspace ./my-study --deep
 ```
 
 Credential presence and live API validation are different states. The provider
-check does not make a paid request.
+check does not make a paid request. When you explicitly approve one minimal
+remote verification, use `xscientist provider check --workspace ./my-study
+--live --json`; it reports model identity without storing response content.
 
 ## 3. Detach, inspect, and resume
 

@@ -55,6 +55,12 @@ class FeedbackItem:
     action_taken: Optional[str] = None
     resolved: bool = False
     item_id: str = ""
+    # Optional research links.  Legacy feedback files omit these fields and
+    # continue to load because all three have conservative defaults.
+    intervention_id: Optional[str] = None
+    outcome_id: Optional[str] = None
+    evaluation_scope: str = "observational"
+    evaluator_id: Optional[str] = None
 
 
 class EnhancedFeedbackSystem:
@@ -151,6 +157,10 @@ class EnhancedFeedbackSystem:
         metrics: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
         actionable: bool = True,
+        intervention_id: Optional[str] = None,
+        outcome_id: Optional[str] = None,
+        evaluation_scope: str = "observational",
+        evaluator_id: Optional[str] = None,
     ) -> FeedbackItem:
         """
         Add feedback item
@@ -163,10 +173,17 @@ class EnhancedFeedbackSystem:
             metrics: Associated metrics
             context: Additional context
             actionable: Whether this feedback requires action
+            intervention_id: Stable identifier of the strategy/configuration
+                change being observed, when one exists
+            outcome_id: Stable identifier of a measured downstream outcome
+            evaluation_scope: ``observational`` (default), ``controlled``, or
+                ``independent``
+            evaluator_id: Accountable evaluator for an independent outcome
 
         Returns:
             Created feedback item
         """
+        scope = self._normalize_evaluation_scope(evaluation_scope)
         item = FeedbackItem(
             timestamp=datetime.now().isoformat(),
             category=category.value,
@@ -177,6 +194,12 @@ class EnhancedFeedbackSystem:
             context=context or {},
             actionable=actionable,
             item_id=uuid.uuid4().hex,
+            intervention_id=self._normalize_reference(
+                intervention_id, "intervention_id"
+            ),
+            outcome_id=self._normalize_reference(outcome_id, "outcome_id"),
+            evaluation_scope=scope,
+            evaluator_id=self._normalize_reference(evaluator_id, "evaluator_id"),
         )
 
         self.feedback_buffer.append(item)
@@ -193,6 +216,141 @@ class EnhancedFeedbackSystem:
         self._save_feedback_batch()
 
         return item
+
+    @staticmethod
+    def _normalize_reference(value: Optional[str], label: str) -> Optional[str]:
+        """Normalize a persisted link while rejecting ambiguous log values."""
+
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        if "\n" in cleaned or "\r" in cleaned:
+            raise ValueError(f"{label} cannot contain a newline")
+        if len(cleaned) > 256:
+            raise ValueError(f"{label} is too long (maximum 256 characters)")
+        return cleaned
+
+    @staticmethod
+    def _normalize_evaluation_scope(value: str) -> str:
+        scope = str(value or "observational").strip().lower()
+        allowed = {"observational", "controlled", "independent"}
+        if scope not in allowed:
+            raise ValueError(
+                "evaluation_scope must be observational, controlled, or independent"
+            )
+        return scope
+
+    @staticmethod
+    def _item_attribution_status(item: FeedbackItem) -> str:
+        if item.intervention_id and item.outcome_id:
+            if item.evaluation_scope == "independent" and item.evaluator_id:
+                return "independent_paired"
+            if item.evaluation_scope == "controlled":
+                return "controlled_paired"
+            return "observational_paired"
+        if item.intervention_id:
+            return "intervention_only"
+        if item.outcome_id:
+            return "outcome_only"
+        return "unattributed"
+
+    @classmethod
+    def item_attribution_status(cls, item: FeedbackItem) -> str:
+        """Public, stable wrapper used by CLI/reporting integrations."""
+
+        return cls._item_attribution_status(item)
+
+    def attribution_summary(self) -> Dict[str, Any]:
+        """Describe how much feedback can be linked to an evaluated change.
+
+        This is deliberately a status report, not a causal claim.  A paired
+        observation is useful for learning, while an independent evaluator is
+        the minimum signal exposed as ``independent_paired``; callers must
+        still apply the Research VCS promotion gates before changing defaults.
+        """
+
+        counts: Dict[str, int] = defaultdict(int)
+        for item in self.feedback_history:
+            counts[self._item_attribution_status(item)] += 1
+        paired = sum(
+            counts[key]
+            for key in (
+                "observational_paired",
+                "controlled_paired",
+                "independent_paired",
+            )
+        )
+        independent = counts["independent_paired"]
+        total = len(self.feedback_history)
+        if not total:
+            status = "no_observations"
+        elif independent:
+            status = "independent_paired"
+        elif paired:
+            status = "paired_observations"
+        elif counts["intervention_only"] or counts["outcome_only"]:
+            status = "partially_linked"
+        else:
+            status = "unattributed"
+        return {
+            "status": status,
+            "total_items": total,
+            "paired_items": paired,
+            "independent_paired_items": independent,
+            "controlled_paired_items": counts["controlled_paired"],
+            "observational_paired_items": counts["observational_paired"],
+            "intervention_only_items": counts["intervention_only"],
+            "outcome_only_items": counts["outcome_only"],
+            "unattributed_items": counts["unattributed"],
+            "causal_attribution_established": False,
+            "promotion_signal_allowed": False,
+            "next_requirement": (
+                "link an intervention_id and outcome_id, then record an accountable "
+                "evaluator before treating feedback as independent evidence"
+                if not independent
+                else "run the fixed independent evolution gate before promotion"
+            ),
+        }
+
+    def record_outcome(
+        self,
+        feedback_item: FeedbackItem | str,
+        outcome_id: str,
+        *,
+        evaluation_scope: str = "observational",
+        evaluator_id: Optional[str] = None,
+    ) -> FeedbackItem:
+        """Link a measured outcome to an existing feedback observation.
+
+        Linking is explicit and monotonic: an empty outcome is rejected and an
+        existing non-empty outcome cannot silently be replaced.  This prevents
+        a later process from rewriting the outcome that a self-evolution report
+        was based on.
+        """
+
+        item_id = (
+            feedback_item.item_id
+            if isinstance(feedback_item, FeedbackItem)
+            else str(feedback_item)
+        )
+        target = next(
+            (item for item in self.feedback_history if item.item_id == item_id),
+            None,
+        )
+        if target is None:
+            raise ValueError(f"feedback item not found: {item_id}")
+        normalized_outcome = self._normalize_reference(outcome_id, "outcome_id")
+        if not normalized_outcome:
+            raise ValueError("outcome_id is required")
+        if target.outcome_id and target.outcome_id != normalized_outcome:
+            raise ValueError("feedback item already links a different outcome_id")
+        target.outcome_id = normalized_outcome
+        target.evaluation_scope = self._normalize_evaluation_scope(evaluation_scope)
+        target.evaluator_id = self._normalize_reference(evaluator_id, "evaluator_id")
+        self._save_feedback_batch()
+        return target
 
     def analyze_trends(self, metric_name: str, hours: Optional[int] = None) -> Dict:
         """
@@ -410,6 +568,7 @@ class EnhancedFeedbackSystem:
         """
         unresolved = [item for item in self.feedback_history if not item.resolved]
         has_data = bool(self.feedback_history or self.metric_windows)
+        attribution = self.attribution_summary()
         report = {
             "timestamp": datetime.now().isoformat(),
             "feedback_summary": {
@@ -418,6 +577,7 @@ class EnhancedFeedbackSystem:
                 "critical_items": len(
                     [item for item in unresolved if item.priority == "critical"]
                 ),
+                "attribution": attribution,
             },
             "metrics": {},
             "trends": {},
@@ -549,6 +709,21 @@ class EnhancedFeedbackSystem:
                 if disk_item is not None and disk_item.resolved and not item.resolved:
                     item.resolved = True
                     item.action_taken = disk_item.action_taken
+                # Reference links are also monotonic.  A short-lived writer
+                # must not erase an intervention/outcome pair written by a
+                # concurrent process that it loaded earlier.
+                if disk_item is not None:
+                    if disk_item.intervention_id and not item.intervention_id:
+                        item.intervention_id = disk_item.intervention_id
+                    if disk_item.outcome_id and not item.outcome_id:
+                        item.outcome_id = disk_item.outcome_id
+                    if (
+                        disk_item.evaluation_scope != "observational"
+                        and item.evaluation_scope == "observational"
+                    ):
+                        item.evaluation_scope = disk_item.evaluation_scope
+                    if disk_item.evaluator_id and not item.evaluator_id:
+                        item.evaluator_id = disk_item.evaluator_id
                 merged.append(item)
             removed = 0
             if prune_resolved:

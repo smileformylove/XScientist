@@ -302,6 +302,162 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertIn("unknown_model_price", payload["error_codes"])
             self.assertFalse(payload["checks"]["model_price_known"])
 
+    def test_provider_check_live_is_explicit_and_reports_model_identity(self) -> None:
+        """A configuration check must only make a request when --live is given."""
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="gpt-4o-mini",
+            )
+            output = io.StringIO()
+            live_result = {
+                "ok": True,
+                "supported": True,
+                "transport_ok": True,
+                "provider": "openai",
+                "requested_model": "gpt-4o-mini",
+                "client_model": "gpt-4o-mini",
+                "reported_model": "gpt-4o-mini",
+                "identity_status": "exact",
+                "model_identity_verified": True,
+                "exact_model_match": True,
+                "response_content_recorded": False,
+            }
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"OPENAI_API_KEY": "process-only-secret"},
+                    clear=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "ai_scientist.utils.provider_registry.probe_live_model",
+                    return_value=live_result,
+                ) as probe,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--live",
+                        "--timeout",
+                        "4",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["checks"]["live_probe_requested"])
+            self.assertTrue(payload["checks"]["live_request_attempted"])
+            self.assertTrue(payload["checks"]["live_api_verified"])
+            self.assertEqual(payload["checks"]["verification_scope"], "live_request")
+            self.assertEqual(payload["live_probe"]["identity_status"], "exact")
+            probe.assert_called_once()
+            self.assertEqual(probe.call_args.kwargs["timeout"], 4.0)
+            self.assertNotIn("process-only-secret", output.getvalue())
+
+    def test_provider_check_without_live_never_calls_the_provider_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="gpt-4o-mini",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"OPENAI_API_KEY": "process-only-secret"},
+                    clear=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "ai_scientist.utils.provider_registry.probe_live_model"
+                ) as probe,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertFalse(payload["checks"]["live_probe_requested"])
+            self.assertFalse(payload["checks"]["live_api_verified"])
+            self.assertIsNone(payload["live_probe"])
+            probe.assert_not_called()
+
+    def test_provider_check_live_respects_unknown_cost_guard_before_network(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/unpriced-research-model",
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"OPENAI_API_KEY": "process-only-secret"},
+                    clear=True,
+                ),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "ai_scientist.utils.provider_registry.probe_live_model"
+                ) as probe,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "check",
+                        "--workspace",
+                        str(workspace),
+                        "--max-cost-usd",
+                        "1",
+                        "--live",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertIn("unknown_model_price", payload["error_codes"])
+            self.assertIn("live_probe_blocked_by_unknown_cost", payload["error_codes"])
+            self.assertFalse(payload["checks"]["live_api_verified"])
+            self.assertFalse(payload["checks"]["live_request_attempted"])
+            self.assertEqual(
+                payload["checks"]["verification_scope"], "live_request_blocked"
+            )
+            probe.assert_not_called()
+
     def test_ollama_check_verifies_service_model_and_zero_cost(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"

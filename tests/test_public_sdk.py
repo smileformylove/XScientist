@@ -31,6 +31,7 @@ class PublicSdkTests(unittest.TestCase):
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
+        self.assertTrue(callable(xscientist.closure_level_summary))
         self.assertTrue(callable(xscientist.build_research_guide))
         self.assertTrue(callable(xscientist.compare_workspace_history))
         self.assertTrue(callable(xscientist.inspect_workspace_checkpoint))

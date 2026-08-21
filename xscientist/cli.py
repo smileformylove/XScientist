@@ -492,7 +492,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "check",
         help=(
             "Check one provider's local credentials, client, model, and optional "
-            "cost enforcement without making a paid API call."
+            "cost enforcement; no request is made unless --live is supplied."
         ),
     )
     provider_check.add_argument("name", nargs="?", choices=_PROVIDER_CHOICES)
@@ -506,6 +506,20 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="also require a known non-negative price for the configured model",
+    )
+    provider_check.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "make one explicit minimal provider request; this may incur cost "
+            "and requires a live-capable provider"
+        ),
+    )
+    provider_check.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for --live (default: 30)",
     )
     provider_check.add_argument("--json", action="store_true", dest="as_json")
     provider_add = provider_subparsers.add_parser(
@@ -1859,7 +1873,10 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     if isinstance(prices, dict):
                         custom_prices = prices
             model = str(row.get("model") or "")
-            from ai_scientist.utils.provider_registry import model_provenance
+            from ai_scientist.utils.provider_registry import (
+                model_provenance,
+                probe_live_model,
+            )
 
             provenance = (
                 model_provenance(model, env=workspace_environment(workspace))
@@ -1871,6 +1888,49 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 if model
                 else None
             )
+            cost_ready = parsed.max_cost_usd is None or price is not None
+            live_probe: dict[str, object] | None = None
+            if parsed.live:
+                if parsed.timeout <= 0:
+                    raise ProviderConfigError("--timeout must be greater than zero")
+                # A live request must never bypass an explicit cost guard.  If
+                # the configured model has no price, fail closed before opening
+                # a network connection and tell the user how to supply one.
+                if not cost_ready:
+                    live_probe = {
+                        "ok": False,
+                        "supported": None,
+                        "transport_ok": None,
+                        "error_code": "live_probe_blocked_by_unknown_cost",
+                        "response_content_recorded": False,
+                    }
+                elif not row["ready"]:
+                    live_probe = {
+                        "ok": False,
+                        "supported": None,
+                        "transport_ok": None,
+                        "error_code": "live_probe_blocked_by_configuration",
+                        "response_content_recorded": False,
+                    }
+                else:
+                    load_result = load_workspace_environment(workspace)
+                    if load_result.get("error"):
+                        raise ProviderConfigError(str(load_result["error"]))
+                    try:
+                        live_probe = probe_live_model(
+                            model,
+                            timeout=float(parsed.timeout),
+                            env=workspace_environment(workspace),
+                        )
+                    except ValueError as exc:
+                        live_probe = {
+                            "ok": False,
+                            "supported": None,
+                            "transport_ok": False,
+                            "error_code": "live_probe_configuration_error",
+                            "error_message": str(exc),
+                            "response_content_recorded": False,
+                        }
             error_codes: list[str] = []
             remediations: list[dict[str, str]] = []
             if not row["configured"]:
@@ -1923,7 +1983,6 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         "command": f"ollama pull {model_name}",
                     }
                 )
-            cost_ready = parsed.max_cost_usd is None or price is not None
             if not cost_ready:
                 error_codes.append("unknown_model_price")
                 remediations.append(
@@ -1934,13 +1993,37 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         ),
                     }
                 )
+            if parsed.live and live_probe is not None and not live_probe.get("ok"):
+                probe_error = str(live_probe.get("error_code") or "live_probe_failed")
+                error_codes.append(probe_error)
+                remediations.append(
+                    {
+                        "code": "inspect_live_provider_probe",
+                        # Keep the repair command path-free.  Provider commands
+                        # already discover the nearest workspace, so a copied
+                        # command remains useful without disclosing the local
+                        # absolute path in JSON output.
+                        "command": f"xscientist provider test {provider} --json",
+                    }
+                )
+            ready_with_live = bool(
+                row["ready"]
+                and cost_ready
+                and (not parsed.live or (live_probe and live_probe.get("ok")))
+            )
+            live_request_attempted = bool(
+                parsed.live
+                and live_probe is not None
+                and live_probe.get("transport_ok") is not None
+            )
             payload = {
                 "schema": "xscientist.provider-check.v1",
-                "ok": bool(row["ready"] and cost_ready),
+                "ok": ready_with_live,
                 "workspace": ".",
                 "provider": provider,
                 "model": model or None,
                 "provenance": provenance,
+                "live_probe": live_probe,
                 "checks": {
                     "metadata_configured": bool(row["configured"]),
                     "credentials_present": bool(row["credentials_available"]),
@@ -1958,12 +2041,26 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     "local_service_reachable": local_probe["service_reachable"],
                     "model_available": local_probe["model_available"],
                     "live_api_verified": bool(
-                        local_probe["checked"] and local_probe["ok"]
+                        (local_probe["checked"] and local_probe["ok"])
+                        or (live_probe is not None and live_probe.get("ok"))
+                    ),
+                    "live_probe_requested": bool(parsed.live),
+                    "live_request_attempted": live_request_attempted,
+                    "live_probe_supported": (
+                        live_probe.get("supported") if live_probe is not None else None
                     ),
                     "verification_scope": (
-                        "local_service"
-                        if local_probe["checked"]
-                        else "configuration_only"
+                        "live_request"
+                        if live_request_attempted
+                        else (
+                            "live_request_blocked"
+                            if parsed.live
+                            else (
+                                "local_service"
+                                if local_probe["checked"]
+                                else "configuration_only"
+                            )
+                        )
                     ),
                 },
                 "price_per_million": price,
@@ -1974,26 +2071,51 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(json.dumps(payload, indent=2, ensure_ascii=False))
             else:
                 state = (
-                    "local service and model verified"
-                    if local_probe["checked"] and payload["ok"]
+                    "live provider request verified"
+                    if parsed.live and payload["ok"]
                     else (
-                        "configuration checks passed; credentials not live-verified"
-                        if payload["ok"]
-                        and any(field.required for field in PROVIDER_FIELDS[provider])
+                        (
+                            "live provider request failed"
+                            if live_request_attempted
+                            else "live provider request not made (blocked)"
+                        )
+                        if parsed.live
                         else (
-                            "configuration checks passed"
-                            if payload["ok"]
-                            else "not ready"
+                            "local service and model verified"
+                            if local_probe["checked"] and payload["ok"]
+                            else (
+                                "configuration checks passed; credentials not live-verified"
+                                if payload["ok"]
+                                and any(
+                                    field.required
+                                    for field in PROVIDER_FIELDS[provider]
+                                )
+                                else (
+                                    "configuration checks passed"
+                                    if payload["ok"]
+                                    else "not ready"
+                                )
+                            )
                         )
                     )
                 )
                 print(f"Provider {provider}: {state}")
                 print(f"Model: {model or '-'}")
                 if any(field.required for field in PROVIDER_FIELDS[provider]):
+                    if not parsed.live:
+                        credential_note = (
+                            "presence check only; no provider request was made"
+                        )
+                    elif live_probe and live_probe.get("transport_ok") is not None:
+                        credential_note = "presence check plus explicit live probe; see request outcome"
+                    else:
+                        credential_note = (
+                            "presence check; live probe was blocked before a request"
+                        )
                     print(
                         "Credentials: "
                         + ("present" if row["credentials_available"] else "missing")
-                        + " (presence check only; no paid API request was made)"
+                        + f" ({credential_note})"
                     )
                 else:
                     print("Credentials: not required for this local provider")

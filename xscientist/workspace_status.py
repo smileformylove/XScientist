@@ -12,7 +12,11 @@ import yaml
 from ai_scientist.utils.privacy import portable_path, redact_sensitive_payload
 
 from .provider_config import discover_workspace_root
-from .research_closure import audit_research_closure, summarize_closure_levels
+from .research_closure import (
+    audit_research_closure,
+    closure_level_summary,
+    summarize_closure_levels,
+)
 from .research_git import ResearchGitError, repository_status
 from .research_journey import build_research_guide
 
@@ -64,6 +68,24 @@ def _first_existing(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.is_file()), None)
 
 
+def _empty_closure_levels(status: str = "unavailable") -> dict[str, dict[str, Any]]:
+    """Return a shape-stable closure ladder when no repository audit is available."""
+
+    return {
+        level: {
+            "complete": False,
+            "status": status,
+            "claim_count": 0,
+            "complete_claim_count": 0,
+            "blocker_count": 0,
+            "warning_count": 0,
+            "blocker_codes": [],
+            "warning_codes": [],
+        }
+        for level in ("trace", "replay", "verify")
+    }
+
+
 def _latest_background_run(root: Path) -> dict[str, Any] | None:
     candidates: list[dict[str, Any]] = []
     for path in (root / "04_logs" / "runs").glob("*.json"):
@@ -111,6 +133,11 @@ def _review_summary(root: Path, status: dict[str, Any]) -> dict[str, Any]:
             "replay": "unavailable",
             "verify": "unavailable",
         },
+        "closure_levels": _empty_closure_levels(),
+        "target_level": None,
+        "commit": None,
+        "blocker_count": 0,
+        "warning_count": 0,
         "promotion_ready": False,
         "blocker_codes": [],
         "object_counts": {},
@@ -137,6 +164,7 @@ def _review_summary(root: Path, status: dict[str, Any]) -> dict[str, Any]:
         return base
 
     levels = summarize_closure_levels(closure)
+    level_summary = closure_level_summary(closure)
     claim_count = len(closure.get("claims") or [])
     integrity_errors = list((closure.get("integrity") or {}).get("errors") or [])
     checks = {
@@ -152,6 +180,11 @@ def _review_summary(root: Path, status: dict[str, Any]) -> dict[str, Any]:
         {
             "available": True,
             "checks": checks,
+            "closure_levels": level_summary,
+            "target_level": closure.get("target_level"),
+            "commit": closure.get("commit"),
+            "blocker_count": len(closure.get("blockers") or []),
+            "warning_count": len(closure.get("warnings") or []),
             "promotion_ready": levels["verify"],
             "blocker_codes": sorted(
                 {str(item.get("code") or "") for item in closure.get("blockers") or []}
@@ -324,6 +357,11 @@ def build_workspace_status(
             },
             "promotion_ready": False,
             "blocker_codes": [],
+            "closure_levels": _empty_closure_levels(),
+            "target_level": "unavailable",
+            "commit": None,
+            "blocker_count": 0,
+            "warning_count": 0,
             "object_counts": {},
             "evolution": {
                 "candidates": 0,
