@@ -23,6 +23,22 @@
     "provider": {"type": "string", "description": "openai | anthropic | ollama | huggingface | …"},
     "model": {"type": "string", "description": "Model id as passed by the caller (e.g. anthropic/glm-5.1)."},
     "request_style": {"type": "string", "description": "openai_chat | openai_reasoning | anthropic_messages | huggingface | ollama."},
+    "model_provenance": {
+      "type": "object",
+      "description": "Secret-free resolved provider contract. Endpoints are represented by hashes and credentials by environment-variable names.",
+      "properties": {
+        "provider": {"type": "string"},
+        "requested_model": {"type": "string"},
+        "client_model": {"type": "string"},
+        "request_style": {"type": "string"},
+        "endpoint_fingerprint": {"type": ["string", "null"]},
+        "endpoint_configured": {"type": "boolean"},
+        "endpoint_env": {"type": ["string", "null"]},
+        "api_key_env": {"type": ["string", "null"]},
+        "configuration_fingerprint": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
     "params": {
       "type": "object",
       "description": "Hash-worthy request knobs (temperature, max_tokens, seed, top_p, response_format, tool_choice, stop). Non-serialisable values MUST be omitted, not stringified.",

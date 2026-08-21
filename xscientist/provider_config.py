@@ -27,6 +27,15 @@ DEFAULT_MODELS = {"zhipu": "glm-4-flash"}
 PROVIDER_ALIASES = {"custom": "openai_compat"}
 PLACEHOLDER_VALUES = {"", "replace-me", "your-api-key", "your_api_key_here"}
 
+# ``load_workspace_environment`` necessarily exposes the selected workspace to
+# legacy code through ``os.environ``.  Keep a small, in-memory ownership map so
+# a later workspace load can distinguish values injected by XScientist from
+# credentials explicitly supplied by the user's shell.  This prevents a
+# process that services multiple workspaces (the desktop app and test runners
+# do this routinely) from silently routing workspace B through workspace A's
+# endpoint or account.
+_MANAGED_ENV_VALUES: dict[str, tuple[str, str]] = {}
+
 
 @dataclass(frozen=True)
 class ProviderField:
@@ -502,6 +511,76 @@ def configured_field_value(
     return str(field.default or "").strip()
 
 
+def _workspace_key(root: str | Path) -> str:
+    return str(Path(root).expanduser().resolve())
+
+
+def _process_environment_for_workspace(
+    workspace: str | Path,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return process values after removing stale managed values.
+
+    An explicitly supplied mapping is treated as authoritative and is never
+    mutated.  With the real process environment, only an exact value that was
+    previously injected by XScientist for another workspace is removed; a
+    user's unrelated shell variable therefore keeps its normal precedence.
+    """
+
+    source = dict(os.environ if environ is None else environ)
+    if environ is not None:
+        return source
+    current = _workspace_key(workspace)
+    for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
+        if owner != current and source.get(name) == value:
+            source.pop(name, None)
+    return source
+
+
+def _effective_workspace_environment(
+    workspace: str | Path,
+    stored: Mapping[str, str],
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    # Explicit process/CLI values win over the current workspace file.  Stale
+    # values injected by an earlier workspace have already been removed above.
+    return {**dict(stored), **_process_environment_for_workspace(workspace, environ)}
+
+
+def mark_managed_environment(
+    root: str | Path,
+    name: str,
+    value: str,
+) -> None:
+    """Set and attribute a process variable to a workspace-owned value."""
+
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return
+    os.environ[str(name)] = cleaned
+    _MANAGED_ENV_VALUES[str(name)] = (_workspace_key(root), cleaned)
+
+
+def workspace_environment(
+    root: str | Path,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve a secret-bearing environment for one workspace without leaks.
+
+    The returned mapping is safe to pass to provider clients.  It contains the
+    workspace env file plus explicit process values, while filtering values
+    that XScientist previously injected for a different workspace.
+    """
+
+    workspace = Path(root).expanduser().resolve()
+    config = load_provider_config(workspace, missing_ok=True)
+    env_file = resolve_env_file(
+        workspace, str(config.get("env_file") or DEFAULT_ENV_FILE)
+    )
+    stored = read_env_file(env_file) if env_file.is_file() else {}
+    return _effective_workspace_environment(workspace, stored, environ)
+
+
 def _env_file_is_private(path: Path) -> bool:
     if os.name == "nt" or not path.is_file():
         return True
@@ -530,28 +609,50 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
                 f"{env_file.relative_to(workspace).as_posix()}"
             ),
         }
+    stored = read_env_file(env_file)
+    current_workspace_key = _workspace_key(workspace)
+    for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
+        if owner != current_workspace_key and os.environ.get(name) == value:
+            os.environ.pop(name, None)
+            _MANAGED_ENV_VALUES.pop(name, None)
+    process_environment = _process_environment_for_workspace(workspace)
     loaded_names: list[str] = []
-    for name, value in read_env_file(env_file).items():
-        if _is_configured_value(value) and name not in os.environ:
-            os.environ[name] = value
+    overridden_names: list[str] = []
+    for name, value in stored.items():
+        if not _is_configured_value(value):
+            continue
+        if name not in process_environment:
+            mark_managed_environment(workspace, name, value)
+            process_environment[name] = value
             loaded_names.append(name)
+        elif process_environment[name] != value:
+            # A value explicitly present in the shell remains authoritative;
+            # report the distinction instead of silently claiming the file was
+            # used.  Stale XScientist-managed values were removed above.
+            owner_value = _MANAGED_ENV_VALUES.get(name)
+            if owner_value and owner_value[0] == _workspace_key(workspace):
+                mark_managed_environment(workspace, name, value)
+                process_environment[name] = value
+                overridden_names.append(name)
     active = str(config.get("active_provider") or "").strip()
     entry = config.get("providers", {}).get(active, {}) if active else {}
     model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
     if active:
-        os.environ["AI_SCIENTIST_ACTIVE_PROVIDER"] = active
+        mark_managed_environment(workspace, "AI_SCIENTIST_ACTIVE_PROVIDER", active)
     if model:
         # The active workspace is an explicit local choice. It must replace a
         # stale process-wide default left by another workspace or desktop run.
         # Role-specific AI_SCIENTIST_MODEL_* values and CLI flags still win.
-        os.environ["AI_SCIENTIST_DEFAULT_MODEL"] = model
-        os.environ["ZHIPU_DEFAULT_MODEL"] = model
+        mark_managed_environment(workspace, "AI_SCIENTIST_DEFAULT_MODEL", model)
+        mark_managed_environment(workspace, "ZHIPU_DEFAULT_MODEL", model)
     return {
         "loaded": True,
         "workspace": ".",
         "active_provider": active or None,
         "model": model or None,
         "loaded_names": sorted(loaded_names),
+        "overridden_names": sorted(overridden_names),
+        "environment_scope": "workspace_plus_explicit_process",
     }
 
 
@@ -718,7 +819,9 @@ def provider_statuses(
     # Discovery-only listing is allowed to inspect process environment and
     # free local services, but local files require an initialized workspace.
     stored = read_env_file(env_file) if initialized else {}
-    effective_environ = {**stored, **dict(os.environ if environ is None else environ)}
+    effective_environ = _effective_workspace_environment(
+        workspace, stored, environ
+    )
     active = str(config.get("active_provider") or "")
     configured_entries = config.get("providers", {})
     rows = []
@@ -788,6 +891,11 @@ def provider_statuses(
                 "missing": missing,
                 "error": env_error,
                 "local_probe": local_probe,
+                "environment_scope": (
+                    "workspace_plus_explicit_process"
+                    if environ is None
+                    else "supplied_mapping"
+                ),
             }
         )
     return rows
@@ -810,6 +918,7 @@ __all__ = [
     "discover_workspace_root",
     "load_provider_config",
     "load_workspace_environment",
+    "mark_managed_environment",
     "provider_config_payload",
     "probe_provider_model",
     "provider_statuses",
@@ -822,4 +931,5 @@ __all__ = [
     "validate_custom_base_url",
     "validate_provider_model",
     "workspace_config_path",
+    "workspace_environment",
 ]

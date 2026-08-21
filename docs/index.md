@@ -42,6 +42,10 @@ software run is therefore not misrepresented as successful scientific closure.
 Read [Getting started](GETTING_STARTED.md) for the practical workflow or the
 [Research protocol](RESEARCH_PROTOCOL_V2.md) for the scientific model.
 
+For a frank current-state review, including usability, provider provenance,
+scientific-quality limits, exploration coverage, clue transparency, and
+feedback/self-evolution gaps, see [the 2026 project audit](PROJECT_AUDIT_2026-08.md).
+
 !!! warning
     XScientist is alpha research software. Generated code belongs inside the
     configured isolation boundary. Machine-generated claims stay unverified

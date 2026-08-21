@@ -30,10 +30,52 @@ from xscientist.provider_config import (
     provider_statuses,
     resolve_env_file,
     validate_custom_base_url,
+    workspace_environment,
 )
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_loading_two_workspaces_does_not_reuse_managed_provider_values(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            first = Path(td) / "first"
+            second = Path(td) / "second"
+            create_workspace(
+                first,
+                provider="openai_compat",
+                model="openai_compat/first-model",
+            )
+            create_workspace(
+                second,
+                provider="openai_compat",
+                model="openai_compat/second-model",
+            )
+            for workspace, suffix in ((first, "first"), (second, "second")):
+                env_file = workspace / ".env"
+                env_file.write_text(
+                    "OPENAI_COMPAT_API_KEY={0}-key\n"
+                    "OPENAI_COMPAT_BASE_URL=https://{0}.example/v1\n".format(
+                        suffix
+                    ),
+                    encoding="utf-8",
+                )
+                env_file.chmod(0o600)
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                load_workspace_environment(first)
+                self.assertEqual(
+                    os.environ["OPENAI_COMPAT_BASE_URL"],
+                    "https://first.example/v1",
+                )
+                load_workspace_environment(second)
+                self.assertEqual(
+                    os.environ["OPENAI_COMPAT_BASE_URL"],
+                    "https://second.example/v1",
+                )
+                self.assertEqual(
+                    workspace_environment(second)["OPENAI_COMPAT_API_KEY"],
+                    "second-key",
+                )
+
     def test_cli_provider_choices_match_registry(self) -> None:
         self.assertEqual(tuple(_PROVIDER_CHOICES[:-1]), PROVIDER_NAMES)
         self.assertEqual(_PROVIDER_CHOICES[-1], "custom")

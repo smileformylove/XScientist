@@ -194,6 +194,23 @@ class ResearchRepositoryTests(unittest.TestCase):
                 second.object_id,
             )
 
+    def test_blame_resolves_latest_selector_at_requested_historical_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._init(Path(td) / "research")
+            first = repository.record("hypothesis", {"statement": "H1"})
+            first_checkpoint = repository.commit(stage="ideation", subject="record H1")
+            repository.record("hypothesis", {"statement": "H2"})
+            repository.commit(stage="ideation", subject="record H2")
+
+            blame = repository.blame(
+                "@latest:hypothesis",
+                commit=str(first_checkpoint.commit),
+            )
+
+        self.assertEqual(blame["selector"], "@latest:hypothesis")
+        self.assertEqual(blame["resolved_object_id"], first.object_id)
+        self.assertEqual(blame["object"]["object_id"], first.object_id)
+
     def test_privacy_gate_rejects_secret_without_persisting_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "research"

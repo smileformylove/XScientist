@@ -275,6 +275,11 @@ extend-exclude = '''
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+# Keep source-checkout test runs deterministic.  Without an explicit project
+# path, the standalone ``pytest`` console script can omit the repository root
+# from ``sys.path`` (and an unrelated site-packages ``tests`` namespace can
+# win import resolution), making collection fail before any test runs.
+pythonpath = ["."]
 
 [tool.coverage.run]
 branch = true

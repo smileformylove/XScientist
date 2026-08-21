@@ -42,6 +42,8 @@ The P0–P2 product work identified below is now implemented on `main`:
 - durable cross-process feedback with honest unknown/corruption states;
 - separate traceability, replayability, and verification closure reporting;
 - persistent readiness blockers and bounded scientific-strategy follow-ups.
+- workspace-scoped provider environments, secret-free model/endpoint
+  provenance, and structured live-probe capability states.
 - a GitHub-like default review surface showing clean/pending history,
   trace/replay/verify checks, compact checkpoint diffs, and stale DAG views;
 - rollback that preserves policy-excluded generated views while atomically
@@ -216,8 +218,9 @@ Remaining friction:
 
 ### Small CLI consistency gaps found during this audit
 
-- lifecycle commands accept selectors such as `@latest:hypothesis`, while
-  `research blame` still requires an immutable `rso-*` ID;
+- lifecycle commands and `research blame` now accept selectors such as
+  `@latest:hypothesis`; historical blame resolves the selector against the
+  requested commit rather than the mutable working tree;
 - manual DAG output may be placed inside a repository and is safely excluded
   from scientific staging, while Autopilot writes its view outside the working
   tree; the distinction should be surfaced in CLI output;

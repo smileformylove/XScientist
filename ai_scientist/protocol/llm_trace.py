@@ -162,6 +162,7 @@ def record_llm_call(
     latency_ms: int | None = None,
     error: str | None = None,
     stage: str | None = None,
+    model_provenance: dict[str, Any] | None = None,
 ) -> str | None:
     """Append one row to ``<ara>/llm/calls.jsonl``.
 
@@ -192,6 +193,7 @@ def record_llm_call(
                 "provider": provider,
                 "model": model,
                 "request_style": request_style,
+                "model_provenance": model_provenance or {},
                 "params": _clean_params(params),
                 "messages_ref": messages_ref,
                 "response_ref": response_ref,

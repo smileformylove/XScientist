@@ -6,6 +6,23 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Changed
+
+- Provider diagnostics now track workspace-owned environment values, expose
+  secret-free resolved model/endpoint fingerprints, distinguish configuration
+  checks from live verification, and return structured unsupported live-probe
+  results for non-OpenAI-compatible clients.
+- LLM call provenance records the resolved provider contract without API keys;
+  historical `research blame` selectors resolve against the requested commit.
+- Source-checkout test discovery is deterministic through the configured
+  project path and local `tests` package.
+
+### Documentation
+
+- Added a current Chinese project audit covering usability, auditability,
+  scientific quality, exploration, clue transparency, feedback, and
+  self-evolution limits.
+
 ## [0.1.3] - 2026-08-19
 
 ### Added

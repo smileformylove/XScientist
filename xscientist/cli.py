@@ -1511,6 +1511,7 @@ def _configure_provider(
         ProviderConfigError,
         configured_field_value,
         load_provider_config,
+        mark_managed_environment,
         normalize_provider_name,
         provider_statuses,
         read_env_file,
@@ -1520,6 +1521,7 @@ def _configure_provider(
         update_env_file,
         validate_custom_base_url,
         validate_provider_model,
+        workspace_environment,
     )
 
     requested_name = str(name or "").strip().lower()
@@ -1540,6 +1542,7 @@ def _configure_provider(
     env_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
     env_path = resolve_env_file(workspace, env_name)
     stored = read_env_file(env_path)
+    effective_environment = workspace_environment(workspace)
     updates: dict[str, str] = {}
     if base_url_value is not None:
         if provider != "openai_compat":
@@ -1550,7 +1553,7 @@ def _configure_provider(
     for field in PROVIDER_FIELDS[provider]:
         if field.name in updates:
             continue
-        current = configured_field_value(field, stored, os.environ)
+        current = configured_field_value(field, stored, effective_environment)
         if current:
             continue
         if field.default is not None:
@@ -1574,7 +1577,7 @@ def _configure_provider(
     # otherwise a stale desktop/shell environment could still route this run
     # to another endpoint or credential.
     for env_field, value in updates.items():
-        os.environ[env_field] = value
+        mark_managed_environment(workspace, env_field, value)
     saved = save_provider(
         workspace,
         provider=provider,
@@ -1582,6 +1585,9 @@ def _configure_provider(
         env_file=env_name,
         activate=activate,
     )
+    from ai_scientist.utils.provider_registry import model_provenance
+
+    provenance = model_provenance(model, env=workspace_environment(workspace))
     bfts_updated = False
     if update_bfts and saved.get("active_provider") == provider:
         bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
@@ -1591,6 +1597,9 @@ def _configure_provider(
         "provider": provider,
         "requested_provider": requested_name,
         "model": model,
+        "resolved_client_model": provenance["client_model"],
+        "endpoint_fingerprint": provenance["endpoint_fingerprint"],
+        "configuration_fingerprint": provenance["configuration_fingerprint"],
         "active": saved.get("active_provider") == provider,
         "env_file": env_path.relative_to(workspace).as_posix(),
         "credentials_written": sorted(
@@ -1614,7 +1623,7 @@ def _configure_provider(
                     PROVIDER_FIELDS[provider][0],
                 ),
                 {**stored, **updates},
-                os.environ,
+                workspace_environment(workspace),
             )
         )
         if provider in {"openai_compat", "ollama"}
@@ -1652,6 +1661,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         remove_provider,
         update_bfts_models,
         workspace_config_path,
+        workspace_environment,
     )
 
     try:
@@ -1746,10 +1756,8 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             return 0
 
         if parsed.provider_command == "test":
-            import os
-
             from ai_scientist.utils.provider_registry import (
-                probe_openai_compatible_model,
+                probe_live_model,
             )
 
             if parsed.timeout <= 0:
@@ -1769,10 +1777,10 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 raise ProviderConfigError(str(load_result["error"]))
             model = str(entry["model"])
             try:
-                probe = probe_openai_compatible_model(
+                probe = probe_live_model(
                     model,
                     timeout=float(parsed.timeout),
-                    env=dict(os.environ),
+                    env=workspace_environment(workspace),
                 )
             except ValueError as exc:
                 raise ProviderConfigError(str(exc)) from exc
@@ -1782,6 +1790,8 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "workspace": ".",
                 "provider": provider,
                 "model": model,
+                "supported": probe.get("supported", True),
+                "identity_status": probe.get("identity_status", "unavailable"),
                 "billing": "one explicit minimal model request",
                 "probe": probe,
                 "response_content_recorded": False,
@@ -1792,8 +1802,18 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"Provider test: {provider}")
                 print(f"Requested model: {probe.get('client_model') or model}")
                 print(f"Reported model: {probe.get('reported_model') or '-'}")
-                if probe.get("ok"):
+                if probe.get("error_code") == "live_probe_not_supported":
+                    print(
+                        "Live probe: not supported for this provider family; "
+                        "no API request was made"
+                    )
+                elif probe.get("identity_status") == "exact":
                     print("Model identity: exact match")
+                elif probe.get("identity_status") == "alias":
+                    print(
+                        "Model identity: route alias (request succeeded, "
+                        "but the gateway returned a prefixed alias)"
+                    )
                 elif probe.get("error_code") == "live_request_failed":
                     print(
                         "Model identity: unavailable "
@@ -1839,6 +1859,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     if isinstance(prices, dict):
                         custom_prices = prices
             model = str(row.get("model") or "")
+            from ai_scientist.utils.provider_registry import model_provenance
+
+            provenance = (
+                model_provenance(model, env=workspace_environment(workspace))
+                if model
+                else None
+            )
             price = (
                 resolve_model_price(model, prices_per_million=custom_prices)
                 if model
@@ -1913,6 +1940,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "workspace": ".",
                 "provider": provider,
                 "model": model or None,
+                "provenance": provenance,
                 "checks": {
                     "metadata_configured": bool(row["configured"]),
                     "credentials_present": bool(row["credentials_available"]),
@@ -1931,6 +1959,11 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     "model_available": local_probe["model_available"],
                     "live_api_verified": bool(
                         local_probe["checked"] and local_probe["ok"]
+                    ),
+                    "verification_scope": (
+                        "local_service"
+                        if local_probe["checked"]
+                        else "configuration_only"
                     ),
                 },
                 "price_per_million": price,

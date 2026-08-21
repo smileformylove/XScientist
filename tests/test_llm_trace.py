@@ -158,6 +158,28 @@ class LLMTraceTests(unittest.TestCase):
             rows[0]["messages_ref"]["hash"], rows[1]["messages_ref"]["hash"]
         )
 
+    def test_model_provenance_is_persisted_without_api_key(self) -> None:
+        self._enable()
+        record_llm_call(
+            provider="openai_compat",
+            model="openai_compat/research-model",
+            request_style="openai_chat",
+            system_message="sys",
+            messages=[],
+            response_text="ok",
+            model_provenance={
+                "provider": "openai_compat",
+                "requested_model": "openai_compat/research-model",
+                "client_model": "research-model",
+                "endpoint_fingerprint": "sha256:" + "a" * 64,
+                "api_key_env": "OPENAI_COMPAT_API_KEY",
+                "secret": "marker",
+            },
+        )
+        [row] = self._read_rows()
+        self.assertEqual(row["model_provenance"]["api_key_env"], "OPENAI_COMPAT_API_KEY")
+        self.assertNotIn("marker", json.dumps(row))
+
     def test_stage_override_beats_env(self) -> None:
         self._enable(stage="fallback")
         record_llm_call(

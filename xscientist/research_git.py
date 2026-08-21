@@ -3320,9 +3320,63 @@ def research_blame(
     root = _repository_root(repo)
     resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
     objects = _research_objects_at_commit(root, resolved.stdout.strip())
-    payload = objects.get(object_id)
+    selector = str(object_id or "").strip()
+
+    # Resolve against the requested commit, not the mutable working tree.  The
+    # previous implementation delegated selectors to the current object store,
+    # which made ``blame @latest:hypothesis --commit OLD`` either fail or point
+    # at a newer object than the one being audited.
+    if selector.startswith("@latest"):
+        prefix, separator, selected_kind = selector.partition(":")
+        if prefix != "@latest" or not separator or not selected_kind:
+            raise ResearchGitError("object selector must use @latest:<kind>")
+        candidates = [
+            (candidate_id, candidate)
+            for candidate_id, candidate in objects.items()
+            if str(candidate.get("kind") or "") == selected_kind
+        ]
+        if not candidates:
+            raise ResearchGitError(
+                f"no research objects found for selector at {commit}: {selector}"
+            )
+        resolved_object_id = max(
+            candidates,
+            key=lambda item: (
+                str(item[1].get("created_at") or ""),
+                item[0],
+            ),
+        )[0]
+    elif selector.startswith("urn:xscientist:research-object:sha256:"):
+        matches = [
+            candidate_id
+            for candidate_id, candidate in objects.items()
+            if candidate.get("qualified_id") == selector
+        ]
+        if len(matches) != 1:
+            raise ResearchGitError(f"research object not found at {commit}: {selector}")
+        resolved_object_id = matches[0]
+    elif selector in objects:
+        resolved_object_id = selector
+    elif re.fullmatch(r"rso-[0-9a-f]{6,15}", selector):
+        matches = sorted(
+            candidate_id
+            for candidate_id in objects
+            if candidate_id.startswith(selector)
+        )
+        if len(matches) != 1:
+            detail = "not found" if not matches else "ambiguous"
+            raise ResearchGitError(
+                f"{detail} research object prefix at {commit}: {selector}"
+            )
+        resolved_object_id = matches[0]
+    else:
+        resolved_object_id = selector
+
+    payload = objects.get(resolved_object_id)
     if payload is None:
-        raise ResearchGitError(f"research object not found at {commit}: {object_id}")
+        raise ResearchGitError(
+            f"research object not found at {commit}: {resolved_object_id}"
+        )
     path = str(payload["repository_path"])
     raw = _run_git(
         root,
@@ -3337,10 +3391,14 @@ def research_blame(
         ],
     ).stdout.splitlines()
     if not raw:
-        raise ResearchGitError(f"cannot locate research object origin: {object_id}")
+        raise ResearchGitError(
+            f"cannot locate research object origin: {resolved_object_id}"
+        )
     fields = raw[0].split("\0", 3)
     if len(fields) != 4:
-        raise ResearchGitError(f"cannot parse research object origin: {object_id}")
+        raise ResearchGitError(
+            f"cannot parse research object origin: {resolved_object_id}"
+        )
     origin_commit, authored_at, author, subject = fields
     checkpoint = _latest_checkpoint_record(root, origin_commit)
     related_by = [
@@ -3351,11 +3409,13 @@ def research_blame(
         }
         for source_id, source in sorted(objects.items())
         for relation in source.get("relations") or []
-        if relation.get("target") == object_id
+        if relation.get("target") == resolved_object_id
     ]
     return {
+        "selector": selector,
+        "resolved_object_id": resolved_object_id,
         "object": {
-            "object_id": object_id,
+            "object_id": resolved_object_id,
             "kind": payload["kind"],
             "state": payload["state"],
             "content_hash": payload["content_hash"],

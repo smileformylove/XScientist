@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Provider and model resolution helpers for multi-vendor LLM access."""
 
+import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -101,6 +103,107 @@ def _pick_first_env(
         if value:
             return env_name, value
     return None, None
+
+
+_MODEL_ROUTE_PREFIXES = frozenset(
+    {
+        "openai",
+        "openai_compat",
+        "custom",
+        "anthropic",
+        "bedrock",
+        "vertex_ai",
+        "ollama",
+        "deepseek",
+        "huggingface",
+        "openrouter",
+        "gemini",
+        "zhipu",
+    }
+)
+
+
+def _model_identity_variants(value: str) -> set[str]:
+    """Return conservative aliases for comparing gateway model identities.
+
+    Gateways frequently echo a route prefix (``openai_compat/foo``) or a
+    deployment alias while still serving the requested model.  We only strip
+    prefixes that XScientist itself understands; broad substring matching
+    would turn a real model substitution into a false pass.
+    """
+
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return set()
+    variants = {normalized}
+    prefix, separator, suffix = normalized.partition("/")
+    if separator and prefix in _MODEL_ROUTE_PREFIXES and suffix:
+        variants.add(suffix)
+    return variants
+
+
+def model_identity_status(requested_model: str, reported_model: str | None) -> str:
+    """Classify a provider-reported model without collapsing aliases and drift.
+
+    Returns one of ``exact``, ``alias``, ``mismatch`` or ``unavailable``.  The
+    strict ``ok`` result of a live probe remains tied to ``exact`` so callers
+    that require an immutable deployment identity still fail closed, while the
+    richer status lets users distinguish a harmless route prefix from a real
+    substitution.
+    """
+
+    reported = str(reported_model or "").strip()
+    requested = str(requested_model or "").strip()
+    if not reported:
+        return "unavailable"
+    if reported == requested:
+        return "exact"
+    if _model_identity_variants(requested) & _model_identity_variants(reported):
+        return "alias"
+    return "mismatch"
+
+
+def _fingerprint(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def model_provenance(
+    model: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Build a secret-free, hash-stable provider contract for audit records.
+
+    API keys are represented only by the environment variable name that won
+    resolution.  Custom endpoints are represented by a content hash rather
+    than a URL, which preserves cross-run comparability without leaking private
+    hostnames into research artifacts.
+    """
+
+    source = os.environ if env is None else env
+    spec = resolve_model_provider(model)
+    base_name, base_url = _pick_first_env(spec.base_url_env_vars, source)
+    endpoint = str(base_url or spec.default_base_url or "").strip().rstrip("/")
+    key_name, _key_value = _pick_first_env(spec.api_key_env_vars, source)
+    core = {
+        "provider": spec.provider,
+        "requested_model": spec.raw_model,
+        "client_model": spec.client_model,
+        "request_style": spec.request_style,
+        "endpoint_fingerprint": _fingerprint(endpoint),
+    }
+    return {
+        **core,
+        "endpoint_configured": bool(endpoint),
+        "endpoint_env": base_name,
+        "api_key_env": key_name,
+        "configuration_fingerprint": _fingerprint(
+            json.dumps(core, sort_keys=True, separators=(",", ":"))
+        ),
+    }
 
 
 def _build_spec(
@@ -458,6 +561,8 @@ def probe_openai_compatible_model(
     if missing:
         raise ValueError("missing provider configuration: " + ", ".join(missing))
 
+    provenance = model_provenance(model, env=source)
+
     try:
         from openai import OpenAI
     except ModuleNotFoundError as exc:
@@ -493,17 +598,21 @@ def probe_openai_compatible_model(
     except Exception as exc:
         return {
             "ok": False,
+            "supported": True,
+            "transport_ok": False,
             "provider": spec.provider,
             "requested_model": model,
             "client_model": client_model,
             "reported_model": None,
             "model_identity_verified": False,
             "exact_model_match": False,
+            "identity_status": "unavailable",
             "latency_ms": round((time.monotonic() - started) * 1000, 1),
             "error_code": "live_request_failed",
             "error_type": type(exc).__name__,
             "http_status": getattr(exc, "status_code", None),
             "response_content_recorded": False,
+            "provenance": provenance,
         }
     finally:
         close = getattr(client, "close", None) if client is not None else None
@@ -519,16 +628,20 @@ def probe_openai_compatible_model(
     prompt_tokens = getattr(usage, "prompt_tokens", None)
     completion_tokens = getattr(usage, "completion_tokens", None)
     total_tokens = getattr(usage, "total_tokens", None)
-    identity_verified = bool(reported_model)
-    exact_match = identity_verified and reported_model == client_model
+    identity_status = model_identity_status(client_model, reported_model)
+    identity_verified = identity_status != "unavailable"
+    exact_match = identity_status == "exact"
     return {
         "ok": bool(exact_match),
+        "supported": True,
+        "transport_ok": True,
         "provider": spec.provider,
         "requested_model": model,
         "client_model": client_model,
         "reported_model": reported_model or None,
         "model_identity_verified": identity_verified,
         "exact_model_match": exact_match,
+        "identity_status": identity_status,
         "finish_reason": finish_reason or None,
         "latency_ms": round((time.monotonic() - started) * 1000, 1),
         "usage": {
@@ -537,6 +650,48 @@ def probe_openai_compatible_model(
             "total_tokens": total_tokens,
         },
         "response_content_recorded": False,
+        "provenance": provenance,
+    }
+
+
+def probe_live_model(
+    model: str,
+    *,
+    timeout: float = 30.0,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Run the safest available live probe for a resolved provider.
+
+    OpenAI-compatible routes have a fully implemented, content-free probe.
+    Other provider families are returned as a structured unsupported result so
+    the CLI can explain the limitation instead of leaking an implementation
+    ``ValueError``.  This is deliberately conservative: an unsupported probe
+    must never be reported as a successful verification.
+    """
+
+    spec = resolve_model_provider(model)
+    if spec.client_family == "openai_compatible":
+        return probe_openai_compatible_model(model, timeout=timeout, env=env)
+    provenance = model_provenance(model, env=env)
+    return {
+        "ok": False,
+        "supported": False,
+        "transport_ok": None,
+        "provider": spec.provider,
+        "requested_model": model,
+        "client_model": spec.client_model,
+        "reported_model": None,
+        "model_identity_verified": False,
+        "exact_model_match": False,
+        "identity_status": "unavailable",
+        "error_code": "live_probe_not_supported",
+        "error_type": None,
+        "error_message": (
+            f"live probing is not implemented for provider family "
+            f"{spec.client_family!r}"
+        ),
+        "response_content_recorded": False,
+        "provenance": provenance,
     }
 
 

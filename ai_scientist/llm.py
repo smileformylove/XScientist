@@ -16,6 +16,7 @@ from ai_scientist.utils.optional_dependencies import (
 )
 from ai_scientist.utils.provider_registry import (
     build_openai_compatible_client_kwargs,
+    model_provenance as build_model_provenance,
     model_uses_anthropic_client,
     resolve_model_provider,
 )
@@ -623,6 +624,7 @@ def _record_llm_call_safe(
     """
     try:
         tokens = _extract_tokens(response)
+        provenance = build_model_provenance(model, env=os.environ)
         record_llm_call(
             provider=provider or getattr(spec, "provider", "unknown"),
             model=model,
@@ -634,6 +636,7 @@ def _record_llm_call_safe(
             tokens=tokens,
             latency_ms=latency_ms,
             error=error,
+            model_provenance=provenance,
         )
     except Exception:
         if strict_llm_tracing():

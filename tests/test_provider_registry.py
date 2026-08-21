@@ -6,6 +6,9 @@ from unittest import mock
 from ai_scientist.utils.provider_registry import (
     build_openai_compatible_client_kwargs,
     missing_model_credentials,
+    model_identity_status,
+    model_provenance,
+    probe_live_model,
     probe_openai_compatible_model,
     provider_env_statuses,
     resolve_model_provider,
@@ -13,6 +16,40 @@ from ai_scientist.utils.provider_registry import (
 
 
 class ProviderRegistryTests(unittest.TestCase):
+    def test_model_identity_status_distinguishes_route_alias_from_substitution(self) -> None:
+        self.assertEqual(
+            model_identity_status("gpt-5.6-luna", "openai_compat/gpt-5.6-luna"),
+            "alias",
+        )
+        self.assertEqual(model_identity_status("gpt-5.6-luna", "gpt-5.4"), "mismatch")
+        self.assertEqual(model_identity_status("gpt-5.6-luna", None), "unavailable")
+
+    def test_model_provenance_is_secret_free_and_endpoint_stable(self) -> None:
+        provenance = model_provenance(
+            "openai_compat/gpt-5.6-luna",
+            env={
+                "OPENAI_COMPAT_API_KEY": "example-key",
+                "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1/",
+            },
+        )
+        rendered = str(provenance)
+        self.assertNotIn("example-key", rendered)
+        self.assertEqual(provenance["endpoint_env"], "OPENAI_COMPAT_BASE_URL")
+        self.assertTrue(str(provenance["endpoint_fingerprint"]).startswith("sha256:"))
+        self.assertTrue(
+            str(provenance["configuration_fingerprint"]).startswith("sha256:")
+        )
+
+    def test_live_probe_returns_structured_unsupported_for_anthropic(self) -> None:
+        result = probe_live_model(
+            "anthropic/claude-3-5-sonnet-20241022",
+            env={"ANTHROPIC_API_KEY": "test-key"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["supported"])
+        self.assertEqual(result["error_code"], "live_probe_not_supported")
+        self.assertFalse(result["response_content_recorded"])
+
     def test_resolve_model_provider_should_normalize_prefixed_and_legacy_models(
         self,
     ) -> None:
@@ -139,6 +176,7 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(result["exact_model_match"])
         self.assertEqual(result["reported_model"], "gpt-5.4-mini")
+        self.assertEqual(result["identity_status"], "mismatch")
 
     def test_huggingface_base_url_tracks_requested_model(self) -> None:
         spec = resolve_model_provider("huggingface/org/custom-model")
