@@ -170,6 +170,25 @@ Available client extras are `openai`, `anthropic`, `zhipu`, `bedrock`,
 `vertex`, and `openai-compatible`. The last covers local Ollama and compatible
 services such as DeepSeek, Gemini, OpenRouter, and custom endpoints.
 
+For any OpenAI-compatible service, configure the endpoint explicitly. `custom`
+is a friendly alias for the generic `openai_compat` provider; the URL and key
+stay in the workspace's permission-restricted, Git-ignored `.env` file:
+
+```bash
+python -m pip install "xscientist[research,openai-compatible]"
+export OPENAI_COMPAT_API_KEY="..."
+xscientist provider add custom \
+  --model gpt-5.6-luna \
+  --base-url "https://your-compatible-service.example/v1" \
+  --non-interactive
+xscientist provider test custom --json
+```
+
+`provider test` makes one explicit minimal request and compares the model sent
+to the model reported by the endpoint. A mismatch (for example a gateway
+silently selecting a smaller model) is reported as unverified; the response
+content is never stored by the test.
+
 For scripts and CI, make every consequential choice explicit:
 
 ```bash
@@ -289,6 +308,24 @@ These levels form a one-way ladder: a recorded claim may be traceable without
 being replayable, and replayable without being independently verified. A
 blocked audit is an actionable scientific gap, not necessarily a software
 failure.
+
+### Paper quality status
+
+The writing pass separates a readable manuscript from a verified result. A
+`quality_gate_passed` result requires a locked preregistration, completed
+confirmatory records for every registered task, independent seeds, persisted
+result artifacts, numeric candidate-versus-baseline comparisons with
+uncertainty, deterministic hashes, a task → metric → claim path, and a
+clean-room verification report covering every required criterion. Prose,
+figures, or an LLM score cannot substitute for missing evidence.
+
+Until that chain is complete, XScientist labels the output
+`exploratory_draft` or `manuscript_draft`; it does not call it
+`submission_ready`. Result JSON also includes
+`scientific_evidence_failures` and short `scientific_evidence_next_actions`, so
+a blocked run tells you what to fix next instead of silently lowering a score.
+See the [research integrity contract](docs/RESEARCH_INTEGRITY.md) for the exact
+record fields and replay requirements.
 
 Save a meaningful manual change before trying a risky alternative. Rollback is
 preview-only unless `--apply` is explicit. Applying it appends a reversal

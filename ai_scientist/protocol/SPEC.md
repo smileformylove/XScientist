@@ -205,6 +205,12 @@ Producers scan the manuscript source for `\claimref{<node_id>}` markers
 still MUST be written — with `resolved: false` and `node: null` — so
 consumers can see the manuscript's *intent* even when the node is missing.
 
+For the publication-quality evidence gate, a marker MAY additionally carry the
+paper claim node ID while retaining the ARA node link:
+`\claimref[claim=<claim_id>]{<node_id>}`. The claim ID is checked against
+`claim_evidence_graph.json`; the node ID is checked by the ARA claim registry.
+Neither ID may be fabricated by a writer.
+
 The optional `claims/_index.json` gives a batch summary and is treated as
 non-schema-checked metadata.
 

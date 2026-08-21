@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import re
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
@@ -17,7 +18,6 @@ from ai_scientist.writing_prompt_profiles import (
     render_writing_profile_self_checks,
     render_writing_profile_system_guidance,
 )
-
 
 # ========================================
 # 论文模板库
@@ -45,7 +45,7 @@ PAPER_TEMPLATES = {
                     "Use present tense for established facts",
                     "Use past tense for your findings",
                     "Emphasize novelty and contribution",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -64,7 +64,7 @@ PAPER_TEMPLATES = {
                     "Build intuitive understanding before technical details",
                     "Use concrete examples when possible",
                     "End with clear contribution statement",
-                ]
+                ],
             },
             "related_work": {
                 "order": 3,
@@ -81,7 +81,7 @@ PAPER_TEMPLATES = {
                     "Be respectful but clear about limitations",
                     "Position your work as filling gaps",
                     "Consider using a comparison table",
-                ]
+                ],
             },
             "method": {
                 "order": 4,
@@ -99,7 +99,7 @@ PAPER_TEMPLATES = {
                     "Provide theoretical justifications",
                     "Use figures to illustrate architecture",
                     "Be detailed enough for reproducibility",
-                ]
+                ],
             },
             "experiments": {
                 "order": 5,
@@ -119,7 +119,7 @@ PAPER_TEMPLATES = {
                     "Report statistical significance",
                     "Visualize results clearly",
                     "Ablation studies are crucial",
-                ]
+                ],
             },
             "results": {
                 "order": 6,
@@ -137,7 +137,7 @@ PAPER_TEMPLATES = {
                     "Explain why your method works",
                     "Discuss limitations honestly",
                     "Use visualizations effectively",
-                ]
+                ],
             },
             "discussion": {
                 "order": 7,
@@ -152,7 +152,7 @@ PAPER_TEMPLATES = {
                     "Be honest about limitations",
                     "Suggest concrete future directions",
                     "Avoid overclaiming",
-                ]
+                ],
             },
             "conclusion": {
                 "order": 8,
@@ -165,11 +165,10 @@ PAPER_TEMPLATES = {
                     "Keep it brief and impactful",
                     "Include broader impact (NeurIPS requirement)",
                     "Don't just repeat the abstract",
-                ]
+                ],
             },
-        }
+        },
     },
-
     "iclr": {
         "name": "ICLR",
         "page_limit": 8,
@@ -189,7 +188,7 @@ PAPER_TEMPLATES = {
                     "Emphasize the learning aspect",
                     "Highlight representational insights",
                     "Focus on intuition",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -205,7 +204,7 @@ PAPER_TEMPLATES = {
                     "Focus on learning representations",
                     "Emphasize theoretical insights",
                     "Build intuition gradually",
-                ]
+                ],
             },
             "background": {
                 "order": 3,
@@ -219,7 +218,7 @@ PAPER_TEMPLATES = {
                     "Keep it focused and essential",
                     "Define notation clearly",
                     "Avoid redundancy with related work",
-                ]
+                ],
             },
             "method": {
                 "order": 4,
@@ -236,7 +235,7 @@ PAPER_TEMPLATES = {
                     "Clear mathematical formulation",
                     "Include convergence or complexity analysis",
                     "Connect representation to learning",
-                ]
+                ],
             },
             "experiments": {
                 "order": 5,
@@ -252,7 +251,7 @@ PAPER_TEMPLATES = {
                     "Strong baselines",
                     "Ablation studies essential",
                     "Analyze learned representations",
-                ]
+                ],
             },
             "related_work": {
                 "order": 6,
@@ -266,7 +265,7 @@ PAPER_TEMPLATES = {
                     "Can be after experiments",
                     "Focus on learning methods",
                     "Compare representational approaches",
-                ]
+                ],
             },
             "conclusion": {
                 "order": 7,
@@ -280,11 +279,10 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Include broader impact statement",
                     "Discuss societal implications",
-                ]
+                ],
             },
-        }
+        },
     },
-
     "cvpr": {
         "name": "CVPR",
         "page_limit": 8,
@@ -304,7 +302,7 @@ PAPER_TEMPLATES = {
                     "Emphasize visual aspects",
                     "Mention computational efficiency",
                     "Highlight real-world applicability",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -320,7 +318,7 @@ PAPER_TEMPLATES = {
                     "Include visual motivation",
                     "Be specific about visual challenges",
                     "Emphasize efficiency if applicable",
-                ]
+                ],
             },
             "related_work": {
                 "order": 3,
@@ -334,7 +332,7 @@ PAPER_TEMPLATES = {
                     "Cover both task and general methods",
                     "Include recent CVPR/ICCV/ECCV work",
                     "Use comparison table",
-                ]
+                ],
             },
             "method": {
                 "order": 4,
@@ -351,7 +349,7 @@ PAPER_TEMPLATES = {
                     "Detailed layer specifications",
                     "Visualize key operations",
                     "Computational complexity analysis",
-                ]
+                ],
             },
             "experiments": {
                 "order": 5,
@@ -368,7 +366,7 @@ PAPER_TEMPLATES = {
                     "Qualitative visualizations",
                     "Timing/memory analysis",
                     "Per-class breakdown if classification",
-                ]
+                ],
             },
             "conclusion": {
                 "order": 6,
@@ -380,11 +378,10 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Keep very brief",
                     "Focus on practical impact",
-                ]
+                ],
             },
-        }
+        },
     },
-
     "icbinb": {
         "name": "ICBINB (ICLR Workshop)",
         "page_limit": 4,
@@ -401,7 +398,7 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Very concise",
                     "Focus on key contribution",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -415,7 +412,7 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Get to the point quickly",
                     "Combine related work here",
-                ]
+                ],
             },
             "method": {
                 "order": 3,
@@ -427,7 +424,7 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Focus on essentials",
                     "Use figures efficiently",
-                ]
+                ],
             },
             "experiments": {
                 "order": 4,
@@ -440,7 +437,7 @@ PAPER_TEMPLATES = {
                     "Combine setup with results",
                     "Focus on key findings",
                     "Essential ablations only",
-                ]
+                ],
             },
             "conclusion": {
                 "order": 5,
@@ -450,11 +447,10 @@ PAPER_TEMPLATES = {
                 ],
                 "tips": [
                     "Just a few sentences",
-                ]
+                ],
             },
-        }
+        },
     },
-
     "journal": {
         "name": "Journal (JMLR/TPAMI/Pattern Recognition)",
         "page_limit": 12,
@@ -473,7 +469,7 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Can be more detailed",
                     "Include broader context",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -489,7 +485,7 @@ PAPER_TEMPLATES = {
                     "Thorough literature context",
                     "Clear significance statement",
                     "Detailed roadmap",
-                ]
+                ],
             },
             "related_work": {
                 "order": 3,
@@ -506,7 +502,7 @@ PAPER_TEMPLATES = {
                     "Historical perspective",
                     "Critical analysis",
                     "Clear positioning",
-                ]
+                ],
             },
             "background": {
                 "order": 4,
@@ -519,7 +515,7 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Self-contained background",
                     "Mathematical foundations",
-                ]
+                ],
             },
             "method": {
                 "order": 5,
@@ -536,7 +532,7 @@ PAPER_TEMPLATES = {
                     "Complete specifications",
                     "Strong theory",
                     "Reproducibility focus",
-                ]
+                ],
             },
             "experiments": {
                 "order": 6,
@@ -555,7 +551,7 @@ PAPER_TEMPLATES = {
                     "Multiple scenarios",
                     "Statistical rigor",
                     "Comprehensive analysis",
-                ]
+                ],
             },
             "discussion": {
                 "order": 7,
@@ -571,7 +567,7 @@ PAPER_TEMPLATES = {
                     "Broader implications",
                     "Honest limitations",
                     "Concrete future work",
-                ]
+                ],
             },
             "conclusion": {
                 "order": 8,
@@ -583,9 +579,9 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Comprehensive summary",
                     "Societal implications",
-                ]
+                ],
             },
-        }
+        },
     },
     "nature": {
         "name": "Nature-style Research Article",
@@ -605,7 +601,7 @@ PAPER_TEMPLATES = {
                     "Lead with why the problem matters broadly",
                     "Keep the claim strong but evidence-backed",
                     "Use minimal jargon",
-                ]
+                ],
             },
             "introduction": {
                 "order": 2,
@@ -620,7 +616,7 @@ PAPER_TEMPLATES = {
                     "Build significance early",
                     "Avoid overloading with narrow literature",
                     "End with a crisp statement of advance",
-                ]
+                ],
             },
             "results": {
                 "order": 3,
@@ -635,7 +631,7 @@ PAPER_TEMPLATES = {
                     "Center the narrative on the strongest evidence",
                     "Use figures/tables to support every major claim",
                     "Prefer crisp story over exhaustive enumeration",
-                ]
+                ],
             },
             "discussion": {
                 "order": 4,
@@ -650,7 +646,7 @@ PAPER_TEMPLATES = {
                     "Be ambitious about impact but honest about scope",
                     "Explicitly discuss limitations",
                     "Connect to broader scientific significance",
-                ]
+                ],
             },
             "methods": {
                 "order": 5,
@@ -664,9 +660,9 @@ PAPER_TEMPLATES = {
                 "tips": [
                     "Make reproducibility straightforward",
                     "State statistical and robustness protocols explicitly",
-                ]
+                ],
             },
-        }
+        },
     },
 }
 
@@ -692,7 +688,7 @@ ACADEMIC_WRITING_STANDARDS = {
             "First person singular ('I')",
             "Rhetorical questions",
             "Emotional language",
-        ]
+        ],
     },
     "structure_guidelines": {
         "paragraph_structure": [
@@ -710,7 +706,7 @@ ACADEMIC_WRITING_STANDARDS = {
             "Clear problem-solution structure",
             "Coherent argument progression",
             "Explicit justifications for choices",
-        ]
+        ],
     },
     "writing_style": {
         "clarity": [
@@ -730,7 +726,7 @@ ACADEMIC_WRITING_STANDARDS = {
             "Prefer simple over complex",
             "Avoid wordy phrases",
             "Combine related ideas",
-        ]
+        ],
     },
     "technical_writing": {
         "mathematics": [
@@ -755,7 +751,7 @@ ACADEMIC_WRITING_STANDARDS = {
             "Clear pseudocode",
             "Consistent notation",
             "Explained in text",
-        ]
+        ],
     },
     "common_mistakes": {
         "avoid": [
@@ -768,13 +764,14 @@ ACADEMIC_WRITING_STANDARDS = {
             "Weak transitions",
             "Passive voice overuse",
         ]
-    }
+    },
 }
 
 
 # ========================================
 # 专业章节写作器
 # ========================================
+
 
 class ExpertSectionWriter:
     """专家级章节写作器"""
@@ -866,9 +863,9 @@ class ExpertSectionWriter:
             )
 
             # 解析响应
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if not json_match:
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
 
             if json_match:
                 outline = json.loads(json_match.group(1))
@@ -1085,8 +1082,7 @@ class ExpertSectionWriter:
         # 按顺序编写章节
         sections_content = {}
         section_order = sorted(
-            self.template['sections'].items(),
-            key=lambda x: x[1]['order']
+            self.template["sections"].items(), key=lambda x: x[1]["order"]
         )
 
         for section_name, section_info in section_order:
@@ -1096,10 +1092,12 @@ class ExpertSectionWriter:
 
             # 添加前面章节的上下文
             if iterative:
-                previous = "\n\n".join([
-                    f"\\section{{{name}}}\n{content}"
-                    for name, content in sections_content.items()
-                ])
+                previous = "\n\n".join(
+                    [
+                        f"\\section{{{name}}}\n{content}"
+                        for name, content in sections_content.items()
+                    ]
+                )
                 context["previous_sections"] = previous[:2000]  # 限制长度
 
             # 编写章节
@@ -1140,8 +1138,7 @@ class ExpertSectionWriter:
         # 组装章节
         body = ""
         section_order = sorted(
-            self.template['sections'].items(),
-            key=lambda x: x[1]['order']
+            self.template["sections"].items(), key=lambda x: x[1]["order"]
         )
 
         for section_name, _ in section_order:
@@ -1161,6 +1158,7 @@ class ExpertSectionWriter:
 # ========================================
 # 专业论文评估器
 # ========================================
+
 
 class ProfessionalPaperEvaluator:
     """专业论文质量评估器"""
@@ -1277,18 +1275,50 @@ class ProfessionalPaperEvaluator:
             )
 
             # 解析响应
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
             if not json_match:
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\{.*\}", response, re.DOTALL)
 
             if json_match:
-                return json.loads(json_match.group(1))
+                payload_text = (
+                    json_match.group(1) if json_match.lastindex else json_match.group(0)
+                )
+                parsed = json.loads(payload_text)
+                if not isinstance(parsed, dict):
+                    return {
+                        "raw_response": response,
+                        "score": 0,
+                        "evaluation_error": "reviewer_payload_not_object",
+                    }
+                score = parsed.get("score")
+                if isinstance(score, str):
+                    try:
+                        score = float(score.strip())
+                    except ValueError:
+                        score = None
+                if (
+                    not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                    or not math.isfinite(float(score))
+                ):
+                    parsed["score"] = 0
+                    parsed["evaluation_error"] = "reviewer_score_missing_or_invalid"
+                else:
+                    parsed["score"] = max(0.0, min(5.0, float(score)))
+                return parsed
             else:
-                return {"raw_response": response, "score": 3}
+                # An unparsable reviewer response is an evaluation failure, not
+                # a neutral score. A fallback score can silently make a paper
+                # look acceptable when the reviewer never produced a verdict.
+                return {
+                    "raw_response": response,
+                    "score": 0,
+                    "evaluation_error": "reviewer_response_not_valid_json",
+                }
 
         except Exception as e:
             print(f"    ⚠️  {dimension} 评估失败: {e}")
-            return {"score": 3, "error": str(e)}
+            return {"score": 0, "error": str(e), "evaluation_error": True}
 
     def _get_evaluation_criteria(self, dimension: str) -> Dict:
         """获取评估标准"""
@@ -1302,7 +1332,7 @@ class ProfessionalPaperEvaluator:
                     "逻辑流程清晰",
                     "过渡自然",
                     "图表位置恰当",
-                ]
+                ],
             },
             "content": {
                 "description": "内容质量和深度",
@@ -1312,7 +1342,7 @@ class ProfessionalPaperEvaluator:
                     "论证有力",
                     "实验结果详实",
                     "分析深入",
-                ]
+                ],
             },
             "innovation": {
                 "description": "创新性和贡献",
@@ -1322,7 +1352,7 @@ class ProfessionalPaperEvaluator:
                     "贡献具有重要性",
                     "方法新颖",
                     "结果有突破",
-                ]
+                ],
             },
             "rigor": {
                 "description": "研究严谨性",
@@ -1332,7 +1362,7 @@ class ProfessionalPaperEvaluator:
                     "统计分析正确",
                     "可复现性强",
                     "结论基于证据",
-                ]
+                ],
             },
             "clarity": {
                 "description": "表达清晰度",
@@ -1342,7 +1372,7 @@ class ProfessionalPaperEvaluator:
                     "数学表达规范",
                     "图表清晰易懂",
                     "读者友好",
-                ]
+                ],
             },
             "professionalism": {
                 "description": "专业性和规范性",
@@ -1352,7 +1382,7 @@ class ProfessionalPaperEvaluator:
                     "无语法错误",
                     "学术语言得体",
                     "符合期刊/会议规范",
-                ]
+                ],
             },
         }
 
@@ -1403,6 +1433,7 @@ class ProfessionalPaperEvaluator:
 # 辅助函数
 # ========================================
 
+
 def get_template_info(template: str) -> Dict:
     """获取模板信息"""
     return PAPER_TEMPLATES.get(template, PAPER_TEMPLATES["neurips"])
@@ -1420,10 +1451,30 @@ def recommend_template(idea: Dict) -> str:
     task = idea.get("Task", "").lower()
     summary = " ".join(
         str(idea.get(key, ""))
-        for key in ["Title", "Abstract", "Short Hypothesis", "Hypothesis", "Impact", "Field", "Task"]
+        for key in [
+            "Title",
+            "Abstract",
+            "Short Hypothesis",
+            "Hypothesis",
+            "Impact",
+            "Field",
+            "Task",
+        ]
     ).lower()
 
-    if any(marker in summary for marker in ["real-world", "societal", "climate", "medical", "biology", "agriculture", "broad impact", "major challenge"]):
+    if any(
+        marker in summary
+        for marker in [
+            "real-world",
+            "societal",
+            "climate",
+            "medical",
+            "biology",
+            "agriculture",
+            "broad impact",
+            "major challenge",
+        ]
+    ):
         return "nature"
     elif "vision" in field or "image" in task:
         return "cvpr"

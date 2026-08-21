@@ -19,6 +19,22 @@ xscientist provider check openai --max-cost-usd 10
 xscientist provider activate openai
 ```
 
+For a user-owned OpenAI-compatible endpoint, use the `custom` alias and keep
+the endpoint in the private env file:
+
+```bash
+export OPENAI_COMPAT_API_KEY="..."
+xscientist provider add custom \
+  --model gpt-5.6-luna \
+  --base-url "https://your-compatible-service.example/v1" \
+  --non-interactive
+xscientist provider test custom --json
+```
+
+The live test is an explicit, billable minimal request. It reports both the
+requested client model and the endpoint-reported model, without recording
+prompt or completion content.
+
 `provider list` checks credentials and the required client packages separately.
 If the selected client is absent, it prints the exact provider-specific command
 without displaying credential values. Commands started below the workspace root

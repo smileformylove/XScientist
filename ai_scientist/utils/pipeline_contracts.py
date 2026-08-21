@@ -209,25 +209,64 @@ def load_json_artifact(path: str | Path, *, default: Any = None) -> Any:
         return deepcopy(default)
 
 
-def load_jsonl_artifact(path: str | Path) -> list[dict[str, Any]]:
+def load_jsonl_artifact_with_errors(
+    path: str | Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load JSONL rows and retain parse diagnostics for fail-closed consumers.
+
+    The historical ``load_jsonl_artifact`` API intentionally skips malformed
+    rows so exploratory dashboards can remain useful. Publication and audit
+    gates must not silently lose a failed experiment, so this companion API
+    returns line-level diagnostics as well.
+    """
+
     artifact_path_obj = Path(path)
     if not artifact_path_obj.exists():
-        return []
+        return [], []
     rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     try:
         with open(artifact_path_obj, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
                 text = line.strip()
                 if not text:
                     continue
                 try:
                     payload = json.loads(text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    errors.append(
+                        {
+                            "line": line_number,
+                            "error": "invalid_json",
+                            "detail": str(exc),
+                        }
+                    )
                     continue
                 if isinstance(payload, dict):
                     rows.append(payload)
+                else:
+                    errors.append(
+                        {
+                            "line": line_number,
+                            "error": "row_not_object",
+                            "detail": type(payload).__name__,
+                        }
+                    )
     except OSError:
-        return []
+        errors.append(
+            {
+                "line": None,
+                "error": "read_error",
+                "detail": str(artifact_path_obj),
+            }
+        )
+    return rows, errors
+
+
+def load_jsonl_artifact(path: str | Path) -> list[dict[str, Any]]:
+    """Load valid JSONL object rows, preserving legacy permissive behavior."""
+
+    rows, _errors = load_jsonl_artifact_with_errors(path)
     return rows
 
 

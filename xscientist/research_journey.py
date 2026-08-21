@@ -5,10 +5,12 @@ from __future__ import annotations
 import locale
 import shlex
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.privacy import redact_sensitive_payload
 
 from .research_git import ResearchGitError, init_repository
 from .research_vcs import ResearchRepository
@@ -129,6 +131,86 @@ def _command_for_repo(command: str, repo: str | Path) -> str:
         return f"{contextual} {nested_arguments}" if nested_separator else contextual
     contextual = f"{prefix}{subcommand} --repo {shlex.quote(str(repo))}"
     return f"{contextual} {arguments}" if separator else contextual
+
+
+_ACTION_OWNERS = {
+    "record_hypothesis": "researcher",
+    "choose_first_test": "researcher",
+    "choose_study_mode": "researcher",
+    "preregister_confirmatory": "researcher",
+    "lock_method_discovery": "researcher",
+    "run_experiment": "experimenter",
+    "bind_evidence": "experimenter",
+    "record_inference": "researcher",
+    "independent_review": "independent_reviewer",
+    "state_claim": "researcher",
+    "resolve_contested_claim": "researcher",
+    "run_resolution_experiment": "experimenter",
+    "bind_resolution_evidence": "experimenter",
+    "infer_resolution": "researcher",
+    "review_resolution": "independent_reviewer",
+    "replace_contested_claim": "researcher",
+    "reproduce": "independent_reproducer",
+    "inspect_dag": "researcher",
+    "strengthen_research_program": "researcher",
+}
+
+_ACTION_INPUTS = {
+    "record_hypothesis": ["expected_observation", "disconfirming_result"],
+    "choose_first_test": ["dataset_or_observation", "fair_comparison"],
+    "choose_study_mode": ["research_question", "candidate_explanations"],
+    "preregister_confirmatory": [
+        "dataset",
+        "metric",
+        "baseline",
+        "locked_split_hash",
+        "estimand",
+    ],
+    "lock_method_discovery": ["intervention", "rival_explanation", "transfer_test"],
+    "run_experiment": ["command_or_run_description", "seed", "result_artifact"],
+    "bind_evidence": ["experiment_attempt", "result_artifact", "direction"],
+    "record_inference": ["evidence", "warrant", "bounded_conclusion"],
+    "independent_review": ["reviewer_identity", "review_decision", "review_scope"],
+    "state_claim": ["reviewed_inference", "tested_conditions", "claim_scope"],
+    "reproduce": ["checkpoint_or_ref", "independent_executor", "receipt"],
+    "strengthen_research_program": ["rival_hypothesis", "mechanism", "transfer_boundary"],
+}
+
+
+def _primary_action(
+    language: str,
+    next_steps: list[dict[str, str]],
+    completed_stages: int,
+) -> dict[str, Any]:
+    """Expose one deterministic action while retaining alternatives for experts."""
+
+    if not next_steps:
+        return {
+            "code": "none",
+            "title": _text(language, "No pending action", "没有待处理动作"),
+            "why": _text(language, "The guide has no unresolved step.", "当前指南没有未解决步骤。"),
+            "command": None,
+            "priority": "P2",
+            "blocking_level": "advisory",
+            "owner": "researcher",
+            "required_inputs": [],
+        }
+    step = next_steps[0]
+    code = str(step.get("code") or "unknown")
+    blocking = completed_stages < 8 and code not in {
+        "strengthen_research_program",
+        "inspect_dag",
+    }
+    return {
+        "code": code,
+        "title": step.get("title"),
+        "why": step.get("why"),
+        "command": step.get("command"),
+        "priority": "P0" if blocking else "P1",
+        "blocking_level": "blocking" if blocking else "advisory",
+        "owner": _ACTION_OWNERS.get(code, "researcher"),
+        "required_inputs": list(_ACTION_INPUTS.get(code, [])),
+    }
 
 
 def _created_at(item: dict[str, Any]) -> str:
@@ -600,6 +682,7 @@ def build_research_guide(
             "reproduction",
         )
     )
+    primary_action = _primary_action(selected_language, next_steps, completed_stages)
     return {
         "schema_version": GUIDE_SCHEMA,
         "language": selected_language,
@@ -610,6 +693,7 @@ def build_research_guide(
             "total_stages": 8,
             "percent": round(completed_stages / 8 * 100),
         },
+        "primary_action": primary_action,
         "counts": dict(sorted(counts.items())),
         "next_steps": next_steps,
         "warnings": warnings,
@@ -619,6 +703,59 @@ def build_research_guide(
             "recommendations": program_report.get("recommended_actions") or [],
         },
     }
+
+
+def public_exploration_payload(
+    payload: dict[str, Any], *, workspace: str | Path | None = None
+) -> dict[str, Any]:
+    """Return a portable exploration response safe for JSON/telemetry output."""
+
+    safe = deepcopy(payload)
+    raw_workspace = workspace or safe.get("repository") or "."
+    root = Path(raw_workspace).expanduser().resolve()
+
+    def relative_value(value: Any) -> str:
+        try:
+            candidate = Path(str(value)).expanduser().resolve()
+            return candidate.relative_to(root).as_posix() or "."
+        except (OSError, TypeError, ValueError):
+            return "[REDACTED_PATH]"
+
+    safe["repository"] = "."
+    safe["continue_command"] = "xscientist explore ."
+    safe["status_command"] = "xscientist status ."
+    checkpoint = safe.get("checkpoint")
+    if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_path"):
+        checkpoint["checkpoint_path"] = relative_value(checkpoint["checkpoint_path"])
+    guide = safe.get("guide")
+    if isinstance(guide, dict):
+        guide["repository"] = "."
+        # Rebuild commands against the portable working-directory reference so
+        # copy/paste never embeds the caller's home or temporary directory.
+        try:
+            refreshed = build_research_guide(
+                root,
+                language=str(safe.get("language") or guide.get("language") or "auto"),
+                command_repo=".",
+            )
+            guide["next_steps"] = refreshed.get("next_steps", guide.get("next_steps"))
+            guide["primary_action"] = refreshed.get(
+                "primary_action", guide.get("primary_action")
+            )
+        except (OSError, ResearchGitError, ValueError):
+            for step in guide.get("next_steps") or []:
+                if isinstance(step, dict):
+                    step["command"] = _command_for_repo(step.get("command", ""), ".")
+            if isinstance(guide.get("primary_action"), dict):
+                guide["primary_action"]["command"] = _command_for_repo(
+                    guide["primary_action"].get("command", ""), "."
+                )
+    safe["privacy"] = {
+        "host_paths_disclosed": False,
+        "matched_values_disclosed": False,
+        "workspace_reference": ".",
+    }
+    return redact_sensitive_payload(safe)
 
 
 def explore_research_idea(
@@ -937,5 +1074,6 @@ __all__ = [
     "build_research_guide",
     "explore_research_idea",
     "inspect_idea_research",
+    "public_exploration_payload",
     "start_guided_research",
 ]

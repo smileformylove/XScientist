@@ -14,11 +14,11 @@ DOI:
 
 Authors:
 
-Jixiang Luo
+Anonymous Authors
 
 Contact email:
 
-jixiangluo85@gmail.com
+(provide at submission time)
 
 Abstract:
 

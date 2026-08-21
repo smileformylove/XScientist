@@ -11,6 +11,31 @@ from typing import Any, Optional
 from ai_scientist.utils.pipeline_helpers import find_latest_bfts_run_dir
 
 
+def _node_attempt(node: dict[str, Any], *, parent_id: Any = None) -> dict[str, Any]:
+    """Keep a compact, deterministic journal view for every attempted node."""
+
+    metric = node.get("metric") if isinstance(node.get("metric"), dict) else {}
+    return {
+        "node_id": node.get("id"),
+        "parent_id": parent_id,
+        "is_buggy": node.get("is_buggy") is True,
+        "is_seed_node": node.get("is_seed_node") is True,
+        "is_seed_agg_node": node.get("is_seed_agg_node") is True,
+        "seed": node.get("seed"),
+        "metric_name": metric.get("name"),
+        "metric_mean": _metric_mean_value(metric),
+        "metric_objective": _metric_objective(metric),
+        "dataset_names": _extract_dataset_names(metric),
+        "metric": metric,
+        "evaluation_report": node.get("evaluation_report")
+        or node.get("evaluation")
+        or node.get("evaluation_result"),
+        "artifacts": node.get("artifacts") or {},
+        "input_hash": node.get("evaluator_input_hash") or node.get("input_hash"),
+        "output_hash": node.get("evaluator_result_hash") or node.get("output_hash"),
+    }
+
+
 def _safe_float(value: Any) -> Optional[float]:
     try:
         parsed = float(value)
@@ -140,6 +165,11 @@ def build_experiment_report(base_folder: str | Path) -> dict[str, Any]:
         journal_json = _load_json(journal_path)
         nodes = journal_json.get("nodes") or []
         node2parent = journal_json.get("node2parent") or {}
+        attempts = [
+            _node_attempt(node, parent_id=node2parent.get(node.get("id")))
+            for node in nodes
+            if isinstance(node, dict)
+        ]
 
         def _is_good(node: dict) -> bool:
             return (node.get("is_buggy") is False)
@@ -175,6 +205,7 @@ def build_experiment_report(base_folder: str | Path) -> dict[str, Any]:
                         "good": sum(1 for n in nodes if _is_good(n)),
                         "buggy": sum(1 for n in nodes if n.get("is_buggy") is True),
                     },
+                    "attempts": attempts,
                 }
             )
             continue
@@ -240,6 +271,7 @@ def build_experiment_report(base_folder: str | Path) -> dict[str, Any]:
                     "good": sum(1 for n in nodes if _is_good(n)),
                     "buggy": sum(1 for n in nodes if n.get("is_buggy") is True),
                 },
+                "attempts": attempts,
             }
         )
 
@@ -325,4 +357,3 @@ def write_experiment_report(base_folder: str | Path) -> tuple[Path, Path]:
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     md_path.write_text(render_experiment_report_markdown(report), encoding="utf-8")
     return json_path, md_path
-

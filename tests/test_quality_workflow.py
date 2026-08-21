@@ -67,7 +67,9 @@ class QualityWorkflowTests(unittest.TestCase):
         self.assertFalse(acceptance["accepted"])
         self.assertIn("strict submission discipline", " ".join(acceptance["reasons"]))
 
-    def test_execute_quality_workflow_should_pass_fallback_policy_to_runner(self) -> None:
+    def test_execute_quality_workflow_should_pass_fallback_policy_to_runner(
+        self,
+    ) -> None:
         seen_kwargs = {}
 
         def fake_run_high_quality_pass(**kwargs):
@@ -119,6 +121,8 @@ class QualityWorkflowTests(unittest.TestCase):
                 "quality_threshold": 4.5,
                 "rigor_threshold": 4.1,
                 "auto_improvement_fallback_enabled": False,
+                "scientific_evidence_status": "verified",
+                "quality_gate_passed": True,
             },
             auto_improvement_fallback=False,
             target_venue="nature",
@@ -132,6 +136,8 @@ class QualityWorkflowTests(unittest.TestCase):
                 "quality_threshold": 4.5,
                 "rigor_threshold": 4.1,
                 "auto_improvement_fallback_enabled": True,
+                "scientific_evidence_status": "verified",
+                "quality_gate_passed": True,
             },
             auto_improvement_fallback=False,
             target_venue="nature",
@@ -165,7 +171,10 @@ class QualityWorkflowTests(unittest.TestCase):
                 {
                     "repair_metrics": {"active_issue_count": 1},
                     "lane_summaries": {
-                        "hostile_critic": {"active_issue_count": 1, "blocking_issue_count": 1}
+                        "hostile_critic": {
+                            "active_issue_count": 1,
+                            "blocking_issue_count": 1,
+                        }
                     },
                 },
                 producer="test_quality_workflow",
@@ -220,9 +229,7 @@ class QualityWorkflowTests(unittest.TestCase):
                     "unresolved_critical_count": 1,
                     "persistent_issue_count": 2,
                 },
-                final_todo_snapshot={
-                    "counts": {"total_tasks": 2, "p0_unresolved": 1}
-                },
+                final_todo_snapshot={"counts": {"total_tasks": 2, "p0_unresolved": 1}},
             )
 
             self.assertFalse(acceptance["accepted"])
@@ -230,7 +237,9 @@ class QualityWorkflowTests(unittest.TestCase):
             self.assertIn("stage standards overall score below target", joined)
             self.assertIn("blocked stage standards remain", joined)
             self.assertIn("self-evolution score below target", joined)
-            self.assertIn("final self-review still has unresolved critical issues", joined)
+            self.assertIn(
+                "final self-review still has unresolved critical issues", joined
+            )
             self.assertIn("experiment TODO still has unresolved P0 items", joined)
             self.assertTrue(acceptance["signals"]["repair_lane_order"])
             self.assertTrue(acceptance["signals"]["hostile_recheck_required"])
@@ -299,9 +308,7 @@ class QualityWorkflowTests(unittest.TestCase):
                     "unresolved_critical_count": 0,
                     "persistent_issue_count": 0,
                 },
-                final_todo_snapshot={
-                    "counts": {"total_tasks": 1, "p0_unresolved": 0}
-                },
+                final_todo_snapshot={"counts": {"total_tasks": 1, "p0_unresolved": 0}},
             )
 
             self.assertTrue(acceptance["accepted"])
@@ -334,7 +341,9 @@ class QualityWorkflowTests(unittest.TestCase):
             )
 
             self.assertFalse(acceptance["accepted"])
-            self.assertIn("integrity forensics reported HARD_FLAGS", acceptance["reasons"])
+            self.assertIn(
+                "integrity forensics reported HARD_FLAGS", acceptance["reasons"]
+            )
             self.assertEqual(acceptance["signals"]["integrity_verdict"], "HARD_FLAGS")
             self.assertEqual(
                 acceptance["signals"]["integrity_report_path"], "/tmp/report.json"
@@ -370,7 +379,9 @@ class QualityWorkflowTests(unittest.TestCase):
             self.assertEqual(acceptance["signals"]["integrity_verdict"], "SOFT_FLAGS")
             self.assertEqual(acceptance["signals"]["integrity_counts"], {"findings": 2})
 
-    def test_derive_autonomous_followup_focus_should_absorb_repair_lane_priorities(self) -> None:
+    def test_derive_autonomous_followup_focus_should_absorb_repair_lane_priorities(
+        self,
+    ) -> None:
         focus = derive_autonomous_followup_focus(
             quality_result={
                 "quality_gate_passed": False,

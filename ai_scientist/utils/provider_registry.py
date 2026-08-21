@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Provider and model resolution helpers for multi-vendor LLM access."""
 
+import os
+import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
@@ -82,6 +84,7 @@ def _split_prefixed_model(model: str) -> tuple[str | None, str]:
         "gemini",
         "zhipu",
         "openai_compat",
+        "custom",
     }
     if prefix in known_prefixes:
         return prefix, suffix
@@ -275,7 +278,7 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             default_base_url="https://open.bigmodel.cn/api/paas/v4/",
         )
 
-    if prefix == "openai_compat":
+    if prefix in {"openai_compat", "custom"}:
         return _build_spec(
             raw_model,
             "openai_compat",
@@ -414,9 +417,127 @@ def build_openai_compatible_client_kwargs(
         kwargs["api_key"] = api_key or ""
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
+        if spec.provider == "openai_compat":
+            # A few OpenAI-compatible gateways reject the SDK's default
+            # ``OpenAI/Python`` user agent even when the request body is valid.
+            # Keep the workaround scoped to the explicit compatibility route
+            # and allow deployments to choose their own neutral identifier.
+            kwargs["default_headers"] = {
+                "User-Agent": str(
+                    source.get("OPENAI_COMPAT_USER_AGENT")
+                    or "xscientist-openai-compatible"
+                ).strip()
+            }
         if max_retries is not None:
             kwargs["max_retries"] = max_retries
     return kwargs, spec.client_model
+
+
+def probe_openai_compatible_model(
+    model: str,
+    *,
+    timeout: float = 30.0,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Make one explicit minimal call and verify the provider-reported model.
+
+    The response content is intentionally discarded. The probe exposes only
+    model identity, latency, finish status, and aggregate token counts so a
+    user can detect endpoint-side model substitution without recording prompt
+    or completion text.
+    """
+
+    source = dict(os.environ if env is None else env)
+    spec = resolve_model_provider(model)
+    if spec.client_family != "openai_compatible":
+        raise ValueError(
+            f"live model probing currently supports OpenAI-compatible providers, "
+            f"not {spec.provider!r}"
+        )
+    missing = _missing_requirements(spec, source)
+    if missing:
+        raise ValueError("missing provider configuration: " + ", ".join(missing))
+
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "the OpenAI-compatible client is not installed; install the selected "
+            "provider extra first"
+        ) from exc
+
+    kwargs, client_model = build_openai_compatible_client_kwargs(
+        model,
+        env=source,
+        max_retries=0,
+    )
+    if spec.provider == "openai":
+        _key_name, api_key = _pick_first_env(spec.api_key_env_vars, source)
+        if api_key:
+            kwargs["api_key"] = api_key
+    started = time.monotonic()
+    client = None
+    try:
+        kwargs["timeout"] = float(timeout)
+        client = OpenAI(**kwargs)
+        response = client.chat.completions.create(
+            model=client_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Reply with exactly OK and no other text.",
+                }
+            ],
+            max_tokens=8,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": spec.provider,
+            "requested_model": model,
+            "client_model": client_model,
+            "reported_model": None,
+            "model_identity_verified": False,
+            "exact_model_match": False,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_code": "live_request_failed",
+            "error_type": type(exc).__name__,
+            "http_status": getattr(exc, "status_code", None),
+            "response_content_recorded": False,
+        }
+    finally:
+        close = getattr(client, "close", None) if client is not None else None
+        if callable(close):
+            close()
+
+    reported_model = str(getattr(response, "model", "") or "").strip()
+    choices = list(getattr(response, "choices", None) or [])
+    finish_reason = (
+        str(getattr(choices[0], "finish_reason", "") or "") if choices else ""
+    )
+    usage = getattr(response, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+    identity_verified = bool(reported_model)
+    exact_match = identity_verified and reported_model == client_model
+    return {
+        "ok": bool(exact_match),
+        "provider": spec.provider,
+        "requested_model": model,
+        "client_model": client_model,
+        "reported_model": reported_model or None,
+        "model_identity_verified": identity_verified,
+        "exact_model_match": exact_match,
+        "finish_reason": finish_reason or None,
+        "latency_ms": round((time.monotonic() - started) * 1000, 1),
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+        "response_content_recorded": False,
+    }
 
 
 def provider_env_statuses(

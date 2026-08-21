@@ -14,6 +14,33 @@ from ai_scientist.utils.pipeline_helpers import (
     find_best_pdf_path,
     iter_bfts_run_dirs,
 )
+from ai_scientist.utils.pipeline_contracts import (
+    load_jsonl_artifact,
+    load_jsonl_artifact_with_errors,
+)
+from ai_scientist.utils.evidence_snapshot import (
+    SNAPSHOT_FILENAME,
+    build_evidence_snapshot,
+    save_evidence_snapshot,
+    verify_evidence_snapshot,
+)
+from ai_scientist.utils.experiment_registry import check_experiment_registry_integrity
+from ai_scientist.utils.research_integrity import (
+    SCHEMA_VERSION,
+    VERIFICATION_REQUIRED_CRITERIA,
+    _canonical_hash,
+    _canonical_seed,
+    _deterministic_lineage_matches,
+    _is_content_hash,
+    _is_number,
+    _result_artifact_manifest_present,
+    _verification_report_hash_payload,
+    _verification_metric_matches,
+    _verification_output_matches,
+    _protocol_fidelity_hash,
+    build_verification_report,
+    validate_preregistration,
+)
 
 QUALITY_PRESETS = {
     "balanced": {
@@ -387,6 +414,13 @@ def should_resume_high_quality_result(
     if not isinstance(existing_result, dict):
         return False
     if str(existing_result.get("status") or "").lower() != "success":
+        return False
+    # Cached drafts must never hide a newly available blocker (or preserve an
+    # old false-positive result from before the scientific evidence gate).
+    # Only a verified, actually-passed result is safe to reuse.
+    if existing_result.get("scientific_evidence_status") != "verified":
+        return False
+    if existing_result.get("quality_gate_passed") is not True:
         return False
     fallback_enabled = existing_result.get("auto_improvement_fallback_enabled")
     if not isinstance(fallback_enabled, bool):
@@ -2917,12 +2951,79 @@ def assess_experiment_rigor(
         ],
     }
 
-    findings = {
+    textual_findings = {
         name: any(keyword in corpus for keyword in keywords)
         for name, keywords in checks.items()
     }
-    met = sum(findings.values())
-    score = 1.0 + met
+
+    # Textual signals are useful reviewer hints, but they are not evidence.
+    # When an experiment registry exists, score the actual records instead of
+    # rewarding a manuscript for merely mentioning scientific terminology.
+    registry_path = base_folder / "experiment_registry.jsonl"
+    if registry_path.exists():
+        try:
+            records = load_jsonl_artifact(registry_path)
+        except (OSError, ValueError, TypeError):
+            records = []
+        completed = [
+            item
+            for item in records
+            if isinstance(item, dict)
+            and str(item.get("status") or "").lower() in {"completed", "verified"}
+        ]
+
+        def _contains_statistical_result(value: Any) -> bool:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    key_lower = str(key).lower().replace("-", "_")
+                    if key_lower in {
+                        "confidence_interval",
+                        "ci",
+                        "effect_size",
+                        "p_value",
+                        "pvalue",
+                        "standard_error",
+                    }:
+                        return True
+                    if _contains_statistical_result(child):
+                        return True
+            elif isinstance(value, list):
+                return any(_contains_statistical_result(item) for item in value)
+            return False
+
+        findings = {
+            "baseline": bool(completed)
+            and all(str(item.get("baseline_ref") or "").strip() for item in completed),
+            "ablation": any(
+                "ablation" in json.dumps(item, ensure_ascii=False).lower()
+                for item in completed
+            ),
+            "statistics": any(
+                _contains_statistical_result(item.get("result_summary", {}))
+                for item in completed
+            ),
+            "reproducibility": bool(completed)
+            and all(
+                item.get("dataset_split_hash")
+                and item.get("evaluator_input_hash")
+                and item.get("evaluator_result_hash")
+                for item in completed
+            ),
+        }
+        score = 1.0 + sum(findings.values())
+        hard_failures = [
+            f"registry_{name}_missing"
+            for name, passed in findings.items()
+            if not passed
+        ]
+        source = "experiment_registry"
+    else:
+        # A paper without a registry must never receive a strong rigor score
+        # from prose alone. Keep the textual signals for diagnostics only.
+        findings = {name: False for name in checks}
+        score = 1.0
+        hard_failures = ["experiment_registry_missing"]
+        source = "textual_advisory_only"
 
     recommendations = []
     if not findings["baseline"]:
@@ -2935,14 +3036,1111 @@ def assess_experiment_rigor(
         recommendations.append("补充实现细节、超参数与复现实验设置。")
 
     return {
-        "score": score,
+        "score": min(5.0, float(score)),
         "checks": findings,
+        "textual_signals": textual_findings,
+        "hard_failures": hard_failures,
+        "source": source,
         "recommendations": recommendations,
-        "overall_assessment": "strong" if score >= 4 else "needs_improvement",
+        "overall_assessment": (
+            "strong" if score >= 4 and not hard_failures else "needs_improvement"
+        ),
     }
 
 
-def assess_claim_support(latex_content: str) -> dict:
+_RESULT_NUMBER_RE = re.compile(
+    r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w.])"
+)
+_RESULT_CONTEXT_RE = re.compile(
+    r"accuracy|precision|recall|f1|auc|loss|error|score|improv|increase|decrease|"
+    r"baseline|effect|p[-_ ]?value|confidence|metric|signific",
+    re.IGNORECASE,
+)
+
+
+def _claim_numeric_occurrences(text: str) -> list[dict[str, Any]]:
+    """Extract result-like numbers together with their source offsets."""
+
+    value = str(text or "")
+    occurrences: list[dict[str, Any]] = []
+    for match in _RESULT_NUMBER_RE.finditer(value):
+        numeric = match.group(0)
+        suffix_end = match.end()
+        is_percent = False
+        if value.startswith("\\%", suffix_end):
+            is_percent = True
+            suffix_end += 2
+        elif value.startswith("%", suffix_end):
+            is_percent = True
+            suffix_end += 1
+        display_raw = numeric + ("%" if is_percent else "")
+        try:
+            parsed = float(numeric)
+        except ValueError:
+            continue
+        context = value[max(0, match.start() - 20) : suffix_end + 20]
+        label_context = value[max(0, match.start() - 16) : suffix_end + 8]
+        if re.search(r"(?:figure|fig\.|table|tab\.|section|page)\s*$", label_context[: len(label_context) // 2], re.IGNORECASE):
+            continue
+        if (
+            not is_percent
+            and "." not in numeric
+            and "e" not in numeric.lower()
+            and numeric not in {"0", "1"}
+            and not _RESULT_CONTEXT_RE.search(context)
+        ):
+            continue
+        occurrences.append(
+            {
+                "value": parsed,
+                "percent": is_percent,
+                "raw": display_raw,
+                "start": match.start(),
+                "end": suffix_end,
+            }
+        )
+    return occurrences
+
+
+def _claim_numeric_tokens(text: str) -> list[tuple[float, bool, str]]:
+    """Extract result-like numbers while ignoring ordinary figure/year labels."""
+
+    return [
+        (item["value"], item["percent"], item["raw"])
+        for item in _claim_numeric_occurrences(text)
+    ]
+
+
+def _numeric_precision(raw: str) -> int:
+    """Return decimal places represented by a displayed numeric token."""
+
+    numeric = str(raw or "").rstrip("%").lower()
+    mantissa = numeric.split("e", 1)[0]
+    if "." not in mantissa:
+        return 0
+    return len(mantissa.split(".", 1)[1])
+
+
+def _numeric_values_match(
+    claim_value: float,
+    claim_percent: bool,
+    claim_raw: str,
+    artifact_value: float,
+    artifact_percent: bool,
+    artifact_raw: str,
+) -> bool:
+    """Compare displayed values with unit conversion and bounded rounding error."""
+
+    claim_normalized = claim_value / 100.0 if claim_percent else claim_value
+    artifact_normalized = (
+        artifact_value / 100.0 if artifact_percent else artifact_value
+    )
+    claim_quantum = 10.0 ** (-_numeric_precision(claim_raw))
+    artifact_quantum = 10.0 ** (-_numeric_precision(artifact_raw))
+    if claim_percent:
+        claim_quantum /= 100.0
+    if artifact_percent:
+        artifact_quantum /= 100.0
+    # A displayed result is accepted within half of its least significant
+    # displayed unit.  Use the larger displayed unit, rather than combining
+    # errors from unrelated values, so 90.0% cannot silently match 90.1%.
+    tolerance = max(1e-9, 0.5 * max(claim_quantum, artifact_quantum))
+    return abs(claim_normalized - artifact_normalized) <= tolerance
+
+
+def _numeric_token_matches(
+    claim_tokens: list[tuple[float, bool, str]], artifact_values: set[str] | list[str]
+) -> bool:
+    """Require every claim result number to occur in the artifact values.
+
+    This function intentionally keeps the legacy flat-value interface.  The
+    higher-level evidence matcher below adds record/task binding when that
+    metadata is available.
+    """
+
+    if not claim_tokens:
+        return True
+    normalized_artifact_values = {
+        str(value).strip() for value in artifact_values if str(value).strip()
+    }
+    artifact_tokens = [
+        token
+        for value in normalized_artifact_values
+        for token in _claim_numeric_occurrences(value)
+    ]
+    for claim_value, claim_percent, claim_raw in claim_tokens:
+        matched = claim_raw in normalized_artifact_values or any(
+            _numeric_values_match(
+                claim_value,
+                claim_percent,
+                claim_raw,
+                artifact_item["value"],
+                artifact_item["percent"],
+                artifact_item["raw"],
+            )
+            for artifact_item in artifact_tokens
+        )
+        if not matched:
+            return False
+    return True
+
+
+def _normalise_evidence_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9%]+", " ", str(value or "").lower()).strip()
+
+
+def _metric_aliases(value: Any) -> set[str]:
+    normalized = _normalise_evidence_text(value)
+    if not normalized:
+        return set()
+    aliases = {normalized, normalized.replace(" ", "_")}
+    if normalized in {"f1 score", "f1_score"}:
+        aliases.update({"f1", "f1 score", "f1_score"})
+    if normalized in {"accuracy score", "accuracy_score"}:
+        aliases.add("accuracy")
+    return aliases
+
+
+_RESULT_KEY_TOKENS = (
+    "metric",
+    "value",
+    "score",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "auc",
+    "loss",
+    "error",
+    "mean",
+    "std",
+    "variance",
+    "ci",
+    "effect",
+    "p_value",
+    "delta",
+    "baseline",
+)
+
+
+def _numeric_record_evidence_groups(
+    records: list[dict[str, Any]],
+    *,
+    require_confirmatory: bool = True,
+) -> list[list[dict[str, Any]]]:
+    """Extract result numbers while preserving their registry record boundary."""
+
+    groups: list[list[dict[str, Any]]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        status = str(record.get("status") or "").strip().lower()
+        if status not in {"completed", "verified"}:
+            continue
+        study_phase = str(record.get("study_phase") or "").strip().lower()
+        if require_confirmatory and study_phase != "confirmatory":
+            continue
+        summary = record.get("result_summary")
+        if not isinstance(summary, dict):
+            continue
+
+        group: list[dict[str, Any]] = []
+
+        def collect(value: Any, path: str = "") -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = f"{path}.{key}" if path else str(key)
+                    collect(child, child_path)
+                return
+            if isinstance(value, list):
+                for index, child in enumerate(value):
+                    collect(child, f"{path}[{index}]")
+                return
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return
+
+            lowered_path = path.lower()
+            if not any(token in lowered_path for token in _RESULT_KEY_TOKENS):
+                return
+            leaf = re.sub(r"\[\d+\]$", "", path.rsplit(".", 1)[-1])
+            metric_name = record.get("metric")
+            if leaf.lower() not in {
+                "metric_mean",
+                "metric_value",
+                "metric_objective",
+                "value",
+                "final_metric",
+            }:
+                metric_name = leaf
+            group.append(
+                {
+                    "value": str(value),
+                    "metric": metric_name,
+                    "task_id": record.get("task_id"),
+                    "dataset": record.get("dataset"),
+                    "baseline": record.get("baseline_ref"),
+                    "split_hash": record.get("dataset_split_hash"),
+                    "record_id": record.get("record_id"),
+                    "study_phase": study_phase,
+                    "status": status,
+                    "path": path,
+                }
+            )
+
+        collect(summary)
+        if group:
+            groups.append(group)
+    return groups
+
+
+def _numeric_evidence_groups(
+    key_results: dict[str, Any] | None,
+    base_folder: str | Path | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Build coherent numeric groups from result records.
+
+    A group is one registered result record.  Matching all numbers inside one
+    group prevents a manuscript from combining a candidate value from one
+    task with a baseline or F1 value from another task.
+    """
+
+    payload = key_results if isinstance(key_results, dict) else {}
+
+    # A rooted publication audit must read the registry itself. This prevents a
+    # caller-provided cache or flat value list from promoting exploratory data.
+    if base_folder is not None:
+        registry_path = Path(base_folder) / "experiment_registry.jsonl"
+        try:
+            records = load_jsonl_artifact(registry_path)
+        except (OSError, ValueError, TypeError):
+            records = []
+        return _numeric_record_evidence_groups(records, require_confirmatory=True)
+
+    raw_evidence = (
+        payload.get("evidence_values")
+        or payload.get("numeric_evidence")
+        or payload.get("result_bindings")
+        or []
+    )
+    groups: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(raw_evidence, list):
+        for index, item in enumerate(raw_evidence):
+            if not isinstance(item, dict) or item.get("value") is None:
+                continue
+            phase = str(item.get("study_phase") or "").strip().lower()
+            status = str(item.get("status") or "").strip().lower()
+            if phase and phase != "confirmatory":
+                continue
+            if status and status not in {"completed", "verified"}:
+                continue
+            group_id = str(
+                item.get("group_id")
+                or item.get("record_id")
+                or item.get("task_id")
+                or f"evidence_{index}"
+            )
+            groups.setdefault(group_id, []).append(dict(item))
+
+    if groups:
+        return list(groups.values())
+
+    flat_values = {
+        str(value).strip()
+        for value in payload.get("values") or []
+        if str(value).strip()
+    }
+    return [
+        [{"value": value, "group_id": "flat_artifact_values"} for value in flat_values]
+    ] if flat_values else []
+
+
+def _claim_token_metric_hint(
+    claim_text: str,
+    occurrence: dict[str, Any],
+    known_metrics: set[str],
+) -> set[str]:
+    if not known_metrics:
+        return set()
+    preceding: list[tuple[int, str]] = []
+    following: list[tuple[int, str]] = []
+    for metric in known_metrics:
+        aliases = _metric_aliases(metric)
+        for alias in aliases:
+            if len(alias) < 2:
+                continue
+            for match in re.finditer(re.escape(alias), claim_text.lower()):
+                distance = occurrence["start"] - match.start()
+                if distance >= 0:
+                    preceding.append((distance, metric))
+                else:
+                    following.append((-distance, metric))
+    if not preceding and not following:
+        return set()
+    candidates = preceding or following
+    distance, metric = min(candidates)
+    return {metric} if distance <= 96 else set()
+
+
+def _numeric_evidence_matches(
+    claim_text: str,
+    claim_tokens: list[tuple[float, bool, str]],
+    key_results: dict[str, Any] | None,
+    base_folder: str | Path | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Match all claim numbers against one metadata-consistent result group."""
+
+    if not claim_tokens:
+        return True, {"matched": True, "reason": "no_result_numbers"}
+    groups = _numeric_evidence_groups(key_results, base_folder)
+    if not groups:
+        return False, {"matched": False, "reason": "no_artifact_numeric_values"}
+
+    occurrences = _claim_numeric_occurrences(claim_text)
+    known_metrics = {
+        str(item.get("metric"))
+        for group in groups
+        for item in group
+        if str(item.get("metric") or "").strip()
+    }
+    claim_lower = claim_text.lower()
+    known_metadata = {
+        field: {
+            str(item.get(field)).strip().lower()
+            for group in groups
+            for item in group
+            if len(str(item.get(field) or "").strip()) >= 3
+        }
+        for field in ("task_id", "dataset", "baseline", "split_hash")
+    }
+
+    for group in groups:
+        group_text = " ".join(
+            str(item.get(field) or "").lower()
+            for item in group
+            for field in ("task_id", "dataset", "baseline", "split_hash")
+        )
+        explicit_metadata = [
+            value for values in known_metadata.values() for value in values if value in claim_lower
+        ]
+        if explicit_metadata and not all(value in group_text for value in explicit_metadata):
+            continue
+
+        group_values = {
+            str(item.get("value")).strip()
+            for item in group
+            if str(item.get("value") or "").strip()
+        }
+        group_metrics = {
+            metric
+            for item in group
+            for metric in _metric_aliases(item.get("metric"))
+        }
+        matched_all = True
+        for index, token in enumerate(claim_tokens):
+            occurrence = occurrences[index] if index < len(occurrences) else {}
+            hints = _claim_token_metric_hint(claim_text, occurrence, known_metrics)
+            candidate_values = group_values
+            if hints and not any(
+                group_metrics.intersection(_metric_aliases(hint)) for hint in hints
+            ):
+                matched_all = False
+                break
+            if hints:
+                candidate_values = {
+                    str(item.get("value")).strip()
+                    for item in group
+                    if _metric_aliases(item.get("metric")).intersection(
+                        set().union(*(set(_metric_aliases(hint)) for hint in hints))
+                    )
+                }
+            if not _numeric_token_matches([token], candidate_values):
+                matched_all = False
+                break
+        if matched_all:
+            return True, {
+                "matched": True,
+                "group_id": str(group[0].get("record_id") or group[0].get("group_id") or ""),
+                "record_id": str(group[0].get("record_id") or ""),
+                "task_id": str(group[0].get("task_id") or ""),
+                "matched_values": sorted(group_values),
+            }
+    return False, {
+        "matched": False,
+        "reason": "one_or_more_numbers_not_bound_to_same_result_group",
+    }
+
+
+_CITATION_COMMAND_RE = re.compile(r"\\(?P<command>cite[a-zA-Z]*|nocite)\*?")
+_CLAIM_REF_TOKEN_PATTERN = (
+    r"\\claimref\s*(?:\[[^\]]*\])?\s*\{\s*[^{}\s,]+\s*\}"
+)
+_CLAIM_REF_RE = re.compile(
+    r"\\claimref\s*(?:\[(?P<opts>[^\]]*)\])?\s*"
+    r"\{\s*(?P<target>[^{}\s,]+)\s*\}",
+    re.MULTILINE,
+)
+_TRAILING_CLAIM_REF_RE = re.compile(
+    rf"(?P<punct>[.!?])(?P<space>\s*)"
+    rf"(?P<refs>{_CLAIM_REF_TOKEN_PATTERN}(?:\s*{_CLAIM_REF_TOKEN_PATTERN})*)"
+    r"(?P<after>\s*)"
+)
+_BIB_DECLARATION_RE = re.compile(
+    r"\\(?:bibliography|addbibresource)\s*(?:\[[^\]]*\])?\s*\{([^{}]*)\}",
+    re.IGNORECASE,
+)
+_FILECONTENTS_RE = re.compile(
+    r"\\begin\{filecontents\*?\}\s*\{([^{}]+)\}(.*?)"
+    r"\\end\{filecontents\*?\}",
+    re.IGNORECASE | re.DOTALL,
+)
+_BIB_ENTRY_START_RE = re.compile(r"@\s*([A-Za-z][\w-]*)\s*([\{\(])")
+
+
+def _claimref_metadata(text: str) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    for match in _CLAIM_REF_RE.finditer(str(text or "")):
+        options: dict[str, str] = {}
+        for chunk in str(match.group("opts") or "").split(","):
+            key, separator, value = chunk.partition("=")
+            if separator and key.strip() and value.strip():
+                options[key.strip().lower()] = value.strip().strip("'\"")
+        markers.append(
+            {
+                "target": match.group("target").strip(),
+                "options": options,
+            }
+        )
+    return markers
+
+
+def _attach_trailing_claimrefs(block: str) -> str:
+    """Keep a post-sentence claim marker with the sentence it annotates."""
+
+    def replace(match: re.Match[str]) -> str:
+        separator = match.group("after") or match.group("space")
+        return f"{match.group('refs')}{match.group('punct')}{separator}"
+
+    return _TRAILING_CLAIM_REF_RE.sub(replace, str(block or ""))
+
+
+def _strip_latex_comments(text: str) -> str:
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        cut_at: int | None = None
+        for index, char in enumerate(line):
+            if char != "%":
+                continue
+            backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            if backslashes % 2 == 0:
+                cut_at = index
+                break
+        lines.append(line if cut_at is None else line[:cut_at])
+    return "\n".join(lines)
+
+
+def _consume_balanced_delimiter(
+    text: str, start: int, opening: str = "{", closing: str = "}"
+) -> tuple[str | None, int]:
+    if start >= len(text) or text[start] != opening:
+        return None, start
+    depth = 0
+    quote = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == '"' and not escaped:
+            quote = not quote
+        if quote:
+            escaped = char == "\\" and not escaped
+            continue
+        escaped = char == "\\" and not escaped
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : index], index + 1
+    return None, len(text)
+
+
+def _extract_citation_keys(latex_content: str) -> dict[str, Any]:
+    cleaned = _strip_latex_comments(latex_content)
+    cited_keys: list[str] = []
+    parse_errors: list[str] = []
+    command_count = 0
+    nocite_all = False
+    for match in _CITATION_COMMAND_RE.finditer(cleaned):
+        command_count += 1
+        cursor = match.end()
+        while cursor < len(cleaned) and cleaned[cursor].isspace():
+            cursor += 1
+        # natbib permits one or two optional bracket arguments.
+        while cursor < len(cleaned) and cleaned[cursor] == "[":
+            _, cursor = _consume_balanced_delimiter(cleaned, cursor, "[", "]")
+            if cursor >= len(cleaned) or cleaned[cursor - 1] != "]":
+                parse_errors.append(f"{match.group('command')}:unclosed_optional_argument")
+                break
+            while cursor < len(cleaned) and cleaned[cursor].isspace():
+                cursor += 1
+        if cursor >= len(cleaned) or cleaned[cursor] != "{":
+            parse_errors.append(f"{match.group('command')}:missing_key_argument")
+            continue
+        raw_keys, cursor = _consume_balanced_delimiter(cleaned, cursor)
+        if raw_keys is None:
+            parse_errors.append(f"{match.group('command')}:unclosed_key_argument")
+            continue
+        pieces = [item.strip() for item in raw_keys.split(",")]
+        if not pieces or any(not item for item in pieces):
+            parse_errors.append(f"{match.group('command')}:empty_citation_key")
+        for key in pieces:
+            if not key:
+                continue
+            if key == "*":
+                nocite_all = True
+                continue
+            cited_keys.append(key)
+    return {
+        "keys": sorted(set(cited_keys)),
+        "command_count": command_count,
+        "nocite_all": nocite_all,
+        "parse_errors": parse_errors,
+    }
+
+
+def _parse_bib_entries(content: str, source_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+    entries: list[dict[str, Any]] = []
+    errors: list[str] = []
+    text = str(content or "")
+    for match in _BIB_ENTRY_START_RE.finditer(text):
+        entry_type = match.group(1).lower()
+        if entry_type in {"comment", "preamble", "string"}:
+            continue
+        opening = match.group(2)
+        closing = "}" if opening == "{" else ")"
+        body, end = _consume_balanced_delimiter(text, match.end() - 1, opening, closing)
+        if body is None:
+            errors.append(f"{source_name}:unclosed_{entry_type}")
+            continue
+        comma_index = body.find(",")
+        if comma_index < 0:
+            errors.append(f"{source_name}:missing_key_separator")
+            continue
+        key = body[:comma_index].strip()
+        if not key:
+            errors.append(f"{source_name}:empty_entry_key")
+            continue
+        if any(char.isspace() for char in key):
+            errors.append(f"{source_name}:invalid_entry_key:{key}")
+            continue
+        entries.append(
+            {
+                "key": key,
+                "type": entry_type,
+                "source": source_name,
+                "offset": match.start(),
+                "end": end,
+            }
+        )
+    return entries, errors
+
+
+def _citation_source_name(root: Path | None, path: Path) -> str:
+    if root is not None:
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            pass
+    return path.name
+
+
+def _citation_integrity_report(
+    latex_content: str,
+    base_folder: str | Path | None = None,
+) -> dict[str, Any]:
+    """Check local citation commands and BibTeX keys without network access."""
+
+    root = Path(base_folder).expanduser().resolve() if base_folder is not None else None
+    cleaned = _strip_latex_comments(latex_content)
+    citation_data = _extract_citation_keys(cleaned)
+    embedded_sources: dict[str, str] = {}
+    for match in _FILECONTENTS_RE.finditer(cleaned):
+        filename = Path(match.group(1).strip()).name
+        if filename.lower().endswith(".bib"):
+            embedded_sources[filename.lower()] = match.group(2)
+
+    declared_names: list[str] = []
+    for match in _BIB_DECLARATION_RE.finditer(cleaned):
+        declared_names.extend(
+            item.strip() for item in match.group(1).split(",") if item.strip()
+        )
+
+    sources: list[tuple[str, str]] = []
+    loaded_names: set[str] = set()
+    missing_sources: list[str] = []
+
+    def add_embedded(filename: str) -> None:
+        normalized = Path(filename).name.lower()
+        if normalized in embedded_sources and normalized not in loaded_names:
+            sources.append((f"embedded:{Path(filename).name}", embedded_sources[normalized]))
+            loaded_names.add(normalized)
+
+    def add_path(path: Path) -> None:
+        normalized = path.name.lower()
+        if normalized in embedded_sources:
+            add_embedded(path.name)
+            return
+        if normalized in loaded_names:
+            return
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            missing_sources.append(_citation_source_name(root, path))
+            return
+        sources.append((_citation_source_name(root, path), content))
+        loaded_names.add(normalized)
+
+    if declared_names:
+        for declared in declared_names:
+            raw_name = Path(declared.strip())
+            filename = raw_name.name if raw_name.suffix else f"{raw_name.name}.bib"
+            if filename.lower() in embedded_sources:
+                add_embedded(filename)
+                continue
+            if root is None:
+                missing_sources.append(filename)
+                continue
+            candidates = [root / "latex" / raw_name, root / "latex" / filename, root / raw_name, root / filename]
+            existing = next((candidate for candidate in candidates if candidate.is_file()), None)
+            if existing is None:
+                missing_sources.append(filename)
+            else:
+                add_path(existing)
+    else:
+        for filename in sorted(embedded_sources):
+            add_embedded(filename)
+        if root is not None:
+            for path in sorted(root.glob("latex/**/*.bib")):
+                if path.is_file():
+                    add_path(path)
+            for path in sorted(root.glob("*.bib")):
+                if path.is_file():
+                    add_path(path)
+
+    entries: list[dict[str, Any]] = []
+    parse_errors = list(citation_data.get("parse_errors") or [])
+    for source_name, content in sources:
+        parsed, errors = _parse_bib_entries(content, source_name)
+        entries.extend(parsed)
+        parse_errors.extend(errors)
+
+    key_sources: dict[str, list[str]] = {}
+    for entry in entries:
+        key_sources.setdefault(str(entry["key"]), []).append(str(entry["source"]))
+    duplicate_keys = sorted(key for key, values in key_sources.items() if len(values) > 1)
+    duplicate_case_keys = sorted(
+        key
+        for key in {
+            item.lower() for item in key_sources
+        }
+        if sum(1 for item in key_sources if item.lower() == key) > 1
+    )
+    bib_keys = sorted(key_sources)
+    cited_keys = list(citation_data.get("keys") or [])
+    missing_keys = sorted(set(cited_keys) - set(bib_keys))
+    unused_keys = (
+        []
+        if citation_data.get("nocite_all")
+        else sorted(set(bib_keys) - set(cited_keys))
+    )
+    issues = list(parse_errors)
+    issues.extend(f"missing_bib_source:{item}" for item in sorted(set(missing_sources)))
+    issues.extend(f"missing_citation_key:{item}" for item in missing_keys)
+    issues.extend(f"duplicate_bib_key:{item}" for item in duplicate_keys)
+    issues.extend(f"duplicate_case_bib_key:{item}" for item in duplicate_case_keys)
+    issues.extend(f"unused_bib_key:{item}" for item in unused_keys)
+    if not cited_keys and not citation_data.get("nocite_all"):
+        issues.append("no_in_text_citations")
+    if not entries:
+        issues.append("no_bibtex_entries")
+
+    return {
+        "ok": not issues,
+        "status": "ready" if not issues else "blocked",
+        "has_citations": bool(cited_keys or citation_data.get("nocite_all")),
+        "citation_command_count": citation_data.get("command_count", 0),
+        "cited_keys": cited_keys,
+        "bib_keys": bib_keys,
+        "missing_keys": missing_keys,
+        "unused_keys": unused_keys,
+        "duplicate_keys": duplicate_keys,
+        "duplicate_case_keys": duplicate_case_keys,
+        "parse_errors": parse_errors,
+        "missing_sources": sorted(set(missing_sources)),
+        "bib_files": [name for name, _ in sources],
+        "issues": sorted(set(issues)),
+    }
+
+
+def _claim_graph_binding_report(
+    records: list[dict[str, Any]], graph: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate every task/metric/claim path against registered evidence."""
+
+    raw_nodes = graph.get("nodes") if isinstance(graph, dict) else []
+    raw_edges = graph.get("edges") if isinstance(graph, dict) else []
+    raw_nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    raw_edges = raw_edges if isinstance(raw_edges, list) else []
+    node_ids = [
+        str(item.get("id") or "").strip()
+        for item in raw_nodes
+        if isinstance(item, dict)
+    ]
+    nodes = {
+        str(item.get("id") or "").strip(): item
+        for item in raw_nodes
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    edges = [item for item in raw_edges if isinstance(item, dict)]
+    edge_keys = [
+        (
+            str(edge.get("source") or "").strip(),
+            str(edge.get("target") or "").strip(),
+            str(edge.get("type") or "").strip(),
+        )
+        for edge in edges
+    ]
+    graph_structure_ok = (
+        bool(nodes)
+        and len(node_ids) == len(nodes)
+        and all(node_ids)
+        and len(edge_keys) == len(set(edge_keys))
+        and all(source and target and edge_type for source, target, edge_type in edge_keys)
+        and all(source in nodes and target in nodes for source, target, _ in edge_keys)
+        and all(
+            (
+                edge_type != "supports"
+                or (
+                    nodes[source].get("type") == "experiment"
+                    and nodes[target].get("type") in {"metric", "figure"}
+                )
+                or (
+                    edge_type == "supports"
+                    and nodes[source].get("type") == "metric"
+                    and nodes[target].get("type") == "claim"
+                )
+            )
+            for source, target, edge_type in edge_keys
+        )
+    )
+
+    completed_records = [
+        item
+        for item in records
+        if isinstance(item, dict)
+        and str(item.get("status") or "").lower() in {"completed", "verified"}
+    ]
+    records_by_task: dict[str, list[dict[str, Any]]] = {}
+    for record in completed_records:
+        task_id = str(record.get("task_id") or "").strip()
+        if task_id:
+            records_by_task.setdefault(task_id, []).append(record)
+
+    claim_nodes = {
+        node_id: node
+        for node_id, node in nodes.items()
+        if node.get("type") == "claim"
+    }
+    metric_nodes = {
+        node_id: node
+        for node_id, node in nodes.items()
+        if node.get("type") == "metric"
+    }
+    task_nodes = {
+        node_id: node
+        for node_id, node in nodes.items()
+        if node.get("type") == "experiment"
+    }
+
+    def _metadata_matches(node: dict[str, Any], candidates: list[dict[str, Any]]) -> bool:
+        if not candidates:
+            return False
+        field_aliases = {
+            "task_id": ("task_id",),
+            "dataset": ("dataset", "dataset_name"),
+            "metric": ("metric", "metric_name"),
+            "baseline": ("baseline", "baseline_ref"),
+            "split_hash": ("split_hash", "dataset_split_hash"),
+        }
+        for node_field, record_fields in field_aliases.items():
+            raw_value = node.get(node_field)
+            if raw_value is None and node_field == "metric":
+                raw_value = node.get("label")
+            if raw_value is None:
+                continue
+            expected = _normalise_evidence_text(raw_value)
+            if not expected:
+                continue
+            if not any(
+                expected == _normalise_evidence_text(record.get(field))
+                or expected in _normalise_evidence_text(record.get(field))
+                or _normalise_evidence_text(record.get(field)) in expected
+                for record in candidates
+                for field in record_fields
+            ):
+                return False
+        def collect_hashes(value: Any) -> set[str]:
+            found: set[str] = set()
+            if isinstance(value, dict):
+                for child in value.values():
+                    found.update(collect_hashes(child))
+            elif isinstance(value, (list, tuple, set)):
+                for child in value:
+                    found.update(collect_hashes(child))
+            elif isinstance(value, str) and value.startswith("sha256:"):
+                found.add(value)
+            return found
+
+        node_hashes: set[str] = set()
+        for field in (
+            "artifact_hash",
+            "artifact_hashes",
+            "evidence_hash",
+            "evidence_hashes",
+            "result_hash",
+            "record_hash",
+        ):
+            node_hashes.update(collect_hashes(node.get(field)))
+        if node_hashes:
+            record_hashes = set().union(*(collect_hashes(record) for record in candidates))
+            if not node_hashes.issubset(record_hashes):
+                return False
+        return True
+
+    task_paths: dict[str, set[str]] = {}
+    claim_paths: dict[str, set[str]] = {claim_id: set() for claim_id in claim_nodes}
+    path_details: list[dict[str, Any]] = []
+    for task_id, candidates in records_by_task.items():
+        if task_id not in task_nodes or not _metadata_matches(task_nodes[task_id], candidates):
+            task_paths[task_id] = set()
+            continue
+        metric_ids = {
+            target
+            for source, target, edge_type in edge_keys
+            if source == task_id
+            and edge_type == "supports"
+            and target in metric_nodes
+            and _metadata_matches(metric_nodes[target], candidates)
+        }
+        task_paths[task_id] = set()
+        for metric_id in metric_ids:
+            claim_ids = {
+                target
+                for source, target, edge_type in edge_keys
+                if source == metric_id
+                and edge_type == "supports"
+                and target in claim_nodes
+                and _metadata_matches(claim_nodes[target], candidates)
+            }
+            for claim_id in claim_ids:
+                task_paths.setdefault(task_id, set()).add(claim_id)
+                claim_paths.setdefault(claim_id, set()).add(task_id)
+                path_details.append(
+                    {
+                        "task_id": task_id,
+                        "metric_id": metric_id,
+                        "claim_id": claim_id,
+                        "record_ids": sorted(
+                            str(record.get("record_id") or "")
+                            for record in candidates
+                            if str(record.get("record_id") or "")
+                        ),
+                    }
+                )
+
+    completed_task_ids = set(records_by_task)
+    unbound_tasks = sorted(task_id for task_id in completed_task_ids if not task_paths.get(task_id))
+    unbound_claims = sorted(claim_id for claim_id, tasks in claim_paths.items() if not tasks)
+    return {
+        "graph_present": bool(nodes),
+        "graph_structure_ok": graph_structure_ok,
+        "node_count": len(nodes),
+        "claim_count": len(claim_nodes),
+        "metric_count": len(metric_nodes),
+        "task_node_count": len(task_nodes),
+        "completed_task_count": len(completed_task_ids),
+        "bound_task_count": sum(bool(task_paths.get(task_id)) for task_id in completed_task_ids),
+        "bound_claim_count": sum(bool(claim_paths.get(claim_id)) for claim_id in claim_nodes),
+        "bound_claim_ids": sorted(claim_id for claim_id, tasks in claim_paths.items() if tasks),
+        "unbound_claim_ids": unbound_claims,
+        "unbound_task_ids": unbound_tasks,
+        "task_paths": {task_id: sorted(claims) for task_id, claims in task_paths.items()},
+        "claim_paths": {claim_id: sorted(tasks) for claim_id, tasks in claim_paths.items()},
+        "path_details": path_details,
+        "status": (
+            "ready"
+            if graph_structure_ok
+            and bool(claim_nodes)
+            and not unbound_tasks
+            and not unbound_claims
+            else "blocked"
+        ),
+    }
+
+
+def _manuscript_claim_binding_report(
+    latex_content: str,
+    records: list[dict[str, Any]],
+    graph_binding: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind every detected manuscript claim to one confirmatory graph path."""
+
+    ledger = build_claim_evidence_ledger(latex_content)
+    all_graph_claim_ids = set((graph_binding.get("claim_paths") or {}).keys())
+    bound_graph_claim_ids = set(graph_binding.get("bound_claim_ids") or [])
+    path_details = [
+        item
+        for item in graph_binding.get("path_details") or []
+        if isinstance(item, dict)
+    ]
+    evidence_groups = _numeric_record_evidence_groups(
+        records, require_confirmatory=True
+    )
+    evidence_values = [item for group in evidence_groups for item in group]
+    key_results = {"evidence_values": evidence_values}
+    details: list[dict[str, Any]] = []
+
+    for index, item in enumerate(ledger):
+        claim_text = str(item.get("claim") or "")
+        markers = item.get("claim_markers") or _claimref_metadata(claim_text)
+        marker_targets = [
+            str(marker.get("target") or "").strip()
+            for marker in markers
+            if isinstance(marker, dict) and str(marker.get("target") or "").strip()
+        ]
+        option_claim_refs = [
+            str(options.get(key) or "").strip()
+            for marker in markers
+            if isinstance(marker, dict)
+            for options in [
+                marker.get("options") if isinstance(marker.get("options"), dict) else {}
+            ]
+            for key in ("claim", "claim_id", "graph_claim")
+            if str(options.get(key) or "").strip()
+        ]
+        graph_claim_refs = sorted(
+            {
+                reference
+                for reference in marker_targets + option_claim_refs
+                if reference in all_graph_claim_ids
+            }
+        )
+        unknown_option_refs = sorted(
+            {
+                reference
+                for reference in option_claim_refs
+                if reference not in all_graph_claim_ids
+            }
+        )
+        numbers = _claim_numeric_tokens(claim_text)
+        numeric_matched, numeric_detail = _numeric_evidence_matches(
+            claim_text,
+            numbers,
+            key_results,
+        )
+        record_id = str(numeric_detail.get("record_id") or "")
+        task_id = str(numeric_detail.get("task_id") or "")
+        matching_paths = [
+            path
+            for path in path_details
+            if (record_id and record_id in set(path.get("record_ids") or []))
+            or (not record_id and task_id and path.get("task_id") == task_id)
+        ]
+        numeric_path_claim_ids = sorted(
+            {
+                str(path.get("claim_id") or "")
+                for path in matching_paths
+                if str(path.get("claim_id") or "")
+            }
+        )
+
+        reasons: list[str] = []
+        bound_claim_ids: list[str] = []
+        if unknown_option_refs:
+            reasons.append("unknown_graph_claim_ref")
+        if numbers:
+            if not numeric_matched:
+                reasons.append(str(numeric_detail.get("reason") or "numeric_evidence_unbound"))
+            elif not numeric_path_claim_ids:
+                reasons.append("numeric_record_has_no_graph_claim_path")
+            elif graph_claim_refs:
+                if not set(graph_claim_refs).issubset(bound_graph_claim_ids):
+                    reasons.append("graph_claim_ref_has_no_confirmatory_path")
+                if not set(graph_claim_refs).issubset(set(numeric_path_claim_ids)):
+                    reasons.append("numeric_record_and_graph_claim_ref_disagree")
+                if not reasons:
+                    bound_claim_ids = graph_claim_refs
+            elif len(numeric_path_claim_ids) == 1:
+                bound_claim_ids = numeric_path_claim_ids
+            else:
+                reasons.append("ambiguous_numeric_graph_claim_path")
+        elif not graph_claim_refs:
+            reasons.append("missing_graph_claim_ref")
+        elif not set(graph_claim_refs).issubset(bound_graph_claim_ids):
+            reasons.append("graph_claim_ref_has_no_confirmatory_path")
+        elif not reasons:
+            bound_claim_ids = graph_claim_refs
+
+        bound = bool(bound_claim_ids) and not reasons
+        details.append(
+            {
+                "claim_index": index,
+                "section": item.get("section"),
+                "claim": claim_text,
+                "numbers": [token[2] for token in numbers],
+                "marker_targets": marker_targets,
+                "graph_claim_refs": graph_claim_refs,
+                "unknown_graph_claim_refs": unknown_option_refs,
+                "numeric_evidence": numeric_detail if numbers else None,
+                "candidate_graph_claim_ids": numeric_path_claim_ids,
+                "bound_claim_ids": bound_claim_ids,
+                "bound": bound,
+                "reasons": sorted(set(reasons)),
+            }
+        )
+
+    unbound = [item for item in details if not item.get("bound")]
+    status = "ready" if ledger and not unbound else "blocked"
+    return {
+        "status": status,
+        "claim_count": len(ledger),
+        "bound_claim_count": len(details) - len(unbound),
+        "unbound_claim_count": len(unbound),
+        "confirmatory_numeric_record_count": len(evidence_groups),
+        "bindings": details,
+        "unbound_claims": unbound,
+        "issues": (
+            []
+            if status == "ready"
+            else (["no_manuscript_claims_detected"] if not ledger else sorted(
+                {
+                    reason
+                    for claim in unbound
+                    for reason in claim.get("reasons") or []
+                }
+            ))
+        ),
+    }
+
+
+def assess_claim_support(
+    latex_content: str,
+    base_folder: str | Path | None = None,
+    key_results: dict[str, Any] | None = None,
+) -> dict:
     ledger = build_claim_evidence_ledger(latex_content)
 
     claim_markers = [
@@ -2951,17 +4149,14 @@ def assess_claim_support(latex_content: str) -> dict:
         "state-of-the-art",
         "sota",
         "novel",
+        "improve",
         "we show",
         "we demonstrate",
         "improves",
         "improvement",
         "superior",
     ]
-    claims = [
-        item["claim"]
-        for item in ledger
-        if any(marker in item["claim"].lower() for marker in claim_markers)
-    ]
+    claims = [item["claim"] for item in ledger]
 
     has_figure_ref = any(
         token in latex_content.lower() for token in ["\\ref{fig", "figure", "fig."]
@@ -2969,20 +4164,51 @@ def assess_claim_support(latex_content: str) -> dict:
     has_table_ref = any(
         token in latex_content.lower() for token in ["\\ref{tab", "table", "tab."]
     )
-    has_citation = "\\cite{" in latex_content
+    citation_report = _citation_integrity_report(latex_content, base_folder)
+    has_citation = bool(citation_report.get("has_citations"))
     has_limitations = any(
         token in latex_content.lower()
         for token in ["limitation", "future work", "threats to validity"]
     )
 
     unsupported_claims = [item["claim"] for item in ledger if not item.get("supported")]
+    artifact_values = {
+        str(value).strip()
+        for value in (key_results or {}).get("values") or []
+        if str(value).strip()
+    }
+    numeric_unbound_claims = []
+    numeric_binding_details: list[dict[str, Any]] = []
+    if key_results is not None or base_folder is not None:
+        for item in ledger:
+            claim_text = str(item.get("claim") or "")
+            numbers = _claim_numeric_tokens(claim_text)
+            matched, detail = _numeric_evidence_matches(
+                claim_text,
+                numbers,
+                key_results,
+                base_folder,
+            )
+            if numbers:
+                numeric_binding_details.append(
+                    {
+                        "claim": claim_text,
+                        "numbers": [token[2] for token in numbers],
+                        **detail,
+                    }
+                )
+            if numbers and not matched:
+                numeric_unbound_claims.append(claim_text)
+    unsupported_claims = list(
+        dict.fromkeys(unsupported_claims + numeric_unbound_claims)
+    )
 
     score = 5.0
     if claims and unsupported_claims:
         score -= min(2.0, 0.5 * len(unsupported_claims))
     if not has_limitations:
         score -= 0.5
-    if not has_citation:
+    if not has_citation or not citation_report.get("ok"):
         score -= 0.5
     if not (has_figure_ref or has_table_ref):
         score -= 0.5
@@ -2997,6 +4223,96 @@ def assess_claim_support(latex_content: str) -> dict:
         recommendations.append("补充 limitations / future work，提升可信度。")
     if not has_citation:
         recommendations.append("补充与现有工作的引用对照，避免孤立 claim。")
+    elif not citation_report.get("ok"):
+        recommendations.append(
+            "修复 BibTeX 引用完整性：处理缺失、重复、未使用或解析失败的条目。"
+        )
+
+    artifact_binding = {
+        "checked": False,
+        "status": "not_checked",
+        "reason": "no experiment root supplied",
+    }
+    if base_folder is not None:
+        root = Path(base_folder)
+        registry_path = root / "experiment_registry.jsonl"
+        graph_path = root / "claim_evidence_graph.json"
+        artifact_binding["checked"] = True
+        if not registry_path.exists() or not graph_path.exists():
+            artifact_binding.update(
+                {
+                    "status": "blocked",
+                    "reason": "claim graph or experiment registry is missing",
+                }
+            )
+        else:
+            try:
+                records = load_jsonl_artifact(registry_path)
+                graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                records, graph = [], {}
+            confirmatory_records = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and str(record.get("study_phase") or "").strip().lower()
+                == "confirmatory"
+            ]
+            graph_binding = _claim_graph_binding_report(confirmatory_records, graph)
+            manuscript_binding = _manuscript_claim_binding_report(
+                latex_content,
+                confirmatory_records,
+                graph_binding,
+            )
+            binding_ready = (
+                graph_binding.get("status") == "ready"
+                and manuscript_binding.get("status") == "ready"
+            )
+            artifact_binding.update(
+                {
+                    "status": "ready" if binding_ready else "blocked",
+                    "completed_task_count": graph_binding.get("completed_task_count", 0),
+                    "bound_task_count": graph_binding.get("bound_task_count", 0),
+                    "bound_claim_count": graph_binding.get("bound_claim_count", 0),
+                    "bound_manuscript_claim_count": manuscript_binding.get(
+                        "bound_claim_count", 0
+                    ),
+                    "claim_graph": graph_binding,
+                    "manuscript_claims": manuscript_binding,
+                    "reason": (
+                        None
+                        if binding_ready
+                        else "; ".join(
+                            [
+                                str(item)
+                                for item in (
+                                    ["graph_structure_invalid"]
+                                    if not graph_binding.get("graph_structure_ok")
+                                    else []
+                                )
+                                + [
+                                    "unbound_claims="
+                                    + ",".join(graph_binding.get("unbound_claim_ids") or [])
+                                    if graph_binding.get("unbound_claim_ids")
+                                    else "",
+                                    "unbound_tasks="
+                                    + ",".join(graph_binding.get("unbound_task_ids") or [])
+                                    if graph_binding.get("unbound_task_ids")
+                                    else "",
+                                    "manuscript_claim_issues="
+                                    + ",".join(manuscript_binding.get("issues") or [])
+                                    if manuscript_binding.get("issues")
+                                    else "",
+                                ]
+                                if str(item)
+                            ]
+                        )
+                    ),
+                }
+            )
+
+    if artifact_binding.get("checked") and artifact_binding.get("status") != "ready":
+        score = min(score, 2.0)
 
     return {
         "score": score,
@@ -3005,13 +4321,929 @@ def assess_claim_support(latex_content: str) -> dict:
         "has_figure_ref": has_figure_ref,
         "has_table_ref": has_table_ref,
         "has_citation": has_citation,
+        "citation_integrity": citation_report,
         "has_limitations": has_limitations,
+        "numeric_unbound_claims": numeric_unbound_claims[:10],
+        "numeric_binding": numeric_binding_details[:20],
+        "artifact_binding": artifact_binding,
         "recommendations": recommendations,
-        "overall_assessment": "supported" if score >= 4 else "needs_improvement",
+        "overall_assessment": (
+            "supported"
+            if score >= 4 and artifact_binding.get("status") in {"ready", "not_checked"}
+            else "needs_improvement"
+        ),
     }
 
 
-def assess_numeric_coverage(latex_content: str) -> dict:
+def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
+    """Build a deterministic, artifact-bound publication gate.
+
+    This gate deliberately does not inspect prose quality. A manuscript can be
+    readable and still be scientifically unverified. The gate therefore checks
+    the existing preregistration, experiment registry, claim graph, and
+    independent verification report as one chain. Missing artifacts fail
+    closed and are reported as actionable blockers.
+    """
+
+    root = Path(base_folder).expanduser().resolve()
+    checks: list[dict[str, Any]] = []
+    failures: list[str] = []
+
+    def check(
+        check_id: str, passed: bool, detail: str, *, required: bool = True
+    ) -> None:
+        checks.append(
+            {
+                "id": check_id,
+                "passed": bool(passed),
+                "required": bool(required),
+                "detail": detail,
+            }
+        )
+        if required and not passed:
+            failures.append(check_id)
+
+    preregistration_path = root / "preregistration.json"
+    registry_path = root / "experiment_registry.jsonl"
+    graph_path = root / "claim_evidence_graph.json"
+    verification_path = root / "verification_report.json"
+    snapshot_path = root / SNAPSHOT_FILENAME
+    latex_path = root / "latex" / "template.tex"
+    snapshot_required = snapshot_path.exists() or (root / "latex" / "template.tex").is_file()
+
+    citation_report: dict[str, Any]
+    latex_content: str | None = None
+    if latex_path.is_file():
+        try:
+            latex_content = latex_path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+            citation_report = _citation_integrity_report(
+                latex_content, root
+            )
+        except OSError:
+            latex_content = ""
+            citation_report = {
+                "ok": False,
+                "status": "blocked",
+                "issues": ["latex_read_failed"],
+            }
+        check(
+            "citation_integrity",
+            citation_report.get("ok") is True,
+            ", ".join(citation_report.get("issues") or [])
+            or "all in-text citation keys resolve to unique, used BibTeX entries",
+        )
+    else:
+        citation_report = {
+            "ok": True,
+            "status": "not_checked",
+            "issues": [],
+            "has_citations": False,
+        }
+
+    preregistration: dict[str, Any] = {}
+    if preregistration_path.exists():
+        try:
+            payload = json.loads(preregistration_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                preregistration = payload
+        except (OSError, ValueError, TypeError):
+            preregistration = {}
+    check("preregistration_present", bool(preregistration), "preregistration.json")
+
+    preregistration_report = (
+        validate_preregistration(preregistration, require_locked=True)
+        if preregistration
+        else {"ok": False, "errors": ["missing"]}
+    )
+    check(
+        "locked_preregistration",
+        bool(preregistration_report.get("ok")),
+        ", ".join(preregistration_report.get("errors") or [])
+        or "locked and hash-valid",
+    )
+    raw_external_validity = preregistration.get("external_validity")
+    external_validity = (
+        raw_external_validity if isinstance(raw_external_validity, dict) else {}
+    )
+    external_required = external_validity.get("required") is True
+    external_evidence = external_validity.get("evidence_artifacts")
+    external_assessed = (
+        str(external_validity.get("status") or "").strip()
+        in {"assessed", "verified"}
+        and bool(str(external_validity.get("assessment_method") or "").strip())
+        and isinstance(external_evidence, list)
+        and bool(external_evidence)
+    )
+    check(
+        "external_validity_assessment",
+        external_assessed,
+        (
+            "external conditions, assessment method, and evidence artifacts are recorded"
+            if external_assessed
+            else "external validity is not assessed; keep claims bounded to tested conditions"
+        ),
+        required=external_required,
+    )
+
+    if registry_path.exists():
+        try:
+            records, registry_parse_errors = load_jsonl_artifact_with_errors(
+                registry_path
+            )
+        except (OSError, ValueError, TypeError):
+            records, registry_parse_errors = [], [{"error": "registry_read_failed"}]
+    else:
+        records, registry_parse_errors = [], []
+    check(
+        "registry_parse_integrity",
+        not registry_parse_errors,
+        "experiment_registry.jsonl contains only valid object rows",
+    )
+    registry_integrity = None
+    if snapshot_required or (root / "experiment_registry.integrity.json").exists():
+        registry_integrity = check_experiment_registry_integrity(root)
+        check(
+            "registry_append_only_integrity",
+            registry_integrity.get("ok") is True,
+            ", ".join(registry_integrity.get("errors") or [])
+            or "ordered registry chain matches its immutable sidecar",
+        )
+    confirmatory = [
+        item
+        for item in records
+        if isinstance(item, dict)
+        and str(item.get("study_phase") or "").lower() == "confirmatory"
+    ]
+    incomplete_confirmatory = [
+        item
+        for item in confirmatory
+        if str(item.get("status") or "").lower() not in {"completed", "verified"}
+    ]
+    completed = [
+        item
+        for item in confirmatory
+        if str(item.get("status") or "").lower() in {"completed", "verified"}
+    ]
+    check(
+        "confirmatory_registry_records",
+        bool(completed),
+        f"completed_confirmatory_records={len(completed)}",
+    )
+    check(
+        "confirmatory_attempt_completeness",
+        not incomplete_confirmatory,
+        "all confirmatory attempts are completed or verified",
+    )
+
+    completed_record_ids = [
+        str(item.get("record_id") or "").strip() for item in completed
+    ]
+    # Integrity flags are JSON booleans, not truthy labels.  In particular,
+    # ``"false"`` must not turn an ordinary record into a reproduction.
+    reproduction_records = [
+        item for item in records if item.get("independent_reproduction") is True
+    ]
+    relevant_record_ids = completed_record_ids + [
+        str(item.get("record_id") or "").strip() for item in reproduction_records
+    ]
+    check(
+        "registry_record_id_integrity",
+        bool(completed)
+        and all(relevant_record_ids)
+        and len(relevant_record_ids) == len(set(relevant_record_ids)),
+        "confirmatory and reproduction records have unique, non-empty record_id values",
+    )
+    check(
+        "registry_producer_identity",
+        bool(completed)
+        and all(str(item.get("producer_id") or "").strip() for item in completed),
+        "completed records identify their producer",
+    )
+
+    def _has_durable_result_artifact(record: dict[str, Any]) -> bool:
+        """Require a record to point at a persisted result, not just status text."""
+        return _result_artifact_manifest_present(record, root)
+
+    durable_records = bool(completed) and all(
+        _has_durable_result_artifact(record)
+        and bool(record.get("finished_at"))
+        and not record.get("error_type")
+        for record in completed
+    )
+    check(
+        "durable_result_artifacts",
+        durable_records,
+        "completed records point to persisted result artifacts",
+    )
+    recomputed_records = bool(completed) and all(
+        record.get("verification_recomputed") is True
+        and bool(
+            str(
+                record.get("verification_command")
+                or record.get("verification_method")
+                or ""
+            ).strip()
+        )
+        and _verification_metric_matches(record)
+        and _verification_output_matches(record, root)
+        for record in completed
+    )
+    check(
+        "record_recomputation_evidence",
+        recomputed_records,
+        "each record carries verifier command and hashes matching its artifacts",
+    )
+
+    outcomes = [
+        item for item in preregistration.get("outcomes") or [] if isinstance(item, dict)
+    ]
+    outcome_task_ids = [str(item.get("task_id") or "") for item in outcomes]
+    unique_task_ids = bool(outcome_task_ids) and len(outcome_task_ids) == len(
+        set(outcome_task_ids)
+    )
+    check(
+        "unique_registered_task_ids",
+        unique_task_ids,
+        f"registered_outcomes={len(outcome_task_ids)}",
+    )
+    complete_outcomes = bool(outcomes) and all(
+        all(
+            str(item.get(field) or "").strip()
+            for field in ("task_id", "dataset", "metric", "baseline")
+        )
+        for item in outcomes
+    )
+    check(
+        "registered_outcome_fields_complete",
+        complete_outcomes,
+        "task_id, dataset, metric, and baseline are non-empty",
+    )
+    registered_task_id_set = {
+        str(item.get("task_id") or "").strip() for item in outcomes
+    }
+    completed_task_id_set = {
+        str(item.get("task_id") or "").strip() for item in completed
+    }
+    check(
+        "registry_registered_task_ids_only",
+        bool(completed) and completed_task_id_set.issubset(registered_task_id_set),
+        "every confirmatory record belongs to a registered task",
+    )
+    preregistration_id = str(preregistration.get("preregistration_id") or "").strip()
+    check(
+        "registry_preregistration_linkage",
+        bool(completed)
+        and bool(preregistration_id)
+        and all(
+            str(record.get("preregistration_id") or "").strip() == preregistration_id
+            for record in completed
+        ),
+        "every confirmatory record references the locked preregistration",
+    )
+    outcome_by_task = {
+        str(item.get("task_id")): item for item in outcomes if item.get("task_id")
+    }
+    matched_by_task = {
+        task_id: [
+            record
+            for record in completed
+            if str(record.get("task_id")) == task_id
+            and str(record.get("task_id") or "").strip()
+            and str(record.get("dataset") or "") == str(outcome.get("dataset") or "")
+            and str(record.get("metric") or "") == str(outcome.get("metric") or "")
+            and str(record.get("baseline_ref") or "")
+            == str(outcome.get("baseline") or "")
+            and str(record.get("preregistration_id") or "")
+            == str(preregistration.get("preregistration_id") or "")
+        ]
+        for task_id, outcome in outcome_by_task.items()
+    }
+    task_coverage = (
+        unique_task_ids
+        and complete_outcomes
+        and bool(outcome_by_task)
+        and all(matched_by_task.values())
+    )
+    check(
+        "registered_task_coverage",
+        task_coverage,
+        f"registered_tasks={len(outcome_by_task)}",
+    )
+    protocol_fidelity = bool(matched_by_task) and all(
+        record.get("protocol_fidelity_hash")
+        == _protocol_fidelity_hash(preregistration, task_id)
+        for task_id, records_for_task in matched_by_task.items()
+        for record in records_for_task
+    )
+    check(
+        "protocol_fidelity_hash",
+        protocol_fidelity,
+        "confirmatory records bind the full locked protocol, not only task labels",
+    )
+
+    raw_analysis = preregistration.get("analysis_plan")
+    analysis = raw_analysis if isinstance(raw_analysis, dict) else {}
+    try:
+        minimum_seeds = max(int(analysis.get("minimum_independent_seeds") or 1), 1)
+    except (TypeError, ValueError):
+        minimum_seeds = 1
+    seed_coverage = bool(matched_by_task) and all(
+        len(
+            {
+                _canonical_seed(record.get("seed"))
+                for record in records
+                if _canonical_seed(record.get("seed")) is not None
+            }
+        )
+        >= minimum_seeds
+        for records in matched_by_task.values()
+    )
+    check(
+        "independent_seed_coverage",
+        seed_coverage,
+        f"minimum_independent_seeds={minimum_seeds}",
+    )
+
+    def _numeric_result(record: dict[str, Any]) -> bool:
+        summary = record.get("result_summary") or {}
+        if not isinstance(summary, dict):
+            return False
+        for key in ("metric_mean", "metric_value", "value", "final_metric"):
+            value = summary.get(key)
+            if _is_number(value):
+                return True
+        return False
+
+    def _has_baseline_comparison(record: dict[str, Any]) -> bool:
+        summary = record.get("result_summary") or {}
+        if not isinstance(summary, dict):
+            return False
+        comparison = summary.get("comparison")
+        if isinstance(comparison, dict):
+            # Do not use ``or`` here: zero is a valid metric/delta and must
+            # not be treated as a missing value.
+            candidate = comparison.get("candidate")
+            if candidate is None:
+                candidate = comparison.get("candidate_mean")
+            baseline = comparison.get("baseline")
+            if baseline is None:
+                baseline = comparison.get("baseline_mean")
+            delta = comparison.get("delta")
+            if delta is None:
+                delta = comparison.get("delta_vs_baseline")
+            if all(_is_number(value) for value in (candidate, baseline, delta)):
+                return abs(float(candidate) - float(baseline) - float(delta)) <= 1e-3
+        has_baseline = any(
+            _is_number(summary.get(key))
+            for key in ("baseline_metric_mean", "baseline_value", "baseline_mean")
+        )
+        has_delta = any(
+            _is_number(summary.get(key))
+            for key in ("delta_vs_baseline", "metric_delta", "delta")
+        )
+        return has_baseline and has_delta
+
+    def _has_inferential_result(record: dict[str, Any]) -> bool:
+        payload = record.get("result_summary") or {}
+        if not isinstance(payload, dict):
+            return False
+        if "p_value" in payload and (
+            not _is_number(payload.get("p_value"))
+            or not 0 <= float(payload.get("p_value")) <= 1
+        ):
+            return False
+        if "standard_error" in payload and (
+            not _is_number(payload.get("standard_error"))
+            or float(payload.get("standard_error")) < 0
+        ):
+            return False
+        for key in ("effect_size", "p_value", "standard_error"):
+            value = payload.get(key)
+            if _is_number(value):
+                return True
+        interval = payload.get("confidence_interval")
+        return (
+            isinstance(interval, (list, tuple))
+            and len(interval) == 2
+            and all(_is_number(value) for value in interval)
+            and float(interval[0]) <= float(interval[1])
+        )
+
+    measured = bool(completed) and all(
+        _numeric_result(record)
+        for records_for_task in matched_by_task.values()
+        for record in records_for_task
+    )
+    inferential = bool(matched_by_task) and all(
+        any(_has_inferential_result(record) for record in records_for_task)
+        for records_for_task in matched_by_task.values()
+    )
+    baseline_comparison = bool(matched_by_task) and all(
+        any(_has_baseline_comparison(record) for record in records_for_task)
+        for records_for_task in matched_by_task.values()
+    )
+    check(
+        "numeric_results_are_artifact_bound",
+        measured,
+        "metric values found in result cards",
+    )
+    check(
+        "inferential_statistics_present", inferential, "CI/effect size/p-value/SE found"
+    )
+    check(
+        "baseline_comparison_present",
+        baseline_comparison,
+        "candidate and baseline values plus a predeclared delta are recorded",
+    )
+
+    deterministic_lineage = bool(matched_by_task) and all(
+        record.get("metric_provenance") == "deterministic_verified"
+        and _is_content_hash(record.get("dataset_split_hash"))
+        and _is_content_hash(record.get("evaluator_input_hash"))
+        and _is_content_hash(record.get("evaluator_result_hash"))
+        and _deterministic_lineage_matches(record, root)
+        for records_for_task in matched_by_task.values()
+        for record in records_for_task
+    )
+    blind_holdout = bool(matched_by_task) and all(
+        record.get("holdout_access") == "verifier_only"
+        for records_for_task in matched_by_task.values()
+        for record in records_for_task
+    )
+    raw_data_policy = preregistration.get("data_policy")
+    data_policy = raw_data_policy if isinstance(raw_data_policy, dict) else {}
+    raw_split_hashes = data_policy.get("split_hashes")
+    split_hashes = raw_split_hashes if isinstance(raw_split_hashes, dict) else {}
+    split_fidelity = bool(matched_by_task) and all(
+        record.get("dataset_split_hash") == split_hashes.get(task_id)
+        for task_id, records_for_task in matched_by_task.items()
+        for record in records_for_task
+    )
+    check(
+        "deterministic_metric_lineage",
+        deterministic_lineage,
+        "content-addressed metric inputs and outputs",
+    )
+    check("blind_holdout_boundary", blind_holdout, "holdout_access=verifier_only")
+    check(
+        "locked_split_fidelity",
+        split_fidelity,
+        "record split hashes match preregistration",
+    )
+
+    graph: dict[str, Any] = {}
+    if graph_path.exists():
+        try:
+            payload = json.loads(graph_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                graph = payload
+        except (OSError, ValueError, TypeError):
+            graph = {}
+    graph_binding = _claim_graph_binding_report(confirmatory, graph)
+    graph_bound = graph_binding.get("status") == "ready"
+    check(
+        "claim_graph_present",
+        graph_binding.get("graph_present") is True,
+        "claim_evidence_graph.json",
+    )
+    check(
+        "claim_graph_integrity",
+        graph_binding.get("graph_structure_ok") is True,
+        "claim graph node IDs, edge endpoints, and node types are valid",
+    )
+    check(
+        "completed_evidence_bound_to_claim",
+        graph_bound,
+        "every completed task and every claim has a task -> metric -> claim path",
+    )
+    check(
+        "claim_graph_all_claims_bound",
+        bool(graph_binding.get("claim_count"))
+        and not graph_binding.get("unbound_claim_ids")
+        and not graph_binding.get("unbound_task_ids"),
+        "all claim nodes are bound to completed, metadata-consistent evidence",
+    )
+    if latex_content is not None:
+        manuscript_claim_binding = _manuscript_claim_binding_report(
+            latex_content,
+            confirmatory,
+            graph_binding,
+        )
+        check(
+            "manuscript_claim_evidence_binding",
+            manuscript_claim_binding.get("status") == "ready",
+            (
+                f"bound_manuscript_claims={manuscript_claim_binding.get('bound_claim_count', 0)}/"
+                f"{manuscript_claim_binding.get('claim_count', 0)}; "
+                + ", ".join(manuscript_claim_binding.get("issues") or [])
+            ).rstrip("; "),
+        )
+    else:
+        manuscript_claim_binding = {
+            "status": "not_checked",
+            "claim_count": 0,
+            "bound_claim_count": 0,
+            "unbound_claim_count": 0,
+            "bindings": [],
+            "unbound_claims": [],
+            "issues": [],
+        }
+
+    verification: dict[str, Any] = {}
+    if verification_path.exists():
+        try:
+            payload = json.loads(verification_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                verification = payload
+        except (OSError, ValueError, TypeError):
+            verification = {}
+    conclusion_interpretation = verification.get("conclusion_interpretation")
+    if not isinstance(conclusion_interpretation, dict):
+        conclusion_interpretation = {}
+    conclusion_status = str(conclusion_interpretation.get("status") or "").strip()
+    conclusion_claim_safe = conclusion_status in {
+        "supports_effect",
+        "supports_no_meaningful_effect",
+    }
+    check(
+        "conclusion_interpretation",
+        conclusion_claim_safe,
+        (
+            f"conclusion status={conclusion_status or 'missing'}; "
+            "inconclusive results cannot promote a no-effect or effect claim"
+        ),
+    )
+    producer_ids = {
+        str(record.get("producer_id") or "").strip()
+        for record in completed
+        if str(record.get("producer_id") or "").strip()
+    }
+    completed_record_id_set = {
+        record_id for record_id in completed_record_ids if record_id
+    }
+    raw_verification_criteria = (
+        verification.get("criteria")
+        if isinstance(verification.get("criteria"), list)
+        else []
+    )
+    criterion_ids = [
+        str(item.get("id") or "").strip()
+        for item in raw_verification_criteria
+        if isinstance(item, dict)
+    ]
+    criteria_integrity = (
+        bool(raw_verification_criteria)
+        and len(criterion_ids) == len(raw_verification_criteria)
+        and all(criterion_ids)
+        and len(criterion_ids) == len(set(criterion_ids))
+    )
+    verification_criteria = {
+        str(item.get("id")): item
+        for item in raw_verification_criteria
+        if isinstance(item, dict) and item.get("id")
+    }
+    expected_criteria_present = VERIFICATION_REQUIRED_CRITERIA.issubset(
+        set(verification_criteria)
+    )
+    criteria_all_passed = (
+        criteria_integrity
+        and expected_criteria_present
+        and all(
+            verification_criteria[criterion_id].get("passed") is True
+            and verification_criteria[criterion_id].get("required", True) is True
+            for criterion_id in VERIFICATION_REQUIRED_CRITERIA
+        )
+    )
+    verification_ids_list = [
+        str(record_id).strip()
+        for record_id in verification.get("confirmatory_record_ids") or []
+    ]
+    verification_ids_integrity = (
+        bool(verification_ids_list)
+        and all(verification_ids_list)
+        and len(verification_ids_list) == len(set(verification_ids_list))
+    )
+    verification_record_ids_exact = (
+        verification_ids_integrity
+        and set(verification_ids_list) == completed_record_id_set
+    )
+    expected_verification_hash = _canonical_hash(
+        _verification_report_hash_payload(verification)
+    )
+    verification_hash_ok = (
+        bool(str(verification.get("report_hash") or "").strip())
+        and verification.get("report_hash") == expected_verification_hash
+    )
+    try:
+        recomputed_verification = build_verification_report(
+            preregistration,
+            records,
+            verifier_id=str(verification.get("verifier_id") or ""),
+            clean_room=verification.get("clean_room") is True,
+            verification_root=root,
+        )
+    except (OSError, TypeError, ValueError):
+        recomputed_verification = {
+            "status": "blocked",
+            "required_failures": ["verification_recompute_error"],
+            "criteria": [],
+            "confirmatory_record_ids": [],
+            "reproduction_record_ids": [],
+        }
+    recomputed_report_hash = _canonical_hash(
+        _verification_report_hash_payload(recomputed_verification)
+    )
+    verification_matches_registry = (
+        recomputed_verification.get("status") == "verified"
+        and verification.get("criteria") == recomputed_verification.get("criteria")
+        and verification.get("required_failures")
+        == recomputed_verification.get("required_failures")
+        and verification.get("confirmatory_record_ids")
+        == recomputed_verification.get("confirmatory_record_ids")
+        and verification.get("reproduction_record_ids")
+        == recomputed_verification.get("reproduction_record_ids")
+        and verification.get("report_hash") == recomputed_report_hash
+        and verification.get("records_hash") == recomputed_verification.get("records_hash")
+        and verification.get("registry_hash") == recomputed_verification.get("registry_hash")
+        and verification.get("evidence_snapshot_hash")
+        == recomputed_verification.get("evidence_snapshot_hash")
+    )
+    verified = (
+        verification.get("schema_version") == SCHEMA_VERSION
+        and verification.get("status") == "verified"
+        and verification.get("claim_promotion_allowed") is True
+        and verification.get("preregistration_id")
+        == preregistration.get("preregistration_id")
+        and verification.get("registration_hash")
+        == preregistration.get("registration_hash")
+        and bool(str(verification.get("verifier_id") or "").strip())
+        and bool(verification.get("clean_room") is True)
+        and criteria_all_passed
+        and not producer_ids.intersection(
+            {str(verification.get("verifier_id") or "").strip()}
+        )
+        and verification_record_ids_exact
+        and verification_hash_ok
+        and verification_matches_registry
+        and not verification.get("required_failures")
+    )
+    check(
+        "verification_criteria_integrity",
+        criteria_integrity,
+        "verification criteria IDs are non-empty and unique",
+    )
+    check(
+        "verification_schema_version",
+        verification.get("schema_version") == SCHEMA_VERSION,
+        "verification report uses the current integrity schema",
+    )
+    check(
+        "verification_criteria_complete",
+        criteria_all_passed,
+        f"required criteria present={expected_criteria_present}",
+    )
+    check(
+        "verification_record_ids_exact",
+        verification_record_ids_exact,
+        "verification report covers exactly the completed confirmatory records",
+    )
+    check(
+        "verification_report_hash",
+        verification_hash_ok and verification_matches_registry,
+        "verification report hash and semantics match a fresh registry recomputation",
+    )
+    snapshot_report = verify_evidence_snapshot(root) if snapshot_required else {
+        "ok": True,
+        "current": {},
+        "expected_hash": None,
+        "current_hash": None,
+        "mismatches": [],
+    }
+    check(
+        "evidence_snapshot_integrity",
+        snapshot_report.get("ok") is True if snapshot_required else True,
+        ", ".join(snapshot_report.get("mismatches") or [])
+        or ("final manuscript and evidence files are unchanged" if snapshot_required else "not required for low-level registry audit"),
+    )
+    snapshot_binding_ok = (
+        not snapshot_required
+        or (
+            snapshot_report.get("ok") is True
+            and bool(verification.get("evidence_snapshot_hash"))
+            and verification.get("evidence_snapshot_hash")
+            == snapshot_report.get("current_hash")
+            and verification.get("manuscript_hash")
+            == snapshot_report.get("current", {}).get("manuscript_hash")
+            and verification.get("registry_hash")
+            == snapshot_report.get("current", {}).get("registry_hash")
+        )
+    )
+    check(
+        "verification_snapshot_binding",
+        snapshot_binding_ok,
+        "verification report is bound to the current final manuscript snapshot",
+    )
+    check(
+        "independent_verification",
+        verified,
+        str(
+            verification.get("status") or "verification_report.json missing or blocked"
+        ),
+    )
+
+    recovery_actions = {
+        "preregistration_present": "Create a preregistration before interpreting confirmatory results.",
+        "locked_preregistration": "Resolve placeholders, hash every split, and lock the preregistration.",
+        "estimand_specification": "Declare the population, intervention, comparator, outcome, measure, and endpoint in the preregistration.",
+        "missing_data_policy": "Record the primary and sensitivity missing-data rules and report missing counts.",
+        "null_result_interpretation": "Mark a near-zero result inconclusive, or preregister an equivalence margin/precision target and satisfy it.",
+        "conclusion_interpretation": "Do not promote an effect or no-effect claim until the result interpretation is supported.",
+        "external_validity_assessment": "Assess the declared transfer conditions with independent data or explicitly keep the claim local.",
+        "registry_parse_integrity": "Repair or quarantine malformed experiment_registry.jsonl rows before auditing.",
+        "confirmatory_registry_records": "Run and record an explicit confirmatory phase for each registered task.",
+        "confirmatory_attempt_completeness": "Resolve or explicitly quarantine every failed/running confirmatory attempt before publication; incomplete attempts cannot be silently ignored.",
+        "durable_result_artifacts": "Persist non-empty result/input artifacts inside the study root.",
+        "record_recomputation_evidence": "Run the clean-room verifier and record its command plus matching hashes.",
+        "protocol_fidelity_hash": "Re-run the confirmatory task against the locked analysis/data/control protocol and record its protocol hash.",
+        "deterministic_metric_lineage": "Attach evaluator input/result files whose bytes match the recorded hashes.",
+        "completed_evidence_bound_to_claim": "Regenerate the claim graph and connect each published task to metric and claim nodes.",
+        "claim_graph_integrity": "Regenerate the claim graph with unique nodes and valid experiment → metric → claim edges.",
+        "claim_graph_all_claims_bound": "Bind every published claim node to a completed task, metric, and matching result artifact.",
+        "manuscript_claim_evidence_binding": "Add a graph claim reference to each detected manuscript claim and bind every reported number to the same confirmatory record path.",
+        "citation_integrity": "Repair missing, duplicate, unused, or malformed BibTeX entries and rerun the local citation audit.",
+        "verification_report_hash": "Regenerate verification_report.json from the current registry; do not hand-edit it.",
+        "verification_criteria_integrity": "Regenerate the verification report so every criterion ID is unique and complete.",
+        "independent_verification": "Use a verifier identity distinct from producers and complete clean-room reproduction.",
+    }
+    next_actions = [
+        recovery_actions.get(
+            failure,
+            f"Inspect the evidence check '{failure}' and resolve its recorded detail.",
+        )
+        for failure in failures
+    ]
+    failures = list(dict.fromkeys(failures))
+    check_by_id = {str(item.get("id")): item for item in checks}
+    dimension_check_ids = {
+        "protocol_integrity": [
+            "preregistration_present",
+            "locked_preregistration",
+            "estimand_specification",
+            "missing_data_policy",
+            "confirmatory_registry_records",
+            "confirmatory_attempt_completeness",
+            "registry_registered_task_ids_only",
+            "registry_preregistration_linkage",
+            "registered_task_coverage",
+            "protocol_fidelity_hash",
+            "locked_split_fidelity",
+            "blind_holdout_boundary",
+            "independent_seed_coverage",
+        ],
+        "computational_replayability": [
+            "registry_parse_integrity",
+            "registry_append_only_integrity",
+            "durable_result_artifacts",
+            "record_recomputation_evidence",
+            "deterministic_metric_lineage",
+            "evidence_snapshot_integrity",
+            "verification_snapshot_binding",
+            "verification_report_hash",
+            "independent_verification",
+        ],
+        "statistical_evidence": [
+            "numeric_results_are_artifact_bound",
+            "inferential_statistics_present",
+            "baseline_comparison_present",
+            "conclusion_interpretation",
+            "independent_verification",
+        ],
+        "external_validity": ["external_validity_assessment"],
+    }
+    evidence_dimensions: dict[str, dict[str, Any]] = {}
+    for dimension, check_ids in dimension_check_ids.items():
+        rows = [check_by_id[item] for item in check_ids if item in check_by_id]
+        failed_ids = [str(item.get("id")) for item in rows if not item.get("passed")]
+        required_rows = [item for item in rows if item.get("required") is True]
+        if failed_ids and any(item.get("required") is True for item in rows):
+            dimension_status = "blocked"
+        elif rows and any(item.get("passed") is True for item in rows) and all(
+            item.get("passed") is True for item in required_rows
+        ):
+            dimension_status = "verified"
+        else:
+            dimension_status = "not_assessed"
+        evidence_dimensions[dimension] = {
+            "status": dimension_status,
+            "verified": dimension_status == "verified",
+            "check_ids": check_ids,
+            "failed_check_ids": failed_ids,
+            "blocking": dimension_status == "blocked",
+        }
+    dimension_for_check = {
+        check_id: dimension
+        for dimension, check_ids in dimension_check_ids.items()
+        for check_id in check_ids
+    }
+    owner_for_dimension = {
+        "protocol_integrity": "study_designer",
+        "computational_replayability": "experimenter_or_verifier",
+        "statistical_evidence": "statistician_or_researcher",
+        "external_validity": "researcher",
+    }
+    inputs_for_dimension = {
+        "protocol_integrity": ["locked preregistration", "split hashes", "protocol hash"],
+        "computational_replayability": ["code", "data artifacts", "environment", "replay command"],
+        "statistical_evidence": ["result summaries", "uncertainty estimates", "null-result interpretation"],
+        "external_validity": ["target transfer conditions", "assessment data", "independent validation"],
+    }
+    recovery_plan: list[dict[str, Any]] = []
+    for failure in failures:
+        dimension = dimension_for_check.get(failure, "protocol_integrity")
+        recovery_plan.append(
+            {
+                "code": failure,
+                "dimension": dimension,
+                "priority": "P0",
+                "blocking_level": "blocking",
+                "owner": owner_for_dimension[dimension],
+                "required_inputs": list(inputs_for_dimension[dimension]),
+                "action": recovery_actions.get(
+                    failure,
+                    f"Inspect the evidence check '{failure}' and resolve its recorded detail.",
+                ),
+            }
+        )
+    if evidence_dimensions["external_validity"]["status"] == "not_assessed":
+        recovery_plan.append(
+            {
+                "code": "assess_external_validity",
+                "dimension": "external_validity",
+                "priority": "P1",
+                "blocking_level": "advisory",
+                "owner": owner_for_dimension["external_validity"],
+                "required_inputs": list(inputs_for_dimension["external_validity"]),
+                "action": recovery_actions["external_validity_assessment"],
+            }
+        )
+    if recovery_plan:
+        primary_action = dict(recovery_plan[0])
+    else:
+        primary_action = {
+            "code": "none",
+            "dimension": "computational_replayability",
+            "priority": "P2",
+            "blocking_level": "advisory",
+            "owner": "researcher",
+            "required_inputs": [],
+            "action": "All required evidence checks passed; preserve the replay package and claim scope.",
+        }
+    epistemic_status = {
+        dimension: details["status"]
+        for dimension, details in evidence_dimensions.items()
+    }
+    epistemic_status["real_world_truth"] = (
+        "bounded_external_validity_evidence"
+        if evidence_dimensions["external_validity"]["status"] == "verified"
+        else "not_established"
+    )
+    return {
+        "status": "verified" if not failures else "blocked",
+        "submission_ready": not failures,
+        "hard_failures": failures,
+        "next_actions": next_actions,
+        "primary_action": primary_action,
+        "recovery_plan": recovery_plan,
+        "evidence_dimensions": evidence_dimensions,
+        "epistemic_status": epistemic_status,
+        "claim_scope": (
+            "tested_conditions_only"
+            if evidence_dimensions["external_validity"]["status"] != "verified"
+            else "tested_and_assessed_transfer_conditions"
+        ),
+        "checks": checks,
+        "minimum_independent_seeds": minimum_seeds,
+        "artifact_paths": {
+            "preregistration": str(preregistration_path),
+            "experiment_registry": str(registry_path),
+            "claim_evidence_graph": str(graph_path),
+            "verification_report": str(verification_path),
+            "evidence_snapshot": str(snapshot_path),
+            "registry_integrity": str(root / "experiment_registry.integrity.json"),
+        },
+        "evidence_snapshot": snapshot_report,
+        "registry_integrity": registry_integrity,
+        "citation_integrity": citation_report,
+        "claim_graph_binding": graph_binding,
+        "manuscript_claim_binding": manuscript_claim_binding,
+    }
+
+
+def assess_numeric_coverage(
+    latex_content: str, key_results: dict[str, Any] | None = None
+) -> dict:
     abstract_match = re.search(
         r"\\begin\{abstract\}(.*?)\\end\{abstract\}",
         latex_content,
@@ -3022,7 +5254,9 @@ def assess_numeric_coverage(latex_content: str) -> dict:
         latex_content,
         re.DOTALL | re.IGNORECASE,
     )
-    numeric_patterns = [r"\b\d+\.\d+\b", r"\b\d+%\b", r"\b\d+\.\d+%\b"]
+    numeric_patterns = [
+        r"(?<![\w.])[-+]?\d+(?:\.\d+)?%?(?![\w.])",
+    ]
 
     abstract_numbers = []
     conclusion_numbers = []
@@ -3040,12 +5274,20 @@ def assess_numeric_coverage(latex_content: str) -> dict:
     if len(conclusion_numbers) == 0:
         score -= 0.8
         recommendations.append("结论中加入关键数值或定量 takeaway。")
+    artifact_values = list((key_results or {}).get("values") or [])
+    if key_results is not None and not artifact_values:
+        score = min(score, 2.0)
+        recommendations.append(
+            "论文中的数字没有从实验摘要/结果卡解析到，不能作为已验证结果。"
+        )
     score = max(1.0, min(5.0, score))
 
     return {
         "score": score,
         "abstract_numbers": abstract_numbers[:10],
         "conclusion_numbers": conclusion_numbers[:10],
+        "artifact_backed_values": artifact_values[:10],
+        "artifact_backed": bool(artifact_values),
         "recommendations": recommendations,
         "overall_assessment": "grounded" if score >= 4 else "needs_improvement",
     }
@@ -3129,6 +5371,41 @@ def build_claim_evidence_ledger(latex_content: str) -> list[dict]:
             for keyword in ["introduction", "result", "discussion", "conclusion"]
         ):
             source_blocks.append((title, section["content"]))
+
+    def split_sentences(text: str) -> list[str]:
+        annotated = _attach_trailing_claimrefs(text)
+        return [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", annotated)
+            if sentence.strip()
+        ]
+
+    def claim_sentence_key(sentence: str) -> str:
+        without_environment = re.sub(
+            r"\\(?:begin|end)\{[^}]+\}", " ", sentence, flags=re.IGNORECASE
+        )
+        without_sections = re.sub(
+            r"\\section\*?\{[^}]*\}", " ", without_environment, flags=re.IGNORECASE
+        )
+        return re.sub(r"\s+", " ", without_sections).strip()
+
+    selected_marker_sentences = {
+        claim_sentence_key(sentence)
+        for _, block in source_blocks
+        for sentence in split_sentences(block)
+        if "\\claimref" in sentence
+    }
+    if not any(str(block or "").strip() for _, block in source_blocks):
+        # Small model write calls often return a marked LaTeX fragment rather
+        # than a complete template. Explicit markers remain auditable there.
+        source_blocks.append(("manuscript", latex_content))
+    else:
+        # Preserve explicitly marked claims outside the conventional English
+        # section names without rescanning and duplicating the whole manuscript.
+        for sentence in split_sentences(latex_content):
+            normalized = claim_sentence_key(sentence)
+            if "\\claimref" in sentence and normalized not in selected_marker_sentences:
+                source_blocks.append(("marked_claim", sentence))
     claim_markers = [
         "outperform",
         "significant",
@@ -3137,40 +5414,51 @@ def build_claim_evidence_ledger(latex_content: str) -> list[dict]:
         "novel",
         "we show",
         "we demonstrate",
+        "improve",
         "improves",
         "improvement",
         "superior",
     ]
 
     ledger = []
+    seen_claims: set[str] = set()
     for section_name, block in source_blocks:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", block) if s.strip()]
+        sentences = split_sentences(block)
         for sentence in sentences:
             lowered = sentence.lower()
-            if not any(marker in lowered for marker in claim_markers):
+            result_claim = bool(_claim_numeric_tokens(sentence)) and bool(
+                _RESULT_CONTEXT_RE.search(sentence)
+            )
+            if not any(marker in lowered for marker in claim_markers) and not result_claim:
                 continue
+            normalized_claim = claim_sentence_key(sentence)
+            if normalized_claim in seen_claims:
+                continue
+            seen_claims.add(normalized_claim)
 
             support_types = []
             if any(
-                token in lowered for token in ["\\cite{", "prior work", "previous work"]
+                token in lowered for token in ["\\cite", "prior work", "previous work"]
             ):
                 support_types.append("citation")
             if any(token in lowered for token in ["figure", "fig.", "\\ref{fig"]):
                 support_types.append("figure")
             if any(token in lowered for token in ["table", "tab.", "\\ref{tab"]):
                 support_types.append("table")
-            if not support_types:
-                if "\\cite{" in latex_content:
-                    support_types.append("citation_global")
-                if "\\ref{fig" in latex_content or "figure" in latex_content.lower():
-                    support_types.append("figure_global")
-                if "\\ref{tab" in latex_content or "table" in latex_content.lower():
-                    support_types.append("table_global")
 
+            claim_marker_metadata = _claimref_metadata(sentence)
             ledger.append(
                 {
                     "section": section_name,
                     "claim": sentence,
+                    "claim_markers": claim_marker_metadata,
+                    "claim_refs": list(
+                        dict.fromkeys(
+                            str(marker.get("target") or "")
+                            for marker in claim_marker_metadata
+                            if str(marker.get("target") or "")
+                        )
+                    ),
                     "support_types": support_types,
                     "supported": len(support_types) > 0,
                     "linked_results": [],
@@ -3187,7 +5475,17 @@ def link_claims_to_key_results(
     linked = []
     for item in claim_ledger:
         claim_text = item.get("claim", "")
-        local_links = [value for value in values if value in claim_text][:5]
+        claim_numbers = _claim_numeric_tokens(claim_text)
+        numeric_match, _ = _numeric_evidence_matches(
+            claim_text,
+            claim_numbers,
+            key_results,
+        )
+        local_links = (
+            list(values[:5])
+            if claim_numbers and numeric_match
+            else [value for value in values if str(value) in claim_text][:5]
+        )
         updated = {**item, "linked_results": local_links}
         if not local_links and values:
             sample_values = ", ".join(values[:3])
@@ -3437,13 +5735,13 @@ Weaknesses:
 def extract_key_results(base_folder: str | Path, latex_content: str) -> dict:
     base_folder = Path(base_folder)
     numeric_patterns = [
-        r"\b\d+\.\d+\b",
-        r"\b\d+%\b",
-        r"\b\d+\.\d+%\b",
+        # Include zero and integer metrics (e.g. accuracy=0) while avoiding
+        # digits embedded in identifiers/words.
+        r"(?<![\w.])[-+]?\d+(?:\.\d+)?%?(?![\w.])",
     ]
 
     sources = []
-    structured_results = []
+    source_structured_results = []
     summary_filenames = [
         "baseline_summary.json",
         "research_summary.json",
@@ -3461,7 +5759,7 @@ def extract_key_results(base_folder: str | Path, latex_content: str) -> dict:
                 raw_text = path.read_text(encoding="utf-8", errors="ignore")
                 sources.append(raw_text)
                 summary_json = json.loads(raw_text)
-                structured_results.extend(
+                source_structured_results.extend(
                     _extract_structured_results(summary_json, source_name=path.name)
                 )
                 seen.add(filename)
@@ -3471,12 +5769,57 @@ def extract_key_results(base_folder: str | Path, latex_content: str) -> dict:
                 continue
         if len(seen) == len(summary_filenames):
             break
-    sources.append(latex_content)
-
-    values = []
+    source_values = []
     for source in sources:
         for pattern in numeric_patterns:
-            values.extend(re.findall(pattern, source))
+            source_values.extend(re.findall(pattern, source))
+
+    values = list(source_values)
+    structured_results = list(source_structured_results)
+    evidence_groups: list[list[dict[str, Any]]] = []
+    evidence_scope = "legacy_summaries" if sources else "none"
+    excluded_registry_record_count = 0
+
+    # The experiment registry is the authoritative source for publication
+    # numbers. Prefer numeric leaves from result summaries over scraping prose
+    # or identifiers (task ids, timestamps, and seeds are not results).
+    registry_path = base_folder / "experiment_registry.jsonl"
+    if registry_path.exists():
+        try:
+            registry_records = load_jsonl_artifact(registry_path)
+        except (OSError, ValueError, TypeError):
+            registry_records = []
+        evidence_groups = _numeric_record_evidence_groups(
+            registry_records, require_confirmatory=True
+        )
+        confirmed_record_ids = {
+            str(group[0].get("record_id") or "")
+            for group in evidence_groups
+            if group
+        }
+        values = [str(item["value"]) for group in evidence_groups for item in group]
+        structured_results = []
+        for record in registry_records:
+            if not isinstance(record, dict):
+                continue
+            record_id = str(record.get("record_id") or "")
+            if record_id not in confirmed_record_ids:
+                continue
+            summary = record.get("result_summary")
+            if isinstance(summary, dict):
+                structured_results.extend(
+                    _extract_structured_results(
+                        summary, source_name=f"experiment_registry:{record_id}"
+                    )
+                )
+        excluded_registry_record_count = max(
+            len([item for item in registry_records if isinstance(item, dict)])
+            - len(confirmed_record_ids),
+            0,
+        )
+        evidence_scope = (
+            "confirmatory_registry" if evidence_groups else "no_confirmatory_evidence"
+        )
 
     dedup_values = []
     seen = set()
@@ -3487,15 +5830,29 @@ def extract_key_results(base_folder: str | Path, latex_content: str) -> dict:
 
     key_results = dedup_values[:20]
     recommendations = []
+    if registry_path.exists() and not evidence_groups:
+        recommendations.append(
+            "实验注册表中没有已完成的 confirmatory 数值结果；禁止将 exploratory 结果写成论文结论。"
+        )
     if len(key_results) < 3:
         recommendations.append(
             "关键数值结果过少，建议在摘要、结果和结论中明确写出核心数字。"
         )
 
+    evidence_values = [
+        item
+        for group in evidence_groups
+        for item in group
+        if isinstance(item, dict) and item.get("value") is not None
+    ]
+
     return {
         "values": key_results,
         "count": len(key_results),
         "structured_results": structured_results[:20],
+        "evidence_values": evidence_values[:100],
+        "evidence_scope": evidence_scope,
+        "excluded_registry_record_count": excluded_registry_record_count,
         "recommendations": recommendations,
     }
 
@@ -3562,10 +5919,16 @@ def evaluate_quality_bundle(
     claim_ledger = link_claims_to_key_results(
         build_claim_evidence_ledger(latex_content), key_results
     )
-    claim_support = assess_claim_support(latex_content)
-    numeric_coverage = assess_numeric_coverage(latex_content)
+    claim_support = assess_claim_support(latex_content, base_folder, key_results)
+    numeric_coverage = assess_numeric_coverage(latex_content, key_results)
     claim_alignment = assess_claim_alignment(claim_ledger)
     breakthrough_profile = assess_breakthrough_potential(idea, venue)
+    # Every quality assessment gets a fresh content-addressed view.  Rewrites
+    # therefore invalidate cached scores instead of silently reusing a report
+    # that describes an earlier manuscript.
+    snapshot = build_evidence_snapshot(base_folder)
+    save_evidence_snapshot(base_folder, snapshot)
+    scientific_evidence = build_scientific_evidence_gate(base_folder)
     contribution_map = build_contribution_map(
         {
             "claim_ledger": claim_ledger,
@@ -3587,11 +5950,15 @@ def evaluate_quality_bundle(
         "claim_support": claim_support,
         "numeric_coverage": numeric_coverage,
         "claim_alignment": claim_alignment,
+        "scientific_evidence": scientific_evidence,
         "breakthrough_profile": breakthrough_profile,
         "claim_ledger": claim_ledger,
         "evidence_pack": evidence_pack,
         "key_results": key_results,
         "contribution_map": contribution_map,
+        "artifact_snapshot": snapshot,
+        "artifact_snapshot_hash": snapshot.get("snapshot_hash"),
+        "manuscript_hash": snapshot.get("manuscript_hash"),
     }
 
 
@@ -4029,6 +6396,7 @@ def _build_submission_readiness(
     numeric_coverage_score = report.get("numeric_coverage", {}).get("score", 0)
     breakthrough_score = report.get("breakthrough_profile", {}).get("score", 0)
     evidence_pack = report.get("evidence_pack", {})
+    scientific_evidence = report.get("scientific_evidence", {})
     contribution_count = len(report.get("contribution_map", []))
     evidence_density_score = evidence_pack.get("evidence_density_score", 0)
 
@@ -4070,6 +6438,15 @@ def _build_submission_readiness(
             f"evidence density below target ({evidence_density_score:.2f} < 3.00)"
         )
 
+    # A publishable manuscript must be backed by the executable research
+    # contracts. Scores from prose reviewers cannot override missing or
+    # blocked scientific evidence.
+    if scientific_evidence.get("status") != "verified":
+        for failure in scientific_evidence.get("hard_failures") or [
+            "scientific_evidence_gate_blocked"
+        ]:
+            blockers.append(f"scientific evidence gate: {failure}")
+
     venue_fit = {
         "neurips": {"normal"},
         "iclr": {"normal", "icbinb", "extended"},
@@ -4091,7 +6468,25 @@ def _build_submission_readiness(
     ]:
         blockers.append(f"claim action: {recommendation}")
 
-    blockers = blockers[:10]
+    # Keep the complete audit trail.  A top-level UI can display a short
+    # preview, but readiness must never hide the 11th scientific or citation
+    # failure behind a low-value prose recommendation.
+    blockers = list(dict.fromkeys(blockers))
+    severity_rank = {
+        "scientific evidence gate": 0,
+        "no figure/table": 1,
+        "claim": 2,
+        "numeric": 3,
+        "rigor": 4,
+        "quality": 5,
+    }
+    top_blockers = sorted(
+        blockers,
+        key=lambda value: min(
+            (rank for token, rank in severity_rank.items() if token in value.lower()),
+            default=99,
+        ),
+    )[:10]
     categories = {
         "quality": sum(
             "quality" in blocker or "review weakness" in blocker for blocker in blockers
@@ -4117,8 +6512,36 @@ def _build_submission_readiness(
         "ready": ready,
         "status": "ready" if ready else "needs_work",
         "blockers": blockers,
+        "blocker_count": len(blockers),
+        "top_blockers": top_blockers,
         "categories": categories,
     }
+
+
+def _quality_gate_passed(
+    report: dict[str, Any],
+    *,
+    quality_threshold: float,
+    rigor_threshold: float,
+    claim_support_threshold: float,
+) -> bool:
+    """Return the single authoritative manuscript quality-gate decision.
+
+    Keep the scientific-evidence requirement alongside the prose thresholds so
+    every path (normal pass, fallback, and resume) has the same authority
+    boundary.  In particular, a high LLM score must never promote a draft when
+    the artifact/verification chain is missing.
+    """
+
+    return bool(
+        report.get("professional", {}).get("overall", {}).get("score", 0)
+        >= quality_threshold
+        and report.get("rigor", {}).get("score", 0) >= rigor_threshold
+        and report.get("claim_support", {}).get("score", 0) >= claim_support_threshold
+        and report.get("claim_alignment", {}).get("score", 0) >= 3.5
+        and report.get("numeric_coverage", {}).get("score", 0) >= 3.5
+        and report.get("scientific_evidence", {}).get("status") == "verified"
+    )
 
 
 def run_high_quality_pass(
@@ -4169,7 +6592,17 @@ def run_high_quality_pass(
             quality_threshold=quality_threshold,
             rigor_threshold=rigor_threshold,
         ):
-            return existing_result
+            current_snapshot = build_evidence_snapshot(base_folder)
+            if (
+                existing_result.get("artifact_snapshot_hash")
+                == current_snapshot.get("snapshot_hash")
+                and existing_result.get("manuscript_hash")
+                == current_snapshot.get("manuscript_hash")
+            ):
+                return existing_result
+            logger(
+                "High-quality pass: cached result is stale because the manuscript or evidence snapshot changed"
+            )
         logger(
             "High-quality pass: cached result settings mismatch, rerunning with current fallback discipline"
         )
@@ -4356,12 +6789,11 @@ def run_high_quality_pass(
     final_numeric_coverage_score = current_report.get("numeric_coverage", {}).get(
         "score", 0
     )
-    gate_passed = (
-        final_quality_score >= quality_threshold
-        and final_rigor_score >= rigor_threshold
-        and final_claim_support_score >= claim_support_threshold
-        and final_claim_alignment_score >= 3.5
-        and final_numeric_coverage_score >= 3.5
+    gate_passed = _quality_gate_passed(
+        current_report,
+        quality_threshold=quality_threshold,
+        rigor_threshold=rigor_threshold,
+        claim_support_threshold=claim_support_threshold,
     )
     readiness = _build_submission_readiness(
         current_report,
@@ -4488,12 +6920,11 @@ def run_high_quality_pass(
         current_report = _apply_autonomous_followup_focus(
             current_report, applied_followup_focus
         )
-        gate_passed = (
-            final_quality_score >= quality_threshold
-            and final_rigor_score >= rigor_threshold
-            and final_claim_support_score >= claim_support_threshold
-            and final_claim_alignment_score >= 3.5
-            and final_numeric_coverage_score >= 3.5
+        gate_passed = _quality_gate_passed(
+            current_report,
+            quality_threshold=quality_threshold,
+            rigor_threshold=rigor_threshold,
+            claim_support_threshold=claim_support_threshold,
         )
     current_report["auto_improvement_fallback_used"] = auto_improvement_fallback_used
     current_report["auto_improvement_fallback_enabled"] = bool(
@@ -4586,7 +7017,19 @@ def run_high_quality_pass(
             current_report.get("key_results", {}).get("structured_results", [])
         ),
         "contribution_count": len(current_report.get("contribution_map", [])),
+        "scientific_evidence_status": current_report.get("scientific_evidence", {}).get(
+            "status"
+        ),
+        "scientific_evidence_failures": current_report.get(
+            "scientific_evidence", {}
+        ).get("hard_failures", []),
+        "scientific_evidence_next_actions": current_report.get(
+            "scientific_evidence", {}
+        ).get("next_actions", []),
         "quality_gate_passed": gate_passed,
+        "artifact_snapshot_hash": current_report.get("artifact_snapshot_hash"),
+        "manuscript_hash": current_report.get("manuscript_hash"),
+        "evidence_snapshot_file": str(base_folder / SNAPSHOT_FILENAME),
         "submission_priority_score": priority_profile.get("score"),
         "submission_priority_tier": priority_profile.get("tier"),
         "submission_priority_reasons": priority_profile.get("reasons", []),

@@ -50,7 +50,7 @@ Version/update notes:
 
 Maintenance notes:
 
-- Confirm the author spelling and contact email.
+- Configure the author metadata and contact email at submission time.
 - Confirm that the repository URL is visible on the title page and in the
   availability section.
 - Keep README/BibTeX references aligned with arXiv: `2607.12301`.

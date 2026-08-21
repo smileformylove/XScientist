@@ -55,7 +55,19 @@ _PROVIDER_CHOICES = [
     "openai_compat",
     "bedrock",
     "vertex_ai",
+    "custom",
 ]
+
+_RESEARCH_MODEL_FLAGS = (
+    ("ideation", "--model-ideation"),
+    ("agg_plots", "--model-agg-plots"),
+    ("writeup", "--model-writeup"),
+    ("writeup_small", "--model-writeup-small"),
+    ("citation", "--model-citation"),
+    ("review", "--model-review"),
+    ("idea_ranking", "--idea-rank-model"),
+    ("quality", "--quality-model"),
+)
 
 _TASK_CHOICES = [
     "protocol",
@@ -507,6 +519,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="workspace root (default: discover from the current directory)",
     )
     provider_add.add_argument("--model", default=None)
+    provider_add.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible API root for the custom provider",
+    )
     provider_add.add_argument("--no-activate", action="store_true")
     provider_add.add_argument("--no-update-bfts", action="store_true")
     provider_add.add_argument("--json", action="store_true", dest="as_json")
@@ -515,6 +532,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never prompt; require credentials to already exist in env or the env file",
     )
+    provider_test = provider_subparsers.add_parser(
+        "test",
+        help=(
+            "Make one explicit minimal API call and verify the provider-reported model."
+        ),
+    )
+    provider_test.add_argument("name", nargs="?", choices=_PROVIDER_CHOICES)
+    provider_test.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
+    provider_test.add_argument("--timeout", type=float, default=30.0)
+    provider_test.add_argument("--json", action="store_true", dest="as_json")
     provider_activate = provider_subparsers.add_parser(
         "activate",
         help="Switch the active provider and default model.",
@@ -594,6 +625,11 @@ def _build_setup_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible API root when --provider custom is selected",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
         "--no-research-vcs",
@@ -660,6 +696,11 @@ def _build_start_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help="provider-compatible model ID; prompted when needed",
+    )
+    study.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible API root when --provider custom is selected",
     )
 
     evidence = parser.add_argument_group("evidence and accountability")
@@ -898,6 +939,14 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     if workspace is None:
         return command
     quoted = shlex.quote(str(workspace))
+    # ``status`` is commonly invoked from a parent directory (or a CI job)
+    # while its guide emits the intentionally short ``explore .`` command.
+    # Keep the next action bound to the workspace the user just inspected;
+    # otherwise a copy/paste would silently create/update a different repo in
+    # the caller's current directory.
+    if command in {"xscientist explore .", "xscientist explore . --lang zh"}:
+        suffix = " --lang zh" if command.endswith("--lang zh") else ""
+        return f"xscientist explore {quoted}{suffix}"
     if "--workspace ." in command:
         return command.replace("--workspace .", f"--workspace {quoted}")
     if "--repo ." in command:
@@ -1194,6 +1243,35 @@ def _interactive_start_inputs(
             parsed.max_cost_usd = float(answer)
 
 
+def _research_model_contract(model: str, *, source: str) -> dict[str, object]:
+    """Describe the exact model contract shared by an autonomous study."""
+
+    from ai_scientist.utils.provider_registry import resolve_model_provider
+
+    spec = resolve_model_provider(model)
+    roles = {role: model for role, _flag in _RESEARCH_MODEL_FLAGS}
+    return {
+        "selected_model": model,
+        "provider": spec.provider,
+        "provider_display_name": spec.display_name,
+        "client_family": spec.client_family,
+        "client_model": spec.client_model,
+        "request_style": spec.request_style,
+        "selection_source": source,
+        "roles": roles,
+        "all_roles_explicit": True,
+    }
+
+
+def _research_model_arguments(model: str) -> list[str]:
+    """Pass the selected model explicitly through every project role."""
+
+    arguments: list[str] = []
+    for _role, flag in _RESEARCH_MODEL_FLAGS:
+        arguments.extend([flag, model])
+    return arguments
+
+
 def _build_doctor_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xscientist doctor",
@@ -1418,6 +1496,7 @@ def _configure_provider(
     *,
     name: str,
     model_value: str | None = None,
+    base_url_value: str | None = None,
     activate: bool = True,
     update_bfts: bool = True,
     non_interactive: bool = False,
@@ -1432,15 +1511,19 @@ def _configure_provider(
         ProviderConfigError,
         configured_field_value,
         load_provider_config,
+        normalize_provider_name,
         provider_statuses,
         read_env_file,
         resolve_env_file,
         save_provider,
         update_bfts_models,
         update_env_file,
+        validate_custom_base_url,
         validate_provider_model,
     )
 
+    requested_name = str(name or "").strip().lower()
+    name = normalize_provider_name(requested_name)
     config = load_provider_config(workspace, missing_ok=False)
     existing = config.get("providers", {}).get(name, {})
     existing_model = (
@@ -1458,7 +1541,15 @@ def _configure_provider(
     env_path = resolve_env_file(workspace, env_name)
     stored = read_env_file(env_path)
     updates: dict[str, str] = {}
+    if base_url_value is not None:
+        if provider != "openai_compat":
+            raise ProviderConfigError(
+                "--base-url is supported only with provider custom/openai_compat"
+            )
+        updates["OPENAI_COMPAT_BASE_URL"] = validate_custom_base_url(base_url_value)
     for field in PROVIDER_FIELDS[provider]:
+        if field.name in updates:
+            continue
         current = configured_field_value(field, stored, os.environ)
         if current:
             continue
@@ -1479,6 +1570,11 @@ def _configure_provider(
         updates[field.name] = value
     if updates or env_path.is_file():
         update_env_file(env_path, updates)
+    # Explicitly entered values must also win for the rest of this process;
+    # otherwise a stale desktop/shell environment could still route this run
+    # to another endpoint or credential.
+    for env_field, value in updates.items():
+        os.environ[env_field] = value
     saved = save_provider(
         workspace,
         provider=provider,
@@ -1493,10 +1589,36 @@ def _configure_provider(
         "ok": True,
         "workspace": ".",
         "provider": provider,
+        "requested_provider": requested_name,
         "model": model,
         "active": saved.get("active_provider") == provider,
         "env_file": env_path.relative_to(workspace).as_posix(),
-        "credentials_written": sorted(updates),
+        "credentials_written": sorted(
+            field.name
+            for field in PROVIDER_FIELDS[provider]
+            if field.secret and field.name in updates
+        ),
+        "settings_written": sorted(
+            field.name
+            for field in PROVIDER_FIELDS[provider]
+            if not field.secret and field.name in updates
+        ),
+        "endpoint_configured": bool(
+            configured_field_value(
+                next(
+                    (
+                        field
+                        for field in PROVIDER_FIELDS[provider]
+                        if field.name.endswith("BASE_URL")
+                    ),
+                    PROVIDER_FIELDS[provider][0],
+                ),
+                {**stored, **updates},
+                os.environ,
+            )
+        )
+        if provider in {"openai_compat", "ollama"}
+        else None,
         "bfts_updated": bfts_updated,
     }
     status = next(
@@ -1524,6 +1646,8 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         activate_provider,
         discover_workspace_root,
         load_provider_config,
+        load_workspace_environment,
+        normalize_provider_name,
         provider_statuses,
         remove_provider,
         update_bfts_models,
@@ -1621,11 +1745,71 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     print(f"Other providers hidden: {hidden_count} (use --all)")
             return 0
 
+        if parsed.provider_command == "test":
+            import os
+
+            from ai_scientist.utils.provider_registry import (
+                probe_openai_compatible_model,
+            )
+
+            if parsed.timeout <= 0:
+                raise ProviderConfigError("--timeout must be greater than zero")
+            config = load_provider_config(workspace, missing_ok=False)
+            requested_provider = str(parsed.name or config.get("active_provider") or "")
+            provider = normalize_provider_name(requested_provider)
+            if not provider:
+                raise ProviderConfigError(
+                    "no active provider is configured; pass a provider name"
+                )
+            entry = (config.get("providers") or {}).get(provider, {})
+            if not isinstance(entry, dict) or not entry.get("model"):
+                raise ProviderConfigError(f"provider {provider!r} is not configured")
+            load_result = load_workspace_environment(workspace)
+            if load_result.get("error"):
+                raise ProviderConfigError(str(load_result["error"]))
+            model = str(entry["model"])
+            try:
+                probe = probe_openai_compatible_model(
+                    model,
+                    timeout=float(parsed.timeout),
+                    env=dict(os.environ),
+                )
+            except ValueError as exc:
+                raise ProviderConfigError(str(exc)) from exc
+            payload = {
+                "schema": "xscientist.provider-test.v1",
+                "ok": bool(probe.get("ok")),
+                "workspace": ".",
+                "provider": provider,
+                "model": model,
+                "billing": "one explicit minimal model request",
+                "probe": probe,
+                "response_content_recorded": False,
+            }
+            if parsed.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Provider test: {provider}")
+                print(f"Requested model: {probe.get('client_model') or model}")
+                print(f"Reported model: {probe.get('reported_model') or '-'}")
+                if probe.get("ok"):
+                    print("Model identity: exact match")
+                elif probe.get("error_code") == "live_request_failed":
+                    print(
+                        "Model identity: unavailable "
+                        f"({probe.get('error_type') or 'request failed'})"
+                    )
+                else:
+                    print("Model identity: mismatch; treat this run as unverified")
+            return 0 if payload["ok"] else 1
+
         if parsed.provider_command == "check":
             if parsed.max_cost_usd is not None and parsed.max_cost_usd <= 0:
                 raise ProviderConfigError("--max-cost-usd must be greater than zero")
             config = load_provider_config(workspace, missing_ok=False)
-            provider = str(parsed.name or config.get("active_provider") or "")
+            provider = normalize_provider_name(
+                str(parsed.name or config.get("active_provider") or "")
+            )
             if not provider:
                 raise ProviderConfigError(
                     "no active provider is configured; pass a provider name or run "
@@ -1805,7 +1989,9 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             return 0 if payload["ok"] else 1
 
         if parsed.provider_command == "remove":
-            config = remove_provider(workspace, parsed.name)
+            config = remove_provider(
+                workspace, normalize_provider_name(parsed.name)
+            )
             active_provider = config.get("active_provider")
             bfts_updated = False
             if active_provider:
@@ -1828,15 +2014,16 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             return 0
 
         if parsed.provider_command == "activate":
-            config = activate_provider(workspace, parsed.name)
-            entry = config["providers"][parsed.name]
+            provider_name = normalize_provider_name(parsed.name)
+            config = activate_provider(workspace, provider_name)
+            entry = config["providers"][provider_name]
             model = str(entry["model"])
             bfts_updated = False
             if not parsed.no_update_bfts:
                 bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
             payload = {
                 "ok": True,
-                "active_provider": parsed.name,
+                "active_provider": provider_name,
                 "model": model,
                 "bfts_updated": bfts_updated,
             }
@@ -1852,6 +2039,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             workspace,
             name=parsed.name,
             model_value=parsed.model,
+            base_url_value=parsed.base_url,
             activate=not parsed.no_activate,
             update_bfts=not parsed.no_update_bfts,
             non_interactive=parsed.non_interactive,
@@ -1867,6 +2055,11 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print("Credentials: using existing environment or local env file")
             print(f"Active: {payload['active']}")
             print(f"BFTS config updated: {payload['bfts_updated']}")
+            if payload.get("settings_written"):
+                print(
+                    "Provider settings saved securely to: "
+                    f"{payload['env_file']}"
+                )
             if not payload["client_available"]:
                 print(
                     "Provider client missing: "
@@ -2015,6 +2208,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         ProviderConfigError,
         load_provider_config,
         load_workspace_environment,
+        normalize_provider_name,
         validate_provider_model,
     )
     from .research_git import ResearchGitError, repository_status
@@ -2109,9 +2303,10 @@ def _run_start(parsed: argparse.Namespace) -> int:
         existing_config = (
             load_provider_config(workspace, missing_ok=False) if config_exists else {}
         )
-        selected_provider = str(
+        requested_provider = str(
             parsed.provider or existing_config.get("active_provider") or ""
         )
+        selected_provider = normalize_provider_name(requested_provider)
         if not selected_provider:
             raise ProviderConfigError(
                 "no active provider is configured; pass --provider and --model"
@@ -2124,8 +2319,17 @@ def _run_start(parsed: argparse.Namespace) -> int:
             if isinstance(provider_entry, dict)
             else ""
         )
-        selected_model = (
-            parsed.model or existing_model or DEFAULT_MODELS.get(selected_provider)
+        model_source = (
+            "start_argument"
+            if parsed.model
+            else (
+                "workspace_provider_config"
+                if existing_model
+                else "provider_default"
+            )
+        )
+        selected_model = parsed.model or existing_model or DEFAULT_MODELS.get(
+            selected_provider
         )
         selected_task = str(
             parsed.task
@@ -2146,6 +2350,10 @@ def _run_start(parsed: argparse.Namespace) -> int:
             ).strip()
         selected_provider, selected_model = validate_provider_model(
             selected_provider, selected_model
+        )
+        model_contract = _research_model_contract(
+            selected_model,
+            source=model_source,
         )
         workspace_creation: dict[str, object] | None = None
         if not config_exists:
@@ -2226,6 +2434,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 workspace,
                 name=selected_provider,
                 model_value=selected_model,
+                base_url_value=parsed.base_url,
                 non_interactive=parsed.non_interactive,
             )
         phases["provider"] = {
@@ -2233,6 +2442,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "ready": bool(provider_result.get("ready")),
             "provider": selected_provider,
             "model": selected_model,
+            "model_contract": model_contract,
             "reason": provider_result.get("reason"),
         }
 
@@ -2424,6 +2634,14 @@ def _run_start(parsed: argparse.Namespace) -> int:
         str(workspace / "bfts_config.yaml"),
         "--research-vcs-strict",
     ]
+    project_args.extend(_research_model_arguments(selected_model))
+    if not parsed.as_json:
+        print(
+            "Research model contract: "
+            f"{model_contract['provider']}/{model_contract['client_model']} "
+            f"(source: {model_contract['selection_source']}; "
+            "all research roles explicit)"
+        )
     if parsed.data_dir:
         project_args.extend(["--data-dir", str(Path(parsed.data_dir).expanduser())])
     else:
@@ -2461,6 +2679,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         "workspace": ".",
         "project": ".",
         "returncode": returncode,
+        "model_contract": model_contract,
         "research_dag": "outputs/views/"
         + workspace.name
         + "/research-dag/research-dag.html",
@@ -2992,6 +3211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .research_journey import (
             explore_research_idea,
             inspect_idea_research,
+            public_exploration_payload,
         )
 
         try:
@@ -3033,7 +3253,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"xscientist explore: {exc}", file=sys.stderr)
             return 2
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    public_exploration_payload(payload, workspace=destination),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             language = payload["language"]
             framing = payload["framing"]
@@ -3127,7 +3353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if parsed.command == "demo":
         import webbrowser
 
-        from .demo import create_autopilot_demo, create_demo
+        from .demo import create_autopilot_demo, create_demo, public_demo_payload
         from .research_git import ResearchGitError
 
         try:
@@ -3167,8 +3393,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["browser_opened"] = bool(
                 webbrowser.open(Path(payload["dag"]["html"]).as_uri())
             )
+        public_payload = public_demo_payload(payload, workspace=parsed.directory)
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(json.dumps(public_payload, indent=2, ensure_ascii=False))
         else:
             language = _selected_language(parsed.lang)
             if language == "zh":
@@ -3575,11 +3802,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .diagnostics import diagnose
         from .dependency_profiles import TASK_PROFILES
         from .onboarding import WorkspaceInitError, create_workspace
-        from .provider_config import DEFAULT_MODELS, ProviderConfigError
+        from .provider_config import (
+            DEFAULT_MODELS,
+            ProviderConfigError,
+            normalize_provider_name,
+        )
 
         try:
             task_profile = TASK_PROFILES[parsed.task]
-            selected_provider = parsed.provider
+            selected_provider = (
+                normalize_provider_name(parsed.provider) if parsed.provider else None
+            )
             if task_profile["provider_required"] and not selected_provider:
                 if parsed.non_interactive or not sys.stdin.isatty():
                     raise ProviderConfigError(
@@ -3675,6 +3908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         workspace,
                         name=workspace_template_provider,
                         model_value=selected_model,
+                        base_url_value=parsed.base_url,
                         non_interactive=parsed.non_interactive,
                     )
                 except ProviderConfigError as exc:

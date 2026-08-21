@@ -29,12 +29,14 @@ from xscientist.provider_config import (
     load_workspace_environment,
     provider_statuses,
     resolve_env_file,
+    validate_custom_base_url,
 )
 
 
 class ProviderConfigTests(unittest.TestCase):
     def test_cli_provider_choices_match_registry(self) -> None:
-        self.assertEqual(tuple(_PROVIDER_CHOICES), PROVIDER_NAMES)
+        self.assertEqual(tuple(_PROVIDER_CHOICES[:-1]), PROVIDER_NAMES)
+        self.assertEqual(_PROVIDER_CHOICES[-1], "custom")
 
     def test_each_provider_has_a_path_free_install_profile(self) -> None:
         for provider in PROVIDER_NAMES:
@@ -453,6 +455,151 @@ class ProviderConfigTests(unittest.TestCase):
                 )
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(project_main(["--help"]), 0)
+
+    def test_workspace_model_replaces_stale_process_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="custom",
+                model="gpt-5.6-luna",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"AI_SCIENTIST_DEFAULT_MODEL": "gpt-5.4-mini"},
+                clear=True,
+            ):
+                state = load_workspace_environment(workspace)
+
+                self.assertEqual(state["model"], "openai_compat/gpt-5.6-luna")
+                self.assertEqual(
+                    os.environ["AI_SCIENTIST_DEFAULT_MODEL"],
+                    "openai_compat/gpt-5.6-luna",
+                )
+
+    def test_custom_provider_add_accepts_base_url_without_serializing_secret(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace, provider="zhipu")
+            output = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("getpass.getpass", return_value="custom-secret"),
+                mock.patch("xscientist.cli.sys.stdin.isatty", return_value=True),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "add",
+                        "custom",
+                        "--workspace",
+                        str(workspace),
+                        "--model",
+                        "gpt-5.6-luna",
+                        "--base-url",
+                        "https://gateway.example/v1",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertNotIn("custom-secret", rendered)
+            payload = json.loads(rendered)
+            self.assertEqual(payload["provider"], "openai_compat")
+            self.assertEqual(payload["model"], "openai_compat/gpt-5.6-luna")
+            self.assertEqual(payload["settings_written"], ["OPENAI_COMPAT_BASE_URL"])
+            self.assertEqual(payload["credentials_written"], ["OPENAI_COMPAT_API_KEY"])
+            metadata = (workspace / ".xscientist" / "providers.json").read_text()
+            self.assertNotIn("gateway.example", metadata)
+            self.assertNotIn("custom-secret", metadata)
+            env_text = (workspace / ".env").read_text()
+            self.assertIn("OPENAI_COMPAT_BASE_URL=https://gateway.example/v1", env_text)
+            self.assertIn("OPENAI_COMPAT_API_KEY=custom-secret", env_text)
+
+    def test_custom_base_url_validation_requires_a_safe_absolute_endpoint(self) -> None:
+        self.assertEqual(
+            validate_custom_base_url("https://gateway.example/v1/"),
+            "https://gateway.example/v1",
+        )
+        self.assertEqual(
+            validate_custom_base_url("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1",
+        )
+        invalid_urls = {
+            "": "cannot be empty",
+            "gateway.example/v1": "absolute HTTP",
+            "http://gateway.example/v1": "require HTTPS",
+            "https://user:password@gateway.example/v1": "embedded credentials",
+            "https://gateway.example/v1?token=secret": "query",
+            "https://gateway.example:bad/v1": "invalid port",
+        }
+        for value, message in invalid_urls.items():
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ProviderConfigError, message
+            ):
+                validate_custom_base_url(value)
+
+    def test_provider_test_uses_workspace_endpoint_without_printing_credentials(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace, provider="custom", model="gpt-5.6-luna")
+            env_file = workspace / ".env"
+            env_file.write_text(
+                "OPENAI_COMPAT_API_KEY=probe-secret\n"
+                "OPENAI_COMPAT_BASE_URL=https://gateway.example/v1\n",
+                encoding="utf-8",
+            )
+            env_file.chmod(0o600)
+            probe_result = {
+                "ok": True,
+                "provider": "openai_compat",
+                "requested_model": "openai_compat/gpt-5.6-luna",
+                "client_model": "gpt-5.6-luna",
+                "reported_model": "gpt-5.6-luna",
+                "model_identity_verified": True,
+                "exact_model_match": True,
+                "response_content_recorded": False,
+            }
+            output = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch(
+                    "ai_scientist.utils.provider_registry.probe_openai_compatible_model",
+                    return_value=probe_result,
+                ) as probe,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "test",
+                        "custom",
+                        "--workspace",
+                        str(workspace),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("probe-secret", output.getvalue())
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["response_content_recorded"])
+            probe.assert_called_once()
+            self.assertEqual(
+                probe.call_args.kwargs["env"]["OPENAI_COMPAT_BASE_URL"],
+                "https://gateway.example/v1",
+            )
+            self.assertEqual(
+                probe.call_args.kwargs["env"]["OPENAI_COMPAT_API_KEY"],
+                "probe-secret",
+            )
 
     def test_process_environment_is_not_copied_to_disk(self) -> None:
         with tempfile.TemporaryDirectory() as td:

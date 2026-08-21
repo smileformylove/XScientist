@@ -156,6 +156,23 @@ xscientist start ./hosted-study
 `openai-compatible`。最后一个也覆盖 Ollama、DeepSeek、Gemini、OpenRouter 和
 自定义兼容端点。
 
+对于任意 OpenAI-compatible 服务，可以显式添加自定义端点。`custom` 是通用
+`openai_compat` Provider 的易用别名；地址和密钥会写入工作区中权限受限且被 Git
+忽略的 `.env`，不会进入 Provider 元数据：
+
+```bash
+python -m pip install "xscientist[research,openai-compatible]"
+export OPENAI_COMPAT_API_KEY="..."
+xscientist provider add custom \
+  --model gpt-5.6-luna \
+  --base-url "https://your-compatible-service.example/v1" \
+  --non-interactive
+xscientist provider test custom --json
+```
+
+`provider test` 会发起一次明确的最小请求，并比较客户端发送的模型和端点返回的
+模型。如果网关静默切换到较小模型，会标记为未验证；测试不会保存响应正文。
+
 脚本和 CI 应显式写出所有重要选择：
 
 ```bash
@@ -262,6 +279,18 @@ xscientist audit ./first-study --level verify
 
 三个层级只能逐级增强：已记录的结论可能可追踪但不可重放，也可能可重放但尚未经过
 独立验证。审计显示阻塞，通常意味着存在明确的科研缺口，不一定是软件运行失败。
+
+### 论文质量状态
+
+写作通过不等于科学结果已经验证。`quality_gate_passed` 只有在锁定的预注册、每个
+注册任务的 confirmatory 记录、独立随机种子、持久化结果文件、带不确定性的候选方法与
+基线比较、确定性哈希、`任务 → 指标 → 结论` 证据路径，以及覆盖全部必需标准的干净环境
+验证报告同时成立时才会为真。漂亮的文字、图表或 LLM 分数都不能替代缺失证据。
+
+证据链完成前，输出会明确标为 `exploratory_draft` 或 `manuscript_draft`，不会标成
+`submission_ready`。结果 JSON 还会给出
+`scientific_evidence_failures` 和 `scientific_evidence_next_actions`，直接说明下一步
+该补哪份证据；具体字段和复现要求见[科研完整性协议](RESEARCH_INTEGRITY.md)。
 
 手工修改到达一个有意义的状态时，可以先保存检查点，再尝试风险更高的替代方案。
 回滚默认只预览；显式使用 `--apply` 后也只会追加一条反向检查点，不删除、不改写

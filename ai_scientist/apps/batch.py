@@ -659,37 +659,44 @@ def _build_experiment_registry_rows(
     for idx, task in enumerate(research_plan.get("tasks") or []):
         stage = stages[min(idx, len(stages) - 1)] if stages else {}
         best = stage.get("best") or {}
-        if best:
-            status = "completed"
+        attempts = [item for item in stage.get("attempts") or [] if isinstance(item, dict)]
+        if not attempts and best:
+            attempts = [{**best, "node_id": best.get("node_id") or best.get("best_node_id"), "is_buggy": False}]
+        if not attempts:
+            attempts = [{"node_id": f"missing-{idx}", "is_buggy": True}]
+        for attempt_idx, attempt in enumerate(attempts):
+            node_id = str(attempt.get("node_id") or f"attempt-{attempt_idx}")
+            has_metric = attempt.get("metric_mean") is not None
+            buggy = attempt.get("is_buggy") is True
+            status = "completed" if has_metric and not buggy else "failed"
+            if not stages and not best:
+                status = "planned"
+            is_best = bool(best) and node_id == str(best.get("node_id") or best.get("best_node_id") or "")
             result_summary = {
-                "metric_name": best.get("metric_name"),
-                "metric_mean": best.get("metric_mean"),
-                "metric_objective": best.get("metric_objective"),
-                "dataset_names": best.get("dataset_names") or [task.get("dataset")],
-                "seed_eval": best.get("seed_eval"),
-                "delta_objective_vs_prev_stage": stage.get(
-                    "delta_objective_vs_prev_stage"
-                ),
+                "metric_name": attempt.get("metric_name"),
+                "metric_mean": attempt.get("metric_mean"),
+                "metric_objective": attempt.get("metric_objective"),
+                "dataset_names": attempt.get("dataset_names") or [task.get("dataset")],
+                "seed": attempt.get("seed"),
+                "evaluation_report": attempt.get("evaluation_report"),
+                "delta_objective_vs_prev_stage": stage.get("delta_objective_vs_prev_stage"),
                 "warnings": warnings,
-            }
-            error_type = None
-            error_message = None
-            entered_storyline = idx == 0
-        else:
-            status = "failed" if stages or warnings else "planned"
-            result_summary = {
-                "warnings": warnings,
+                "attempt_node_id": node_id,
                 "node_counts": stage.get("node_counts"),
             }
-            error_type = (
-                "missing_best_result" if stages else "missing_experiment_report"
-            )
-            error_message = (
-                "; ".join(warnings[:3]) or "No valid experiment summary was detected."
-            )
-            entered_storyline = False
-        rows.append(
-            build_experiment_record(
+            artifacts = {
+                "paper_root": str(paper_root_path),
+                "experiment_report_json": str(paper_root_path / "experiment_report.json"),
+                "experiment_report_md": str(paper_root_path / "experiment_report.md"),
+                "latest_run_dir": latest_run_dir,
+                "stage_dir": stage.get("stage_dir"),
+                "journal_path": stage.get("journal_path"),
+            }
+            if isinstance(attempt.get("artifacts"), dict):
+                artifacts.update(attempt["artifacts"])
+            rows.append(
+                build_experiment_record(
+                record_id=f"{str(task.get('task_id') or f'task_{idx}')}:stage_{idx}:{node_id}",
                 task_id=str(task.get("task_id") or f"task_{idx}"),
                 dataset=str(task.get("dataset") or "dataset_to_be_selected"),
                 metric=str(task.get("metric") or "primary_task_metric"),
@@ -698,23 +705,13 @@ def _build_experiment_registry_rows(
                     "goal": task.get("goal"),
                     "priority": task.get("priority"),
                 },
+                seed=attempt.get("seed"),
                 status=status,
                 result_summary=result_summary,
-                artifacts={
-                    "paper_root": str(paper_root_path),
-                    "experiment_report_json": str(
-                        paper_root_path / "experiment_report.json"
-                    ),
-                    "experiment_report_md": str(
-                        paper_root_path / "experiment_report.md"
-                    ),
-                    "latest_run_dir": latest_run_dir,
-                    "stage_dir": stage.get("stage_dir"),
-                    "journal_path": stage.get("journal_path"),
-                },
-                error_type=error_type,
-                error_message=error_message,
-                entered_storyline=entered_storyline,
+                artifacts=artifacts,
+                error_type=None if status == "completed" else "buggy_or_missing_attempt",
+                error_message=None if status == "completed" else "; ".join(warnings[:3]) or "Attempt did not produce a valid metric.",
+                entered_storyline=is_best,
                 budget=task.get("budget"),
                 workflow_mode=research_plan.get("workflow_mode"),
                 policy_name=(research_plan.get("execution_policy") or {}).get(
@@ -725,7 +722,7 @@ def _build_experiment_registry_rows(
                     {
                         "check": str(check),
                         "passed": status == "completed",
-                        "source": "experiment_report_best_result",
+                        "source": "experiment_journal_attempt",
                     }
                     for check in (task.get("acceptance_checks") or [])
                 ],
@@ -735,8 +732,8 @@ def _build_experiment_registry_rows(
                     "source": "experiment_registry_builder",
                 },
                 budget_status="within_budget" if status == "completed" else None,
+                )
             )
-        )
     return rows
 
 
@@ -3058,6 +3055,18 @@ def _process_single_paper(args):
                 f"[想法 #{idea_idx}] ⚠️  Sample gate 未通过: "
                 f"{sample_gate.get('result', {}).get('reasons', [])}"
             )
+            return {
+                "idea_idx": idea_idx,
+                "status": "failed",
+                "research_status": "blocked",
+                "stage": "sample_gate",
+                "sample_gate": sample_gate,
+                "pause_reason": "unsatisfiable_gate",
+                "gate_reasons": ["sample_gate_blocked"],
+                "resumable": False,
+                "paper_type": paper_type,
+                "workflow_mode": workflow_mode,
+            }
         assert_gate_preconditions_satisfiable(
             GatePreconditionContext(
                 research_plan=research_plan,
@@ -3094,10 +3103,7 @@ def _process_single_paper(args):
             writing_profile=writing_profile,
         )
 
-        # 清理实验结果
-        experiment_results = osp.join(exp_dir, "experiment_results")
-        if osp.exists(experiment_results):
-            shutil.rmtree(experiment_results)
+        # 保留原始实验结果，后续写作只读取注册表和证据快照。
 
         writeup_plan = build_writeup_execution_plan(
             paper_type,

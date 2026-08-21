@@ -50,10 +50,11 @@ class IdeaExploreTests(unittest.TestCase):
             self.assertEqual(
                 payload["guide"]["next_steps"][0]["code"], "record_hypothesis"
             )
-            self.assertIn(
-                f"xscientist explore {workspace.resolve()}",
+            self.assertEqual(
                 payload["guide"]["next_steps"][0]["command"],
+                "xscientist explore .",
             )
+            self.assertFalse(payload["privacy"]["host_paths_disclosed"])
             repository = ResearchRepository(workspace)
             self.assertEqual(len(repository.objects(kind="question")), 1)
             self.assertEqual(len(repository.objects(kind="research_goal")), 1)

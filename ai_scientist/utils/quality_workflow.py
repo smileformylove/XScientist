@@ -11,6 +11,7 @@ from ai_scientist.utils.high_quality_pipeline import (
     resolve_submission_acceptance_settings,
 )
 from ai_scientist.utils.pipeline_contracts import load_contract_artifact
+from ai_scientist.utils.evidence_snapshot import verify_evidence_snapshot
 
 QUALITY_PRESET_ORDER = ("balanced", "high", "publishable")
 AUTONOMOUS_STYLE_ORDER = ("conservative", "professional", "assertive")
@@ -273,6 +274,39 @@ def evaluate_final_submission_readiness(
         accepted = False
         reasons.append("final high-quality assessment artifact is missing")
 
+    snapshot_check = {"ok": True, "mismatches": [], "current_hash": None}
+    if resolved_quality_result.get("artifact_snapshot_hash"):
+        snapshot_check = verify_evidence_snapshot(run_dir)
+        if (
+            snapshot_check.get("ok") is not True
+            or resolved_quality_result.get("artifact_snapshot_hash")
+            != snapshot_check.get("current_hash")
+            or resolved_quality_result.get("manuscript_hash")
+            != snapshot_check.get("current", {}).get("manuscript_hash")
+        ):
+            accepted = False
+            reasons.append(
+                "final manuscript/evidence snapshot does not match the quality assessment; rerun the final assessment"
+            )
+        elif snapshot_check.get("mismatches"):
+            accepted = False
+            reasons.append(
+                "final evidence snapshot changed: "
+                + ", ".join(snapshot_check.get("mismatches") or [])
+            )
+        try:
+            from ai_scientist.utils.high_quality_pipeline import build_scientific_evidence_gate
+
+            fresh_scientific_gate = build_scientific_evidence_gate(run_dir)
+        except (OSError, TypeError, ValueError):
+            fresh_scientific_gate = {"status": "blocked", "hard_failures": ["recompute_error"]}
+        if fresh_scientific_gate.get("status") != "verified":
+            accepted = False
+            reasons.append(
+                "fresh scientific evidence gate is not verified: "
+                + ", ".join(fresh_scientific_gate.get("hard_failures") or ["blocked"])
+            )
+
     missing_artifacts = [
         name for name, payload in artifacts.items() if not isinstance(payload, dict) or not payload
     ]
@@ -506,6 +540,8 @@ def evaluate_final_submission_readiness(
             "integrity_verdict": integrity_verdict,
             "integrity_counts": integrity_counts,
             "integrity_report_path": integrity_report_path,
+            "artifact_snapshot_hash": snapshot_check.get("current_hash"),
+            "artifact_snapshot_mismatches": snapshot_check.get("mismatches") or [],
         },
         "artifacts_present": {
             name: bool(isinstance(payload, dict) and payload)

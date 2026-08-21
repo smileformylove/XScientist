@@ -24,6 +24,7 @@ CONFIG_SCHEMA_VERSION = 1
 CONFIG_RELATIVE_PATH = Path(".xscientist") / "providers.json"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_MODELS = {"zhipu": "glm-4-flash"}
+PROVIDER_ALIASES = {"custom": "openai_compat"}
 PLACEHOLDER_VALUES = {"", "replace-me", "your-api-key", "your_api_key_here"}
 
 
@@ -97,6 +98,11 @@ class ProviderConfigError(ValueError):
     """Raised when provider configuration is unsafe or malformed."""
 
 
+def normalize_provider_name(provider: str) -> str:
+    normalized = str(provider or "").strip().lower()
+    return PROVIDER_ALIASES.get(normalized, normalized)
+
+
 def normalize_provider_model(provider: str, model: str | None) -> str:
     """Make a user-entered model ID unambiguous for the selected provider.
 
@@ -107,10 +113,12 @@ def normalize_provider_model(provider: str, model: str | None) -> str:
     selected provider prefix.
     """
 
-    normalized = str(provider or "").strip().lower()
+    normalized = normalize_provider_name(provider)
     selected = str(model or "").strip()
     if not selected or normalized not in PROVIDER_FIELDS:
         return selected
+    if selected.startswith("custom/") and normalized == "openai_compat":
+        selected = "openai_compat/" + selected.split("/", 1)[1]
     # A slash is explicit routing metadata, not a friendly bare model name.
     # Never rewrite it: a mismatched or malformed prefix must keep failing
     # closed when provider configuration is loaded.
@@ -405,7 +413,7 @@ def provider_config_payload(
 
 
 def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]:
-    normalized = str(provider or "").strip().lower()
+    normalized = normalize_provider_name(provider)
     if normalized not in PROVIDER_FIELDS:
         choices = ", ".join(PROVIDER_NAMES)
         raise ProviderConfigError(
@@ -427,6 +435,31 @@ def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]
             f"{normalized}/<model>"
         )
     return normalized, selected
+
+
+def validate_custom_base_url(value: str) -> str:
+    """Validate a user-selected OpenAI-compatible API root."""
+
+    selected = str(value or "").strip().rstrip("/")
+    if not selected:
+        raise ProviderConfigError("--base-url cannot be empty")
+    parsed = urllib.parse.urlsplit(selected)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ProviderConfigError("--base-url must be an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ProviderConfigError("--base-url cannot contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ProviderConfigError("--base-url cannot contain a query or fragment")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ProviderConfigError("--base-url contains an invalid port") from exc
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and parsed.hostname not in local_hosts:
+        raise ProviderConfigError(
+            "remote custom providers require HTTPS; HTTP is allowed only for loopback"
+        )
+    return selected
 
 
 def _clean_env_value(raw: str) -> str:
@@ -506,10 +539,13 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
     entry = config.get("providers", {}).get(active, {}) if active else {}
     model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
     if active:
-        os.environ.setdefault("AI_SCIENTIST_ACTIVE_PROVIDER", active)
+        os.environ["AI_SCIENTIST_ACTIVE_PROVIDER"] = active
     if model:
-        os.environ.setdefault("AI_SCIENTIST_DEFAULT_MODEL", model)
-        os.environ.setdefault("ZHIPU_DEFAULT_MODEL", model)
+        # The active workspace is an explicit local choice. It must replace a
+        # stale process-wide default left by another workspace or desktop run.
+        # Role-specific AI_SCIENTIST_MODEL_* values and CLI flags still win.
+        os.environ["AI_SCIENTIST_DEFAULT_MODEL"] = model
+        os.environ["ZHIPU_DEFAULT_MODEL"] = model
     return {
         "loaded": True,
         "workspace": ".",
@@ -609,7 +645,7 @@ def save_provider(
 
 def activate_provider(root: str | Path, provider: str) -> dict[str, Any]:
     workspace = Path(root).expanduser().resolve()
-    normalized = str(provider or "").strip().lower()
+    normalized = normalize_provider_name(provider)
     config = load_provider_config(workspace, missing_ok=False)
     if normalized not in config["providers"]:
         raise ProviderConfigError(f"provider {normalized!r} is not configured")
@@ -620,7 +656,7 @@ def activate_provider(root: str | Path, provider: str) -> dict[str, Any]:
 
 def remove_provider(root: str | Path, provider: str) -> dict[str, Any]:
     workspace = Path(root).expanduser().resolve()
-    normalized = str(provider or "").strip().lower()
+    normalized = normalize_provider_name(provider)
     config = load_provider_config(workspace, missing_ok=False)
     if normalized not in config["providers"]:
         raise ProviderConfigError(f"provider {normalized!r} is not configured")
@@ -697,7 +733,9 @@ def provider_statuses(
             " | ".join((field.name, *field.aliases))
             for field in fields
             if field.required
-            and not _is_configured_value(configured_field_value(field, stored))
+            and not _is_configured_value(
+                configured_field_value(field, stored, effective_environ)
+            )
         ]
         model = str(entry.get("model") or "") if isinstance(entry, dict) else ""
         local_probe = (
@@ -758,8 +796,10 @@ def provider_statuses(
 __all__ = [
     "CONFIG_RELATIVE_PATH",
     "DEFAULT_MODELS",
+    "PROVIDER_ALIASES",
     "discover_provider_models",
     "empty_provider_config",
+    "normalize_provider_name",
     "normalize_provider_model",
     "PROVIDER_FIELDS",
     "PROVIDER_NAMES",
@@ -779,6 +819,7 @@ __all__ = [
     "save_provider",
     "update_bfts_models",
     "update_env_file",
+    "validate_custom_base_url",
     "validate_provider_model",
     "workspace_config_path",
 ]

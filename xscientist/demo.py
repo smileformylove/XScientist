@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from ai_scientist.utils.atomic_io import atomic_write_json, atomic_write_text
+from ai_scientist.utils.privacy import redact_sensitive_payload
 
 from .research_dag import export_research_dag
 from .research_git import ResearchGitError, create_checkpoint
@@ -33,6 +35,48 @@ _DEMO_ENVIRONMENT_HASH = _fixture_hash(
     "xscientist trusted offline fixture environment v1"
 )
 _DEMO_DEPENDENCY_HASH = _fixture_hash("python-standard-library-only")
+
+
+def public_demo_payload(
+    payload: dict[str, Any], *, workspace: str | Path
+) -> dict[str, Any]:
+    """Make demo JSON portable without hiding the files from local callers."""
+
+    safe = deepcopy(payload)
+    root = Path(workspace).expanduser().resolve()
+
+    def relative_path(value: Any) -> str:
+        try:
+            return Path(str(value)).expanduser().resolve().relative_to(root).as_posix()
+        except (OSError, TypeError, ValueError):
+            return "[REDACTED_PATH]"
+
+    safe["repository"] = "."
+    dag = safe.get("dag")
+    if isinstance(dag, dict):
+        for field in ("json", "html"):
+            if dag.get(field):
+                dag[field] = relative_path(dag[field])
+    guide = safe.get("guide")
+    if isinstance(guide, dict):
+        guide["repository"] = "."
+        try:
+            refreshed = build_research_guide(
+                root,
+                language=str(guide.get("language") or "auto"),
+                command_repo=".",
+            )
+            for field in ("primary_action", "next_steps", "warnings", "program_review"):
+                if field in refreshed:
+                    guide[field] = refreshed[field]
+        except (OSError, ResearchGitError, ValueError):
+            pass
+    safe["privacy"] = {
+        "host_paths_disclosed": False,
+        "matched_values_disclosed": False,
+        "workspace_reference": ".",
+    }
+    return redact_sensitive_payload(safe)
 
 
 def _ensure_empty_destination(path: Path) -> None:
@@ -672,4 +716,5 @@ __all__ = [
     "DEMO_SCHEMA",
     "create_autopilot_demo",
     "create_demo",
+    "public_demo_payload",
 ]

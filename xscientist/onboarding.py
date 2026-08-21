@@ -22,6 +22,7 @@ from .provider_config import (
     PROVIDER_FIELDS,
     ProviderConfigError,
     empty_provider_config,
+    normalize_provider_name,
     provider_config_payload,
     validate_provider_model,
 )
@@ -459,7 +460,7 @@ def create_workspace(
 ) -> dict[str, Any]:
     """Create a safe, installed-package-first XScientist workspace."""
     normalized_profile = str(profile or "default").strip().lower()
-    normalized_provider = str(provider or "zhipu").strip().lower()
+    normalized_provider = normalize_provider_name(provider or "zhipu")
     if normalized_provider not in PROVIDER_ENV_LINES:
         choices = ", ".join(sorted(PROVIDER_ENV_LINES))
         raise WorkspaceInitError(

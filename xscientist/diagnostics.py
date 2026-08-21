@@ -16,6 +16,7 @@ from .provider_config import (
     discover_provider_models,
     discover_workspace_root,
     load_provider_config,
+    normalize_provider_name,
     provider_statuses,
 )
 
@@ -45,7 +46,9 @@ def diagnose(
             config = load_provider_config(root, missing_ok=False)
         except (OSError, ProviderConfigError) as exc:
             workspace_error = str(exc)
-    selected_provider = str(provider or "").strip().lower() or None
+    selected_provider = (
+        normalize_provider_name(provider) if str(provider or "").strip() else None
+    )
     if selected_provider is not None and selected_provider not in PROVIDER_NAMES:
         raise ProviderConfigError(f"unknown provider {selected_provider!r}")
     task_profile = TASK_PROFILES.get(str(task or "").strip().lower())

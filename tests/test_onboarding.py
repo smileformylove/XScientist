@@ -259,6 +259,17 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("--autopilot", argv)
             self.assertIn("--allow-synthetic-data", argv)
             self.assertIn("--research-vcs-strict", argv)
+            for flag in (
+                "--model-ideation",
+                "--model-agg-plots",
+                "--model-writeup",
+                "--model-writeup-small",
+                "--model-citation",
+                "--model-review",
+                "--idea-rank-model",
+                "--quality-model",
+            ):
+                self.assertEqual(argv[argv.index(flag) + 1], "glm-4-flash")
 
     def test_start_fails_before_provider_use_when_cost_price_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as td:

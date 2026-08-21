@@ -10,11 +10,24 @@ from pathlib import Path
 
 import yaml
 
-from xscientist.cli import main as cli_main
+from xscientist.cli import _contextual_action, main as cli_main
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
 class DemoStatusTests(unittest.TestCase):
+    def test_contextual_explore_action_stays_bound_to_inspected_workspace(self) -> None:
+        """A copied next-step command must not mutate the caller's directory."""
+
+        workspace = Path("/tmp/xscientist-user-study")
+        self.assertEqual(
+            _contextual_action("xscientist explore .", workspace),
+            "xscientist explore /tmp/xscientist-user-study",
+        )
+        self.assertEqual(
+            _contextual_action("xscientist explore . --lang zh", workspace),
+            "xscientist explore /tmp/xscientist-user-study --lang zh",
+        )
+
     def test_provider_free_demo_creates_a_contested_evidence_journey(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "demo"
@@ -33,7 +46,9 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(payload["dag"]["closure"], "blocked")
             self.assertGreaterEqual(payload["dag"]["nodes"], 10)
             self.assertGreaterEqual(payload["dag"]["relations"], 10)
-            self.assertTrue(Path(payload["dag"]["html"]).is_file())
+            self.assertTrue((workspace / payload["dag"]["html"]).is_file())
+            self.assertEqual(payload["repository"], ".")
+            self.assertFalse(payload["privacy"]["host_paths_disclosed"])
             self.assertTrue((workspace / "research.yaml").is_file())
             self.assertIn("failed_attempt", payload["objects"])
             self.assertIn("supporting_evidence", payload["objects"])
@@ -52,7 +67,7 @@ class DemoStatusTests(unittest.TestCase):
                 step["code"]: step["command"] for step in payload["guide"]["next_steps"]
             }
             self.assertIn(
-                f"program review --repo {workspace.resolve()}",
+                "program review --repo .",
                 commands["strengthen_research_program"],
             )
 

@@ -291,7 +291,10 @@ def render_claim_prompt_snippet(*, max_nodes: int = 20) -> str:
         "When you cite an experimental result (a number, a table cell, a "
         "figure claim), append `\\claimref{<node_id>}` immediately after the "
         "sentence. `<node_id>` is the tree-search node that produced the "
-        f"evidence (see the exploration_graph). Up to {max_nodes} claims per "
+        "evidence (see the exploration_graph). When Structured manuscript "
+        "state supplies a graph claim ID, preserve both links with "
+        "`\\claimref[claim=<claim_id>]{<node_id>}`. Never invent either ID. "
+        f"Up to {max_nodes} claims per "
         "section is plenty. This macro is invisible in the PDF but lets a "
         "downstream agent re-execute the corresponding node."
     )
