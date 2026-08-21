@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/process-audit.v1/process_audit.schema.json",
+  "title": "XScientist Process Audit",
+  "description": "Bounded, artifact-backed Git-like process evidence; not a transcript or scientific quality score.",
+  "type": "object",
+  "required": [
+    "schema",
+    "available",
+    "reasoning_boundary",
+    "repository",
+    "branches",
+    "branch_topology",
+    "commits",
+    "intermediate",
+    "fairness",
+    "limits",
+    "redaction",
+    "errors"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.process-audit.v1"},
+    "available": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "reasoning_boundary": {"type": "string", "minLength": 1},
+    "repository": {
+      "type": "object",
+      "required": [
+        "branch",
+        "branch_digest",
+        "head",
+        "worktree_clean",
+        "checkpoint_policy",
+        "staged_path_count",
+        "eligible_change_count"
+      ],
+      "properties": {
+        "branch": {"type": ["string", "null"]},
+        "branch_digest": {"type": ["string", "null"]},
+        "head": {"type": ["string", "null"]},
+        "worktree_clean": {"type": ["boolean", "null"]},
+        "checkpoint_policy": {"type": "string"},
+        "staged_path_count": {"type": "integer", "minimum": 0},
+        "eligible_change_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "branches": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "name_digest",
+          "current",
+          "commit",
+          "stage",
+          "status",
+          "checkpoint_id",
+          "commit_count",
+          "commit_count_truncated",
+          "relation"
+        ],
+        "properties": {
+          "name": {"type": "string", "pattern": "^(current|alternative-[1-9][0-9]*)$"},
+          "name_digest": {"type": ["string", "null"]},
+          "current": {"type": "boolean"},
+          "commit": {"type": ["string", "null"]},
+          "stage": {"type": "string"},
+          "status": {"type": "string"},
+          "checkpoint_id": {"type": ["string", "null"]},
+          "commit_count": {"type": "integer", "minimum": 0, "maximum": 128},
+          "commit_count_truncated": {"type": "boolean"},
+          "relation": {"enum": ["current", "same_head", "diverged_or_behind"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "branch_topology": {
+      "type": "object",
+      "required": [
+        "branch_count",
+        "source_branch_count",
+        "branching_observed",
+        "merge_observed",
+        "truncated",
+        "fair_branch_comparison"
+      ],
+      "properties": {
+        "branch_count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "source_branch_count": {"type": "integer", "minimum": 0},
+        "branching_observed": {"type": "boolean"},
+        "merge_observed": {"type": "boolean"},
+        "artifact_scope": {"const": "current_checkout_only"},
+        "per_branch_artifacts_available": {"const": false},
+        "truncated": {"type": "boolean"},
+        "fair_branch_comparison": {"$ref": "#/$defs/fairBranchComparison"}
+      },
+      "additionalProperties": false
+    },
+    "commits": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/commit"}
+    },
+    "intermediate": {"$ref": "#/$defs/intermediate"},
+    "fairness": {"$ref": "#/$defs/fairness"},
+    "limits": {"$ref": "#/$defs/limits"},
+    "redaction": {
+      "type": "object",
+      "required": [
+        "free_text",
+        "absolute_paths",
+        "gold_fields",
+        "branch_names",
+        "subjects"
+      ],
+      "properties": {
+        "free_text": {"const": "omitted"},
+        "absolute_paths": {"const": "omitted"},
+        "gold_fields": {"const": "omitted"},
+        "branch_names": {"const": "alias_plus_digest"},
+        "subjects": {"const": "stage_only"}
+      },
+      "additionalProperties": false
+    },
+    "errors": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "$defs": {
+    "commit": {
+      "type": "object",
+      "required": [
+        "commit",
+        "short_commit",
+        "authored_at",
+        "stage",
+        "status",
+        "subject",
+        "subject_redacted",
+        "checkpoint_id",
+        "parent_count",
+        "parents",
+        "has_reproduce_command",
+        "checkpoint",
+        "branches"
+      ],
+      "properties": {
+        "commit": {"type": ["string", "null"]},
+        "short_commit": {"type": ["string", "null"]},
+        "authored_at": {"type": "string"},
+        "stage": {"type": "string"},
+        "status": {"type": "string"},
+        "subject": {"type": "string", "pattern": "^checkpoint:"},
+        "subject_redacted": {"const": true},
+        "checkpoint_id": {"type": ["string", "null"]},
+        "parent_count": {"type": "integer", "minimum": 0, "maximum": 128},
+        "parents": {"type": "array", "maxItems": 128, "items": {"type": "string"}},
+        "has_reproduce_command": {"type": "boolean"},
+        "branches": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
+        "checkpoint": {
+          "type": "object",
+          "required": ["available", "object_count", "claim_count", "node_count", "changed_path_count"],
+          "properties": {
+            "available": {"type": "boolean"},
+            "object_count": {"type": "integer", "minimum": 0},
+            "claim_count": {"type": "integer", "minimum": 0},
+            "node_count": {"type": "integer", "minimum": 0},
+            "changed_path_count": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "fairBranchComparison": {
+      "type": "object",
+      "required": [
+        "eligible",
+        "requirements",
+        "checks",
+        "same_task_manifest_required",
+        "same_budget_required",
+        "same_evaluator_required",
+        "verified_here"
+      ],
+      "properties": {
+        "eligible": {"type": "boolean"},
+        "requirements": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "checks": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "same_task_manifest_required": {"const": true},
+        "same_budget_required": {"const": true},
+        "same_evaluator_required": {"const": true},
+        "verified_here": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "fairness": {
+      "type": "object",
+      "required": [
+        "comparison_unit",
+        "task_manifest_sha256",
+        "task_count",
+        "task_filter",
+        "task_limit",
+        "filter",
+        "limit",
+        "gold_fields_used",
+        "network_used",
+        "provider_used",
+        "model_used",
+        "network",
+        "provider",
+        "model",
+        "model_cost_usd",
+        "cost",
+        "audit_command_only",
+        "trajectory_cost",
+        "rollouts_evaluated",
+        "same_budget_and_evaluator",
+        "official_comparable"
+      ],
+      "properties": {
+        "comparison_unit": {"type": "string"},
+        "task_manifest_sha256": {"type": ["string", "null"]},
+        "task_count": {"type": ["integer", "null"], "minimum": 0},
+        "task_filter": {"type": "string"},
+        "task_limit": {"type": ["integer", "null"], "minimum": 0},
+        "filter": {"type": "string"},
+        "limit": {"type": ["integer", "null"], "minimum": 0},
+        "gold_fields_used": {"const": false},
+        "network_used": {"const": false},
+        "provider_used": {"const": false},
+        "model_used": {"const": false},
+        "network": {"const": false},
+        "provider": {"const": false},
+        "model": {"const": false},
+        "model_cost_usd": {"const": 0.0},
+        "cost": {"const": 0.0},
+        "audit_command_only": {"const": true},
+        "trajectory_cost": {"const": "unobserved"},
+        "rollouts_evaluated": {"const": 0},
+        "same_budget_and_evaluator": {"const": false},
+        "official_comparable": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_branches", "max_commits", "max_artifacts", "max_decisions", "source_totals", "truncated"],
+      "properties": {
+        "max_branches": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_commits": {"type": "integer", "minimum": 1, "maximum": 128},
+        "max_artifacts": {"type": "integer", "minimum": 1, "maximum": 512},
+        "max_decisions": {"type": "integer", "minimum": 1, "maximum": 128},
+        "source_totals": {
+          "type": "object",
+          "required": ["branches", "unique_commits", "objects", "decision_events"],
+          "properties": {
+            "branches": {"type": "integer", "minimum": 0},
+            "unique_commits": {"type": "integer", "minimum": 0},
+            "objects": {"type": "integer", "minimum": 0},
+            "decision_events": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "source_totals_scope": {"type": "string"},
+        "truncated": {
+          "type": "object",
+          "required": ["branches", "commits", "artifacts", "decisions"],
+          "properties": {
+            "branches": {"type": "boolean"},
+            "commits": {"type": "boolean"},
+            "artifacts": {"type": "boolean"},
+            "decisions": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "intermediate": {
+      "type": "object",
+      "required": [
+        "object_count",
+        "source_object_count",
+        "statistics_scope",
+        "attempt_statistics_scope",
+        "attempts_truncated",
+        "kind_counts",
+        "state_counts",
+        "stage_counts",
+        "coverage",
+        "attempt_count",
+        "failed_attempts",
+        "completed_attempts",
+        "artifacts",
+        "decision_events",
+        "decision_statistics_scope",
+        "failed_or_blocked_artifacts",
+        "failed_or_blocked_count",
+        "failed_or_blocked_visible_count",
+        "source_failed_or_blocked_count",
+        "failure_statistics_scope",
+        "recovery_candidates",
+        "recovery_claim_allowed",
+        "recovery_statistics_scope"
+      ],
+      "properties": {
+        "object_count": {"type": "integer", "minimum": 0},
+        "source_object_count": {"type": "integer", "minimum": 0},
+        "statistics_scope": {"type": "string"},
+        "attempt_statistics_scope": {"type": "string"},
+        "attempts_truncated": {"type": "boolean"},
+        "kind_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "state_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "stage_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "coverage": {
+          "type": "object",
+          "required": ["observed_stages", "stage_count", "stage_total", "ratio", "truncated", "quality_claim_allowed"],
+          "properties": {
+            "observed_stages": {"type": "array", "items": {"enum": ["A", "B", "C", "D", "E", "F"]}, "uniqueItems": true},
+            "stage_count": {"type": "integer", "minimum": 0, "maximum": 6},
+            "stage_total": {"const": 6},
+            "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+            "truncated": {"type": "boolean"},
+            "quality_claim_allowed": {"const": false}
+          },
+          "additionalProperties": false
+        },
+        "attempt_count": {"type": "integer", "minimum": 0},
+        "failed_attempts": {"type": "integer", "minimum": 0},
+        "completed_attempts": {"type": "integer", "minimum": 0},
+        "artifacts": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/artifact"}},
+        "decision_events": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/decision"}},
+        "decision_statistics_scope": {"type": "string"},
+        "failed_or_blocked_artifacts": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/artifact"}},
+        "failed_or_blocked_count": {"type": "integer", "minimum": 0},
+        "failed_or_blocked_visible_count": {"type": "integer", "minimum": 0},
+        "source_failed_or_blocked_count": {"type": "integer", "minimum": 0},
+        "failure_statistics_scope": {"type": "string"},
+        "recovery_candidates": {"type": "integer", "minimum": 0},
+        "recovery_claim_allowed": {"const": false},
+        "recovery_statistics_scope": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["object_id", "kind", "stage", "state", "created_at", "content_hash", "relation_types", "signals", "failure_codes"],
+      "properties": {
+        "object_id": {"type": ["string", "null"]},
+        "kind": {"type": "string"},
+        "stage": {"enum": ["A", "B", "C", "D", "E", "F", "X"]},
+        "state": {"type": "string"},
+        "created_at": {"type": "string"},
+        "content_hash": {"type": ["string", "null"]},
+        "relation_types": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "signals": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "failure_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "decision": {
+      "type": "object",
+      "required": ["object_id", "kind", "stage", "state", "decision", "relation_types", "issue_count", "independence_observed"],
+      "properties": {
+        "object_id": {"type": ["string", "null"]},
+        "kind": {"type": "string"},
+        "stage": {"enum": ["A", "B", "C", "D", "E", "F", "X"]},
+        "state": {"type": "string"},
+        "decision": {"enum": ["allow", "allowed", "accept", "accepted", "block", "blocked", "deny", "denied", "hold", "held", "pause", "paused", "promote", "promoted", "reject", "rejected", "stop", "stopped", "observed"]},
+        "relation_types": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "issue_count": {"type": "integer", "minimum": 0},
+        "independence_observed": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

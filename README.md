@@ -369,6 +369,95 @@ A generated DAG is a disposable view, not scientific source data. Regenerating
 it does not dirty a research checkpoint or prevent a bundle. Eligible research
 changes, tracked edits, or staged changes still block bundling until reviewed.
 
+### Process benchmark comparison (offline and reproducible)
+
+The [linked WeChat article](https://mp.weixin.qq.com/s/pRPBg5RE1a6jWdO8LdP89A)
+points to [AutoResearchEval](https://arxiv.org/abs/2608.14905): a six-stage, artifact-aware
+diagnostic benchmark with 100 tasks and 800 trajectories. XScientist does not
+claim to reproduce its model score: the official rollout service and annotated
+trajectories are external. Instead, the repository includes an explicit,
+zero-cost conformance pilot that checks task framing and the evidence exposed by
+one local workspace:
+
+```bash
+# Optional, explicit one-time export/download from the official dataset page;
+# save one JSON/JSONL task manifest locally. The pilot itself stays offline.
+# (The published dataset layout may evolve; do not hard-code a remote path.)
+
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl \
+  --workspace ./first-study \
+  --limit 20 --kind open-ended --json
+```
+
+The pilot never downloads data, reads gold conclusions, calls a provider, or
+executes a model rollout. It reports `official_comparable: false` and keeps
+three measurements separate: task-contract validity, A–F artifact coverage, and
+XScientist's `trace → replay → verify` plus metacognitive repair signals. See
+[the benchmark protocol](docs/BENCHMARKS.md) for the exact boundary and the
+[official task dataset](https://huggingface.co/datasets/PrentisAI/AutoResearchEval).
+
+One local run on 2026-08-21 (macOS, Python 3.13, bundled balanced demo) produced:
+
+| Measurement | Result | Interpretation |
+| --- | ---: | --- |
+| Open-ended task contracts (first 20) | 20/20 | Manifest framing is structurally valid; no gold was used |
+| Optimization task contracts (first 20) | 20/20 | Same structural check on the separate task family |
+| Demo six-stage coverage | 5/6 (83.3%) | Retrieval artifacts are intentionally absent from the offline fixture |
+| Demo closure | `trace` pass · `replay` pass · `verify` blocked | A held-out conflict and missing independent reproduction remain visible |
+| Demo metacognitive status | `contained` · 2 issues · 0 shipped | The gate holds the conclusion instead of hiding review debt |
+| Demo process trail | 3 commits · 1 branch · 16 typed artifacts | Intermediate objects and checkpoint boundaries remain inspectable; no hidden transcript is exported |
+| Branch conformance fixture | 2 branches · 3 commits · per-commit branch membership | Divergence is visible; fairness stays `NOT VERIFIED` until budget/evaluator/base are evidenced |
+| Network / provider / model cost | none / none / $0 | This is a conformance measurement, not an autonomous-agent score |
+
+The table is a baseline for improving the harness and evidence contracts; it
+must not be compared numerically with published model leaderboard values. In
+the JSON report, `stage_coverage` counts stages meeting the minimum evidence
+bar; each stage also exposes `complete` for the stricter all-criteria result.
+Review debt without an explicit hold/reject gate is reported as `open`, never
+silently upgraded to `contained`.
+
+For orientation, the paper's headline measurements and this pilot sit on
+different layers:
+
+| Layer | AutoResearchEval paper | XScientist local pilot |
+| --- | --- | --- |
+| Scale | 100 tasks, 800 model/harness trajectories | 20 open-ended + 20 optimization manifest rows checked; 0 rollouts |
+| Diagnosis | Artifact-aware judge; κ 0.75 (pattern) / 0.83 (root cause) | No judge; typed-artifact coverage and closure only |
+| Metacognitive signal | F.4 in 660/800 analyses (82.5%) | Bundled demo: 2 unresolved issues, `contained`, 0 shipped; not the same statistic |
+| Cost / comparability | External rollout/evaluation budget | $0, `official_comparable: false` |
+
+The paper figures are reported for context, not as a score that this repository
+claims to match; see the [paper](https://arxiv.org/abs/2608.14905) for its
+artifact-aware judge and full trajectory protocol.
+
+To inspect the git-like process rather than only the endpoint, add
+`--show-process` to the pilot command:
+
+```bash
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl \
+  --workspace ./first-study \
+  --limit 20 --kind open-ended --show-process
+```
+
+The JSON `workspace.process` section
+contains bounded commits, branches, parent/checkpoint counts, typed intermediate
+artifact IDs/hashes, relation types, failure/recovery signals, and a fairness
+contract tied to the manifest SHA-256. It deliberately excludes prompts,
+completions, held-out conclusions, and free-form payloads; it is an
+artifact-backed reasoning trail, not hidden chain-of-thought. Commit membership
+is retained for each visible branch, but artifact rows are explicitly scoped to
+the current checkout (`artifact_scope: current_checkout_only`); the pilot does
+not fabricate per-branch artifact outcomes. Branch comparison
+is only called fair when the report can verify the same task manifest, budget,
+evaluator, and base; otherwise the corresponding field stays unverified.
+Shareable output also replaces free-form branch names and commit subjects with
+stable aliases/digests, so Git metadata cannot become a covert gold or local
+text channel. The process payload is versioned as
+`xscientist.process-audit.v1`; its JSON schema validates both an available
+Research VCS workspace and an explicit unavailable/empty state.
+
 To challenge a conclusion without erasing its history:
 
 ```bash

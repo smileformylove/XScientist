@@ -21,6 +21,21 @@ for its Python package; the ARA protocol has its own version in
   link as automatic causal proof.
 - LLM call provenance records the resolved provider contract without API keys;
   historical `research blame` selectors resolve against the requested commit.
+- Added an offline `benchmark autoresearch` pilot that checks local task
+  manifests, six-stage typed-artifact coverage, closure levels, and contained
+  versus shipped review debt. It never calls a provider and is explicitly not
+  comparable to the official AutoResearchEval rollout score.
+- Added a read-only ARFT observability contract (`arft_coverage.json`) with all
+  45 pattern IDs, A–F/X stages, root-cause rollups, and an explicit
+  `covered/partial/unassessed` boundary.
+- The process pilot now distinguishes open review debt from a typed hold/reject
+  gate and reports unreadable contract inputs without exposing their contents.
+- AutoResearch benchmark reports now expose a bounded Git-like checkpoint and
+  branch topology, typed decision/failure signals, and explicit fairness
+  checks while redacting free-form branch, commit, payload, and gold text.
+- Versioned `process_audit` schema coverage now keeps available and unavailable
+  process reports machine-valid and distinguishes bounded samples from source
+  totals.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 
@@ -29,6 +44,8 @@ for its Python package; the ARA protocol has its own version in
 - Added a current Chinese project audit covering usability, auditability,
   scientific quality, exploration, clue transparency, feedback, and
   self-evolution limits.
+- Added bilingual benchmark documentation with a measured zero-cost demo
+  baseline and links to the official AutoResearchEval task release.
 
 ## [0.1.3] - 2026-08-19
 

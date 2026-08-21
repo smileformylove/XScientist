@@ -400,6 +400,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     first_run.add_argument("--max-seconds", type=float, default=None)
     first_run.add_argument("--json", action="store_true", dest="as_json")
+    autoresearch = benchmark_subparsers.add_parser(
+        "autoresearch",
+        help=(
+            "Run an offline AutoResearchEval-inspired artifact conformance pilot; "
+            "this does not produce an official score."
+        ),
+    )
+    autoresearch.add_argument(
+        "--tasks",
+        required=True,
+        help="local JSONL/JSON task file; no network download is attempted",
+    )
+    autoresearch.add_argument(
+        "--workspace",
+        default=None,
+        help="optional existing XScientist workspace to inspect read-only",
+    )
+    autoresearch.add_argument("--limit", type=int, default=20)
+    autoresearch.add_argument(
+        "--kind",
+        choices=["all", "open-ended", "optimization"],
+        default="all",
+        help="task subset to inspect (default: all)",
+    )
+    autoresearch.add_argument(
+        "--show-process",
+        action="store_true",
+        help=(
+            "show the bounded git-like commit, branch, artifact, and fairness "
+            "timeline in human output; JSON always includes it"
+        ),
+    )
+    autoresearch.add_argument("--json", action="store_true", dest="as_json")
     metrics_parser = subparsers.add_parser(
         "metrics",
         help="Control explicit opt-in, local-only, payload-free usage counters.",
@@ -3314,19 +3347,212 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         return 0 if payload["ok"] else 1
     if parsed.command == "benchmark":
-        from .benchmark import benchmark_first_run
+        from .benchmark import benchmark_autoresearch_pilot, benchmark_first_run
 
         try:
-            payload = benchmark_first_run(
-                parsed.workspace,
-                profile=parsed.profile,
-                max_seconds=parsed.max_seconds,
-            )
+            if parsed.benchmark_command == "autoresearch":
+                payload = benchmark_autoresearch_pilot(
+                    parsed.tasks,
+                    workspace=parsed.workspace,
+                    limit=parsed.limit,
+                    task_kind=parsed.kind,
+                )
+            else:
+                payload = benchmark_first_run(
+                    parsed.workspace,
+                    profile=parsed.profile,
+                    max_seconds=parsed.max_seconds,
+                )
         except (OSError, ValueError) as exc:
             print(f"xscientist benchmark: {exc}", file=sys.stderr)
             return 2
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif parsed.benchmark_command == "autoresearch":
+            tasks = payload["tasks"]
+            print(
+                "AutoResearchEval-inspired conformance pilot: "
+                f"{tasks['valid_task_contracts']}/{tasks['count']} task contracts valid"
+            )
+            print(
+                "Official score: not applicable; no model/provider/network or rollouts used."
+            )
+            workspace_report = payload.get("workspace")
+            if workspace_report:
+                print(
+                    "Six-stage artifact coverage: "
+                    f"{workspace_report['stage_coverage']:.0%} "
+                    f"(criteria score {workspace_report.get('stage_score', 0.0):.1f}/100)"
+                )
+                process = workspace_report.get("process") or {}
+                if process:
+                    repository = process.get("repository") or {}
+                    intermediate = process.get("intermediate") or {}
+                    if not process.get("available", False):
+                        print(
+                            "Process: unavailable "
+                            f"({process.get('reason', 'unknown')}); "
+                            "no local Research VCS evidence was counted"
+                        )
+                    else:
+                        topology = process.get("branch_topology") or {}
+                        source_branches = topology.get(
+                            "source_branch_count", len(process.get("branches") or [])
+                        )
+                        print(
+                            "Process: "
+                            f"{len(process.get('commits') or [])} visible commits, "
+                            f"{len(process.get('branches') or [])}/{source_branches} branches, "
+                            f"{intermediate.get('object_count', 0)} typed artifacts"
+                        )
+                        if parsed.show_process:
+                            print(
+                                "  Branch topology: "
+                                f"branching={'yes' if topology.get('branching_observed') else 'no'}, "
+                                f"merge={'yes' if topology.get('merge_observed') else 'no'}"
+                            )
+                            print(
+                                "  Reasoning trail: artifact-backed signals only; "
+                                "hidden chain-of-thought omitted"
+                            )
+                            print(
+                                "  Artifact scope: "
+                                f"{topology.get('artifact_scope', 'current_checkout_only')}"
+                            )
+                            for branch in process.get("branches") or []:
+                                print(
+                                    f"  branch {branch.get('name', '?')} "
+                                    f"({branch.get('relation', 'line')}, "
+                                    f"{branch.get('commit_count', 0)} commits)"
+                                )
+                            for event in process.get("commits") or []:
+                                memberships = ",".join(event.get("branches") or [])
+                                suffix = f" [{memberships}]" if memberships else ""
+                                print(
+                                    f"  commit {event.get('short_commit', '?')} "
+                                    f"{event.get('stage', 'unknown')} "
+                                    f"{event.get('status', 'unknown')}: "
+                                    f"{event.get('subject', 'checkpoint:unknown')}"
+                                    f"{suffix}"
+                                )
+                            coverage = intermediate.get("coverage") or {}
+                            print(
+                                "  Artifacts: "
+                                f"{len(intermediate.get('artifacts') or [])} visible / "
+                                f"{intermediate.get('object_count', 0)} source; "
+                                f"stages={coverage.get('stage_count', 0)}/"
+                                f"{coverage.get('stage_total', 6)}"
+                            )
+                            for artifact in (intermediate.get("artifacts") or [])[:12]:
+                                print(
+                                    "  artifact "
+                                    f"{artifact.get('object_id', '?')} "
+                                    f"{artifact.get('kind', 'extension')}/"
+                                    f"{artifact.get('stage', 'X')}/"
+                                    f"{artifact.get('state', 'other')}"
+                                )
+                            print(
+                                "  Attempts: "
+                                f"{intermediate.get('attempt_count', 0)} total, "
+                                f"{intermediate.get('failed_attempts', 0)} failed, "
+                                f"{intermediate.get('completed_attempts', 0)} completed"
+                                + (
+                                    " (sample truncated)"
+                                    if intermediate.get("attempts_truncated")
+                                    else ""
+                                )
+                            )
+                            for artifact in (
+                                intermediate.get("failed_or_blocked_artifacts") or []
+                            )[:8]:
+                                print(
+                                    "  failure "
+                                    f"{artifact.get('object_id', '?')} "
+                                    f"{artifact.get('kind', 'extension')}/"
+                                    f"{artifact.get('state', 'other')} "
+                                    f"codes={','.join(artifact.get('failure_codes') or [])}"
+                                )
+                            for decision in (intermediate.get("decision_events") or [])[
+                                :8
+                            ]:
+                                print(
+                                    "  decision "
+                                    f"{decision.get('kind', 'extension')}:"
+                                    f"{decision.get('decision', 'observed')} "
+                                    f"issues={decision.get('issue_count', 0)}"
+                                )
+                            fair = topology.get("fair_branch_comparison") or {}
+                            checks = fair.get("checks") or {}
+                            unverified = [
+                                name
+                                for name in fair.get("requirements") or []
+                                if checks.get(name) is not True
+                            ]
+                            print(
+                                "  Fair branch comparison: "
+                                + (
+                                    "ELIGIBLE"
+                                    if fair.get("eligible")
+                                    else "NOT VERIFIED"
+                                )
+                                + (
+                                    " (unverified: " + ", ".join(unverified) + ")"
+                                    if unverified
+                                    else ""
+                                )
+                            )
+                            truncated = process.get("limits", {}).get("truncated") or {}
+                            if any(truncated.values()):
+                                print(
+                                    "  Bounds: truncated "
+                                    + ", ".join(
+                                        name
+                                        for name, value in truncated.items()
+                                        if value
+                                    )
+                                )
+                        if repository.get("worktree_clean") is False:
+                            print("  WARN  worktree has uncheckpointed changes")
+                arft_summary = workspace_report.get("arft_coverage", {}).get(
+                    "summary", {}
+                )
+                if "coverage_score" in arft_summary:
+                    print(
+                        "ARFT evidence-channel coverage: "
+                        f"{float(arft_summary['coverage_score']):.1f}% "
+                        "(structural only; not a quality score)"
+                    )
+                for stage, result in workspace_report["stages"].items():
+                    state = (
+                        "PASS"
+                        if result.get("complete")
+                        else "MIN" if result.get("covered") else "MISS"
+                    )
+                    print(
+                        f"{state}  "
+                        f"{result.get('label', stage)} ({result.get('score', 0.0):.1f})"
+                    )
+                metacognition = workspace_report.get("metacognition") or {}
+                print(
+                    "Metacognitive loop: "
+                    f"{metacognition.get('status', 'unavailable')} "
+                    f"(issues {metacognition.get('issue_count', 0)}, "
+                    f"repaired {metacognition.get('repaired_issue_count', 0)})"
+                )
+                closure = workspace_report.get("closure") or {}
+                if closure.get("available"):
+                    levels = closure.get("levels") or {}
+                    print(
+                        "Closure: "
+                        + ", ".join(
+                            f"{name}={'PASS' if row.get('complete') else 'BLOCKED'}"
+                            for name, row in levels.items()
+                        )
+                    )
+                for signal in workspace_report.get("metacognitive_signals") or []:
+                    print(f"WARN  {signal['code']}: {signal['detail']}")
+            else:
+                print("Pass --workspace to inspect a local research artifact set.")
         else:
             print(f"First-run benchmark: {payload['duration_seconds']}s")
             print(

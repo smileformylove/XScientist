@@ -79,6 +79,8 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "ai_scientist/resources/configs/bfts_default.yaml",
             "ai_scientist/protocol/schemas/research_closure.schema.json",
             "ai_scientist/protocol/schemas/reproduction_receipt.schema.json",
+            "ai_scientist/protocol/schemas/arft_coverage.schema.json",
+            "ai_scientist/protocol/schemas/process_audit.schema.json",
         }
         missing = sorted(required_wheel - wheel_names)
         if missing:

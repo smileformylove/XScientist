@@ -30,6 +30,10 @@ ARTIFACT_FILENAMES = {
     "self_evolution": "self_evolution.json",
     "stage_standards": "stage_standards.json",
     "process_alignment": "process_alignment.json",
+    # Offline AutoResearchEval/ARFT observability report.  This is deliberately
+    # separate from ``stage_standards``: it records whether artifacts expose
+    # evidence channels, not whether a model passed a benchmark.
+    "arft_coverage": "arft_coverage.json",
     "research_program": "research_program.md",
     "manuscript_candidate_pool": "manuscript_candidate_pool.json",
     "repair_attempts": "repair_attempts.jsonl",
@@ -66,6 +70,7 @@ ARTIFACT_DEFAULT_STATUS = {
     "self_evolution": "missing",
     "stage_standards": "missing",
     "process_alignment": "missing",
+    "arft_coverage": "missing",
     "research_program": "missing",
     "manuscript_candidate_pool": "missing",
     "repair_attempts": "missing",

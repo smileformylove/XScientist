@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/arft-coverage.v1/arft_coverage.schema.json",
+  "title": "XScientist ARFT Observability Coverage",
+  "description": "Offline evidence-channel coverage for the AutoResearchEval/ARFT lens; not a model-quality score.",
+  "type": "object",
+  "required": [
+    "schema",
+    "generated_at",
+    "project_root",
+    "reference",
+    "evaluation_scope",
+    "quality_claim_allowed",
+    "benchmark_compatible",
+    "disclaimer",
+    "summary",
+    "stages",
+    "root_causes",
+    "patterns",
+    "signals",
+    "input_errors",
+    "artifact_channels"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.arft-coverage.v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "project_root": {"const": "."},
+    "reference": {"type": "string", "format": "uri"},
+    "evaluation_scope": {"const": "structural_observability_only"},
+    "quality_claim_allowed": {"const": false},
+    "benchmark_compatible": {"const": false},
+    "disclaimer": {"type": "string", "minLength": 1},
+    "summary": {
+      "type": "object",
+      "required": [
+        "pattern_count",
+        "covered_pattern_count",
+        "partial_pattern_count",
+        "unassessed_pattern_count",
+        "coverage_score",
+        "missing_signal_count",
+        "missing_signal_names"
+      ],
+      "properties": {
+        "pattern_count": {"type": "integer", "minimum": 0},
+        "covered_pattern_count": {"type": "integer", "minimum": 0},
+        "partial_pattern_count": {"type": "integer", "minimum": 0},
+        "unassessed_pattern_count": {"type": "integer", "minimum": 0},
+        "coverage_score": {"type": "number", "minimum": 0, "maximum": 100},
+        "missing_signal_count": {"type": "integer", "minimum": 0},
+        "missing_signal_names": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "required": [
+          "stage",
+          "label",
+          "pattern_count",
+          "covered_pattern_count",
+          "partial_pattern_count",
+          "unassessed_pattern_count",
+          "coverage_score",
+          "patterns"
+        ],
+        "properties": {
+          "stage": {"enum": ["A", "B", "C", "D", "E", "F", "X"]},
+          "label": {"type": "string"},
+          "pattern_count": {"type": "integer", "minimum": 0},
+          "covered_pattern_count": {"type": "integer", "minimum": 0},
+          "partial_pattern_count": {"type": "integer", "minimum": 0},
+          "unassessed_pattern_count": {"type": "integer", "minimum": 0},
+          "coverage_score": {"type": "number", "minimum": 0, "maximum": 100},
+          "patterns": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "root_causes": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "root_cause",
+          "pattern_count",
+          "covered_pattern_count",
+          "partial_pattern_count",
+          "unassessed_pattern_count",
+          "coverage_score"
+        ],
+        "properties": {
+          "root_cause": {"type": "string"},
+          "pattern_count": {"type": "integer", "minimum": 0},
+          "covered_pattern_count": {"type": "integer", "minimum": 0},
+          "partial_pattern_count": {"type": "integer", "minimum": 0},
+          "unassessed_pattern_count": {"type": "integer", "minimum": 0},
+          "coverage_score": {"type": "number", "minimum": 0, "maximum": 100}
+        },
+        "additionalProperties": false
+      }
+    },
+    "patterns": {
+      "type": "array",
+      "minItems": 45,
+      "maxItems": 45,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "stage",
+          "name",
+          "root_cause",
+          "description",
+          "status",
+          "coverage_score",
+          "required_signals",
+          "present_signals",
+          "missing_signals",
+          "evidence_channels",
+          "interpretation"
+        ],
+        "properties": {
+          "id": {"type": "string", "pattern": "^(A|B|C|D|E|F|X)\\.[0-9]+$"},
+          "stage": {"enum": ["A", "B", "C", "D", "E", "F", "X"]},
+          "name": {"type": "string"},
+          "root_cause": {"type": "string"},
+          "description": {"type": "string"},
+          "status": {"enum": ["covered", "partial", "unassessed"]},
+          "coverage_score": {"type": "number", "minimum": 0, "maximum": 100},
+          "required_signals": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "present_signals": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "missing_signals": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "evidence_channels": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "interpretation": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "signals": {"type": "object", "additionalProperties": {"type": "boolean"}},
+    "input_errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact", "error"],
+        "properties": {
+          "artifact": {"type": "string"},
+          "error": {"type": "string"},
+          "line": {"type": "integer", "minimum": 1},
+          "column": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifact_channels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["registered", "exists"],
+        "properties": {
+          "registered": {"type": "boolean"},
+          "exists": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

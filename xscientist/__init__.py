@@ -10,6 +10,8 @@ if TYPE_CHECKING:
     from .research_evolution import ResearchEvolution
     from .research_lifecycle import ResearchLifecycle
     from .research_closure import audit_research_closure, closure_level_summary
+    from .process_audit import build_process_summary
+    from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
     from .research_dag import build_research_dag, export_research_dag
     from .research_discovery import (
         assess_generalization,
@@ -101,6 +103,14 @@ def __getattr__(name: str) -> Any:
         from .research_closure import closure_level_summary
 
         value = closure_level_summary
+    elif name in {"build_arft_coverage", "save_arft_coverage"}:
+        from ai_scientist.utils import arft_coverage
+
+        value = getattr(arft_coverage, name)
+    elif name == "build_process_summary":
+        from .process_audit import build_process_summary
+
+        value = build_process_summary
     elif name in {"build_research_dag", "export_research_dag"}:
         from . import research_dag
 
@@ -168,6 +178,8 @@ __all__ = [
     "ServiceSettings",
     "XScientist",
     "audit_research_closure",
+    "build_arft_coverage",
+    "build_process_summary",
     "closure_level_summary",
     "assess_generalization",
     "build_discovery_contract",
@@ -196,6 +208,7 @@ __all__ = [
     "save_posterior_update",
     "save_transfer_matrix",
     "save_workspace_checkpoint",
+    "save_arft_coverage",
     "scan_research_anomalies",
     "rollback_workspace_checkpoint",
     "__version__",

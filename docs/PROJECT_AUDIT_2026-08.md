@@ -35,15 +35,18 @@ XScientist 的优势已经不在“能否生成一篇论文”，而在于它把
 
 | 检查 | 结果 | 能说明什么 | 不能说明什么 |
 |---|---|---|---|
-| `python -m pytest --collect-only -q` | 可收集 1379 项 | 测试入口可发现 | 不代表真实 provider 或 Docker 可用 |
-| `python -m pytest -q`（本轮） | 1379 passed，5 warnings，53 subtests | 当前源码全量回归通过 | 测试主要是本地 mock/fixture |
+| `python -m pytest --collect-only -q` | 可收集 1398 项 | 测试入口可发现 | 不代表真实 provider 或 Docker 可用 |
+| `python -m pytest -q`（本轮） | 1398 passed，5 warnings，53 subtests（534.13s） | 当前源码全量回归通过 | 测试主要是本地 mock/fixture |
 | provider/closure/feedback 定向回归 | 155 passed，13 subtests | 本轮改动覆盖的 live 探针、闭环摘要、反馈归因和跨进程持久化成立 | 不代表跨平台和外部服务稳定 |
 | 临时工作区 `setup → provider add → provider test` | 配置成功；真实最小请求成功 | 自定义 OpenAI-compatible 路由可被调用，返回了模型身份和 token 汇总 | 不代表完整科研运行成功 |
 | `provider check --json` | 明确区分 configuration-only 与 live verification | 不再把“有 key”当成“API 已验证” | hosted provider 仍需 opt-in live test |
 | `provider check --live --json` | 一次显式最小请求 | 验证传输和模型身份，不保存响应正文 | 不代表科学质量或完整运行成功 |
 | closure audit / workspace status | 一次输出三层闭环摘要 | 审查者可直接看到每层 blocker/warning 数 | 本地账本仍不是第三方证明 |
 | feedback attribution | 干预、结果、评估者可寻址 | 自进化线索不再只有无因果的趋势分数 | 成对观察仍需独立门禁才可晋级 |
+| AutoResearchEval-inspired pilot | 官方任务清单的本地契约检查；内置 demo 的六阶段证据覆盖与 `trace/replay/verify` | 过程证据是否可审查、问题是否被门禁拦截 | 不产生官方模型分数；没有 rollout、gold 或独立 judge |
+| Git-like process audit | 2 分支 fixture 测得 3 个有界 commit，并保留每个 commit 的分支归属；同时暴露 typed artifact、失败/恢复和公平性检查 | 同一输入下的中间决策证据与分支保留情况 | 不导出隐藏思维链；未验证同预算/evaluator/base 时不声称分支对比公平 |
 | `privacy_audit.py . --json` | 0 findings | 当前仓库没有扫描到明显凭据/隐私泄露 | 不能证明未来输入不会泄露 |
+| 分发 inventory + isolated wheel smoke | wheel/sdist 通过；隔离导入显示 39 个 schema、demo closure `blocked` | 新 benchmark/process schema 确实随包发布 | 不代表外部依赖、Docker 或 provider 在每台机器都可用 |
 
 完整自动科研旅程在本机仍受到环境前置条件限制（例如可选 `sklearn`、认证会话和 Docker executable）。这不是测试失败应被掩盖的细节，而是首次运行体验的核心风险：用户很容易把“provider ready”误读成“研究可以运行”。
 
@@ -124,6 +127,17 @@ Research VCS 的 typed object、relation、checkpoint、diff、blame 和 offline
 - provider provenance 现在能记录匿名 endpoint/config 指纹，但旧产物没有该字段，跨版本迁移需要解释；
 - `blame` 找到的是文件首次加入的 Git 变更，不能自动回答“哪次实验真正产生了这个科学结论”；
 - 历史 draft、supersedes、contest 和 active frontier 的语义仍比文件 Git 复杂。
+
+本轮加入的离线 AutoResearchEval-inspired pilot 在内置 balanced demo 上测得
+`5/6` 个阶段达到最低 typed-evidence coverage（83.3%）；缺失的是检索产物。该 demo
+的 `trace` 与 `replay` 通过、`verify` 因独立 reproduction 和 passing gate 阻塞，审查中
+发现的两个问题被标为 `contained` 而不是“已修复”。若没有明确 hold/reject 门禁，
+pilot 会标为 `open`，不会推断问题已经遏制。这正是过程 benchmark 能补足普通最终
+分数的地方，但它仍不是 100-task/800-trajectory 的官方性能结果。
+同一报告还保留有界的 commit/checkpoint 轨迹、branch 拓扑、typed artifact 计数、失败尝试
+和结构化决策事件。可分享输出不包含 commit/branch 自由文本、prompt、completion 或
+gold；它只在 manifest/task slice、fork base、预算和 evaluator 都可核验时才允许“公平分支
+对比”，否则显式标记 `unverified`。
 
 建议在 DAG 节点上同时显示 `selector → resolved id → checkpoint → source revision → provider fingerprint → evidence hash → gate/reproduction`，缺任何一段都显示可行动 blocker。
 

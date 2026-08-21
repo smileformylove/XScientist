@@ -328,6 +328,111 @@ xscientist research export --repo ./first-study --dest ./exchange
 生成的 DAG 是可随时重建的视图，不是科学源数据；重建它不会污染 checkpoint，也
 不会阻止打包。真正的科研改动、已跟踪编辑或暂存内容仍必须先审查。
 
+### 过程 benchmark 对照（离线、可复现）
+
+本项目讨论中给出的[微信文章](https://mp.weixin.qq.com/s/pRPBg5RE1a6jWdO8LdP89A)
+对应 [AutoResearchEval](https://arxiv.org/abs/2608.14905)：100 个任务、800 条轨迹、六个
+科研阶段，以及检查代码/日志/数据的 ARFT 诊断器。XScientist 不宣称复现论文的模型
+分数：官方 rollout 服务和标注轨迹在仓库之外。项目提供的是零成本、明确不越权的本地
+conformance pilot，用来检查任务契约和一个工作区暴露的证据：
+
+```bash
+# 可选：从官方数据集页面导出/下载一个 JSON/JSONL 清单并保存到本地；
+# 远端文件布局可能变化，pilot 本身不会联网。
+
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl \
+  --workspace ./first-study \
+  --limit 20 --kind open-ended --show-process
+```
+
+需要机器可审查文件时可附加 `--json > autoresearch-report.json`；JSON 中的
+`workspace.process` 与终端轨迹使用同一份版本化契约。
+
+pilot 不下载数据、不读取 gold 结论、不调用 Provider，也不执行模型 rollout。输出会
+固定标记 `official_comparable: false`，并把三类指标分开：任务契约是否完整、A–F
+证据覆盖、XScientist 自己的 `trace → replay → verify` 与元认知修复信号。完整边界见
+[benchmark 说明](BENCHMARKS.md)，任务清单见
+[官方数据集](https://huggingface.co/datasets/PrentisAI/AutoResearchEval)。
+
+2026-08-21 在 macOS、Python 3.13、内置 balanced demo 上的一次实测基线：
+
+| 指标 | 结果 | 含义 |
+| --- | ---: | --- |
+| 开放式任务契约（前 20 条） | 20/20 | 结构字段完整，未使用 gold |
+| 目标锚定任务契约（前 20 条） | 20/20 | 对另一任务族做同样结构检查 |
+| Demo 六阶段覆盖 | 5/6（83.3%） | 离线 fixture 故意没有检索产物 |
+| Demo 闭环 | `trace` 通过 · `replay` 通过 · `verify` 阻塞 | held-out 冲突和独立复现缺失仍可见 |
+| Demo 元认知状态 | `contained` · 2 个问题 · 0 个带问题发布 | 门禁拦截审查债务，没有把它伪装成成功 |
+| Demo 过程轨迹 | 3 个 commit · 1 个 branch · 16 个 typed artifact | 中间对象与 checkpoint 边界可审查；不导出隐藏 transcript |
+| 分支契约 fixture | 2 个 branch · 3 个 commit · 每个 commit 保留分支归属 | 可见分歧；在预算/evaluator/base 证据不全时仍为 `NOT VERIFIED` |
+| 网络 / Provider / 模型成本 | 无 / 无 / $0 | 这是契约测量，不是自主 Agent 分数 |
+
+这张表是后续改进 harness 和证据契约的基线，不能与论文发布的模型 leaderboard 数值
+直接比较。JSON 中的 `stage_coverage` 表示达到最低证据门槛的阶段比例；每个阶段还会
+给出 `complete`，表示该阶段列出的全部条件都通过。若评审问题没有明确的修复或
+hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发布”就误报为
+`contained`。
+
+把论文数字和本地实测并排放，边界会更清楚：
+
+| 层次 | AutoResearchEval 论文 | XScientist 本地 pilot |
+| --- | --- | --- |
+| 规模 | 100 个任务、800 条模型/工具轨迹 | 检查开放式 20 条 + 优化 20 条清单；0 条 rollout |
+| 诊断 | artifact-aware judge；模式 κ=0.75、根因 κ=0.83 | 不运行 judge；只测 typed artifact 覆盖和闭环 |
+| 元认知信号 | F.4 出现在 660/800（82.5%）分析中 | 内置 demo：2 个未解决问题，`contained`，0 个带问题发布；不是同一统计量 |
+| 成本 / 可比性 | 需要外部 rollout 和评估预算 | $0，`official_comparable: false` |
+
+论文数字仅作参照，不代表本项目复现了论文得分；完整协议见
+[论文](https://arxiv.org/abs/2608.14905)。
+
+每次报告还记录输入清单的 SHA-256，并只输出按行号汇总的契约缺失字段；这样可以在
+不复制任务答案、不暴露本机路径的前提下复核两次实测是否使用了同一份清单。
+
+`--show-process` 会在终端展示有界的 commit 时间线、branch 拓扑、失败/完成尝试和
+结构化决策事件；完整 JSON 位于 `workspace.process`。为避免任务答案或本地文本
+通过 branch/commit 名称泄漏，可分享报告只保留阶段、状态、稳定别名、短 hash、关系
+类型和布尔证据信号，不导出 prompt、completion、gold 字段或自由 payload。这是
+可审查的“决策证据轨迹”，不是隐藏思维链。
+
+分支间只在同一 manifest/task slice、同一分叉基点、同一预算和同一 evaluator
+都可验证时才能称为公平对比。无法证明的预算、evaluator 或 base 会保持
+`unverified`，整体对比不会被标为 eligible。每个可见分支的 commit 归属会保留，
+但 artifact 行明确标为 `artifact_scope: current_checkout_only`；单次 checkout
+不会被推断成每条分支各自的科研结果。
+过程 payload 使用版本化的 `xscientist.process-audit.v1`，并为可用与不可用工作区保持
+同一顶层 JSON shape；审查器可在无网络状态下加载 `process_audit` schema 进行校验。
+
+两条分支的契约 fixture 在终端中会像这样展示（短 hash 用 `…` 省略）：
+
+```text
+Process: 3 visible commits, 2/2 branches, 2 typed artifacts
+  branch alternative-1 (diverged_or_behind, 3 commits)
+  branch current (current, 2 commits)
+  commit … experiment: checkpoint:experiment [alternative-1]
+  commit … ideation: checkpoint:ideation [alternative-1,current]
+  Fair branch comparison: NOT VERIFIED (unverified: same_task_slice, same_budget, same_evaluator, same_base)
+```
+
+这是可审查的契约示例，不是科研结果，也不表示两条分支真的使用了相同模型预算。
+
+如果需要逐模式检查证据线索，还可以生成离线 ARFT 覆盖报告。它只读取工作区已有的
+科研契约，不调用模型；`covered` 只表示存在可供审查的证据通道，`partial` 和
+`unassessed` 表示仍需补证，绝不是失败率或科研质量分数：
+
+```python
+from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
+
+report = build_arft_coverage("./first-study")  # 只读，覆盖 A–F/X 的 45 个模式
+save_arft_coverage("./first-study")             # 显式写入 arft_coverage.json
+print(report["summary"])
+```
+
+报告固定包含 `quality_claim_allowed: false` 和 `benchmark_compatible: false`，便于
+审查工具在展示时避免把结构性可见性误读成 AutoResearchEval 的模型得分。完整字段和
+边界见 [benchmark 说明](BENCHMARKS.md)。损坏的 JSON/JSONL 契约会以不含正文的
+`input_errors` 暴露，不会静默伪装成“没有证据”，便于区分缺失线索和不可读取产物。
+
 如果要挑战一个结论而不抹掉原历史：
 
 ```bash
