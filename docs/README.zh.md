@@ -355,6 +355,43 @@ pilot 不下载数据、不读取 gold 结论、不调用 Provider，也不执�
 [benchmark 说明](BENCHMARKS.md)，任务清单见
 [官方数据集](https://huggingface.co/datasets/PrentisAI/AutoResearchEval)。
 
+#### 证据与 ARA 的保存边界
+
+这个 pilot 是只读审计：不会创建模型轨迹、复制任务清单，也不会自动写入 ARA。
+Python API 只在内存中返回报告；CLI 只有在把 stdout 重定向到文件时才会保存报告。
+工作区中原本存在的 Research VCS 对象、checkpoint、Git 引用、ARA 目录和 CAS
+产物会留在原位置，但 benchmark 报告本身只是有界、脱敏的索引，不是完整证据归档。
+
+| 来源 | 磁盘上保留什么 | pilot 报告包含什么 |
+| --- | --- | --- |
+| 任务清单 | 调用者原来的 JSON/JSONL 文件 | SHA-256、计数和脱敏后的契约错误；不含 gold 或任务正文 |
+| Research VCS / typed evidence | `.xscientist/objects/`、`checkpoints/`、Git 历史和本地指针 | 有界 artifact/decision 行、hash、信号、源计数和截断标记；不含 payload |
+| ARA / CAS | 已有的 `ara/` 目录及 `.ara-store/`/本地 CAS 原样保留 | 只给闭环和绑定摘要；不会自动复制完整 ARA 或 payload |
+| ARFT 覆盖 | `build_arft_coverage()` 不写文件 | 嵌入结构性摘要；`save_arft_coverage()` 才是显式落盘操作 |
+
+如需保存完整审查包，必须显式选择，并把它当作可能含敏感内容的文件处理：
+
+```bash
+# 保存 benchmark 报告本身（仍是摘要）。
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl --workspace ./first-study \
+  --limit 20 --kind open-ended --json > benchmark-report.json
+
+# 校验 checkpoint、ARA manifest、pointer 和 CAS 绑定。
+xscientist research fsck --repo ./first-study
+
+# 完整 ARA audit bundle（包含所有非 GC 的 ARA 文件）。
+xscientist ara bundle --ara ./first-study/ara/<run> \
+  --dest ./benchmark-evidence/ara-audit.tar.gz --profile audit
+
+# Research VCS 互操作导出；payload 必须显式开启。
+xscientist research export --repo ./first-study --ref HEAD \
+  --dest ./benchmark-evidence/research-export --include-payloads
+```
+
+分享前请检查并脱敏这些 bundle：其中可能含 prompt、工具输出、数据集或模型响应。
+`--show-process` 和 `workspace.process` 有意只给过程摘要，不声称包含全部原始证据。
+
 2026-08-21 在 macOS、Python 3.13、内置 balanced demo 上的一次实测基线：
 
 | 指标 | 结果 | 含义 |
@@ -386,6 +423,19 @@ hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发�
 论文数字仅作参照，不代表本项目复现了论文得分；完整协议见
 [论文](https://arxiv.org/abs/2608.14905)。
 
+#### 能不能和人做 benchmark 对比？
+
+可以，但当前 pilot 还不能直接给出“人类 vs Agent”的科研分数。可信的人类对照组必须
+使用同一份任务清单和 slice、同一个起始 artifact、相同的工具/数据/网络策略、相同的
+时间与成本预算、相同的输出格式、verifier/evaluator 和尝试次数；还应随机化任务顺序、
+预注册停止规则、至少包含多名参与者或多次运行，并报告不确定性，而不是只报一次最佳结果。
+
+之后可以用同一份过程契约记录人类的 checkpoint、证据、失败、修复和门禁，但不收集私人
+自由思维文本。可比指标应包括官方 verifier 的最终分数（如果可用）、同一
+artifact-aware 过程诊断、时间/成本、证据完整性、可审查性和失败恢复覆盖率。在这些
+控制条件和真实人类轨迹集建立前，报告必须保持 `official_comparable: false`；当前能做的
+是比较过程可观测性和易用性，不能声称 XScientist 胜过或等同于科研人员。
+
 每次报告还记录输入清单的 SHA-256，并只输出按行号汇总的契约缺失字段；这样可以在
 不复制任务答案、不暴露本机路径的前提下复核两次实测是否使用了同一份清单。
 
@@ -409,8 +459,9 @@ hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发�
 Process: 3 visible commits, 2/2 branches, 2 typed artifacts
   branch alternative-1 (diverged_or_behind, 3 commits)
   branch current (current, 2 commits)
-  commit … experiment: checkpoint:experiment [alternative-1]
+  commit … init: checkpoint:init [alternative-1,current]
   commit … ideation: checkpoint:ideation [alternative-1,current]
+  commit … experiment: checkpoint:experiment [alternative-1]
   Fair branch comparison: NOT VERIFIED (unverified: same_task_slice, same_budget, same_evaluator, same_base)
 ```
 

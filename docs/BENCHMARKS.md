@@ -72,6 +72,32 @@ xscientist benchmark autoresearch \
   --limit 20 --kind open-ended --show-process
 ```
 
+### Evidence and ARA retention
+
+The pilot is read-only. It does not create a trajectory, copy the task
+manifest, or write an ARA. The API returns a report in memory; redirecting
+`--json` is the explicit way to persist that report. Existing Research VCS
+objects, checkpoints, Git refs, ARA roots, and CAS payloads remain in the
+workspace, while `workspace.process` and the stage report expose only bounded,
+redacted metadata. The report is therefore an audit index, not a complete raw
+evidence archive. `build_arft_coverage()` is also read-only; call
+`save_arft_coverage()` explicitly if its structural report should become a
+pipeline artifact.
+
+For a complete, potentially sensitive review package, export it explicitly:
+
+```bash
+xscientist research fsck --repo ./first-study
+xscientist ara bundle --ara ./first-study/ara/<run> \
+  --dest ./benchmark-evidence/ara-audit.tar.gz --profile audit
+xscientist research export --repo ./first-study --ref HEAD \
+  --dest ./benchmark-evidence/research-export --include-payloads
+```
+
+Inspect and redact the resulting archives before sharing. They may contain
+prompts, tool output, datasets, or model responses; the shareable process
+report intentionally never includes those raw payloads.
+
 For a two-line conformance fixture, the human surface is intentionally
 process-shaped rather than score-shaped:
 
@@ -79,14 +105,28 @@ process-shaped rather than score-shaped:
 Process: 3 visible commits, 2/2 branches, 2 typed artifacts
   branch alternative-1 (diverged_or_behind, 3 commits)
   branch current (current, 2 commits)
-  commit … experiment: checkpoint:experiment [alternative-1]
+  commit … init: checkpoint:init [alternative-1,current]
   commit … ideation: checkpoint:ideation [alternative-1,current]
+  commit … experiment: checkpoint:experiment [alternative-1]
   Fair branch comparison: NOT VERIFIED (unverified: same_task_slice, same_budget, same_evaluator, same_base)
 ```
 
 The ellipses stand for short commit hashes. This fixture is a conformance
 example, not a scientific result or a claim that the two lines received equal
 model budgets.
+
+### Human comparison
+
+A human arm is possible, but this pilot does not currently claim a human-vs-agent
+scientific score. A matched study must hold constant the task manifest and
+slice, starting artifact, tools/data/network policy, wall-clock and cost
+budget, output schema, verifier/evaluator, and attempt count. Task order and
+stopping rules should be randomized or pre-registered; use multiple people or
+runs and report uncertainty. The same process contract can capture
+artifact-backed human checkpoints and decisions without collecting private
+free-form thought. Until a real human trajectory set and the official
+evaluator are available, compare only process observability/usability and keep
+`official_comparable: false`.
 
 The process section exposes checkpoint IDs, short commit IDs, stage/state,
 parent counts, branch relation (`current`, `same_head`, or

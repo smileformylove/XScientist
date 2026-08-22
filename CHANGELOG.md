@@ -39,6 +39,9 @@ for its Python package; the ARA protocol has its own version in
 - Process timelines now retain Git short hashes and use bounded parent-first
   ordering when checkpoint timestamps collide, making branch reasoning easier
   to review without exposing commit subjects.
+- Benchmark documentation now states the read-only evidence/ARA retention
+  boundary and gives explicit fsck, ARA-audit-bundle, and payload-export
+  commands; it also documents the controls required for a human baseline.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 

@@ -397,6 +397,48 @@ XScientist's `trace → replay → verify` plus metacognitive repair signals. Se
 [the benchmark protocol](docs/BENCHMARKS.md) for the exact boundary and the
 [official task dataset](https://huggingface.co/datasets/PrentisAI/AutoResearchEval).
 
+#### Evidence and ARA retention boundary
+
+The pilot is read-only. It does not create a trajectory, copy the task
+manifest, or silently write an ARA. The Python API returns the report in
+memory; the CLI persists the report only when its stdout is redirected. Any
+Research VCS objects, checkpoints, Git refs, ARA directories, or CAS payloads
+already present in the workspace remain in their original locations, but the
+benchmark report is a bounded, redacted index—not a full evidence archive.
+
+| Source | What remains on disk | What the pilot report contains |
+| --- | --- | --- |
+| Task manifest | The caller's original JSON/JSONL file | SHA-256, counts, and redacted contract failures; no gold/task prose |
+| Research VCS / typed evidence | `.xscientist/objects/`, `checkpoints/`, Git history, and local pointers | Bounded artifact/decision rows, hashes, signals, source totals, and truncation flags; payloads omitted |
+| ARA / CAS | Existing `ara/` roots and `.ara-store/`/local CAS remain untouched | Closure and binding summary only; no automatic full ARA snapshot or payload copy |
+| ARFT coverage | Nothing is written by `build_arft_coverage()` | Embedded structural summary; `save_arft_coverage()` is an explicit write |
+
+To preserve a complete review package, opt in explicitly and treat the result
+as potentially sensitive:
+
+```bash
+# Persist the bounded benchmark report itself.
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl --workspace ./first-study \
+  --limit 20 --kind open-ended --json > benchmark-report.json
+
+# Verify checkpoint, ARA-manifest, pointer, and CAS bindings.
+xscientist research fsck --repo ./first-study
+
+# Full ARA audit bundle (includes every non-GC ARA file).
+xscientist ara bundle --ara ./first-study/ara/<run> \
+  --dest ./benchmark-evidence/ara-audit.tar.gz --profile audit
+
+# Research VCS interoperability export; payloads require an explicit flag.
+xscientist research export --repo ./first-study --ref HEAD \
+  --dest ./benchmark-evidence/research-export --include-payloads
+```
+
+Inspect and redact these bundles before sharing: they may contain prompts,
+tool output, datasets, or model responses. `--show-process` and
+`workspace.process` intentionally remain summaries and never claim to contain
+all raw evidence.
+
 One local run on 2026-08-21 (macOS, Python 3.13, bundled balanced demo) produced:
 
 | Measurement | Result | Interpretation |
@@ -430,6 +472,24 @@ different layers:
 The paper figures are reported for context, not as a score that this repository
 claims to match; see the [paper](https://arxiv.org/abs/2608.14905) for its
 artifact-aware judge and full trajectory protocol.
+
+#### Can this be compared with people?
+
+Yes, but the current pilot does not yet produce a human-vs-agent scientific
+score. A defensible human arm must use the same task manifest and slice,
+starting artifact, tools/data/network policy, wall-clock and cost budget,
+output format, verifier/evaluator, and number of attempts. Randomize task
+order, pre-register the stopping rule, use more than one participant/run, and
+report uncertainty rather than a single best result.
+
+The same process contract can then record human checkpoints, evidence,
+failures, repairs, and gates without collecting private free-form thoughts.
+Comparable measures should be the evaluator's final score (when the official
+verifier is available), artifact-aware process diagnosis, time/cost, evidence
+completeness, auditability, and failure/recovery coverage. Until those controls
+and a real human trajectory set exist, this repository must keep
+`official_comparable: false`; it can compare process observability and
+usability, not claim that XScientist beats or matches researchers.
 
 To inspect the git-like process rather than only the endpoint, add
 `--show-process` to the pilot command:
