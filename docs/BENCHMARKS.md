@@ -56,6 +56,13 @@ The report contains three deliberately separate measurements:
 | `workspace.stage_coverage` / `stage_score` | Typed evidence coverage for A–F; `covered` is the minimum two-criterion bar and `complete` means every listed criterion passed; empty folders do not pass | No |
 | `workspace.closure.levels` and `workspace.metacognition` | `trace → replay → verify` and acknowledged-issue containment/repair | No; these are XScientist governance signals |
 | `workspace.process` | Bounded commits, branch topology, typed intermediate artifacts, failure/recovery signals, and fairness boundaries | No; it is the inspectable process layer |
+| `human_baseline` | Explicit local human-arm status; external inventory is never substituted | No; `not_reported` is preserved until a matched local arm exists |
+
+The top-level `human_baseline` record is intentionally explicit:
+`status: "not_reported"`, `matched_arm: false`, `score: null`, `local_runs: 0`,
+and `external_scores_injected: false` for the local pilot. External rows in
+[the source-audited inventory](HUMAN_BASELINES.md) are context only; they are
+never silently substituted into this field.
 
 Each report also records a SHA-256 of the supplied manifest and redacted
 row-level contract failures, so two runs can be compared without copying task
@@ -159,6 +166,30 @@ cost. A held/rejected gate is reported as contained review debt; it is not
 mislabelled as the paper's F.4 “shipped despite awareness” failure. The pilot
 therefore measures observability and governance, not autonomous scientific
 ability.
+
+### External human-baseline inventory
+
+The companion [human-baseline inventory](HUMAN_BASELINES.md) records public
+sources as-of 2026-08-22. It does not pretend that every paper mentioning
+“human” contains a human performance arm. `measured_human` is reserved for
+people who actually ran the stated tasks; public leaderboards and prior SOTA
+are marked as proxies; expert labeling, judge calibration, and human-verified
+ground truth are separate classes. The linked AutoResearchEval paper is
+explicitly `not_reported` for human task performance: its human contribution
+is annotation/calibration only.
+
+The direct measured rows (RE-Bench, PaperBench, DiscoveryWorld, BAISBench,
+BrowseComp, BrowseComp-V³, Mind2Web 2, WebArena, and a sampled DSBench study)
+are useful external context, but their tasks, budgets, tools, and metrics differ
+from this pilot. They must not be copied into
+`workspace.score` or combined into a cross-benchmark human average. The local
+pilot still has zero human runs and zero model rollouts; the only honest local
+status is no human-vs-agent scientific score. The inventory also includes a
+CORE-Bench follow-up showing a human-agent time uplift, plus MLRC-Bench and
+ResearchGym reference artifacts, all clearly labelled as process studies or
+proxies rather than autonomous human capability baselines.
+Adjacent GPQA/GAIA/H-ARC measurements are listed in the inventory for breadth,
+but are explicitly outside the scientific-research comparison.
 
 If review issues exist without an explicit corrective or hold/reject gate, the
 report uses `metacognition.status: "open"`; it never infers containment merely

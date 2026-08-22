@@ -33,6 +33,10 @@ for its Python package; the ARA protocol has its own version in
 - AutoResearch benchmark reports now expose a bounded Git-like checkpoint and
   branch topology, typed decision/failure signals, and explicit fairness
   checks while redacting free-form branch, commit, payload, and gold text.
+- Added a source-audited bilingual human-baseline inventory. It keeps direct
+  participant runs (including versioned BAISBench, Mind2Web 2, and WebArena)
+  separate from leaderboard references, expert validation, and judge
+  calibration; missing or non-tabulated scores remain `not_reported`.
 - Versioned `process_audit` schema coverage now keeps available and unavailable
   process reports machine-valid and distinguishes bounded samples from source
   totals.
@@ -42,6 +46,13 @@ for its Python package; the ARA protocol has its own version in
 - Benchmark documentation now states the read-only evidence/ARA retention
   boundary and gives explicit fsck, ARA-audit-bundle, and payload-export
   commands; it also documents the controls required for a human baseline.
+- Added a source-audited external human-baseline inventory that separates
+  measured participant runs from SOTA/leaderboard proxies, expert validation,
+  judge calibration, ground truth, and explicit `not_reported` cases; no
+  external number is treated as an XScientist score.
+- Autoresearch pilot JSON now carries an explicit `human_baseline` record with
+  `status: "not_reported"`, no matched arm, and a null score until a registered
+  local human run exists.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 

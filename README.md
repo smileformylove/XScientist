@@ -491,6 +491,54 @@ and a real human trajectory set exist, this repository must keep
 `official_comparable: false`; it can compare process observability and
 usability, not claim that XScientist beats or matches researchers.
 
+#### External human baselines (source-audited)
+
+We also maintain a [source-audited inventory of public human baselines](docs/HUMAN_BASELINES.md),
+updated 2026-08-22. It separates real participant runs from leaderboard/SOTA
+references, expert validation, human judge calibration, and human+agent
+workflow studies. The strongest directly measured rows include RE-Bench (61
+experts, 71 attempts), PaperBench (8 ML PhDs on a four-paper subset), and
+DiscoveryWorld (11 scientists on 16 tasks). For a biology-specific reference,
+BAISBench v1 reports a human arm on its own frozen 198-question/31-dataset
+release; the later v2 changes the task and only plots the aggregate human score,
+so the inventory deliberately does not transfer or approximate it. DSBench is
+listed separately as a small, incompletely documented sample rather than an
+expert baseline. Every score is reported only with its original task slice and
+budget; these numbers are not pooled into a “human average” or pasted into the
+XScientist report.
+For retrieval and research-engineering context it also records BrowseComp,
+BrowseComp-V³ (including its published human process score), Mind2Web 2,
+WebArena, and MLRC-Bench, while adjacent GPQA, GAIA, and H-ARC measurements
+remain outside the scientific-research comparison. Mind2Web 2 is a 30-task
+human subset of a 130-task suite; WebArena samples 170 templated intents with
+five CS graduate participants. Neither number is a human score for XScientist.
+
+For a compact, source-scoped comparison (not a leaderboard), the directly
+reported figures are:
+
+| External human arm | Reported result | Scope that must stay attached |
+| --- | ---: | --- |
+| RE-Bench | 82% non-zero; 24% matched/exceeded the strong reference | 61 experts, 71 attempts, 7 ML research-engineering environments, 8h |
+| PaperBench | 41.4% human best@3 after 48h | 3-paper subset of the human study; paper reproduction, not open research |
+| DiscoveryWorld | completion 0.66; knowledge 0.55 | 11 MSc/PhD scientists, 16 simulated-world tasks, 1h/task |
+| BAISBench v1 | BAIS-SD 0.762; CellTypist 0.437 ± 0.014 | Frozen v1: 198 questions/31 datasets; do not transfer to v2 |
+| BrowseComp | 29.2% solved; 86.4% agreement conditional on solved | 1,255 questions, human trainers, 2h cap; 29.2% is solve rate, not accuracy |
+| Mind2Web 2 | partial 0.79; success 0.54; Pass@3 0.83 | Random Subset-30 of 130 long-horizon web tasks; 7 participants |
+
+These rows are external measurements with different tasks, tools, metrics, and
+budgets. They are evidence for how to design a future matched arm, not numbers
+that can be substituted into `workspace.score`.
+
+For the linked AutoResearchEval paper, the honest status is
+`human_task_performance_baseline: not_reported_in_audited_source`: its human
+work is trajectory annotation and judge calibration, not a task-performance
+arm. XScientist itself currently has zero human runs and zero model rollouts,
+so it reports no human-vs-agent scientific score. “Not reported” is preserved
+as a first-class result rather than replaced with zero or an invented estimate.
+The JSON report makes this machine-checkable with
+`human_baseline.status: "not_reported"`, `matched_arm: false`, and `score: null`.
+The same record reports `local_runs: 0` and `external_scores_injected: false`.
+
 To inspect the git-like process rather than only the endpoint, add
 `--show-process` to the pilot command:
 

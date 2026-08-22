@@ -44,6 +44,12 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertFalse(report["official_comparable"])
         self.assertFalse(report["execution"]["network_used"])
         self.assertFalse(report["tasks"]["gold_fields_used"])
+        self.assertEqual(report["human_baseline"]["status"], "not_reported")
+        self.assertEqual(report["human_baseline"]["evidence_class"], "not_reported")
+        self.assertFalse(report["human_baseline"]["matched_arm"])
+        self.assertIsNone(report["human_baseline"]["score"])
+        self.assertEqual(report["human_baseline"]["local_runs"], 0)
+        self.assertFalse(report["human_baseline"]["external_scores_injected"])
         self.assertNotIn("must never be returned", json.dumps(report))
         self.assertNotIn("secret-gold", json.dumps(report))
 

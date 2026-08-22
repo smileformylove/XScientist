@@ -894,6 +894,17 @@ def benchmark_autoresearch_pilot(
         ],
         "official_comparable": False,
         "scope": "offline artifact conformance; no agent rollout evaluation",
+        "human_baseline": {
+            "status": "not_reported",
+            "evidence_class": "not_reported",
+            "matched_arm": False,
+            "score": None,
+            "participants_n": None,
+            "local_runs": 0,
+            "external_scores_injected": False,
+            "reason_code": "NO_LOCAL_HUMAN_RUN",
+            "inventory": "docs/HUMAN_BASELINES.md",
+        },
         "tasks": {
             "count": len(rows),
             "limit": limit,

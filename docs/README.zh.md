@@ -436,6 +436,43 @@ artifact-aware 过程诊断、时间/成本、证据完整性、可审查性和�
 控制条件和真实人类轨迹集建立前，报告必须保持 `official_comparable: false`；当前能做的
 是比较过程可观测性和易用性，不能声称 XScientist 胜过或等同于科研人员。
 
+#### 外部人类基线（已核对来源）
+
+另有一份[按来源核对的人类基线清单](HUMAN_BASELINES.md)（更新于 2026-08-22）。
+清单严格区分：真正让人完成任务的实测基线、公开 leaderboard/SOTA 参考、专家验证、
+人类评审一致性，以及“人类 + Agent”的流程增益研究。直接实测的来源包括 RE-Bench
+（61 位专家、71 次尝试）、PaperBench（8 位 ML 博士、4 篇论文子集）、DiscoveryWorld
+（11 位科学家、16 个任务）；生物信息学方向的 BAISBench v1 也有明确的人类对照，但只能
+引用 v1 自己的 198 题/31 数据集版本；v2 改了任务规模且只在图中画出人类总分，因此不
+读取柱高、不把 v1 数字搬到 v2。DSBench 只作为参与者信息不完整的小样本记录，不称为专家
+基线。所有数字都保留原始任务切片和预算，不跨 benchmark 求一个“人类平均分”。清单还列出 GPQA、GAIA、H-ARC 等相邻通用
+Agent benchmark 的人类实测，以及 BrowseComp、BrowseComp-V³（含公开的人类过程分数）、
+Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
+不把它们混入 XScientist 的科研流程比较。
+
+下面只做“带原始范围的并列参考”，不是 leaderboard，也不是 XScientist 的分数：
+
+| 外部人类实测 | 原文结果 | 必须同时保留的范围 |
+| --- | ---: | --- |
+| RE-Bench | 82% 非零；24% 达到/超过强参考解 | 61 位专家、71 次尝试、7 个 ML 研究工程环境、每次 8 小时 |
+| PaperBench | 人类 best@3 在 48 小时后为 41.4% | 人类研究的 3 篇论文子集；是论文复现，不是开放式科研 |
+| DiscoveryWorld | completion 0.66；knowledge 0.55 | 11 位 MSc/PhD 科学家、16 个模拟世界任务、每题 1 小时 |
+| BAISBench v1 | BAIS-SD 0.762；CellTypist 0.437 ± 0.014 | 冻结的 v1：198 题/31 个数据集；不能搬到 v2 |
+| BrowseComp | solve rate 29.2%；已解题中 86.4% 与参考答案一致 | 1255 题、人类训练师、2 小时上限；29.2% 是完成率，不是准确率 |
+| Mind2Web 2 | partial 0.79；success 0.54；Pass@3 0.83 | 130 个长程网页任务中的随机 Subset-30；7 位参与者 |
+
+这些数字来自不同任务、工具、指标和预算，只能帮助设计未来的同条件人类对照，不能
+写入 `workspace.score`，也不能合并成一个“人类平均分”。
+
+对本文引用的 AutoResearchEval，诚实记录是
+`human_task_performance_baseline: not_reported_in_audited_source`：论文中的人类工作是
+轨迹标注和 judge 校准，不是人类完成任务的对照组。XScientist 当前也没有人类运行和
+模型 rollout，因此没有“人类 vs Agent”的科研分数；`not_reported` 是明确结果，不会被
+替换成 0 或猜测值。
+JSON 报告也会固定写出 `human_baseline.status: "not_reported"`、
+`matched_arm: false`、`score: null`、`local_runs: 0` 和
+`external_scores_injected: false`，方便机器审查而不是靠文字声明。
+
 每次报告还记录输入清单的 SHA-256，并只输出按行号汇总的契约缺失字段；这样可以在
 不复制任务答案、不暴露本机路径的前提下复核两次实测是否使用了同一份清单。
 
