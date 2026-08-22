@@ -473,6 +473,53 @@ The paper figures are reported for context, not as a score that this repository
 claims to match; see the [paper](https://arxiv.org/abs/2608.14905) for its
 artifact-aware judge and full trajectory protocol.
 
+#### Compare the other systems in the talk (without inventing a ranking)
+
+The attached Expo Talk names systems that operate at different layers: full
+research agents (ScientistOne, AI Scientist v2, AutoResearchClaw, DeepScientist,
+AI-Researcher), adaptive search components (AdaEvolve, EvoX, MARS), a review
+component (ScholarPeer), a paper-writing component (PaperOrchestra), and a
+figure component (PaperBanana). MLE-STAR and DS-STAR are adjacent primary-
+source execution references added for coverage; they are not claimed to be
+named in the attached 107-page talk.
+The report also keeps talk-only references (Deep Researcher Agent and the AST
+role diagram) visible without pretending they have a matched benchmark. A
+figure or writing score is not an end-to-end discovery score, so the project
+keeps these scopes separate.
+Context-only mentions and future concepts (for example ScientistTwo) remain
+listed with their slide number in `talk_inventory` rather than being promoted
+to evaluated competitors.
+
+Generate the source-audited matrix locally:
+
+```bash
+# No network, provider, external rollout, or cross-system score aggregation.
+xscientist benchmark systems --json > system-comparison.json
+
+# Add the bounded Git-like process view for one local workspace.
+xscientist benchmark systems --workspace ./first-study --show-process
+```
+
+See the [English comparison](docs/SYSTEM_COMPARISON.md) and
+[中文对比](docs/SYSTEM_COMPARISON.zh.md). Each row records its primary paper or
+official repository, the benchmark layer it actually measures, and an explicit
+status (`reported_primary`, `local_observed`, `scoped_component`, or
+`not_measured_here`). The report hard-codes
+`official_comparable: false`, `score_claim_allowed: false`, and
+`quality_claim_allowed: false`; external numbers are never copied into
+`workspace.score`. Its `rollout_scope` and `cost_scope` are explicitly
+`this_audit_only`, while historical trajectory cost remains `unobserved`.
+With `--workspace`, branch topology, intermediate artifact counts, fairness
+blockers, and `artifact_scope: current_checkout_only` remain visible without
+exporting prompts or hidden free-form reasoning.
+The report also records the attached 107-page talk's filename and SHA-256, so a
+future audit can tell exactly which slide source was used.
+
+The fair next experiment is a registered matched rollout: same task slice,
+starting artifact, model/backbone, hardware, budget, evaluator, retry rule,
+seed count, and canonical rerun. Until that exists, this is a capability and
+evidence comparison—not a claim that XScientist beats any system or person.
+
 #### Can this be compared with people?
 
 Yes, but the current pilot does not yet produce a human-vs-agent scientific
@@ -507,12 +554,16 @@ expert baseline. Every score is reported only with its original task slice and
 budget; these numbers are not pooled into a “human average” or pasted into the
 XScientist report.
 For retrieval and research-engineering context it also records BrowseComp,
-BrowseComp-V³ (including its published human process score), Mind2Web 2,
-WebArena, and MLRC-Bench, while adjacent GPQA, GAIA, and H-ARC human/annotator
+BrowseComp-V³ (including its published human process score), VeriWeb, Mind2Web
+2, WebArena, and MLRC-Bench. A separately labelled human ideation study covers
+research-idea generation only. Adjacent GPQA, GAIA, and H-ARC human/annotator
 reference measurements remain outside the scientific-research comparison.
 Mind2Web 2 is a 30-task
 human subset of a 130-task suite; WebArena samples 170 templated intents with
 five CS graduate participants. Neither number is a human score for XScientist.
+ScholarPeer’s existing human reviews and PaperOrchestra’s 11-researcher
+side-by-side judgments are retained as judge-calibration/reference evidence,
+not as human task-performance arms.
 
 For a compact, source-scoped comparison (not a leaderboard), the directly
 reported figures are:
@@ -522,8 +573,11 @@ reported figures are:
 | RE-Bench | 82% non-zero; 24% matched/exceeded the strong reference | 61 experts, 71 attempts, 7 ML research-engineering environments, 8h |
 | PaperBench | 41.4% human best@3 after 48h | 3-paper subset of the human study; paper reproduction, not open research |
 | DiscoveryWorld | completion 0.66; knowledge 0.55 | 11 MSc/PhD scientists, 16 simulated-world tasks, 1h/task |
+| [Research ideation study](https://arxiv.org/abs/2409.04109) | Human ideas: novelty 4.86 ± 1.26; feasibility 6.53 ± 1.50; overall 4.69 ± 1.16 | 49 NLP idea writers, one proposal each in a 10-day window; ideation-only, not end-to-end research |
+| [PaperQA2 / LitQA2](https://arxiv.org/abs/2409.13740) | Human precision 73.8% ± 9.6%; accuracy 67.7% ± 11.9% | 9 biology/science PhD or PhD-student evaluators; literature QA only, roughly one week per quiz |
+| [VeriWeb](https://arxiv.org/abs/2508.04026) | Human completion L1→L5: 47% / 40% / 15% / 6% / 1%; full success 0% under 12 min/task | 5 annotators, 10 random tasks per level; web information seeking, not scientific-code execution |
 | BAISBench v1 | BAIS-SD 0.762; CellTypist 0.437 ± 0.014 | Frozen v1: 198 questions/31 datasets; do not transfer to v2 |
-| BrowseComp | 29.2% solved; 86.4% agreement conditional on solved | 1,255 questions, human trainers, 2h cap; 29.2% is solve rate, not accuracy |
+| BrowseComp | 29.2% solved; 86.4% agreement conditional on solved | 1,255 attempted of 1,266 questions, human trainers, 2h cap; 29.2% is solve rate, not accuracy |
 | Mind2Web 2 | partial 0.79; success 0.54; Pass@3 0.83 (cross-participant) | Random Subset-30 of 130 long-horizon web tasks; 7 participants, 3 different people per task |
 
 These rows are external measurements with different tasks, tools, metrics, and
@@ -539,6 +593,9 @@ as a first-class result rather than replaced with zero or an invented estimate.
 The JSON report makes this machine-checkable with
 `human_baseline.status: "not_reported"`, `matched_arm: false`, and `score: null`.
 The same record reports `local_runs: 0` and `external_scores_injected: false`.
+Its `evidence_retention` field also states, machine-readably, that the pilot
+does not copy raw trajectories, ARA snapshots, or CAS payloads; complete audit
+bundles require the explicit export commands documented above.
 
 To inspect the git-like process rather than only the endpoint, add
 `--show-process` to the pilot command:

@@ -14,7 +14,7 @@ SUBCOMMANDS = {
     "executor": "check build prepare update",
     "upgrade": "check",
     "conformance": "init check",
-    "benchmark": "first-run autoresearch",
+    "benchmark": "first-run autoresearch systems",
     "metrics": "status enable disable export",
     "capability": "list check",
     "privacy": "audit",

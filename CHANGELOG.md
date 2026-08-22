@@ -53,6 +53,12 @@ for its Python package; the ARA protocol has its own version in
 - Autoresearch pilot JSON now carries an explicit `human_baseline` record with
   `status: "not_reported"`, no matched arm, and a null score until a registered
   local human run exists.
+- Added a bilingual, source-audited comparison matrix and
+  `xscientist benchmark systems`. It separates end-to-end agents from MLE,
+  review, writing, and figure components; includes primary-source links and a
+  redacted Git-like process view; and hard-codes that no cross-system score or
+  quality claim is made. Audit-only rollout/cost scope is explicit, and the
+  human inventory now includes separate ideation and web-process references.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 

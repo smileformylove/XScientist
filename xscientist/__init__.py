@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .research_lifecycle import ResearchLifecycle
     from .research_closure import audit_research_closure, closure_level_summary
     from .process_audit import build_process_summary
+    from .system_comparison import build_system_comparison
     from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
     from .research_dag import build_research_dag, export_research_dag
     from .research_discovery import (
@@ -111,6 +112,10 @@ def __getattr__(name: str) -> Any:
         from .process_audit import build_process_summary
 
         value = build_process_summary
+    elif name == "build_system_comparison":
+        from .system_comparison import build_system_comparison
+
+        value = build_system_comparison
     elif name in {"build_research_dag", "export_research_dag"}:
         from . import research_dag
 
@@ -180,6 +185,7 @@ __all__ = [
     "audit_research_closure",
     "build_arft_coverage",
     "build_process_summary",
+    "build_system_comparison",
     "closure_level_summary",
     "assess_generalization",
     "build_discovery_contract",

@@ -42,6 +42,10 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
             report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
         self.assertTrue(report["ok"])
         self.assertFalse(report["official_comparable"])
+        self.assertEqual(
+            report["comparison_context"]["mode"], "qualitative_source_audit"
+        )
+        self.assertFalse(report["comparison_context"]["external_scores_injected"])
         self.assertFalse(report["execution"]["network_used"])
         self.assertFalse(report["tasks"]["gold_fields_used"])
         self.assertEqual(report["human_baseline"]["status"], "not_reported")
@@ -50,6 +54,13 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertIsNone(report["human_baseline"]["score"])
         self.assertEqual(report["human_baseline"]["local_runs"], 0)
         self.assertFalse(report["human_baseline"]["external_scores_injected"])
+        retention = report["evidence_retention"]
+        self.assertEqual(retention["mode"], "read_only_bounded_index")
+        self.assertFalse(retention["task_manifest_copied"])
+        self.assertFalse(retention["raw_trajectory_copied"])
+        self.assertFalse(retention["ara_snapshot_written"])
+        self.assertFalse(retention["cas_payload_copied"])
+        self.assertTrue(retention["workspace_artifacts_untouched"])
         self.assertNotIn("must never be returned", json.dumps(report))
         self.assertNotIn("secret-gold", json.dumps(report))
 
@@ -394,7 +405,11 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
                 "created_at": f"2026-01-01T00:00:{index:02d}Z",
                 "content_hash": f"sha256:{index:064x}",
                 "payload": {"status": "failed" if index == 0 else "completed"},
-                "relations": [],
+                "relations": (
+                    [{"type": "repairs", "target": "rso-0000000000000000"}]
+                    if index == 3
+                    else []
+                ),
                 "provenance": {},
             }
             for index in range(8)
@@ -449,8 +464,16 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertTrue(report["limits"]["truncated"]["commits"])
         self.assertTrue(report["limits"]["truncated"]["artifacts"])
         self.assertTrue(report["limits"]["truncated"]["decisions"])
-        self.assertEqual(report["intermediate"]["failed_attempts"], 0)
-        self.assertEqual(report["intermediate"]["completed_attempts"], 0)
+        # Header counts are computed over the full validated object store even
+        # when only three artifact rows are shown in the bounded window.
+        self.assertEqual(report["intermediate"]["failed_attempts"], 1)
+        self.assertEqual(report["intermediate"]["completed_attempts"], 2)
+        self.assertEqual(report["intermediate"]["valid_object_count"], 8)
+        self.assertEqual(report["intermediate"]["failed_or_blocked_count"], 1)
+        self.assertEqual(report["intermediate"]["recovery_candidates"], 1)
+        self.assertEqual(
+            report["intermediate"]["statistics_scope"], "all_valid_objects"
+        )
         self.assertTrue(report["intermediate"]["attempts_truncated"])
         self.assertFalse(
             report["branch_topology"]["fair_branch_comparison"]["eligible"]

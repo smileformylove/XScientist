@@ -17,6 +17,30 @@ This is not a model-quality benchmark. It must not be used to claim scientific
 performance, autonomous discovery quality, or provider speed. Those require
 separate registered datasets, budgets, evidence, and evaluation authority.
 
+## Cross-system capability matrix
+
+The talk accompanying this project names several systems that are not
+interchangeable benchmarks: some are end-to-end discovery agents, while
+AdaEvolve/EvoX/MARS, ScholarPeer, PaperOrchestra, and PaperBanana focus on
+search, review, writing, and figures respectively. MLE-STAR and DS-STAR are
+adjacent primary-source execution references added for coverage; they are not
+claimed to be named in the attached 107-page talk. Generate the source-audited,
+non-ranking matrix with:
+
+```bash
+xscientist benchmark systems --json > system-comparison.json
+xscientist benchmark systems --workspace ./first-study --show-process
+```
+
+This command is provider-free and does not fetch or execute any external
+system. It records primary-source links, talk-only provenance, capability
+scope, and an optional redacted XScientist process view. Its report fixes
+`official_comparable: false`, `score_claim_allowed: false`, and
+`quality_claim_allowed: false`. The attached 107-page talk is retained by
+filename and SHA-256 in `source_manifest`; it is a scope-discovery source, not
+a substitute for a primary paper or matched run. Read [the full comparison](SYSTEM_COMPARISON.md)
+for the dimensions, fair-run requirements, and explicit non-claims.
+
 ## AutoResearchEval-inspired pilot
 
 The supplied article discusses [AutoResearchEval](https://arxiv.org/abs/2608.14905):
@@ -63,6 +87,13 @@ The top-level `human_baseline` record is intentionally explicit:
 and `external_scores_injected: false` for the local pilot. External rows in
 [the source-audited inventory](HUMAN_BASELINES.md) are context only; they are
 never silently substituted into this field.
+
+The machine-readable `evidence_retention` record makes the storage boundary
+explicit: the API/CLI pilot writes no raw trajectory, ARA snapshot, or CAS
+payload, and the process view is a bounded redacted index. A caller may retain
+the JSON by redirecting stdout and may create a complete, sensitive audit
+package only with the explicit `fsck`, `ara bundle`, and payload-export
+commands below.
 
 Each report also records a SHA-256 of the supplied manifest and redacted
 row-level contract failures, so two runs can be compared without copying task
@@ -162,7 +193,8 @@ repository an explicit state rather than a schema-less empty result.
 
 `official_comparable` is always `false`, `gold_fields_used` is always `false`,
 and the pilot reports zero rollouts, provider calls, network use, and model
-cost. A held/rejected gate is reported as contained review debt; it is not
+cost for the audit itself; historical trajectory cost remains unobserved. A
+held/rejected gate is reported as contained review debt; it is not
 mislabelled as the paper's F.4 “shipped despite awareness” failure. The pilot
 therefore measures observability and governance, not autonomous scientific
 ability.
@@ -179,7 +211,8 @@ explicitly `not_reported` for human task performance: its human contribution
 is annotation/calibration only.
 
 The direct measured rows (RE-Bench, PaperBench, DiscoveryWorld, BAISBench,
-BrowseComp, BrowseComp-V³, Mind2Web 2, WebArena, and a sampled DSBench study)
+BrowseComp, BrowseComp-V³, VeriWeb, Mind2Web 2, WebArena, and a sampled DSBench
+study), plus the separate research-ideation arm,
 are useful external context, but their tasks, budgets, tools, and metrics differ
 from this pilot. They must not be copied into
 `workspace.score` or combined into a cross-benchmark human average. The local

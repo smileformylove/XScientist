@@ -330,8 +330,9 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
     list[str],
     Counter[str],
     list[dict[str, Any]],
+    dict[str, Any],
 ]:
-    """Read at most ``limit`` object payloads while counting the source store.
+    """Retain at most ``limit`` object payloads while counting source headers.
 
     Directory enumeration is metadata-only.  For a small store we retain the
     existing validator path; for a large store we sample round-robin by kind so
@@ -349,24 +350,107 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
     source_kind_counts: Counter[str] = Counter(
         _safe_kind(path.parent.name) for path in paths
     )
+
+    def new_source_stats() -> dict[str, Any]:
+        return {
+            "valid_object_count": 0,
+            "valid_kind_counts": Counter(),
+            "state_counts": Counter(),
+            "stage_counts": Counter(),
+            "attempt_metrics": {
+                "attempt_count": 0,
+                "failed_attempts": 0,
+                "completed_attempts": 0,
+            },
+            "failed_or_blocked_count": 0,
+            "recovery_failed_ids": set(),
+            "recovery_links": [],
+        }
+
+    def accumulate_source_stats(stats: dict[str, Any], item: Mapping[str, Any]) -> None:
+        """Accumulate scalar headers without retaining the full object payload."""
+
+        stats["valid_object_count"] += 1
+        kind = _safe_kind(item.get("kind"))
+        stats["valid_kind_counts"][kind] += 1
+        state = _safe_state(item.get("state"))
+        stats["state_counts"][state] += 1
+        stage = _KIND_STAGE.get(str(item.get("kind") or ""), "X")
+        stats["stage_counts"][stage] += 1
+
+        raw_state = str(item.get("state") or "").lower()
+        payload = (
+            item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+        )
+        payload_state = str(payload.get("status") or "").lower()
+        effective_state = payload_state or raw_state
+        if str(item.get("kind") or "") == "experiment_attempt":
+            stats["attempt_metrics"]["attempt_count"] += 1
+            if effective_state in _FAILED_STATES:
+                stats["attempt_metrics"]["failed_attempts"] += 1
+            if effective_state in _COMPLETED_STATES:
+                stats["attempt_metrics"]["completed_attempts"] += 1
+
+        failure = raw_state in _FAILED_STATES or bool(_failure_codes(item))
+        if payload_state in _FAILED_STATES:
+            failure = True
+        if failure:
+            stats["failed_or_blocked_count"] += 1
+
+        object_id = str(item.get("object_id") or "")
+        if effective_state in _FAILED_STATES:
+            # Keep only identifiers needed for an internal relation join; they
+            # are never returned in the report.  The cap prevents a malformed
+            # store from turning the audit into an unbounded index.
+            if len(stats["recovery_failed_ids"]) < _HARD_MAX_ARTIFACTS * 1024:
+                stats["recovery_failed_ids"].add(object_id)
+        if effective_state in _COMPLETED_STATES:
+            targets = {
+                str(relation.get("target") or "")
+                for relation in item.get("relations") or []
+                if isinstance(relation, Mapping)
+                and str(relation.get("type") or "") in _REPAIR_RELATIONS
+            }
+            if targets and len(stats["recovery_links"]) < _HARD_MAX_ARTIFACTS * 1024:
+                stats["recovery_links"].append(targets)
+
+    source_stats = new_source_stats()
     if not paths:
         # Keep a small compatibility seam for callers/tests that provide a
         # repository adapter without materializing an object directory.
         try:
             rows = list_research_objects(root)
         except (OSError, ValueError, ResearchGitError) as exc:
-            return [], 0, False, [type(exc).__name__], source_kind_counts, []
+            return (
+                [],
+                0,
+                False,
+                [type(exc).__name__],
+                source_kind_counts,
+                [],
+                source_stats,
+            )
         source_count = len(rows)
         source_kind_counts = Counter(_safe_kind(item.get("kind")) for item in rows)
+        decision_rows = [
+            item for item in rows if str(item.get("kind") or "") in _DECISION_KINDS
+        ][-_HARD_MAX_DECISIONS:]
+        for item in rows:
+            accumulate_source_stats(source_stats, item)
+        source_stats["recovery_candidates"] = sum(
+            bool(targets.intersection(source_stats["recovery_failed_ids"]))
+            for targets in source_stats["recovery_links"]
+        )
+        source_stats.pop("recovery_failed_ids", None)
+        source_stats.pop("recovery_links", None)
         return (
             rows[-limit:] if source_count > limit else rows,
             source_count,
             source_count > limit,
             [],
             source_kind_counts,
-            [item for item in rows if str(item.get("kind") or "") in _DECISION_KINDS][
-                -_HARD_MAX_DECISIONS:
-            ],
+            decision_rows,
+            source_stats,
         )
 
     truncated = source_count > limit
@@ -391,21 +475,15 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
             if not progressed:
                 break
 
+    selected_set = set(selected_paths)
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
-    for path in selected_paths:
-        try:
-            rows.append(
-                validate_research_object(json.loads(path.read_text(encoding="utf-8")))
-            )
-        except (OSError, json.JSONDecodeError, ResearchObjectError, ValueError) as exc:
-            errors.append(type(exc).__name__)
     decision_rows: list[dict[str, Any]] = []
-    decision_paths = [path for path in paths if path.parent.name in _DECISION_KINDS][
-        -_HARD_MAX_DECISIONS:
-    ]
-    selected_ids = {str(item.get("object_id") or "") for item in rows}
-    for path in decision_paths:
+    # The scalar counters are computed over every valid header, while only
+    # ``selected_paths`` are retained as artifact rows.  Decision rows have a
+    # separate hard window so a large hypothesis/artifact history cannot hide
+    # the latest gate/review events.
+    for path in paths:
         try:
             item = validate_research_object(
                 json.loads(path.read_text(encoding="utf-8"))
@@ -413,18 +491,26 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
         except (OSError, json.JSONDecodeError, ResearchObjectError, ValueError) as exc:
             errors.append(type(exc).__name__)
             continue
-        if str(item.get("object_id") or "") not in selected_ids:
+        accumulate_source_stats(source_stats, item)
+        if path in selected_set:
+            rows.append(item)
+        if str(item.get("kind") or "") in _DECISION_KINDS:
             decision_rows.append(item)
-    decision_rows.extend(
-        item for item in rows if str(item.get("kind") or "") in _DECISION_KINDS
+    decision_rows = decision_rows[-_HARD_MAX_DECISIONS:]
+    source_stats["recovery_candidates"] = sum(
+        bool(targets.intersection(source_stats["recovery_failed_ids"]))
+        for targets in source_stats["recovery_links"]
     )
+    source_stats.pop("recovery_failed_ids", None)
+    source_stats.pop("recovery_links", None)
     return (
         rows,
         source_count,
         truncated,
         sorted(set(errors)),
         source_kind_counts,
-        decision_rows[-_HARD_MAX_DECISIONS:],
+        decision_rows,
+        source_stats,
     )
 
 
@@ -817,6 +903,7 @@ def _unavailable_summary(
         "intermediate": {
             "object_count": 0,
             "source_object_count": 0,
+            "valid_object_count": 0,
             "statistics_scope": "no_repository",
             "attempt_statistics_scope": "no_repository",
             "attempts_truncated": False,
@@ -829,6 +916,7 @@ def _unavailable_summary(
                 "stage_total": len(_STAGE_LABELS),
                 "ratio": 0.0,
                 "truncated": bool(truncation.get("artifacts")),
+                "scope": "no_repository",
                 "quality_claim_allowed": False,
             },
             "attempt_count": 0,
@@ -995,6 +1083,7 @@ def build_process_summary(
             object_read_errors,
             source_kind_counts,
             source_decision_objects,
+            source_stats,
         ) = _bounded_object_scan(root, effective_artifacts)
         errors.extend(object_read_errors)
     except (OSError, ValueError, ResearchGitError) as exc:
@@ -1116,40 +1205,35 @@ def build_process_summary(
     )
     bounded_objects = ordered_objects[-effective_artifacts:]
     artifact_rows = [_artifact_row(item) for item in bounded_objects]
-    kind_counts = (
-        source_kind_counts
-        if objects_truncated
-        else Counter(_safe_kind(item.get("kind")) for item in objects)
-    )
+    # Header statistics are calculated over every valid object, even when the
+    # exported artifact rows are bounded.  This prevents a small display
+    # window from turning old failed/completed attempts into apparent zeros.
+    kind_counts = source_stats["valid_kind_counts"]
     source_decision_count = sum(
-        value for kind, value in source_kind_counts.items() if kind in _DECISION_KINDS
+        value for kind, value in kind_counts.items() if kind in _DECISION_KINDS
     )
-    state_counts = Counter(_safe_state(item.get("state")) for item in objects)
-    stage_counts = Counter(
-        _KIND_STAGE.get(str(item.get("kind") or ""), "X") for item in objects
-    )
+    state_counts = source_stats["state_counts"]
+    stage_counts = source_stats["stage_counts"]
     failed = [
         row
         for row in artifact_rows
         if row["state"] in {"failed", "rejected", "blocked"} or row["failure_codes"]
     ]
-    source_failed_count = sum(bool(_failure_codes(item)) for item in objects)
+    source_failed_count = int(source_stats["failed_or_blocked_count"])
     decision_objects = source_decision_objects
     decisions = [
         _decision_row(item) for item in decision_objects[-effective_decisions:]
     ]
     decisions_truncated = source_decision_count > effective_decisions
     merge_observed = any(int(row.get("parent_count") or 0) > 1 for row in commits)
-    branch_observed = len(branch_rows) > 1
+    branch_observed = len(all_branches) > 1
     # Attempt totals are scalar header counts over the source object set;
     # detailed artifact rows remain bounded and may not contain every attempt.
-    attempt_metrics = _attempt_metrics(objects)
+    attempt_metrics = dict(source_stats["attempt_metrics"])
     observed_stages = sorted(
-        {
-            _KIND_STAGE.get(str(item.get("kind") or ""), "X")
-            for item in bounded_objects
-            if _KIND_STAGE.get(str(item.get("kind") or ""), "X") in _STAGE_LABELS
-        }
+        stage
+        for stage in stage_counts
+        if stage in _STAGE_LABELS and stage_counts[stage] > 0
     )
     coverage = {
         "observed_stages": observed_stages,
@@ -1157,10 +1241,11 @@ def build_process_summary(
         "stage_total": len(_STAGE_LABELS),
         "ratio": round(len(observed_stages) / len(_STAGE_LABELS), 3),
         "truncated": objects_truncated or commits_truncated,
+        "scope": "all_valid_objects",
         "quality_claim_allowed": False,
     }
     branch_fairness = _fair_branch_comparison(
-        branch_count=len(branch_rows), task_manifest_sha256=task_manifest_sha256
+        branch_count=len(all_branches), task_manifest_sha256=task_manifest_sha256
     )
     # Branch aliases are intentionally the only branch labels exported.  Keep
     # a stable digest for local cross-report joins without exposing the ref.
@@ -1198,12 +1283,9 @@ def build_process_summary(
         "intermediate": {
             "object_count": source_object_count,
             "source_object_count": source_object_count,
-            "statistics_scope": (
-                "bounded_object_sample" if objects_truncated else "all_objects"
-            ),
-            "attempt_statistics_scope": (
-                "bounded_object_sample" if objects_truncated else "all_objects"
-            ),
+            "statistics_scope": "all_valid_objects",
+            "valid_object_count": int(source_stats["valid_object_count"]),
+            "attempt_statistics_scope": "all_valid_objects",
             "attempts_truncated": objects_truncated,
             "kind_counts": dict(sorted(kind_counts.items())),
             "state_counts": dict(sorted(state_counts.items())),
@@ -1214,15 +1296,13 @@ def build_process_summary(
             "decision_events": decisions,
             "decision_statistics_scope": "all_decision_headers; events are bounded",
             "failed_or_blocked_artifacts": failed,
-            "failed_or_blocked_count": len(failed),
+            "failed_or_blocked_count": source_failed_count,
             "failed_or_blocked_visible_count": len(failed),
             "source_failed_or_blocked_count": source_failed_count,
-            "failure_statistics_scope": "bounded_artifact_rows",
-            "recovery_candidates": _recovery_candidate_count(objects),
+            "failure_statistics_scope": "all_valid_objects",
+            "recovery_candidates": int(source_stats["recovery_candidates"]),
             "recovery_claim_allowed": False,
-            "recovery_statistics_scope": (
-                "bounded_object_sample" if objects_truncated else "all_objects"
-            ),
+            "recovery_statistics_scope": "all_valid_objects",
         },
         "fairness": _fairness_report(
             task_manifest_sha256=task_manifest_sha256,

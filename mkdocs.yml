@@ -34,6 +34,8 @@ nav:
       - Reproducible gallery: examples/README.md
       - First-run benchmark: BENCHMARKS.md
       - Human baseline inventory: HUMAN_BASELINES.md
+      - Research-system comparison: SYSTEM_COMPARISON.md
+      - Research-system comparison (中文): SYSTEM_COMPARISON.zh.md
   - Operate:
       - Long-running studies: LONG_RUNNING_GUIDE.md
       - Configuration: CONFIG_REFERENCE.md

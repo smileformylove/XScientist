@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/system-comparison.v1/system_comparison.schema.json",
+  "title": "XScientist source-audited system comparison",
+  "type": "object",
+  "required": [
+    "schema",
+    "ok",
+    "comparison_mode",
+    "official_comparable",
+    "score_claim_allowed",
+    "quality_claim_allowed",
+    "network_used",
+    "provider_used",
+    "external_rollouts",
+    "source_manifest",
+    "talk_inventory",
+    "dimensions",
+    "systems",
+    "xscientist_local"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.system-comparison.v1"},
+    "ok": {"const": true},
+    "version": {"type": "string"},
+    "comparison_mode": {"const": "qualitative_source_audit"},
+    "official_comparable": {"const": false},
+    "score_claim_allowed": {"const": false},
+    "quality_claim_allowed": {"const": false},
+    "network_used": {"const": false},
+    "provider_used": {"const": false},
+    "external_rollouts": {"const": 0},
+    "source_manifest": {
+      "type": "object",
+      "required": ["attached_talk"],
+      "properties": {
+        "attached_talk": {
+          "type": "object",
+          "required": ["filename", "sha256", "page_count", "role"],
+          "properties": {
+            "filename": {"type": "string", "pattern": "^[^/\\\\]+\\.pdf$"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "page_count": {"type": "integer", "minimum": 1},
+            "role": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "talk_inventory": {
+      "type": "object",
+      "required": ["included_as_rows", "adjacent_references_not_ranked", "context_only_mentions", "note"],
+      "properties": {
+        "included_as_rows": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "adjacent_references_not_ranked": {"type": "array", "items": {"type": "string"}},
+        "context_only_mentions": {"type": "array", "items": {"type": "string"}},
+        "note": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "source_policy": {"type": "object"},
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "label": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "systems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "source_status",
+          "comparison_status",
+          "sources",
+          "capabilities",
+          "benchmark_anchors",
+          "distinction",
+          "limitations",
+          "human_evidence"
+        ],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "name": {"type": "string"},
+          "scope": {"type": "string"},
+          "source_status": {"type": "string"},
+          "comparison_status": {"type": "string"},
+          "talk_slides": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["title", "url", "kind"],
+              "properties": {
+                "title": {"type": "string"},
+                "url": {"type": "string", "minLength": 1},
+                "kind": {"type": "string"},
+                "note": {"type": "string"}
+              },
+              "additionalProperties": true
+            }
+          },
+          "capabilities": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "string"}
+          },
+          "benchmark_anchors": {"type": "array", "items": {"type": "string"}},
+          "distinction": {"type": "string"},
+          "limitations": {"type": "array", "items": {"type": "string"}},
+          "human_evidence": {"$ref": "#/$defs/humanEvidence"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "xscientist_local": {
+      "type": "object",
+      "required": [
+        "status",
+        "workspace_supplied",
+        "path_disclosed",
+        "rollouts",
+        "rollout_scope",
+        "provider_calls",
+        "network_used",
+        "model_cost_usd",
+        "cost_scope",
+        "historical_trajectory_cost",
+        "score",
+        "process"
+      ],
+      "properties": {
+        "status": {"type": "string"},
+        "workspace_supplied": {"type": "boolean"},
+        "path_disclosed": {"const": false},
+        "rollouts": {"const": 0},
+        "rollout_scope": {"const": "this_audit_only"},
+        "provider_calls": {"const": 0},
+        "network_used": {"const": false},
+        "model_cost_usd": {"const": 0.0},
+        "cost_scope": {"const": "this_audit_only"},
+        "historical_trajectory_cost": {"const": "unobserved"},
+        "score": {"type": ["number", "null"]},
+        "process": {"type": ["object", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "interpretation": {"type": "string"}
+  },
+  "$defs": {
+    "humanEvidence": {
+      "type": "object",
+      "required": ["status", "same_condition", "score", "source", "note"],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_reported",
+            "human_reference_proxy",
+            "human_SOTA_reference",
+            "human_judgment_calibration",
+            "human_agent_process"
+          ]
+        },
+        "same_condition": {"const": false},
+        "score": {"type": ["number", "null"]},
+        "source": {"type": "string", "minLength": 1},
+        "note": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

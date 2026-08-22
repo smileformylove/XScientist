@@ -423,6 +423,41 @@ hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发�
 论文数字仅作参照，不代表本项目复现了论文得分；完整协议见
 [论文](https://arxiv.org/abs/2608.14905)。
 
+#### 对比演讲稿里的其他方案（不编造排名）
+
+附带 Expo Talk 中的方案其实处在不同层级：端到端科研代理（ScientistOne、AI
+Scientist v2、AutoResearchClaw、DeepScientist、AI-Researcher），自适应搜索组件
+（AdaEvolve、EvoX、MARS），同行评审组件 ScholarPeer，论文写作组件
+PaperOrchestra，以及科研绘图组件 PaperBanana。MLE-STAR、DS-STAR 是为了覆盖执行层
+而补充的相邻主来源方案；它们没有被声称出现在这份 107 页附件中。演讲稿里只出现的
+Deep Researcher Agent 和 AST 角色图也会保留，但不会假装有匹配 benchmark。
+绘图或写作分数不是端到端发现分数，因此本项目不会把它们合成一个总榜。
+只在背景页出现的名称和 ScientistTwo 等未来概念会在 `talk_inventory` 中保留页码，
+但不会被提升为已评测竞品。
+
+可以离线生成来源审计矩阵：
+
+```bash
+# 不联网、不调用 Provider、不启动外部 rollout，也不聚合跨系统分数。
+xscientist benchmark systems --json > system-comparison.json
+
+# 给一个本地工作区附加有界 Git-like 过程视图。
+xscientist benchmark systems --workspace ./first-study --show-process
+```
+
+详见[中文对比](SYSTEM_COMPARISON.zh.md)和[英文对比](SYSTEM_COMPARISON.md)。每一行都保留
+论文/官方仓库、实际 benchmark 层级和证据状态（`reported_primary`、
+`local_observed`、`scoped_component`、`not_measured_here` 等）。报告固定写出
+`official_comparable: false`、`score_claim_allowed: false`、
+`quality_claim_allowed: false`；外部数字不会被复制进 `workspace.score`。传入
+`--workspace` 后，仍可看到分支拓扑、中间 artifact 数量、公平性阻塞项和
+`artifact_scope: current_checkout_only`，但不会导出 prompt 或隐藏自由推理。
+报告还记录附带 107 页演讲稿的文件名和 SHA-256，之后可以确认使用的是哪一份幻灯片来源。
+
+真正公平的下一步是注册匹配 rollout：相同 task slice、starting artifact、模型/骨干、
+硬件、预算、evaluator、重试规则、seed 数和 canonical rerun。在此之前，这只是能力与
+证据对比，不声称 XScientist 超过任何系统或人。
+
 #### 能不能和人做 benchmark 对比？
 
 可以，但当前 pilot 还不能直接给出“人类 vs Agent”的科研分数。可信的人类对照组必须
@@ -447,8 +482,11 @@ artifact-aware 过程诊断、时间/成本、证据完整性、可审查性和�
 读取柱高、不把 v1 数字搬到 v2。DSBench 只作为参与者信息不完整的小样本记录，不称为专家
 基线。所有数字都保留原始任务切片和预算，不跨 benchmark 求一个“人类平均分”。清单还列出 GPQA、GAIA、H-ARC 等相邻通用
 Agent benchmark 的人类/标注者参考测量，以及 BrowseComp、BrowseComp-V³（含公开的人类过程分数）、
-Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
+VeriWeb、Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考；另有独立的科研想法生成
+人类研究，但明确
 不把它们混入 XScientist 的科研流程比较。
+ScholarPeer 的既有人工评审和 PaperOrchestra 的 11 位研究者并排偏好评审只作为
+judge 校准/参考证据保存，不作为人类完成任务的实测对照组。
 
 下面只做“带原始范围的并列参考”，不是 leaderboard，也不是 XScientist 的分数：
 
@@ -457,8 +495,11 @@ Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
 | RE-Bench | 82% 非零；24% 达到/超过强参考解 | 61 位专家、71 次尝试、7 个 ML 研究工程环境、每次 8 小时 |
 | PaperBench | 人类 best@3 在 48 小时后为 41.4% | 人类研究的 3 篇论文子集；是论文复现，不是开放式科研 |
 | DiscoveryWorld | completion 0.66；knowledge 0.55 | 11 位 MSc/PhD 科学家、16 个模拟世界任务、每题 1 小时 |
+| [科研想法生成研究](https://arxiv.org/abs/2409.04109) | 人类想法：novelty 4.86 ± 1.26；feasibility 6.53 ± 1.50；overall 4.69 ± 1.16 | 49 位 NLP 想法作者、每人一份、10 天窗口；仅测想法生成，不是端到端科研 |
+| [PaperQA2 / LitQA2](https://arxiv.org/abs/2409.13740) | 人类 precision 73.8% ± 9.6%；accuracy 67.7% ± 11.9% | 9 位生物/相关科学 PhD 或博士生；只测文献问答，每轮约一周 |
+| [VeriWeb](https://arxiv.org/abs/2508.04026) | 人类完成率 L1→L5：47% / 40% / 15% / 6% / 1%；12 分钟/题下完整成功为 0% | 5 位标注者、每级随机 10 题；网页信息检索，不是科研代码执行 |
 | BAISBench v1 | BAIS-SD 0.762；CellTypist 0.437 ± 0.014 | 冻结的 v1：198 题/31 个数据集；不能搬到 v2 |
-| BrowseComp | solve rate 29.2%；已解题中 86.4% 与参考答案一致 | 1255 题、人类训练师、2 小时上限；29.2% 是完成率，不是准确率 |
+| BrowseComp | solve rate 29.2%；已解题中 86.4% 与参考答案一致 | 1266 题中尝试 1255 题、人类训练师、2 小时上限；29.2% 是完成率，不是准确率 |
 | Mind2Web 2 | partial 0.79；success 0.54；Pass@3 0.83（跨参与者聚合） | 130 个长程网页任务中的随机 Subset-30；7 位参与者、每题 3 位不同参与者 |
 
 这些数字来自不同任务、工具、指标和预算，只能帮助设计未来的同条件人类对照，不能
@@ -472,6 +513,8 @@ Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
 JSON 报告也会固定写出 `human_baseline.status: "not_reported"`、
 `matched_arm: false`、`score: null`、`local_runs: 0` 和
 `external_scores_injected: false`，方便机器审查而不是靠文字声明。
+报告中的 `evidence_retention` 还会明确记录：pilot 不复制原始轨迹、ARA 快照或 CAS
+payload；完整审查包必须按前文命令显式导出。
 
 每次报告还记录输入清单的 SHA-256，并只输出按行号汇总的契约缺失字段；这样可以在
 不复制任务答案、不暴露本机路径的前提下复核两次实测是否使用了同一份清单。

@@ -455,6 +455,7 @@ def _workspace_stage_report(
             object_read_errors,
             source_kind_counts,
             _source_decision_objects,
+            _source_stats,
         ) = _bounded_object_scan(root, _MAX_WORKSPACE_AUDIT_OBJECTS)
         read_errors.extend(object_read_errors)
     except (OSError, ValueError, TypeError) as exc:
@@ -762,12 +763,22 @@ def _workspace_stage_report(
             gold_fields_used=False,
         )
     except (OSError, ValueError, KeyError, TypeError):
-        process = {
-            "schema": "xscientist.process-audit.v1",
-            "available": False,
-            "reason": "process_audit_unavailable",
-            "errors": ["process_audit_error"],
-        }
+        from .process_audit import _unavailable_summary
+
+        process = _unavailable_summary(
+            task_manifest_sha256=task_manifest_sha256,
+            task_count=task_count,
+            task_filter=task_filter,
+            task_limit=task_limit,
+            gold_fields_used=False,
+            errors=["process_audit_error"],
+            limits={
+                "max_branches": 32,
+                "max_commits": 32,
+                "max_artifacts": 96,
+                "max_decisions": 32,
+            },
+        )
     return {
         "workspace": ".",
         "stages": stages,
@@ -880,6 +891,18 @@ def benchmark_autoresearch_pilot(
         },
         "ok": valid_contracts == len(rows),
         "benchmark_family": "AutoResearchEval-inspired",
+        "comparison_context": {
+            "mode": "qualitative_source_audit",
+            "matrix": "docs/SYSTEM_COMPARISON.md",
+            "external_scores_injected": False,
+            "same_task_slice_verified": False,
+            "same_budget_verified": False,
+            "same_evaluator_verified": False,
+            "note": (
+                "Use xscientist benchmark systems for the source-audited matrix; "
+                "this pilot remains an XScientist process/conformance measurement."
+            ),
+        },
         "reference": {
             "paper": "https://arxiv.org/abs/2608.14905",
             "repository": "https://github.com/PrentisAI/AutoResearchEval",
@@ -894,6 +917,26 @@ def benchmark_autoresearch_pilot(
         ],
         "official_comparable": False,
         "scope": "offline artifact conformance; no agent rollout evaluation",
+        "evidence_retention": {
+            "mode": "read_only_bounded_index",
+            "report_persisted_by_api": False,
+            "report_persisted_by_cli_default": False,
+            "task_manifest_copied": False,
+            "raw_trajectory_copied": False,
+            "ara_snapshot_written": False,
+            "cas_payload_copied": False,
+            "process_payloads_included": False,
+            "workspace_artifacts_untouched": True,
+            "explicit_exports": [
+                "xscientist research fsck --repo <workspace>",
+                "xscientist ara bundle --ara <ara-run> --dest <audit-bundle>",
+                "xscientist research export --repo <workspace> --dest <export> --include-payloads",
+            ],
+            "note": (
+                "Redirect CLI JSON to a file to retain the report; export raw ARA/CAS "
+                "only with an explicit, potentially sensitive command."
+            ),
+        },
         "human_baseline": {
             "status": "not_reported",
             "evidence_class": "not_reported",

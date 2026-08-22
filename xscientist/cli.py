@@ -433,6 +433,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     autoresearch.add_argument("--json", action="store_true", dest="as_json")
+    systems = benchmark_subparsers.add_parser(
+        "systems",
+        help=(
+            "Show a source-audited capability matrix for XScientist and related "
+            "research systems; this never produces a cross-system score."
+        ),
+    )
+    systems.add_argument(
+        "--workspace",
+        default=None,
+        help="optional workspace whose redacted Git-like process summary is included",
+    )
+    systems.add_argument(
+        "--show-process",
+        action="store_true",
+        help="print branch/intermediate process counts for the supplied workspace",
+    )
+    systems.add_argument("--json", action="store_true", dest="as_json")
     metrics_parser = subparsers.add_parser(
         "metrics",
         help="Control explicit opt-in, local-only, payload-free usage counters.",
@@ -3350,7 +3368,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .benchmark import benchmark_autoresearch_pilot, benchmark_first_run
 
         try:
-            if parsed.benchmark_command == "autoresearch":
+            if parsed.benchmark_command == "systems":
+                from .system_comparison import build_system_comparison
+
+                payload = build_system_comparison(parsed.workspace)
+            elif parsed.benchmark_command == "autoresearch":
                 payload = benchmark_autoresearch_pilot(
                     parsed.tasks,
                     workspace=parsed.workspace,
@@ -3368,6 +3390,134 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif parsed.benchmark_command == "systems":
+            print(
+                "System comparison: qualitative source audit only; "
+                "no cross-system score, provider, network, or external rollout."
+            )
+            print(f"Systems covered: {len(payload['systems'])}")
+            local = payload.get("xscientist_local") or {}
+            print(
+                "XScientist local observation: "
+                f"{local.get('status', 'unknown')} "
+                f"(audit rollouts {local.get('rollouts', 0)}, "
+                f"audit cost ${local.get('model_cost_usd', 0.0):.2f}; "
+                "historical trajectory cost unobserved)"
+            )
+            if parsed.show_process:
+                process = local.get("process") or {}
+                if not process:
+                    print("Process: not requested (pass --workspace)")
+                elif not process.get("available", False):
+                    print(
+                        "Process: unavailable " f"({process.get('reason', 'unknown')})"
+                    )
+                else:
+                    topology = process.get("branch_topology") or {}
+                    branches = process.get("branches") or []
+                    commits = process.get("commits") or []
+                    intermediate = process.get("intermediate") or {}
+                    source_branches = topology.get("source_branch_count", len(branches))
+                    print(
+                        "Process: "
+                        f"{len(commits)} visible commits, "
+                        f"{len(branches)}/{source_branches} branches, "
+                        f"{intermediate.get('object_count', 0)} typed artifacts"
+                    )
+                    print(
+                        "  Branch topology: "
+                        f"branching={'yes' if topology.get('branching_observed') else 'no'}, "
+                        f"merge={'yes' if topology.get('merge_observed') else 'no'}"
+                    )
+                    print(
+                        "Fairness: "
+                        + (
+                            "ELIGIBLE"
+                            if topology.get("fair_branch_comparison", {}).get(
+                                "eligible"
+                            )
+                            else "NOT VERIFIED"
+                        )
+                    )
+                    print(
+                        "Artifact scope: "
+                        f"{topology.get('artifact_scope', 'unavailable')}"
+                    )
+                    print(
+                        "  Attempts: "
+                        f"{intermediate.get('attempt_count', 0)} total, "
+                        f"{intermediate.get('failed_attempts', 0)} failed, "
+                        f"{intermediate.get('completed_attempts', 0)} completed"
+                        + (
+                            " (header totals; artifact rows truncated)"
+                            if intermediate.get("attempts_truncated")
+                            else ""
+                        )
+                    )
+                    print(
+                        "  Decisions: "
+                        f"{len(intermediate.get('decision_events') or [])} visible / "
+                        f"{(process.get('limits') or {}).get('source_totals', {}).get('decision_events', 0)} source"
+                    )
+                    fair = topology.get("fair_branch_comparison") or {}
+                    checks = fair.get("checks") or {}
+                    unverified = [
+                        name
+                        for name in fair.get("requirements") or []
+                        if checks.get(name) is not True
+                    ]
+                    print(
+                        "  Fair branch comparison: "
+                        + ("ELIGIBLE" if fair.get("eligible") else "NOT VERIFIED")
+                        + (
+                            " (unverified: " + ", ".join(unverified) + ")"
+                            if unverified
+                            else ""
+                        )
+                    )
+                    truncated = (process.get("limits") or {}).get("truncated") or {}
+                    if any(truncated.values()):
+                        print(
+                            "  Bounds: truncated "
+                            + ", ".join(
+                                name for name, value in truncated.items() if value
+                            )
+                        )
+                    if parsed.show_process:
+                        for branch in branches:
+                            print(
+                                f"  branch {branch.get('name', '?')} "
+                                f"({branch.get('relation', 'line')}, "
+                                f"{branch.get('commit_count', 0)} commits)"
+                            )
+                        for event in commits:
+                            memberships = ",".join(event.get("branches") or [])
+                            suffix = f" [{memberships}]" if memberships else ""
+                            print(
+                                f"  commit {event.get('short_commit', '?')} "
+                                f"{event.get('stage', 'unknown')}/"
+                                f"{event.get('status', 'unknown')}: "
+                                f"{event.get('subject', 'checkpoint:unknown')}"
+                                f"{suffix}"
+                            )
+                        for artifact in (intermediate.get("artifacts") or [])[:12]:
+                            print(
+                                "  artifact "
+                                f"{artifact.get('object_id', '?')} "
+                                f"{artifact.get('kind', 'extension')}/"
+                                f"{artifact.get('stage', 'X')}/"
+                                f"{artifact.get('state', 'other')}"
+                            )
+                        for decision in (intermediate.get("decision_events") or [])[:8]:
+                            print(
+                                "  decision "
+                                f"{decision.get('kind', 'extension')}:"
+                                f"{decision.get('decision', 'observed')} "
+                                f"issues={decision.get('issue_count', 0)}"
+                            )
+            print(
+                "Use --json for the full source links, dimensions, and redacted process view."
+            )
         elif parsed.benchmark_command == "autoresearch":
             tasks = payload["tasks"]
             print(
@@ -3377,6 +3527,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "Official score: not applicable; no model/provider/network or rollouts used."
             )
+            comparison_context = payload.get("comparison_context") or {}
+            if comparison_context:
+                print(
+                    "System comparison: qualitative matrix only; "
+                    "external scores were not injected."
+                )
             workspace_report = payload.get("workspace")
             if workspace_report:
                 print(

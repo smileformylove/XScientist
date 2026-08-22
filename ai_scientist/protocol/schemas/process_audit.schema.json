@@ -284,6 +284,7 @@
       "required": [
         "object_count",
         "source_object_count",
+        "valid_object_count",
         "statistics_scope",
         "attempt_statistics_scope",
         "attempts_truncated",
@@ -309,6 +310,7 @@
       "properties": {
         "object_count": {"type": "integer", "minimum": 0},
         "source_object_count": {"type": "integer", "minimum": 0},
+        "valid_object_count": {"type": "integer", "minimum": 0},
         "statistics_scope": {"type": "string"},
         "attempt_statistics_scope": {"type": "string"},
         "attempts_truncated": {"type": "boolean"},
@@ -317,13 +319,14 @@
         "stage_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
         "coverage": {
           "type": "object",
-          "required": ["observed_stages", "stage_count", "stage_total", "ratio", "truncated", "quality_claim_allowed"],
+          "required": ["observed_stages", "stage_count", "stage_total", "ratio", "truncated", "scope", "quality_claim_allowed"],
           "properties": {
             "observed_stages": {"type": "array", "items": {"enum": ["A", "B", "C", "D", "E", "F"]}, "uniqueItems": true},
             "stage_count": {"type": "integer", "minimum": 0, "maximum": 6},
             "stage_total": {"const": 6},
             "ratio": {"type": "number", "minimum": 0, "maximum": 1},
             "truncated": {"type": "boolean"},
+            "scope": {"type": "string"},
             "quality_claim_allowed": {"const": false}
           },
           "additionalProperties": false
