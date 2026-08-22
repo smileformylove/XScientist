@@ -446,7 +446,7 @@ artifact-aware 过程诊断、时间/成本、证据完整性、可审查性和�
 引用 v1 自己的 198 题/31 数据集版本；v2 改了任务规模且只在图中画出人类总分，因此不
 读取柱高、不把 v1 数字搬到 v2。DSBench 只作为参与者信息不完整的小样本记录，不称为专家
 基线。所有数字都保留原始任务切片和预算，不跨 benchmark 求一个“人类平均分”。清单还列出 GPQA、GAIA、H-ARC 等相邻通用
-Agent benchmark 的人类实测，以及 BrowseComp、BrowseComp-V³（含公开的人类过程分数）、
+Agent benchmark 的人类/标注者参考测量，以及 BrowseComp、BrowseComp-V³（含公开的人类过程分数）、
 Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
 不把它们混入 XScientist 的科研流程比较。
 
@@ -459,7 +459,7 @@ Mind2Web 2、WebArena、MLRC-Bench 的检索/研究工程参考，但明确
 | DiscoveryWorld | completion 0.66；knowledge 0.55 | 11 位 MSc/PhD 科学家、16 个模拟世界任务、每题 1 小时 |
 | BAISBench v1 | BAIS-SD 0.762；CellTypist 0.437 ± 0.014 | 冻结的 v1：198 题/31 个数据集；不能搬到 v2 |
 | BrowseComp | solve rate 29.2%；已解题中 86.4% 与参考答案一致 | 1255 题、人类训练师、2 小时上限；29.2% 是完成率，不是准确率 |
-| Mind2Web 2 | partial 0.79；success 0.54；Pass@3 0.83 | 130 个长程网页任务中的随机 Subset-30；7 位参与者 |
+| Mind2Web 2 | partial 0.79；success 0.54；Pass@3 0.83（跨参与者聚合） | 130 个长程网页任务中的随机 Subset-30；7 位参与者、每题 3 位不同参与者 |
 
 这些数字来自不同任务、工具、指标和预算，只能帮助设计未来的同条件人类对照，不能
 写入 `workspace.score`，也不能合并成一个“人类平均分”。

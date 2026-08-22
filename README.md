@@ -508,8 +508,9 @@ budget; these numbers are not pooled into a “human average” or pasted into t
 XScientist report.
 For retrieval and research-engineering context it also records BrowseComp,
 BrowseComp-V³ (including its published human process score), Mind2Web 2,
-WebArena, and MLRC-Bench, while adjacent GPQA, GAIA, and H-ARC measurements
-remain outside the scientific-research comparison. Mind2Web 2 is a 30-task
+WebArena, and MLRC-Bench, while adjacent GPQA, GAIA, and H-ARC human/annotator
+reference measurements remain outside the scientific-research comparison.
+Mind2Web 2 is a 30-task
 human subset of a 130-task suite; WebArena samples 170 templated intents with
 five CS graduate participants. Neither number is a human score for XScientist.
 
@@ -523,7 +524,7 @@ reported figures are:
 | DiscoveryWorld | completion 0.66; knowledge 0.55 | 11 MSc/PhD scientists, 16 simulated-world tasks, 1h/task |
 | BAISBench v1 | BAIS-SD 0.762; CellTypist 0.437 ± 0.014 | Frozen v1: 198 questions/31 datasets; do not transfer to v2 |
 | BrowseComp | 29.2% solved; 86.4% agreement conditional on solved | 1,255 questions, human trainers, 2h cap; 29.2% is solve rate, not accuracy |
-| Mind2Web 2 | partial 0.79; success 0.54; Pass@3 0.83 | Random Subset-30 of 130 long-horizon web tasks; 7 participants |
+| Mind2Web 2 | partial 0.79; success 0.54; Pass@3 0.83 (cross-participant) | Random Subset-30 of 130 long-horizon web tasks; 7 participants, 3 different people per task |
 
 These rows are external measurements with different tasks, tools, metrics, and
 budgets. They are evidence for how to design a future matched arm, not numbers

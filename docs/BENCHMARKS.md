@@ -188,7 +188,7 @@ status is no human-vs-agent scientific score. The inventory also includes a
 CORE-Bench follow-up showing a human-agent time uplift, plus MLRC-Bench and
 ResearchGym reference artifacts, all clearly labelled as process studies or
 proxies rather than autonomous human capability baselines.
-Adjacent GPQA/GAIA/H-ARC measurements are listed in the inventory for breadth,
+Adjacent GPQA/GAIA/H-ARC human/annotator reference measurements are listed in the inventory for breadth,
 but are explicitly outside the scientific-research comparison.
 
 If review issues exist without an explicit corrective or hold/reject gate, the
