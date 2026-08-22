@@ -8,7 +8,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from xscientist.benchmark import _metacognitive_report, benchmark_autoresearch_pilot
+from xscientist.benchmark import (
+    _metacognitive_report,
+    benchmark_autoresearch_pilot,
+    persist_benchmark_report,
+)
 from xscientist.cli import main
 from xscientist.demo import create_autopilot_demo
 from xscientist.process_audit import _artifact_row, build_process_summary
@@ -63,6 +67,39 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertTrue(retention["workspace_artifacts_untouched"])
         self.assertNotIn("must never be returned", json.dumps(report))
         self.assertNotIn("secret-gold", json.dumps(report))
+        self.assertFalse(report["quality_claim_allowed"])
+        self.assertEqual(
+            report["score_semantics"], "task_contract_and_structural_observability_only"
+        )
+        self.assertEqual(
+            report["diagnostics"]["next_required"], "QUALITY.NO_MATCHED_ROLLOUT"
+        )
+        validate(report, load_schema("autoresearch_conformance"))
+
+    def test_diagnostics_turn_structural_gaps_into_bounded_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "study"
+            root.mkdir()
+            report = benchmark_autoresearch_pilot(
+                self._tasks(Path(raw)), workspace=root, limit=1
+            )
+        diagnostics = report["diagnostics"]
+        self.assertFalse(diagnostics["quality_claim_allowed"])
+        self.assertTrue(diagnostics["items"])
+        self.assertIn(
+            "QUALITY.NO_MATCHED_ROLLOUT", [item["id"] for item in diagnostics["items"]]
+        )
+        self.assertTrue(all("payload" not in item for item in diagnostics["items"]))
+
+    def test_persist_benchmark_report_is_atomic_and_summary_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            destination = Path(raw) / "nested" / "report.json"
+            report = {"schema": "test", "raw_payloads_included": False}
+            persisted = persist_benchmark_report(report, destination)
+            self.assertEqual(persisted, destination.resolve())
+            self.assertEqual(json.loads(destination.read_text()), report)
+            with self.assertRaises(ValueError):
+                persist_benchmark_report(report, destination.parent)
 
     def test_pilot_redacts_untrusted_task_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -161,6 +198,33 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
             report = json.loads(output.getvalue())
         self.assertEqual(report["schema"], "xscientist.autoresearch-conformance.v1")
         self.assertEqual(report["execution"]["rollouts_evaluated"], 0)
+
+    def test_cli_can_persist_redacted_report_without_polluting_json_stdout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tasks = self._tasks(Path(raw))
+            destination = Path(raw) / "audit" / "report.json"
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "benchmark",
+                        "autoresearch",
+                        "--tasks",
+                        str(tasks),
+                        "--output",
+                        str(destination),
+                        "--json",
+                    ]
+                )
+            stdout_report = json.loads(output.getvalue())
+            disk_report = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout_report, disk_report)
+        self.assertTrue(stdout_report["report_persistence"]["requested"])
+        self.assertFalse(stdout_report["report_persistence"]["raw_payloads_included"])
+        validate(stdout_report, load_schema("autoresearch_conformance"))
 
     def test_cli_show_process_surfaces_structured_intermediate_and_fairness(
         self,
@@ -308,6 +372,20 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             report = build_process_summary(Path(raw) / "empty")
         self.assertFalse(report["available"])
+        validate(report, load_schema("process_audit"))
+
+    def test_process_audit_fail_closes_invalid_fairness_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = build_process_summary(
+                Path(raw) / "empty",
+                task_count=-1,
+                task_limit=1.5,
+            )
+
+        fairness = report["fairness"]
+        self.assertIsNone(fairness["task_count"])
+        self.assertIsNone(fairness["task_limit"])
+        self.assertIsNone(fairness["limit"])
         validate(report, load_schema("process_audit"))
 
     def test_process_audit_redacts_gold_like_text_and_branch_refs(self) -> None:

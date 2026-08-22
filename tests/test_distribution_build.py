@@ -172,6 +172,8 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/protocol/schemas/research_closure.schema.json",
                 "ai_scientist/protocol/schemas/reproduction_receipt.schema.json",
                 "ai_scientist/protocol/schemas/arft_coverage.schema.json",
+                "ai_scientist/protocol/schemas/autoresearch_conformance.schema.json",
+                "ai_scientist/protocol/schemas/first_run_benchmark.schema.json",
                 "ai_scientist/protocol/schemas/process_audit.schema.json",
                 "ai_scientist/protocol/schemas/system_comparison.schema.json",
                 "ai_scientist/protocol/schemas/attestation.schema.json",

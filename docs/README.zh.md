@@ -354,13 +354,31 @@ pilot 不下载数据、不读取 gold 结论、不调用 Provider，也不执�
 证据覆盖、XScientist 自己的 `trace → replay → verify` 与元认知修复信号。完整边界见
 [benchmark 说明](BENCHMARKS.md)，任务清单见
 [官方数据集](https://huggingface.co/datasets/PrentisAI/AutoResearchEval)。
+按对照结果整理的 30/90/180 天验收路线见[优化路线图](OPTIMIZATION_ROADMAP.zh.md)。
+
+`benchmark first-run` 的 JSON 可用 `load_schema("first_run_benchmark")` 校验；使用
+`--output` 会原子保存脱敏结果，不复制原始科研 payload。
+
+报告还会输出机器可读的 `diagnostics` 优化清单：`P0` 表示公平质量声明被阻断，
+`P1` 表示证据/生命周期债务，`P2` 表示探索或易用性改进。`stage_coverage` 明确
+是 `structural_stage_coverage_only`，不是科研质量分数；即使显示 83.3%，仍固定
+`quality_claim_allowed: false`。
 
 #### 证据与 ARA 的保存边界
 
 这个 pilot 是只读审计：不会创建模型轨迹、复制任务清单，也不会自动写入 ARA。
-Python API 只在内存中返回报告；CLI 只有在把 stdout 重定向到文件时才会保存报告。
+Python API 只在内存中返回报告；CLI 只有显式使用 `--output` 或重定向 stdout 时才会保存报告。
 工作区中原本存在的 Research VCS 对象、checkpoint、Git 引用、ARA 目录和 CAS
 产物会留在原位置，但 benchmark 报告本身只是有界、脱敏的索引，不是完整证据归档。
+
+也可以用原子写入选项保存摘要和诊断清单（不复制 prompt、模型响应、ARA 或 CAS payload）：
+
+```bash
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl --workspace ./first-study \
+  --limit 20 --kind open-ended --json \
+  --output ./benchmark-evidence/autoresearch-report.json
+```
 
 | 来源 | 磁盘上保留什么 | pilot 报告包含什么 |
 | --- | --- | --- |
@@ -410,6 +428,9 @@ xscientist research export --repo ./first-study --ref HEAD \
 给出 `complete`，表示该阶段列出的全部条件都通过。若评审问题没有明确的修复或
 hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发布”就误报为
 `contained`。
+
+这张历史表是提交到仓库的摘要，不表示原始任务清单、ARA 文件或报告也存放在仓库中。
+需要可复现证据包时，请重新运行上面的命令并使用 `--output`，再显式导出证据。
 
 把论文数字和本地实测并排放，边界会更清楚：
 
@@ -532,6 +553,9 @@ payload；完整审查包必须按前文命令显式导出。
 不会被推断成每条分支各自的科研结果。
 过程 payload 使用版本化的 `xscientist.process-audit.v1`，并为可用与不可用工作区保持
 同一顶层 JSON shape；审查器可在无网络状态下加载 `process_audit` schema 进行校验。
+完整 conformance 报告也可用 `load_schema("autoresearch_conformance")` 校验；schema
+固定 `official_comparable: false`、`quality_claim_allowed: false`、0 次 rollout 和
+不含 raw payload 的边界。
 
 两条分支的契约 fixture 在终端中会像这样展示（短 hash 用 `…` 省略）：
 

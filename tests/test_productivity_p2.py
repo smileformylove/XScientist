@@ -10,13 +10,16 @@ from pathlib import Path
 from unittest import mock
 
 import yaml
+from jsonschema import validate
+
+from ai_scientist.protocol.schemas import load_schema
 
 from xscientist.benchmark import benchmark_first_run
 from xscientist.cli import main
 from xscientist.completion import completion_script
 from xscientist.conformance import check_conformance, init_conformance_kit
 from xscientist.provider_config import CONFIG_RELATIVE_PATH, CONFIG_SCHEMA_VERSION
-from xscientist.research_git import REPOSITORY_SCHEMA
+from xscientist.research_git import REPOSITORY_SCHEMA, ResearchGitError
 from xscientist.upgrade_check import check_upgrade
 from xscientist.usage_metrics import (
     export_metrics,
@@ -37,12 +40,72 @@ class _PyPIResponse(io.StringIO):
 class ProductivityP2Tests(unittest.TestCase):
     def test_first_run_benchmark_is_zero_cost_and_path_free(self) -> None:
         payload = benchmark_first_run(max_seconds=30)
+        validate(payload, load_schema("first_run_benchmark"))
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["network_used"])
         self.assertEqual(payload["model_cost_usd"], 0.0)
         self.assertFalse(payload["workspace_retained"])
         self.assertGreaterEqual(payload["research"]["dag_nodes"], 4)
         self.assertNotIn(str(Path.home()), json.dumps(payload))
+
+    def test_first_run_refuses_to_overwrite_nonempty_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "existing"
+            root.mkdir()
+            marker = root / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            with self.assertRaises(ResearchGitError):
+                benchmark_first_run(workspace=root)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_first_run_cli_output_is_schema_valid_and_atomic(self) -> None:
+        payload = {
+            "schema": "xscientist.first-run-benchmark.v1",
+            "ok": True,
+            "version": "test",
+            "runtime": {"python": "3.13", "system": "test"},
+            "profile": "balanced",
+            "duration_seconds": 0.1,
+            "max_seconds": 30.0,
+            "threshold_passed": True,
+            "network_used": False,
+            "provider_used": False,
+            "model_cost_usd": 0.0,
+            "research": {
+                "dag_nodes": 1,
+                "dag_relations": 0,
+                "closure": "blocked",
+                "run_started": True,
+                "budget_available": True,
+                "next_step": "review",
+            },
+            "workspace_retained": False,
+            "host_paths_disclosed": False,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            destination = Path(raw) / "reports" / "first-run.json"
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "xscientist.benchmark.benchmark_first_run", return_value=payload
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                code = main(
+                    [
+                        "benchmark",
+                        "first-run",
+                        "--output",
+                        str(destination),
+                        "--json",
+                    ]
+                )
+            rendered = json.loads(output.getvalue())
+            persisted = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(rendered, persisted)
+        validate(rendered, load_schema("first_run_benchmark"))
+        self.assertFalse(rendered["report_persistence"]["raw_payloads_included"])
 
     def test_upgrade_check_is_offline_by_default_and_validates_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

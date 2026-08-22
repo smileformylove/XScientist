@@ -7,11 +7,15 @@ credentials, network access, or model cost?
 ```bash
 xscientist benchmark first-run --json
 xscientist benchmark first-run --max-seconds 30
+xscientist benchmark first-run --json --output ./benchmark-evidence/first-run.json
 ```
 
 It creates the deterministic Autopilot fixture, builds the Research VCS DAG,
 reads status, records duration and structural counts, and deletes its temporary
 workspace. `--workspace DIR` retains a named workspace for inspection.
+The JSON is validated by `load_schema("first_run_benchmark")`; `--output`
+persists the redacted result with an atomic write and never copies raw research
+payloads.
 
 This is not a model-quality benchmark. It must not be used to claim scientific
 performance, autonomous discovery quality, or provider speed. Those require
@@ -82,6 +86,18 @@ The report contains three deliberately separate measurements:
 | `workspace.process` | Bounded commits, branch topology, typed intermediate artifacts, failure/recovery signals, and fairness boundaries | No; it is the inspectable process layer |
 | `human_baseline` | Explicit local human-arm status; external inventory is never substituted | No; `not_reported` is preserved until a matched local arm exists |
 
+The pilot also emits a bounded `diagnostics` backlog. It is an action list,
+not a score: `P0` blocks a fair quality claim, `P1` is evidence or lifecycle
+debt, and `P2` is an exploration/usability improvement. Typical findings are
+`QUALITY.NO_MATCHED_ROLLOUT`, `FAIRNESS.BRANCH_CONTRACT_UNVERIFIED`,
+`AUDIT.BOUNDED_VIEW`, and `FEEDBACK.CONTAINED_REVIEW_DEBT`. Every item includes
+a fixed verification condition so a later run can show whether the gap closed.
+
+The stage percentage is explicitly `structural_stage_coverage_only`, never a
+scientific quality score. A run showing 83.3% coverage still has
+`quality_claim_allowed: false` until an evaluator-backed, repeated rollout is
+available.
+
 The top-level `human_baseline` record is intentionally explicit:
 `status: "not_reported"`, `matched_arm: false`, `score: null`, `local_runs: 0`,
 and `external_scores_injected: false` for the local pilot. External rows in
@@ -91,7 +107,7 @@ never silently substituted into this field.
 The machine-readable `evidence_retention` record makes the storage boundary
 explicit: the API/CLI pilot writes no raw trajectory, ARA snapshot, or CAS
 payload, and the process view is a bounded redacted index. A caller may retain
-the JSON by redirecting stdout and may create a complete, sensitive audit
+the JSON with `--output` or by redirecting stdout and may create a complete, sensitive audit
 package only with the explicit `fsck`, `ara bundle`, and payload-export
 commands below.
 
@@ -110,11 +126,23 @@ xscientist benchmark autoresearch \
   --limit 20 --kind open-ended --show-process
 ```
 
+To retain the redacted report without relying on shell redirection, use the
+explicit atomic output option. It saves the summary and diagnostics only; it
+does not copy prompts, model responses, ARA files, or CAS payloads:
+
+```bash
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl --workspace ./first-study \
+  --limit 20 --kind open-ended --json \
+  --output ./benchmark-evidence/autoresearch-report.json
+```
+
 ### Evidence and ARA retention
 
 The pilot is read-only. It does not create a trajectory, copy the task
-manifest, or write an ARA. The API returns a report in memory; redirecting
-`--json` is the explicit way to persist that report. Existing Research VCS
+manifest, or write an ARA. The API returns a report in memory; callers can use
+`persist_benchmark_report()` or the CLI `--output`/`--json` path to persist that
+summary. Existing Research VCS
 objects, checkpoints, Git refs, ARA roots, and CAS payloads remain in the
 workspace, while `workspace.process` and the stage report expose only bounded,
 redacted metadata. The report is therefore an audit index, not a complete raw
@@ -190,6 +218,11 @@ The process payload is versioned as `xscientist.process-audit.v1` and can be
 validated offline with `load_schema("process_audit")`; both available and
 unavailable workspaces use the same top-level shape. This makes a missing local
 repository an explicit state rather than a schema-less empty result.
+
+The complete conformance report is likewise validated by
+`load_schema("autoresearch_conformance")`. The schema fixes the redaction and
+non-comparability invariants (`official_comparable: false`,
+`quality_claim_allowed: false`, zero rollouts, and no raw payloads).
 
 `official_comparable` is always `false`, `gold_fields_used` is always `false`,
 and the pilot reports zero rollouts, provider calls, network use, and model

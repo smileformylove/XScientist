@@ -92,8 +92,15 @@ def create_demo(
     language: str = "auto",
     git_user_name: str | None = None,
     git_user_email: str | None = None,
+    _defer_views: bool = False,
 ) -> dict[str, Any]:
-    """Create a deterministic, contested research history and offline browser."""
+    """Create a deterministic, contested research history and offline browser.
+
+    ``_defer_views`` is an internal fast-path used by the Autopilot fixture.  A
+    fixture adds more objects immediately afterwards, so rendering an
+    intermediate DAG and guide would do the same repository scan twice.  The
+    public/default path keeps the original fully materialized return contract.
+    """
 
     root = Path(destination).expanduser().resolve()
     _ensure_empty_destination(root)
@@ -294,9 +301,14 @@ def create_demo(
         reproduce_command=("python 02_experiments/offline-autopilot-fixture/code.py"),
     )
 
-    exported = export_research_dag(root, root / "research-dag")
-    graph = exported["graph"]
-    guide = build_research_guide(root, language=language)
+    if _defer_views:
+        exported = {"json": None, "html": None, "graph": {}}
+        graph = exported["graph"]
+        guide = {}
+    else:
+        exported = export_research_dag(root, root / "research-dag")
+        graph = exported["graph"]
+        guide = build_research_guide(root, language=language)
     return {
         "schema": DEMO_SCHEMA,
         "ok": True,
@@ -335,6 +347,7 @@ def _apply_autopilot_profile_fixture(
     *,
     profile: str,
     result: dict[str, Any],
+    _refresh_views: bool = True,
 ) -> dict[str, Any]:
     """Materially exercise the contract promised by each Autopilot profile."""
 
@@ -523,19 +536,20 @@ def _apply_autopilot_profile_fixture(
         behavior.append("bounded_first_complete_run")
 
     result["objects"]["autopilot_profile"] = profile_objects
-    exported = export_research_dag(root, root / "research-dag")
-    graph = exported["graph"]
-    result["dag"].update(
-        {
-            "json": exported["json"],
-            "html": exported["html"],
-            "nodes": len(graph.get("nodes") or []),
-            "relations": len(graph.get("edges") or []),
-            "integrity_ok": bool((graph.get("integrity") or {}).get("is_dag")),
-            "closure": (graph.get("scientific_closure") or {}).get("status"),
-        }
-    )
-    result["guide"] = build_research_guide(root)
+    if _refresh_views:
+        exported = export_research_dag(root, root / "research-dag")
+        graph = exported["graph"]
+        result["dag"].update(
+            {
+                "json": exported["json"],
+                "html": exported["html"],
+                "nodes": len(graph.get("nodes") or []),
+                "relations": len(graph.get("edges") or []),
+                "integrity_ok": bool((graph.get("integrity") or {}).get("is_dag")),
+                "closure": (graph.get("scientific_closure") or {}).get("status"),
+            }
+        )
+        result["guide"] = build_research_guide(root)
     return {"behavior": behavior, "objects": profile_objects}
 
 
@@ -563,12 +577,14 @@ def create_autopilot_demo(
         language=language,
         git_user_name=git_user_name,
         git_user_email=git_user_email,
+        _defer_views=True,
     )
     root = Path(destination).expanduser().resolve()
     profile_fixture = _apply_autopilot_profile_fixture(
         root,
         profile=normalized_profile,
         result=result,
+        _refresh_views=False,
     )
     logs = root / "04_logs"
     experiment = root / "02_experiments" / "offline-autopilot-fixture"

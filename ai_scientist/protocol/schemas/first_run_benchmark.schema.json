@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/first-run-benchmark.v1/first_run_benchmark.schema.json",
+  "title": "XScientist first-run benchmark",
+  "description": "Provider-free deterministic usability/conformance measurement; not a scientific quality score.",
+  "type": "object",
+  "required": [
+    "schema",
+    "ok",
+    "version",
+    "runtime",
+    "profile",
+    "duration_seconds",
+    "max_seconds",
+    "threshold_passed",
+    "network_used",
+    "provider_used",
+    "model_cost_usd",
+    "research",
+    "workspace_retained",
+    "host_paths_disclosed"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.first-run-benchmark.v1"},
+    "ok": {"type": "boolean"},
+    "version": {"type": "string", "minLength": 1},
+    "runtime": {
+      "type": "object",
+      "required": ["python", "system"],
+      "properties": {
+        "python": {"type": "string", "minLength": 1},
+        "system": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "profile": {"enum": ["balanced", "discovery", "publication"]},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "max_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "threshold_passed": {"type": "boolean"},
+    "network_used": {"const": false},
+    "provider_used": {"const": false},
+    "model_cost_usd": {"const": 0.0},
+    "research": {
+      "type": "object",
+      "required": [
+        "dag_nodes",
+        "dag_relations",
+        "closure",
+        "run_started",
+        "budget_available",
+        "next_step"
+      ],
+      "properties": {
+        "dag_nodes": {"type": "integer", "minimum": 0},
+        "dag_relations": {"type": "integer", "minimum": 0},
+        "closure": {"type": "string", "minLength": 1},
+        "run_started": {"type": "boolean"},
+        "budget_available": {"type": "boolean"},
+        "next_step": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "workspace_retained": {"type": "boolean"},
+    "host_paths_disclosed": {"const": false},
+    "report_persistence": {"$ref": "#/$defs/reportPersistence"}
+  },
+  "$defs": {
+    "reportPersistence": {
+      "type": "object",
+      "required": [
+        "requested",
+        "format",
+        "destination_digest",
+        "raw_payloads_included"
+      ],
+      "properties": {
+        "requested": {"const": true},
+        "format": {"const": "json"},
+        "destination_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{16}$"
+        },
+        "raw_payloads_included": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

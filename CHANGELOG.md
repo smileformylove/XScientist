@@ -8,6 +8,18 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
+- Benchmark pilots now emit a fixed-vocabulary P0/P1/P2 diagnostics backlog,
+  label stage coverage as structural-only, and expose an atomic `--output`
+  path for retaining the redacted report without copying raw ARA/CAS payloads.
+- Added bilingual benchmark optimization roadmaps with capability-gap mapping
+  and 30/90/180-day acceptance criteria; public SDK exports now include the
+  benchmark helpers and report persistence function.
+- Process fairness metadata now fails closed for invalid task counts (including
+  non-integral or non-finite values) instead of producing schema-invalid audit
+  reports.
+- The first-run benchmark now avoids duplicate DAG/guide rendering and has a
+  versioned `first_run_benchmark` schema plus atomic-output regression coverage.
+
 - Provider diagnostics now track workspace-owned environment values, expose
   secret-free resolved model/endpoint fingerprints, distinguish configuration
   checks from live verification, and return structured unsupported live-probe

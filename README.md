@@ -396,15 +396,36 @@ three measurements separate: task-contract validity, A–F artifact coverage, an
 XScientist's `trace → replay → verify` plus metacognitive repair signals. See
 [the benchmark protocol](docs/BENCHMARKS.md) for the exact boundary and the
 [official task dataset](https://huggingface.co/datasets/PrentisAI/AutoResearchEval).
+The benchmark-driven comparison and 30/90/180-day acceptance plan are in the
+[optimization roadmap](docs/OPTIMIZATION_ROADMAP.md).
+
+The report also contains a bounded `diagnostics` backlog. `P0` means a fair
+quality claim is blocked, `P1` is evidence/lifecycle debt, and `P2` is an
+exploration or usability improvement. `stage_coverage` is explicitly a
+structural measure (`score_semantics: structural_stage_coverage_only`), never a
+scientific quality score; even 83.3% coverage keeps
+`quality_claim_allowed: false`.
 
 #### Evidence and ARA retention boundary
 
 The pilot is read-only. It does not create a trajectory, copy the task
 manifest, or silently write an ARA. The Python API returns the report in
-memory; the CLI persists the report only when its stdout is redirected. Any
+memory; the CLI persists the report only when `--output` or stdout redirection
+is explicitly used. Any
 Research VCS objects, checkpoints, Git refs, ARA directories, or CAS payloads
 already present in the workspace remain in their original locations, but the
 benchmark report is a bounded, redacted index—not a full evidence archive.
+
+For a safer one-command summary export, use the explicit atomic `--output`
+option. It writes the redacted report and diagnostics, but never raw prompts,
+model responses, ARA files, or CAS payloads:
+
+```bash
+xscientist benchmark autoresearch \
+  --tasks ./open-ended_tasks.jsonl --workspace ./first-study \
+  --limit 20 --kind open-ended --json \
+  --output ./benchmark-evidence/autoresearch-report.json
+```
 
 | Source | What remains on disk | What the pilot report contains |
 | --- | --- | --- |
@@ -458,6 +479,11 @@ the JSON report, `stage_coverage` counts stages meeting the minimum evidence
 bar; each stage also exposes `complete` for the stricter all-criteria result.
 Review debt without an explicit hold/reject gate is reported as `open`, never
 silently upgraded to `contained`.
+
+This historical table is a checked-in summary, not a claim that its raw task
+manifests, ARA files, or reports are stored in this repository. Rerun the
+commands above with `--output` and the explicit evidence-export commands when
+a reproducible bundle is required.
 
 For orientation, the paper's headline measurements and this pilot sit on
 different layers:

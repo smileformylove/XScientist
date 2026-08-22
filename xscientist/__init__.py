@@ -12,6 +12,11 @@ if TYPE_CHECKING:
     from .research_closure import audit_research_closure, closure_level_summary
     from .process_audit import build_process_summary
     from .system_comparison import build_system_comparison
+    from .benchmark import (
+        benchmark_autoresearch_pilot,
+        benchmark_first_run,
+        persist_benchmark_report,
+    )
     from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
     from .research_dag import build_research_dag, export_research_dag
     from .research_discovery import (
@@ -116,6 +121,14 @@ def __getattr__(name: str) -> Any:
         from .system_comparison import build_system_comparison
 
         value = build_system_comparison
+    elif name in {
+        "benchmark_autoresearch_pilot",
+        "benchmark_first_run",
+        "persist_benchmark_report",
+    }:
+        from . import benchmark
+
+        value = getattr(benchmark, name)
     elif name in {"build_research_dag", "export_research_dag"}:
         from . import research_dag
 
@@ -186,6 +199,8 @@ __all__ = [
     "build_arft_coverage",
     "build_process_summary",
     "build_system_comparison",
+    "benchmark_autoresearch_pilot",
+    "benchmark_first_run",
     "closure_level_summary",
     "assess_generalization",
     "build_discovery_contract",
@@ -215,6 +230,7 @@ __all__ = [
     "save_transfer_matrix",
     "save_workspace_checkpoint",
     "save_arft_coverage",
+    "persist_benchmark_report",
     "scan_research_anomalies",
     "rollback_workspace_checkpoint",
     "__version__",

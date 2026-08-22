@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import subprocess
 from collections import Counter
@@ -213,6 +214,27 @@ def _safe_token(value: Any, *, default: str = "unknown", limit: int = 64) -> str
 def _safe_task_filter(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in _SAFE_TASK_FILTERS else "custom"
+
+
+def _safe_task_count(value: Any) -> int | None:
+    """Keep fairness metadata schema-safe without trusting caller input.
+
+    Process audits are often assembled from optional CLI/plugin metadata.  An
+    invalid count must not make an otherwise useful audit impossible to
+    validate; ``null`` communicates that the count was unavailable.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (
+        not math.isfinite(value) or not value.is_integer()
+    ):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return count if count >= 0 else None
 
 
 def _safe_manifest_digest(value: Any) -> str | None:
@@ -969,16 +991,18 @@ def _fairness_report(
     task_limit: int | None,
     gold_fields_used: bool,
 ) -> dict[str, Any]:
+    safe_task_count = _safe_task_count(task_count)
+    safe_task_limit = _safe_task_count(task_limit)
     # Keep both verbose and compact aliases: callers from the CLI and callers
     # consuming benchmark JSON should not need a schema-specific rename.
     return {
         "comparison_unit": "task-manifest + bounded artifact trajectory",
         "task_manifest_sha256": _safe_manifest_digest(task_manifest_sha256),
-        "task_count": task_count,
+        "task_count": safe_task_count,
         "task_filter": _safe_task_filter(task_filter),
-        "task_limit": task_limit,
+        "task_limit": safe_task_limit,
         "filter": _safe_task_filter(task_filter),
-        "limit": task_limit,
+        "limit": safe_task_limit,
         # This audit never reads task gold fields, even if a caller passes a
         # truthy legacy flag; keeping the output fail-closed protects the
         # shareable fairness contract.

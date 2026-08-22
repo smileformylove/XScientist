@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -399,6 +400,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="balanced",
     )
     first_run.add_argument("--max-seconds", type=float, default=None)
+    first_run.add_argument(
+        "--output",
+        default=None,
+        help="optional JSON file for the redacted report (atomic write)",
+    )
     first_run.add_argument("--json", action="store_true", dest="as_json")
     autoresearch = benchmark_subparsers.add_parser(
         "autoresearch",
@@ -432,6 +438,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "timeline in human output; JSON always includes it"
         ),
     )
+    autoresearch.add_argument(
+        "--output",
+        default=None,
+        help="optional JSON file for the redacted report (atomic write)",
+    )
     autoresearch.add_argument("--json", action="store_true", dest="as_json")
     systems = benchmark_subparsers.add_parser(
         "systems",
@@ -449,6 +460,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--show-process",
         action="store_true",
         help="print branch/intermediate process counts for the supplied workspace",
+    )
+    systems.add_argument(
+        "--output",
+        default=None,
+        help="optional JSON file for the redacted report (atomic write)",
     )
     systems.add_argument("--json", action="store_true", dest="as_json")
     metrics_parser = subparsers.add_parser(
@@ -1677,22 +1693,24 @@ def _configure_provider(
             for field in PROVIDER_FIELDS[provider]
             if not field.secret and field.name in updates
         ),
-        "endpoint_configured": bool(
-            configured_field_value(
-                next(
-                    (
-                        field
-                        for field in PROVIDER_FIELDS[provider]
-                        if field.name.endswith("BASE_URL")
+        "endpoint_configured": (
+            bool(
+                configured_field_value(
+                    next(
+                        (
+                            field
+                            for field in PROVIDER_FIELDS[provider]
+                            if field.name.endswith("BASE_URL")
+                        ),
+                        PROVIDER_FIELDS[provider][0],
                     ),
-                    PROVIDER_FIELDS[provider][0],
-                ),
-                {**stored, **updates},
-                workspace_environment(workspace),
+                    {**stored, **updates},
+                    workspace_environment(workspace),
+                )
             )
-        )
-        if provider in {"openai_compat", "ollama"}
-        else None,
+            if provider in {"openai_compat", "ollama"}
+            else None
+        ),
         "bfts_updated": bfts_updated,
     }
     status = next(
@@ -2195,9 +2213,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             return 0 if payload["ok"] else 1
 
         if parsed.provider_command == "remove":
-            config = remove_provider(
-                workspace, normalize_provider_name(parsed.name)
-            )
+            config = remove_provider(workspace, normalize_provider_name(parsed.name))
             active_provider = config.get("active_provider")
             bfts_updated = False
             if active_provider:
@@ -2262,10 +2278,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             print(f"Active: {payload['active']}")
             print(f"BFTS config updated: {payload['bfts_updated']}")
             if payload.get("settings_written"):
-                print(
-                    "Provider settings saved securely to: "
-                    f"{payload['env_file']}"
-                )
+                print("Provider settings saved securely to: " f"{payload['env_file']}")
             if not payload["client_available"]:
                 print(
                     "Provider client missing: "
@@ -2528,14 +2541,10 @@ def _run_start(parsed: argparse.Namespace) -> int:
         model_source = (
             "start_argument"
             if parsed.model
-            else (
-                "workspace_provider_config"
-                if existing_model
-                else "provider_default"
-            )
+            else ("workspace_provider_config" if existing_model else "provider_default")
         )
-        selected_model = parsed.model or existing_model or DEFAULT_MODELS.get(
-            selected_provider
+        selected_model = (
+            parsed.model or existing_model or DEFAULT_MODELS.get(selected_provider)
         )
         selected_task = str(
             parsed.task
@@ -3365,7 +3374,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         return 0 if payload["ok"] else 1
     if parsed.command == "benchmark":
-        from .benchmark import benchmark_autoresearch_pilot, benchmark_first_run
+        from .benchmark import (
+            benchmark_autoresearch_pilot,
+            benchmark_first_run,
+            persist_benchmark_report,
+        )
 
         try:
             if parsed.benchmark_command == "systems":
@@ -3388,8 +3401,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"xscientist benchmark: {exc}", file=sys.stderr)
             return 2
+        output_path = getattr(parsed, "output", None)
+        persisted_path = None
+        if output_path:
+            destination_digest = hashlib.sha256(
+                str(Path(output_path).expanduser().resolve()).encode("utf-8")
+            ).hexdigest()[:16]
+            payload = dict(payload)
+            payload["report_persistence"] = {
+                "requested": True,
+                "format": "json",
+                "destination_digest": f"sha256:{destination_digest}",
+                "raw_payloads_included": False,
+            }
+            try:
+                persisted_path = persist_benchmark_report(payload, output_path)
+            except (OSError, ValueError) as exc:
+                print(
+                    f"xscientist benchmark: cannot write report: {exc}", file=sys.stderr
+                )
+                return 2
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
+            if persisted_path is not None:
+                print(
+                    f"Benchmark report written to {persisted_path}",
+                    file=sys.stderr,
+                )
         elif parsed.benchmark_command == "systems":
             print(
                 "System comparison: qualitative source audit only; "
@@ -3518,6 +3556,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "Use --json for the full source links, dimensions, and redacted process view."
             )
+            if persisted_path is not None:
+                print(f"Report written: {persisted_path}")
         elif parsed.benchmark_command == "autoresearch":
             tasks = payload["tasks"]
             print(
@@ -3538,7 +3578,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     "Six-stage artifact coverage: "
                     f"{workspace_report['stage_coverage']:.0%} "
-                    f"(criteria score {workspace_report.get('stage_score', 0.0):.1f}/100)"
+                    f"(structural criteria only; "
+                    f"{workspace_report.get('stage_score', 0.0):.1f}/100, "
+                    "not a quality score)"
                 )
                 process = workspace_report.get("process") or {}
                 if process:
@@ -3707,8 +3749,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 for signal in workspace_report.get("metacognitive_signals") or []:
                     print(f"WARN  {signal['code']}: {signal['detail']}")
+                diagnostics = payload.get("diagnostics") or {}
+                if diagnostics:
+                    counts = diagnostics.get("priority_counts") or {}
+                    print(
+                        "Optimization backlog: "
+                        + ", ".join(
+                            f"{priority}={counts[priority]}"
+                            for priority in ("P0", "P1", "P2")
+                            if counts.get(priority)
+                        )
+                    )
+                    for item in (diagnostics.get("items") or [])[:5]:
+                        print(
+                            f"  {item.get('priority', 'P2')} "
+                            f"{item.get('id', 'UNKNOWN')}: "
+                            f"{item.get('recommendation', 'inspect evidence')}"
+                        )
             else:
                 print("Pass --workspace to inspect a local research artifact set.")
+                diagnostics = payload.get("diagnostics") or {}
+                if diagnostics.get("next_required"):
+                    print(
+                        "Next optimization: "
+                        f"{diagnostics['next_required']} (structural audit only)"
+                    )
+            if persisted_path is not None:
+                print(f"Report written: {persisted_path}")
         else:
             print(f"First-run benchmark: {payload['duration_seconds']}s")
             print(
@@ -3720,6 +3787,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Cost: $0.00; network and model providers were not used.")
             if parsed.max_seconds is not None:
                 print(f"Threshold passed: {payload['threshold_passed']}")
+            if persisted_path is not None:
+                print(f"Report written: {persisted_path}")
         return 0 if payload["ok"] else 1
     if parsed.command == "metrics":
         from .usage_metrics import export_metrics, metrics_status, set_metrics_enabled

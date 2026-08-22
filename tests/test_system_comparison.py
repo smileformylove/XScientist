@@ -108,6 +108,9 @@ class SystemComparisonTests(unittest.TestCase):
         self.assertEqual(
             xscientist.build_system_comparison.__name__, "build_system_comparison"
         )
+        self.assertEqual(
+            xscientist.persist_benchmark_report.__name__, "persist_benchmark_report"
+        )
         output = io.StringIO()
         with redirect_stdout(output):
             code = main(["benchmark", "systems"])

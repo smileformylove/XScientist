@@ -33,6 +33,8 @@ nav:
   - Examples:
       - Reproducible gallery: examples/README.md
       - First-run benchmark: BENCHMARKS.md
+      - Benchmark optimization roadmap: OPTIMIZATION_ROADMAP.md
+      - Benchmark optimization roadmap (中文): OPTIMIZATION_ROADMAP.zh.md
       - Human baseline inventory: HUMAN_BASELINES.md
       - Research-system comparison: SYSTEM_COMPARISON.md
       - Research-system comparison (中文): SYSTEM_COMPARISON.zh.md

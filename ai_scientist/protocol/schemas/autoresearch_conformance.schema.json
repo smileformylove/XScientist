@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/autoresearch-conformance.v1/autoresearch_conformance.schema.json",
+  "title": "XScientist offline AutoResearch conformance report",
+  "description": "A redacted structural audit; never a model-quality or human-comparison score.",
+  "type": "object",
+  "required": [
+    "schema",
+    "ok",
+    "official_comparable",
+    "quality_claim_allowed",
+    "score_semantics",
+    "tasks",
+    "execution",
+    "human_baseline",
+    "evidence_retention",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.autoresearch-conformance.v1"},
+    "version": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "official_comparable": {"const": false},
+    "quality_claim_allowed": {"const": false},
+    "score_semantics": {"const": "task_contract_and_structural_observability_only"},
+    "scope": {"type": "string"},
+    "comparison_context": {"type": "object"},
+    "reference": {"type": "object"},
+    "related_references": {"type": "array"},
+    "tasks": {
+      "type": "object",
+      "required": [
+        "count",
+        "limit",
+        "filter",
+        "valid_task_contracts",
+        "invalid_task_contracts",
+        "gold_fields_used",
+        "gold_fields_omitted"
+      ],
+      "properties": {
+        "count": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1},
+        "filter": {"enum": ["all", "open-ended", "optimization"]},
+        "available_before_filter": {"type": "integer", "minimum": 0},
+        "types": {"type": "object"},
+        "domains": {"type": "object"},
+        "valid_task_contracts": {"type": "integer", "minimum": 0},
+        "invalid_task_contracts": {"type": "array"},
+        "gold_fields_used": {"const": false},
+        "gold_fields_omitted": {"const": true}
+      },
+      "additionalProperties": true
+    },
+    "execution": {
+      "type": "object",
+      "required": [
+        "network_used",
+        "provider_used",
+        "model_used",
+        "model_cost_usd",
+        "rollouts_evaluated"
+      ],
+      "properties": {
+        "network_used": {"const": false},
+        "provider_used": {"const": false},
+        "model_used": {"const": false},
+        "model_cost_usd": {"const": 0.0},
+        "rollouts_evaluated": {"const": 0}
+      },
+      "additionalProperties": true
+    },
+    "human_baseline": {
+      "type": "object",
+      "required": ["status", "matched_arm", "score", "local_runs", "external_scores_injected"],
+      "properties": {
+        "status": {"const": "not_reported"},
+        "matched_arm": {"const": false},
+        "score": {"type": "null"},
+        "local_runs": {"const": 0},
+        "external_scores_injected": {"const": false}
+      },
+      "additionalProperties": true
+    },
+    "evidence_retention": {
+      "type": "object",
+      "required": [
+        "mode",
+        "raw_trajectory_copied",
+        "ara_snapshot_written",
+        "cas_payload_copied",
+        "workspace_artifacts_untouched"
+      ],
+      "properties": {
+        "mode": {"const": "read_only_bounded_index"},
+        "raw_trajectory_copied": {"const": false},
+        "ara_snapshot_written": {"const": false},
+        "cas_payload_copied": {"const": false},
+        "workspace_artifacts_untouched": {"const": true}
+      },
+      "additionalProperties": true
+    },
+    "workspace": {"type": ["object", "null"]},
+    "dataset": {"type": "object"},
+    "next_step": {"type": "string"},
+    "report_persistence": {"$ref": "#/$defs/reportPersistence"},
+    "diagnostics": {"$ref": "#/$defs/diagnostics"}
+  },
+  "$defs": {
+    "reportPersistence": {
+      "type": "object",
+      "required": ["requested", "format", "destination_digest", "raw_payloads_included"],
+      "properties": {
+        "requested": {"const": true},
+        "format": {"const": "json"},
+        "destination_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{16}$"},
+        "raw_payloads_included": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "object",
+      "required": ["scope", "quality_claim_allowed", "official_comparable", "items", "priority_counts", "next_required"],
+      "properties": {
+        "scope": {"const": "offline_conformance_diagnostics"},
+        "quality_claim_allowed": {"const": false},
+        "official_comparable": {"const": false},
+        "items": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["id", "priority", "area", "status", "evidence", "recommendation", "verification"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Z0-9_.-]+$"},
+              "priority": {"enum": ["P0", "P1", "P2"]},
+              "area": {"enum": ["scientific_quality", "fairness", "auditability", "exploration", "feedback_evolution"]},
+              "status": {"type": "string"},
+              "evidence": {"type": "string"},
+              "recommendation": {"type": "string"},
+              "verification": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "priority_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "next_required": {"type": ["string", "null"]},
+        "disclaimer": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

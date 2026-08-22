@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.atomic_io import atomic_write_json
+
 from ._version import __version__
 from .demo import create_autopilot_demo
 from .workspace_status import build_workspace_status
@@ -184,6 +186,307 @@ _PUBLIC_OBJECT_KINDS = frozenset(
         "warrant",
     }
 )
+
+
+def _diagnostic_item(
+    diagnostic_id: str,
+    *,
+    priority: str,
+    area: str,
+    status: str,
+    evidence: str,
+    recommendation: str,
+    verification: str,
+) -> dict[str, Any]:
+    """Build a fixed-vocabulary, actionable benchmark finding.
+
+    The benchmark is intentionally conservative: these are observations about
+    missing measurement/evidence channels, not claims that a scientific result
+    is wrong.  Keeping the text here fixed (rather than copying workspace
+    payloads) also preserves the report's redaction boundary.
+    """
+
+    return {
+        "id": diagnostic_id,
+        "priority": priority,
+        "area": area,
+        "status": status,
+        "evidence": evidence,
+        "recommendation": recommendation,
+        "verification": verification,
+    }
+
+
+def _build_benchmark_diagnostics(report: dict[str, Any]) -> dict[str, Any]:
+    """Turn conformance observations into a small optimization backlog.
+
+    This is deliberately not a weighted score.  It answers the practical
+    follow-up question after a pilot run: what must be fixed before a fair
+    quality comparison, and which observability improvements are next?
+    """
+
+    items: list[dict[str, Any]] = []
+    tasks = report.get("tasks") or {}
+    execution = report.get("execution") or {}
+    human = report.get("human_baseline") or {}
+    workspace = report.get("workspace") or {}
+
+    if int(execution.get("rollouts_evaluated") or 0) == 0:
+        items.append(
+            _diagnostic_item(
+                "QUALITY.NO_MATCHED_ROLLOUT",
+                priority="P0",
+                area="scientific_quality",
+                status="measurement_blocked",
+                evidence="rollouts_evaluated=0",
+                recommendation=(
+                    "Register a task manifest, evaluator, budget, and seed policy; "
+                    "then run repeated local rollouts before making a quality claim."
+                ),
+                verification="official_comparable=true only after all fairness checks pass",
+            )
+        )
+    if int(tasks.get("valid_task_contracts") or 0) < int(tasks.get("count") or 0):
+        items.append(
+            _diagnostic_item(
+                "QUALITY.INVALID_TASK_CONTRACTS",
+                priority="P1",
+                area="scientific_quality",
+                status="observed_gap",
+                evidence="invalid_task_contracts>0",
+                recommendation="Repair task framing and rerun the exact manifest hash.",
+                verification="valid_task_contracts == count",
+            )
+        )
+    if human.get("status") == "not_reported":
+        items.append(
+            _diagnostic_item(
+                "COMPARISON.NO_MATCHED_HUMAN_ARM",
+                priority="P1",
+                area="fairness",
+                status="not_reported",
+                evidence="human_baseline.status=not_reported",
+                recommendation=(
+                    "Keep human status null; if a comparison is needed, preregister "
+                    "a matched human arm instead of importing external scores."
+                ),
+                verification="participants, protocol, budget, and evaluator are archived",
+            )
+        )
+
+    retention = report.get("evidence_retention") or {}
+    if retention.get("mode") == "read_only_bounded_index":
+        items.append(
+            _diagnostic_item(
+                "AUDIT.REPORT_INDEX_ONLY",
+                priority="P1",
+                area="auditability",
+                status="intentional_boundary",
+                evidence="evidence_retention.mode=read_only_bounded_index",
+                recommendation=(
+                    "Persist the redacted report with --output and retain a separately "
+                    "access-controlled ARA/VCS bundle when a full audit is required."
+                ),
+                verification="report_persistence.requested=true and export manifest is archived",
+            )
+        )
+
+    if workspace:
+        stages = workspace.get("stages") or {}
+        incomplete = [
+            stage
+            for stage, row in stages.items()
+            if not bool((row or {}).get("complete"))
+        ]
+        if incomplete:
+            items.append(
+                _diagnostic_item(
+                    "QUALITY.INCOMPLETE_LIFECYCLE",
+                    priority="P1",
+                    area="scientific_quality",
+                    status="observed_gap",
+                    evidence="stage_complete=false",
+                    recommendation=(
+                        "Add the missing typed evidence and independent checks; "
+                        "do not convert stage coverage into a quality score."
+                    ),
+                    verification="all six stages report complete=true",
+                )
+            )
+
+        process = workspace.get("process") or {}
+        if not process.get("available", False):
+            items.append(
+                _diagnostic_item(
+                    "AUDIT.NO_RESEARCH_VCS",
+                    priority="P1",
+                    area="auditability",
+                    status="observed_gap",
+                    evidence="process.available=false",
+                    recommendation=(
+                        "Initialize or export a Research VCS history so intermediate "
+                        "decisions and branch boundaries can be inspected."
+                    ),
+                    verification="process.available=true and schema validates",
+                )
+            )
+        else:
+            topology = process.get("branch_topology") or {}
+            fairness = topology.get("fair_branch_comparison") or {}
+            if int(topology.get("source_branch_count") or 0) > 1 and not fairness.get(
+                "eligible", False
+            ):
+                items.append(
+                    _diagnostic_item(
+                        "FAIRNESS.BRANCH_CONTRACT_UNVERIFIED",
+                        priority="P0",
+                        area="fairness",
+                        status="blocked",
+                        evidence="multiple_branches_without_verified_contract",
+                        recommendation=(
+                            "Record the same task slice, budget, evaluator, and fork "
+                            "base for every branch before comparing outcomes."
+                        ),
+                        verification="fair_branch_comparison.eligible=true",
+                    )
+                )
+            elif int(topology.get("source_branch_count") or 0) <= 1:
+                items.append(
+                    _diagnostic_item(
+                        "EXPLORATION.NO_BRANCH_DIVERSITY",
+                        priority="P2",
+                        area="exploration",
+                        status="not_observed",
+                        evidence="source_branch_count<=1",
+                        recommendation=(
+                            "For exploration studies, preserve at least one explicit "
+                            "alternative branch and its rejection/merge decision."
+                        ),
+                        verification="branch topology shows a registered alternative",
+                    )
+                )
+            limits = process.get("limits") or {}
+            if any((limits.get("truncated") or {}).values()):
+                items.append(
+                    _diagnostic_item(
+                        "AUDIT.BOUNDED_VIEW",
+                        priority="P1",
+                        area="auditability",
+                        status="bounded",
+                        evidence="process.limits.truncated=true",
+                        recommendation=(
+                            "Retain the full Research VCS/ARA export separately; use the "
+                            "redacted index only for sharing."
+                        ),
+                        verification="source totals and an explicit audit bundle are retained",
+                    )
+                )
+
+        metacognition = workspace.get("metacognition") or {}
+        meta_status = str(metacognition.get("status") or "")
+        if meta_status in {"open", "detected"}:
+            items.append(
+                _diagnostic_item(
+                    "FEEDBACK.OPEN_REVIEW_DEBT",
+                    priority="P0",
+                    area="feedback_evolution",
+                    status="blocked",
+                    evidence=f"metacognition.status={meta_status}",
+                    recommendation=(
+                        "Create a linked corrective/retest artifact and keep the release "
+                        "gate closed until it verifies."
+                    ),
+                    verification="status becomes repaired with an explicit repair relation",
+                )
+            )
+        elif meta_status == "contained":
+            items.append(
+                _diagnostic_item(
+                    "FEEDBACK.CONTAINED_REVIEW_DEBT",
+                    priority="P1",
+                    area="feedback_evolution",
+                    status="contained_unrepaired",
+                    evidence="metacognition.status=contained",
+                    recommendation=(
+                        "Treat the hold/reject gate as a release block, not as a repaired "
+                        "result; schedule the corrective experiment."
+                    ),
+                    verification="unresolved_issue_count=0 or status=repaired",
+                )
+            )
+
+        arft = workspace.get("arft_coverage") or {}
+        arft_summary = arft.get("summary") or {}
+        if arft_summary.get("status") == "not_applicable":
+            items.append(
+                _diagnostic_item(
+                    "AUDIT.ARFT_ADAPTER_MISSING",
+                    priority="P1",
+                    area="auditability",
+                    status="adapter_missing",
+                    evidence="arft_coverage.status=not_applicable",
+                    recommendation=(
+                        "Export legacy pipeline contracts or add an explicit typed-object "
+                        "adapter; do not infer ARFT failures from this gap."
+                    ),
+                    verification="arft_coverage has assessed stages/patterns",
+                )
+            )
+        elif float(arft_summary.get("coverage_score") or 0.0) < 100.0:
+            items.append(
+                _diagnostic_item(
+                    "AUDIT.ARFT_CHANNELS_PARTIAL",
+                    priority="P1",
+                    area="auditability",
+                    status="partial",
+                    evidence="arft_coverage.coverage_score<100",
+                    recommendation=(
+                        "Add the missing evidence channels and keep unassessed patterns "
+                        "distinct from observed failures."
+                    ),
+                    verification="all required channels are covered or explicitly waived",
+                )
+            )
+
+        closure = workspace.get("closure") or {}
+        if closure.get("available") and int(closure.get("blocker_count") or 0) > 0:
+            items.append(
+                _diagnostic_item(
+                    "QUALITY.CLOSURE_BLOCKED",
+                    priority="P1",
+                    area="scientific_quality",
+                    status="blocked",
+                    evidence="closure.blocker_count>0",
+                    recommendation="Resolve closure blockers and rerun trace/replay/verify.",
+                    verification="closure.blocker_count=0",
+                )
+            )
+
+    priority_order = {"P0": 0, "P1": 1, "P2": 2}
+    items.sort(key=lambda row: (priority_order.get(row["priority"], 9), row["id"]))
+    counts = Counter(row["priority"] for row in items)
+    return {
+        "scope": "offline_conformance_diagnostics",
+        "quality_claim_allowed": False,
+        "official_comparable": False,
+        "items": items,
+        "priority_counts": dict(sorted(counts.items())),
+        "next_required": items[0]["id"] if items else None,
+        "disclaimer": (
+            "Priorities identify missing measurement or evidence channels; they do not "
+            "rank XScientist against another system."
+        ),
+    }
+
+
+def persist_benchmark_report(report: dict[str, Any], destination: str | Path) -> Path:
+    """Persist only the redacted benchmark report via an atomic JSON write."""
+
+    path = Path(destination).expanduser()
+    if path.exists() and path.is_dir():
+        raise ValueError("benchmark output must be a file, not a directory")
+    atomic_write_json(path, report)
+    return path.resolve()
 
 
 def _opaque_token(value: Any, *, prefix: str) -> str:
@@ -781,6 +1084,8 @@ def _workspace_stage_report(
         )
     return {
         "workspace": ".",
+        "quality_claim_allowed": False,
+        "score_semantics": "structural_stage_coverage_only",
         "stages": stages,
         "stage_coverage": round(covered / len(stages), 3),
         "stage_score": round(
@@ -917,6 +1222,8 @@ def benchmark_autoresearch_pilot(
         ],
         "official_comparable": False,
         "scope": "offline artifact conformance; no agent rollout evaluation",
+        "quality_claim_allowed": False,
+        "score_semantics": "task_contract_and_structural_observability_only",
         "evidence_retention": {
             "mode": "read_only_bounded_index",
             "report_persisted_by_api": False,
@@ -928,13 +1235,14 @@ def benchmark_autoresearch_pilot(
             "process_payloads_included": False,
             "workspace_artifacts_untouched": True,
             "explicit_exports": [
+                "xscientist benchmark autoresearch --output <report.json>",
                 "xscientist research fsck --repo <workspace>",
                 "xscientist ara bundle --ara <ara-run> --dest <audit-bundle>",
                 "xscientist research export --repo <workspace> --dest <export> --include-payloads",
             ],
             "note": (
-                "Redirect CLI JSON to a file to retain the report; export raw ARA/CAS "
-                "only with an explicit, potentially sensitive command."
+                "Use --output or redirect CLI JSON to retain the report; export raw "
+                "ARA/CAS only with an explicit, potentially sensitive command."
             ),
         },
         "human_baseline": {
@@ -989,7 +1297,12 @@ def benchmark_autoresearch_pilot(
             task_filter=task_kind,
             task_limit=limit,
         )
+    report["diagnostics"] = _build_benchmark_diagnostics(report)
     return report
 
 
-__all__ = ["benchmark_first_run", "benchmark_autoresearch_pilot"]
+__all__ = [
+    "benchmark_first_run",
+    "benchmark_autoresearch_pilot",
+    "persist_benchmark_report",
+]
