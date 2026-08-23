@@ -22,6 +22,7 @@
 <p align="center">
   <a href="#start-with-your-own-idea--no-api-key">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous study</a> ·
+  <a href="#far-inspired-opportunity-funnel">Opportunity funnel</a> ·
   <a href="#inspect-and-reproduce">Audit</a> ·
   <a href="#installation">Install</a> ·
   <a href="https://github.com/smileformylove/XScientist/tree/main/docs">Docs</a> ·
@@ -36,13 +37,15 @@ whole path as typed, machine-readable research objects. A completed run is
 never presented as a verified scientific claim unless its evidence and review
 gates actually pass.
 
-> [!IMPORTANT]
-> XScientist is alpha research software, not an oracle. Autonomous runs may use
+> **Important:** XScientist is alpha research software, not an oracle.
+> Autonomous runs may use
 > paid models. Generated code requires the configured isolated executor.
 > Machine-generated claims remain unverified until their evidence and
 > independent review gates are complete.
 
-This README describes the published `0.1.3` release. Pin the package version or
+This README describes the published `0.1.4` release. Version 0.1.4 adds a
+FAR-inspired, source-audited opportunity funnel while keeping the existing
+provenance, isolation, and scientific review gates. Pin the package version or
 a source commit when an experiment must remain exactly reproducible.
 
 ## Choose the shortest path
@@ -64,7 +67,7 @@ is needed after installation.
 
 ```bash
 python -m pip install \
-  "xscientist==0.1.3"
+  "xscientist==0.1.4"
 xscientist explore ./my-study
 ```
 
@@ -143,7 +146,7 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible]==0.1.3"
+  "xscientist[research,openai-compatible]==0.1.4"
 xscientist provider list
 xscientist start ./my-study
 ```
@@ -161,7 +164,7 @@ Install the research runtime plus one provider client:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.3"
+  "xscientist[research,openai]==0.1.4"
 export OPENAI_API_KEY="..."
 xscientist start ./hosted-study
 ```
@@ -278,11 +281,55 @@ Deep strategy commands remain available under `xscientist research`, but new
 users do not need to learn them before the first result. See the
 [deep-research protocol](https://github.com/smileformylove/XScientist/blob/main/docs/DEEP_RESEARCH_PROTOCOL.md)
 and [method-discovery protocol](https://github.com/smileformylove/XScientist/blob/main/docs/METHOD_DISCOVERY_PROTOCOL.md).
+
+### FAR-inspired opportunity funnel
+
 For literature-to-open-problem discovery, the [FAR-inspired opportunity
-funnel](docs/OPPORTUNITY_FUNNEL.md) records every candidate, explicit negative
-outcome, independent judgment, and allocation assumption without turning an
-external paper's counts into a local score. This protocol is an XScientist
-integration inspired by FAR, not a reproduction of FAR's combinatorics pilot.
+funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) records a complete, bounded path from
+direction to candidate pool, attempt, independent judgment, importance grade,
+and resource allocation. Every candidate—including `known`, `none`, failed,
+and not-yet-attempted rows—remains auditable. Allocation is fail-closed until
+the pool is complete and every candidate is explicitly `source_status=open`.
+Declared probabilities and calibration status are retained as inputs; they are
+not silently imputed or presented as a scientific success rate.
+
+The CLI uses the same typed contract (all writes stay local unless you
+explicitly push your Git remote):
+
+Run the [Quick start](#start-with-your-own-idea--no-api-key) first if
+`./first-study` does not exist yet; the commands below extend that workspace.
+
+```bash
+# Lock the direction, then provide a bounded JSON candidate set.
+xscientist research opportunity direction mechanism-search-v1 \
+  "Which mechanism explains the held-out anomaly?" \
+  "Produce a falsifiable and reproducible result." \
+  --repo ./first-study
+xscientist research opportunity pool mechanism-search-v1 ./candidates.json \
+  --repo ./first-study
+
+# Record outcomes, independent gates, and a transparent allocation plan.
+xscientist research opportunity attempt POOL_ID CANDIDATE_ID none \
+  "No resolution in the recorded attempt." --repo ./first-study
+xscientist research opportunity judge ATTEMPT_ID pass evaluator-independent \
+  "Evidence supports a new result." --repo ./first-study
+xscientist research opportunity grade JUDGMENT_ID substantial evaluator-grader \
+  "Potentially important if independently reproduced." --repo ./first-study
+xscientist research opportunity allocate POOL_ID --objective artifact_yield \
+  --max-attempts 5 --repo ./first-study
+xscientist research opportunity inspect POOL_ID --repo ./first-study --json
+```
+
+Use `--no-commit` for a batch and create one explicit checkpoint after review.
+Stage overrides require both `--allow-stage-override` and a non-empty
+`--override-reason`; the reason is hash-bound. Evidence object IDs create
+auditable `derived_from` relations, while external URLs remain explicit but do
+not count as complete local lineage. This is an XScientist process and
+allocation integration inspired by [FAR](https://arxiv.org/abs/2608.16977),
+not a reproduction of [FAR's repository](https://github.com/zeyu-zheng/FAR),
+its corpus-wide importer, its solver, its three-judge rule, or its reported
+pilot counts. It does not produce a human-performance score or claim global
+novelty.
 
 ## Inspect and reproduce
 
@@ -338,7 +385,7 @@ Until that chain is complete, XScientist labels the output
 `submission_ready`. Result JSON also includes
 `scientific_evidence_failures` and short `scientific_evidence_next_actions`, so
 a blocked run tells you what to fix next instead of silently lowering a score.
-See the [research integrity contract](docs/RESEARCH_INTEGRITY.md) for the exact
+See the [research integrity contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) for the exact
 record fields and replay requirements.
 
 Save a meaningful manual change before trying a risky alternative. Rollback is
@@ -399,10 +446,10 @@ The pilot never downloads data, reads gold conclusions, calls a provider, or
 executes a model rollout. It reports `official_comparable: false` and keeps
 three measurements separate: task-contract validity, A–F artifact coverage, and
 XScientist's `trace → replay → verify` plus metacognitive repair signals. See
-[the benchmark protocol](docs/BENCHMARKS.md) for the exact boundary and the
+[the benchmark protocol](https://github.com/smileformylove/XScientist/blob/main/docs/BENCHMARKS.md) for the exact boundary and the
 [official task dataset](https://huggingface.co/datasets/PrentisAI/AutoResearchEval).
 The benchmark-driven completion status and explicit blockers are in the
-[optimization status](docs/OPTIMIZATION_ROADMAP.md); it contains no dated
+[optimization status](https://github.com/smileformylove/XScientist/blob/main/docs/OPTIMIZATION_ROADMAP.md); it contains no dated
 delivery plan or unverified completion promise.
 
 The report also contains a bounded `diagnostics` backlog. `P0` means a fair
@@ -567,8 +614,8 @@ xscientist benchmark systems --json > system-comparison.json
 xscientist benchmark systems --workspace ./first-study --show-process
 ```
 
-See the [English comparison](docs/SYSTEM_COMPARISON.md) and
-[中文对比](docs/SYSTEM_COMPARISON.zh.md). Each row records its primary paper or
+See the [English comparison](https://github.com/smileformylove/XScientist/blob/main/docs/SYSTEM_COMPARISON.md) and
+[中文对比](https://github.com/smileformylove/XScientist/blob/main/docs/SYSTEM_COMPARISON.zh.md). Each row records its primary paper or
 official repository, the benchmark layer it actually measures, and an explicit
 status (`reported_primary`, `local_observed`, `scoped_component`, or
 `not_measured_here`). The report hard-codes
@@ -607,7 +654,7 @@ usability, not claim that XScientist beats or matches researchers.
 
 #### External human baselines (source-audited)
 
-We also maintain a [source-audited inventory of public human baselines](docs/HUMAN_BASELINES.md),
+We also maintain a [source-audited inventory of public human baselines](https://github.com/smileformylove/XScientist/blob/main/docs/HUMAN_BASELINES.md),
 updated 2026-08-23. It separates real participant runs from leaderboard/SOTA
 references, expert validation, human judge calibration, and human+agent
 workflow studies. The strongest directly measured rows include RE-Bench (61
@@ -727,7 +774,7 @@ workflow in `ai_scientist/`, and versioned schemas in
 
 | Channel | Command |
 | --- | --- |
-| Published 0.1.3 | `python -m pip install "xscientist==0.1.3"` |
+| Published 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
 | Development `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
@@ -788,6 +835,7 @@ print(result.returncode)
 | --- | --- |
 | First project and recovery | [Getting started](https://github.com/smileformylove/XScientist/blob/main/docs/GETTING_STARTED.md) · [Long-running guide](https://github.com/smileformylove/XScientist/blob/main/docs/LONG_RUNNING_GUIDE.md) |
 | Research history and protocol | [Local Research Git](https://github.com/smileformylove/XScientist/blob/main/docs/LOCAL_RESEARCH_GIT.md) · [Protocol v2](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md) |
+| Literature opportunities | [Opportunity funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) · [FAR paper](https://arxiv.org/abs/2608.16977) |
 | Integrity and scientific strategy | [Research integrity](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) · [Science constitution](https://github.com/smileformylove/XScientist/blob/main/docs/SCIENCE_CONSTITUTION.md) |
 | Current limitations and audit | [2026 project audit](https://github.com/smileformylove/XScientist/blob/main/docs/PROJECT_AUDIT_2026-08.md) · [Onboarding audit](https://github.com/smileformylove/XScientist/blob/main/docs/ONBOARDING_AUDIT.md) |
 | SDK, HTTP API, and adapters | [SDK/API](https://github.com/smileformylove/XScientist/blob/main/docs/guides/SDK_AND_API.md) · [DAG/adapters](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md) |

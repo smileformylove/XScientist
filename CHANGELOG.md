@@ -6,6 +6,8 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-23
+
 ### Changed
 
 - Benchmark pilots now emit a fixed-vocabulary P0/P1/P2 diagnostics backlog,
@@ -84,6 +86,16 @@ for its Python package; the ARA protocol has its own version in
   redacted Git-like process view; and hard-codes that no cross-system score or
   quality claim is made. Audit-only rollout/cost scope is explicit, and the
   human inventory now includes separate ideation and web-process references.
+- Added a FAR-inspired, source-audited opportunity funnel covering research
+  directions, complete candidate pools, attempts, independent judgments,
+  grades, deterministic allocation, and lineage/coverage summaries. Stage gates
+  and fail-closed allocation prevent incomplete or non-open pools from being
+  presented as scientific results; the protocol does not claim to reproduce
+  FAR's corpus-wide pilot or human performance.
+- Added the `literature_opportunity` schema, Research VCS validation, CLI
+  commands under `xscientist research opportunity`, and bilingual usage docs;
+  probability semantics, evaluator independence, evidence references, and
+  override reasons are explicit and hash-bound.
 - Source-checkout test discovery is deterministic through the configured
   project path and local `tests` package.
 
@@ -385,7 +397,8 @@ for its Python package; the ARA protocol has its own version in
 - Dependency minimums and CI compatibility windows are explicit and checked.
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
-[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/smileformylove/XScientist/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/smileformylove/XScientist/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/smileformylove/XScientist/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/smileformylove/XScientist/compare/v0.1.0...v0.1.1

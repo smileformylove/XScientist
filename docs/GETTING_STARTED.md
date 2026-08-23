@@ -25,11 +25,11 @@ cost, and a next action that asks the user to resolve a contested claim.
 
 ## 2. Optionally add a model
 
-Install the published 0.1.3 release with exactly one provider extra:
+Install the published 0.1.4 release with exactly one provider extra:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.3"
+  "xscientist[research,openai]==0.1.4"
 xscientist start ./my-study
 ```
 

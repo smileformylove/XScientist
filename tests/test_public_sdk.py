@@ -27,7 +27,7 @@ from xscientist.service import run_server
 
 class PublicSdkTests(unittest.TestCase):
     def test_top_level_api_is_stable_and_lightweight(self) -> None:
-        self.assertEqual(xscientist.__version__, "0.1.3")
+        self.assertEqual(xscientist.__version__, "0.1.4")
         self.assertIs(xscientist.XScientist, XScientist)
         self.assertTrue(callable(xscientist.create_app))
         self.assertTrue(callable(xscientist.build_research_dag))
@@ -287,7 +287,7 @@ class PublicSdkTests(unittest.TestCase):
 
     def test_cli_info_human_output_does_not_expose_internal_null_fields(self) -> None:
         payload = {
-            "version": "0.1.3",
+            "version": "0.1.4",
             "installation_profile": "core",
             "research_runtime_ready": False,
             "missing_research_packages": ["sklearn"],

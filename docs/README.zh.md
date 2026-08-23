@@ -22,6 +22,7 @@
 <p align="center">
   <a href="#从自己的想法开始不需要-api-key">快速开始</a> ·
   <a href="#运行自主研究">自主研究</a> ·
+  <a href="#far-启发的研究机会漏斗">研究机会漏斗</a> ·
   <a href="#检查审计与复现">审计复现</a> ·
   <a href="#安装方式">安装</a> ·
   <a href="https://zhuanlan.zhihu.com/p/2027818800238666075">项目随笔</a> ·
@@ -33,13 +34,13 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；只有证据
 和评审门禁真正通过后，系统才会把它标记为已验证。
 
-> [!IMPORTANT]
-> XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
+> **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
 > 生成代码必须经过配置好的隔离执行器；机器生成的结论只有补齐证据和独立评审
 > 门禁后，才能成为“已验证”。
 
-本文描述已经发布的 `0.1.3` 正式版。需要严格复现实验时，请固定软件版本或源码
-commit。
+本文描述已经发布的 `0.1.4` 正式版。0.1.4 新增受 FAR 启发、按来源核对的研究机会
+漏斗，同时保留既有来源追踪、隔离和科研评审门禁。需要严格复现实验时，请固定软件
+版本或源码 commit。
 
 ## 先选最短路径
 
@@ -58,7 +59,7 @@ commit。
 
 ```bash
 python -m pip install \
-  "xscientist==0.1.3"
+  "xscientist==0.1.4"
 xscientist explore ./my-study --lang zh
 ```
 
@@ -131,7 +132,7 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible]==0.1.3"
+  "xscientist[research,openai-compatible]==0.1.4"
 xscientist provider list
 xscientist start ./my-study
 ```
@@ -147,7 +148,7 @@ xscientist start ./my-study
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.3"
+  "xscientist[research,openai]==0.1.4"
 export OPENAI_API_KEY="..."
 xscientist start ./hosted-study
 ```
@@ -252,10 +253,48 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 
 深入策略能力仍在 `xscientist research` 下，但第一次使用无需学习几十个命令。详见
 [深度科研协议](DEEP_RESEARCH_PROTOCOL.md)和[方法发现协议](METHOD_DISCOVERY_PROTOCOL.md)。
+
+### FAR 启发的研究机会漏斗
+
 如果要把“文献 → 开放问题 → 尝试/分配”做成可审计漏斗，可使用
-[FAR 启发的研究机会协议](OPPORTUNITY_FUNNEL.zh.md)。它保留每个候选、负结果、独立
-判定和分配假设，不会把外部论文数量冒充成本地分数。这是 XScientist 受 FAR 启发的
-协议集成，不是对 FAR 组合数学 pilot 的复现。
+[FAR 启发的研究机会协议](OPPORTUNITY_FUNNEL.zh.md)。它按顺序记录研究方向、完整的
+候选池、尝试、独立判定、重要性分级和资源分配。`known`、`none`、失败和未尝试的
+候选都会保留，不能只留下成功案例；只有候选池完整且每一行明确为
+`source_status=open`，allocation 才能通过 fail-closed 门禁。概率和校准状态作为声明的
+输入保存，不会被静默补齐，也不会被说成科研成功率。
+
+CLI 使用同一套带类型的协议（默认只写入本地历史，不会自行推送远端）：
+
+如果 `./first-study` 还不存在，请先按[快速开始](#从自己的想法开始不需要-api-key)
+创建工作区，再运行下面的命令。
+
+```bash
+# 先锁定方向，再提供有界 JSON 候选集。
+xscientist research opportunity direction mechanism-search-v1 \
+  "哪个机制可以解释留出集异常？" \
+  "产出可证伪、可复现的结果。" \
+  --repo ./first-study
+xscientist research opportunity pool mechanism-search-v1 ./candidates.json \
+  --repo ./first-study
+
+# 记录结果、独立门禁和透明的资源分配。
+xscientist research opportunity attempt POOL_ID CANDIDATE_ID none \
+  "本次尝试没有找到解答。" --repo ./first-study
+xscientist research opportunity judge ATTEMPT_ID pass evaluator-independent \
+  "证据支持一个新的结果。" --repo ./first-study
+xscientist research opportunity grade JUDGMENT_ID substantial evaluator-grader \
+  "若独立复现，可能具有较高重要性。" --repo ./first-study
+xscientist research opportunity allocate POOL_ID --objective artifact_yield \
+  --max-attempts 5 --repo ./first-study
+xscientist research opportunity inspect POOL_ID --repo ./first-study --json
+```
+
+批量写入时可使用 `--no-commit`，评审后再创建一条明确检查点。阶段回溯必须同时使用
+`--allow-stage-override` 和非空 `--override-reason`，理由会绑定到哈希。使用本地
+`evidence_object_ids` 会生成可审计的 `derived_from` 关系；只有外部 URL 时会明确标为
+未完成本地 lineage。该协议受 [FAR 论文](https://arxiv.org/abs/2608.16977) 和
+[作者仓库](https://github.com/zeyu-zheng/FAR)启发，但不声称复现其全语料 importer、
+solver、三个 judge 全部通过规则或 pilot 数字，也不生成“人类性能分数”或全球新颖性证明。
 
 ## 检查、审计与复现
 
@@ -657,7 +696,7 @@ flowchart TB
 
 | 渠道 | 命令 |
 | --- | --- |
-| PyPI 正式版 0.1.3 | `python -m pip install "xscientist==0.1.3"` |
+| PyPI 正式版 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
 | 开发版 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
@@ -715,6 +754,7 @@ print(result.returncode)
 | --- | --- |
 | 第一个项目与恢复 | [入门](GETTING_STARTED.md) · [长任务指南](LONG_RUNNING_GUIDE.md) |
 | 科研历史与协议 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) · [协议 v2](RESEARCH_PROTOCOL_V2.md) |
+| 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
 | 科研诚信与策略 | [科研诚信](RESEARCH_INTEGRITY.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 当前劣势与审计 | [2026 项目审计](PROJECT_AUDIT_2026-08.md) · [入门审计](ONBOARDING_AUDIT.md) |
 | SDK、HTTP API 与适配器 | [SDK/API](guides/SDK_AND_API.md) · [DAG/适配器](RESEARCH_DAG_AND_ADAPTERS.md) |
