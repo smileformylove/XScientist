@@ -51,9 +51,11 @@ ScientistTwo 等未来概念会另列 `context_only_mentions`，保留页码但�
 参考、专家验证、人机协作过程研究分开。清单中的数字不会注入本矩阵，也不会写入
 `workspace.score`。
 
-MLE-STAR、DS-STAR 是为了覆盖执行层而补充的相邻主来源方案。它们没有被声称出现在
-这份 107 页附件中，因此 JSON 中的 `talk_slides` 为空；它们的结果仍只按各自论文和
-版本化评测协议解释。
+MLE-STAR、DS-STAR 是为了覆盖执行层而补充的相邻主来源方案。FAR
+（Find–Attempt–Recommend）则是为了覆盖“文献 → 开放问题 → 尝试/分配”入口而补充的
+相邻主来源发现方案。它们没有被声称出现在这份 107 页附件中，因此 JSON 中的
+`talk_slides` 为空；结果仍只按各自论文、仓库和版本化评测协议解释，XScientist 没有在
+本地重跑这些方案。
 
 ## 对比对象和边界
 
@@ -67,6 +69,7 @@ MLE-STAR、DS-STAR 是为了覆盖执行层而补充的相邻主来源方案。�
 | **AutoResearchClaw** | 端到端 23 阶段流水线 | 多 Agent debate、自修复 `Pivot/Refine`、只读结果、定点 HITL、跨 run lessons | ARC-Bench 实验/端到端模式与消融；比较前必须锁论文/仓库 commit |
 | **DeepScientist** | 长时目标驱动发现 | 分层 hypothesize → verify → analyze 与 Findings Memory | 大规模、GPU 密集型 progressive discovery；其预算不能和 provider-free pilot 横比 |
 | **AI-Researcher** | 端到端 survey → 算法实现 → 可投稿论文 | survey、coding、writing 专门 Agent 与 code-validate-refine | Scientist-Bench guided/open-ended；是 Agent benchmark，不是人类同条件运行 |
+| **FAR（Find–Attempt–Recommend）** | 文献 → 开放问题池 → 候选尝试 → judge/grade 发现 | 从研究方向提取未解决问题，对每个看似良定义候选尝试，再把通过的结果送去分级/专家审阅 | 组合数学 pilot 报告 4,717 个猜想已尝试、1,050 个 `NEW`、598 个 judge `PASS`、77 个 grade 可发表；**仅为主来源报告，本仓库未重跑，也没有人类任务性能臂** |
 | **MARS** | 面向 MLE 的执行/搜索组件 | budget-aware MCTS、Design–Decompose–Implement、反思记忆 | MLE-Bench 与跨分支 lesson transfer；不是完整文献到论文系统 |
 | **AdaEvolve** | 自适应演化优化组件 | 按累计改进信号调整探索强度和资源分配 | ADRS / open-ended optimization；属于搜索组件，不是完整科研流水线 |
 | **EvoX（Meta-Evolution）** | 元进化搜索策略组件 | 同时演化候选解和选择/变异策略 | ADRS / 广泛优化任务；必须锁定任务和 evaluator 版本 |
@@ -81,6 +84,7 @@ Scientist-v2](https://arxiv.org/abs/2504.08066)、
 [AutoResearchClaw](https://arxiv.org/abs/2605.20025)、
 [DeepScientist](https://arxiv.org/abs/2509.26603)、
 [AI-Researcher](https://arxiv.org/abs/2505.18705)、
+[FAR](https://arxiv.org/abs/2608.16977)（[官方仓库](https://github.com/zeyu-zheng/FAR)）、
 [MARS](https://arxiv.org/abs/2602.02660)、
 [AdaEvolve](https://arxiv.org/abs/2602.20133)、
 [EvoX](https://arxiv.org/abs/2602.23413)、
@@ -92,17 +96,23 @@ Scientist-v2](https://arxiv.org/abs/2504.08066)、
 这里的“官方”仅指作者发布的研究代码，并不等于产品支持。Google Research 仓库自身的
 “not an officially supported Google product”免责声明仍然有效。
 
+对 FAR，漏斗数量和分配分析只作为来源报告的锚点保留。论文中人工抽查的子集是作者
+按兴趣选择的，不能读成 100% 准确率；judge/专家审阅也不是人类完成任务的对照臂。
+该来源是 arXiv 预印本，不是独立审计的跨系统 benchmark。XScientist 没有在这里运行
+FAR 仓库或其组合数学语料，因此 JSON 明确保持 `reported_primary` /
+`not_measured_here`。
+
 ## 按能力维度看差异
 
 | 维度 | XScientist 当前实况 | 演讲稿中的端到端系统 | 演讲稿中的专门系统与相邻参考 |
 | --- | --- | --- | --- |
-| 问题定义 | 本地检查 question/plan/falsifier；pilot 不自动发现 benchmark | 通常由人给定问题；ScientistOne/ARC 描述 investigator/scoping | MARS/MLE-STAR/DS-STAR 接受任务 tuple 或数据文件；评审/写作/绘图从后段开始 |
+| 问题定义 | 本地检查 question/plan/falsifier；pilot 不自动发现 benchmark | 通常由人给定问题；ScientistOne/ARC 描述 investigator/scoping | FAR 从人指定研究方向形成开放问题池；MARS/MLE-STAR/DS-STAR 接受任务 tuple 或数据文件；评审/写作/绘图从后段开始 |
 | 文献与来源 | 有 provenance/契约表面，但 pilot 不做 provider 检索 | ScientistOne、ARC 明确检索并 grounding；AI-Researcher 有 collector/filter | ScholarPeer 把实时上下文检索作为核心；PaperOrchestra 消费输入材料 |
-| 探索与分支 | 可审计 branch/checkpoint 元数据；不声称有模型生成搜索轨迹 | AI Scientist v2 是实验树；ScientistOne 是 explore/exploit；DeepScientist 是持久分层搜索 | MARS 用资源约束 MCTS；AdaEvolve/EvoX 自适应演化搜索；其他组件不负责完整发现搜索 |
+| 探索与分支 | 可审计 branch/checkpoint 元数据；不声称有模型生成搜索轨迹 | AI Scientist v2 是实验树；ScientistOne 是 explore/exploit；DeepScientist 是持久分层搜索 | FAR 枚举并尝试文献导出的候选；MARS 用资源约束 MCTS；AdaEvolve/EvoX 自适应演化搜索；其他组件不负责完整发现搜索 |
 | 执行 | typed attempts、receipt、失败和 closure 可审计；无 rollout 分数 | 五个端到端系统都报告执行，但预算/环境不同 | MARS/MLE-STAR/DS-STAR 聚焦资源/执行；其余组件位于下游 |
 | 结论与 claim | closure、review debt、provenance、gate 是本地可见信号；不推断质量 | ScientistOne 明确 claim evidence chain；ARC 报告 verified result；其余需 artifact audit | ScholarPeer 可质询 claim；PaperOrchestra/PaperBanana 不能证明实验真实 |
 | 写作/图 | 当前 pilot 不测生成质量 | 端到端系统都含写作，但协议不同 | PaperOrchestra/PaperBanana 应单独评测 |
-| 反馈/进化 | 追加历史、repair/gate、自进化契约可审查 | ARC、DeepScientist 明确持久 lessons；AI Scientist v2 主要是 tree search | MARS 明确研究跨分支 lesson transfer |
+| 反馈/进化 | 追加历史、repair/gate、自进化契约可审查 | ARC、DeepScientist 明确持久 lessons；AI Scientist v2 主要是 tree search | FAR 报告资源分配分析但没有持久自进化臂；MARS 明确研究跨分支 lesson transfer |
 | 过程/公平 | 当前最强本地信号：branch membership、时间线、来源总量、公平性校验、脱敏 | 外部论文记录预算/分支的方式各异；不能自动称为 Git-like | 组件 benchmark 需各自的匹配 harness |
 | 复现/导出 | `fsck`、bundle、CAS/ARA pointer、`trace → replay → verify` | 外部系统公开的 logs/code 不一，必须独立重跑 | 写作/绘图输出仍需独立 artifact/evaluator 检查 |
 
@@ -134,6 +144,10 @@ Scientist-v2](https://arxiv.org/abs/2504.08066)、
 - 把 AutoResearchClaw 的失败→修复→进化记录接到 XScientist 的追加历史和公平性 gate；
 - 吸收 DeepScientist/MARS 的 Findings Memory 与资源约束规划，但把 lesson provenance
   和 credit assignment 固化成 typed objects；
+- 借鉴 FAR 的“研究方向 → 候选池 → 尝试 → judge → grade”漏斗，完整保留 `NONE`、
+  `KNOWN`、失败/无效等结果，不只统计成功发现；
+- 将 FAR 风格的预期产出/预期重要性分配作为可选策略，并记录校准元数据；不能把其
+  组合数学比率外推到其他领域；
 - 将 AdaEvolve/EvoX 式搜索策略自适应做成可选 optimizer adapter，同时保存候选解/策略
   的 lineage 和 evaluator digest；
 - 将 MLE-STAR/DS-STAR 作为执行层 adapter，任务分数与 claim/论文质量严格分开；
@@ -147,7 +161,7 @@ Scientist-v2](https://arxiv.org/abs/2504.08066)、
 当前仓库**不声称** XScientist：
 
 - 超过人类、ScientistOne、AI Scientist、AutoResearchClaw、DeepScientist、
-  AI-Researcher、MARS、ScholarPeer、PaperOrchestra 或 PaperBanana；
+  AI-Researcher、FAR、MARS、ScholarPeer、PaperOrchestra 或 PaperBanana；
 - 复现了演讲稿或外部论文中的任何数字；
 - 仅因为本地 process audit 完成，就完成了 provider-backed autonomous trajectory；
 - 可以把评审/绘图/写作分数转换成科研发现分数。

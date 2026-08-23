@@ -52,6 +52,15 @@ from .research_git import (
     verify_research_bundle,
     verify_research_repository,
 )
+from .opportunity_funnel import (
+    inspect_opportunity_funnel,
+    save_opportunity_allocation,
+    save_opportunity_attempt,
+    save_opportunity_grade,
+    save_opportunity_judgment,
+    save_opportunity_pool,
+    save_research_direction,
+)
 
 
 def _print_json(payload: Any) -> None:
@@ -518,6 +527,121 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     program_claim.add_argument("claim_id")
     program_claim.add_argument("--repo", default=".")
     program_claim.add_argument("--json", action="store_true", dest="as_json")
+
+    opportunity_parser = subparsers.add_parser(
+        "opportunity",
+        help=(
+            "Record a FAR-inspired research-direction → opportunity-pool → "
+            "attempt → independent judge/grade funnel."
+        ),
+    )
+    opportunity_subparsers = opportunity_parser.add_subparsers(
+        dest="opportunity_command", required=True
+    )
+    opportunity_direction = opportunity_subparsers.add_parser(
+        "direction", help="Lock a research direction before extracting opportunities."
+    )
+    opportunity_direction.add_argument("direction_id")
+    opportunity_direction.add_argument("statement")
+    opportunity_direction.add_argument("objective")
+    opportunity_direction.add_argument("--domain", default="")
+    opportunity_direction.add_argument("--success-definition", default="")
+    opportunity_direction.add_argument("--constraint", action="append", default=[])
+    opportunity_direction.add_argument("--source-ref", action="append", default=[])
+    _add_program_save_arguments(opportunity_direction)
+
+    opportunity_pool = opportunity_subparsers.add_parser(
+        "pool", help="Persist a complete candidate JSON array from a bounded extractor."
+    )
+    opportunity_pool.add_argument("direction_id")
+    opportunity_pool.add_argument(
+        "candidates", help="JSON array or file containing candidates."
+    )
+    opportunity_pool.add_argument("--incomplete", action="store_true")
+    opportunity_pool.add_argument("--extraction-notes", default="")
+    _add_program_save_arguments(opportunity_pool)
+
+    opportunity_attempt = opportunity_subparsers.add_parser(
+        "attempt", help="Record an explicit KNOWN/NEW/FIX/NONE opportunity outcome."
+    )
+    opportunity_attempt.add_argument("pool_id")
+    opportunity_attempt.add_argument("candidate_id")
+    opportunity_attempt.add_argument("outcome", choices=["known", "new", "fix", "none"])
+    opportunity_attempt.add_argument("summary")
+    opportunity_attempt.add_argument("--evidence-ref", action="append", default=[])
+    opportunity_attempt.add_argument(
+        "--evidence-object-id", action="append", default=[]
+    )
+    opportunity_attempt.add_argument("--runner", default="")
+    _add_program_save_arguments(opportunity_attempt)
+
+    opportunity_judge = opportunity_subparsers.add_parser(
+        "judge", help="Record a provenance-disjoint judgment for an attempt."
+    )
+    opportunity_judge.add_argument("attempt_id")
+    opportunity_judge.add_argument("verdict", choices=["pass", "fail", "known"])
+    opportunity_judge.add_argument("evaluator_id")
+    opportunity_judge.add_argument("summary")
+    opportunity_judge.add_argument("--evidence-ref", action="append", default=[])
+    opportunity_judge.add_argument("--evidence-object-id", action="append", default=[])
+    opportunity_judge.add_argument(
+        "--allow-stage-override",
+        action="store_true",
+        help="Allow a non-NEW retrospective judgment; requires --override-reason.",
+    )
+    opportunity_judge.add_argument("--override-reason", default="")
+    _add_program_save_arguments(opportunity_judge)
+
+    opportunity_grade = opportunity_subparsers.add_parser(
+        "grade", help="Record an independent known/minor/substantial grade."
+    )
+    opportunity_grade.add_argument("judgment_id")
+    opportunity_grade.add_argument("grade", choices=["known", "minor", "substantial"])
+    opportunity_grade.add_argument("evaluator_id")
+    opportunity_grade.add_argument("summary")
+    opportunity_grade.add_argument("--evidence-ref", action="append", default=[])
+    opportunity_grade.add_argument("--evidence-object-id", action="append", default=[])
+    opportunity_grade.add_argument(
+        "--allow-stage-override",
+        action="store_true",
+        help="Allow grading a non-PASS/KNOWN judgment; requires --override-reason.",
+    )
+    opportunity_grade.add_argument("--override-reason", default="")
+    _add_program_save_arguments(opportunity_grade)
+
+    opportunity_allocate = opportunity_subparsers.add_parser(
+        "allocate",
+        help=(
+            "Rank declared expected yields; missing success probabilities stay "
+            "ineligible and any neutral artifact-factor assumption is recorded."
+        ),
+    )
+    opportunity_allocate.add_argument("pool_id")
+    opportunity_allocate.add_argument(
+        "--objective",
+        choices=["artifact_yield", "importance_yield", "best_artifact"],
+        default="artifact_yield",
+    )
+    opportunity_allocate.add_argument("--max-attempts", type=int)
+    opportunity_allocate.add_argument(
+        "--calibration-status", default="declared_inputs_not_calibrated"
+    )
+    opportunity_allocate.add_argument(
+        "--probability-semantics",
+        choices=[
+            "conditional_artifact_given_success",
+            "joint_artifact_probability",
+        ],
+        default="conditional_artifact_given_success",
+    )
+    _add_program_save_arguments(opportunity_allocate)
+
+    opportunity_inspect = opportunity_subparsers.add_parser(
+        "inspect", help="Show funnel coverage and unattempted/orphan rows."
+    )
+    opportunity_inspect.add_argument("pool_id")
+    opportunity_inspect.add_argument("--repo", default=".")
+    opportunity_inspect.add_argument("--json", action="store_true", dest="as_json")
 
     literature_parser = subparsers.add_parser(
         "literature",
@@ -1809,6 +1933,121 @@ def main(
                     print(f"  {gap['code']}: {_display_text(gap['message'])}")
                 if result["object"] is not None:
                     print(f"Recorded review: {result['object'].object_id}")
+            return 0
+
+        if args.command == "opportunity":
+            if args.opportunity_command == "direction":
+                result = save_research_direction(
+                    args.repo,
+                    direction_id=args.direction_id,
+                    statement=args.statement,
+                    objective=args.objective,
+                    domain=args.domain,
+                    success_definition=args.success_definition,
+                    constraints=args.constraint,
+                    source_refs=args.source_ref,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("research direction", result, as_json=args.as_json)
+                return 0
+            if args.opportunity_command == "pool":
+                raw_candidates = _read_json_value(
+                    args.candidates, label="opportunity candidates"
+                )
+                if isinstance(raw_candidates, dict):
+                    raw_candidates = raw_candidates.get("candidates")
+                if not isinstance(raw_candidates, list):
+                    raise ResearchGitError(
+                        "opportunity candidates must be a JSON array or contain candidates"
+                    )
+                result = save_opportunity_pool(
+                    args.repo,
+                    direction_id=args.direction_id,
+                    candidates=raw_candidates,
+                    complete_candidate_set=not args.incomplete,
+                    extraction_notes=args.extraction_notes,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("opportunity pool", result, as_json=args.as_json)
+                return 0
+            if args.opportunity_command == "attempt":
+                result = save_opportunity_attempt(
+                    args.repo,
+                    pool_id=args.pool_id,
+                    candidate_id=args.candidate_id,
+                    outcome=args.outcome,
+                    summary=args.summary,
+                    evidence_refs=args.evidence_ref,
+                    evidence_object_ids=args.evidence_object_id,
+                    runner=args.runner,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("opportunity attempt", result, as_json=args.as_json)
+                return 0
+            if args.opportunity_command == "judge":
+                result = save_opportunity_judgment(
+                    args.repo,
+                    attempt_id=args.attempt_id,
+                    verdict=args.verdict,
+                    evaluator_id=args.evaluator_id,
+                    summary=args.summary,
+                    evidence_refs=args.evidence_ref,
+                    evidence_object_ids=args.evidence_object_id,
+                    allow_stage_override=args.allow_stage_override,
+                    override_reason=args.override_reason,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "opportunity judgment", result, as_json=args.as_json
+                )
+                return 0
+            if args.opportunity_command == "grade":
+                result = save_opportunity_grade(
+                    args.repo,
+                    judgment_id=args.judgment_id,
+                    grade=args.grade,
+                    evaluator_id=args.evaluator_id,
+                    summary=args.summary,
+                    evidence_refs=args.evidence_ref,
+                    evidence_object_ids=args.evidence_object_id,
+                    allow_stage_override=args.allow_stage_override,
+                    override_reason=args.override_reason,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object("opportunity grade", result, as_json=args.as_json)
+                return 0
+            if args.opportunity_command == "allocate":
+                result = save_opportunity_allocation(
+                    args.repo,
+                    pool_id=args.pool_id,
+                    objective=args.objective,
+                    max_attempts=args.max_attempts,
+                    calibration_status=args.calibration_status,
+                    probability_semantics=args.probability_semantics,
+                    message=args.message,
+                    commit=not args.no_commit,
+                )
+                _print_saved_object(
+                    "opportunity allocation", result, as_json=args.as_json
+                )
+                return 0
+            inspected = inspect_opportunity_funnel(args.repo, args.pool_id)
+            if args.as_json:
+                _print_json(inspected)
+            else:
+                summary = inspected["summary"]
+                print(
+                    f"Opportunity funnel: {summary['attempted_candidate_count']}/"
+                    f"{summary['candidate_count']} candidates attempted"
+                )
+                print(f"Outcomes: {summary['outcome_counts']}")
+                print(f"Unattempted: {summary['unattempted_candidate_ids']}")
+                print(f"Funnel complete: {summary['funnel_complete']}")
             return 0
 
         if args.command == "literature":

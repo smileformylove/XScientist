@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import io
 import json
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from jsonschema import validate
+from jsonschema import ValidationError, validate
 
 import xscientist
 from ai_scientist.protocol.schemas import load_schema
@@ -30,7 +31,7 @@ class SystemComparisonTests(unittest.TestCase):
         self.assertFalse(report["quality_claim_allowed"])
         self.assertEqual(report["external_rollouts"], 0)
         self.assertEqual(len(report["dimensions"]), len(COMPARISON_DIMENSIONS))
-        self.assertGreaterEqual(len(report["systems"]), 15)
+        self.assertGreaterEqual(len(report["systems"]), 16)
         self.assertEqual(report["source_manifest"]["attached_talk"]["page_count"], 107)
         self.assertIn(
             "not an officially supported product",
@@ -41,9 +42,42 @@ class SystemComparisonTests(unittest.TestCase):
             report["talk_inventory"]["adjacent_references_not_ranked"],
         )
         self.assertIn(
+            "FAR (adjacent discovery/allocation reference; not named in attached talk)",
+            report["talk_inventory"]["adjacent_references_not_ranked"],
+        )
+        self.assertIn(
             "ScientistTwo (slide 105; future concept, not an evaluated system)",
             report["talk_inventory"]["context_only_mentions"],
         )
+
+    def test_far_is_source_audited_without_a_human_or_local_score(self) -> None:
+        report = build_system_comparison()
+        far = {row["id"]: row for row in report["systems"]}["far"]
+        self.assertEqual(far["source_status"], "reported_primary")
+        self.assertEqual(far["comparison_status"], "not_measured_here")
+        self.assertEqual(far["talk_slides"], [])
+        self.assertEqual(far["human_evidence"]["status"], "not_reported")
+        self.assertFalse(far["human_evidence"]["same_condition"])
+        self.assertIsNone(far["human_evidence"]["score"])
+        self.assertIn(
+            "No same-condition recruited human task-performance arm",
+            far["human_evidence"]["note"],
+        )
+        urls = {source["url"] for source in far["sources"]}
+        self.assertIn("https://arxiv.org/abs/2608.16977", urls)
+        self.assertIn("https://github.com/zeyu-zheng/FAR", urls)
+        self.assertTrue(
+            any(
+                "not a benchmark accuracy estimate" in item
+                for item in far["limitations"]
+            )
+        )
+
+    def test_schema_rejects_unrecognized_comparison_status(self) -> None:
+        report = deepcopy(build_system_comparison())
+        report["systems"][0]["comparison_status"] = "ranked"
+        with self.assertRaises(ValidationError):
+            validate(report, load_schema("system_comparison"))
 
     def test_every_row_declares_all_dimensions_and_source_boundary(self) -> None:
         dimension_ids = {item["id"] for item in COMPARISON_DIMENSIONS}

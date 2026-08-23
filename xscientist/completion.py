@@ -21,8 +21,9 @@ SUBCOMMANDS = {
     "history": "list show diff save rollback",
     "research": (
         "guide start hypothesis plan preregister experiment evidence infer review "
-        "claim status log dag"
+        "claim status log dag opportunity"
     ),
+    "opportunity": "direction pool attempt judge grade allocate inspect",
 }
 
 OPTIONS = {
@@ -52,6 +53,12 @@ OPTIONS = {
     "upgrade": "--workspace --online --timeout --json",
     "conformance": "--schema --json",
     "benchmark": "--tasks --workspace --profile --max-seconds --limit --kind --show-process --report --output --json",
+    "opportunity": (
+        "--repo --message --no-commit --json --domain --success-definition "
+        "--constraint --source-ref --evidence-ref --evidence-object-id --runner "
+        "--allow-stage-override --override-reason --objective --max-attempts "
+        "--calibration-status --probability-semantics --incomplete --extraction-notes"
+    ),
     "metrics": "--json",
     "auth": "--user --lang --json",
     "init": "--profile --provider --model --force --json",

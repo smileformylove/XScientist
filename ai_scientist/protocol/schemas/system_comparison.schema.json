@@ -95,8 +95,8 @@
           "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
           "name": {"type": "string"},
           "scope": {"type": "string"},
-          "source_status": {"type": "string"},
-          "comparison_status": {"type": "string"},
+          "source_status": {"$ref": "#/$defs/sourceStatus"},
+          "comparison_status": {"$ref": "#/$defs/comparisonStatus"},
           "talk_slides": {"type": "array", "items": {"type": "integer", "minimum": 1}},
           "sources": {
             "type": "array",
@@ -115,7 +115,7 @@
           "capabilities": {
             "type": "object",
             "minProperties": 1,
-            "additionalProperties": {"type": "string"}
+            "additionalProperties": {"$ref": "#/$defs/capabilityStatus"}
           },
           "benchmark_anchors": {"type": "array", "items": {"type": "string"}},
           "distinction": {"type": "string"},
@@ -160,6 +160,33 @@
     "interpretation": {"type": "string"}
   },
   "$defs": {
+    "capabilityStatus": {
+      "type": "string",
+      "enum": [
+        "local_observed",
+        "local_structural_only",
+        "reported_primary",
+        "reported_talk",
+        "scoped_component",
+        "not_measured_here",
+        "not_in_scope"
+      ]
+    },
+    "sourceStatus": {
+      "type": "string",
+      "enum": [
+        "local_observed",
+        "reported_primary",
+        "reported_talk"
+      ]
+    },
+    "comparisonStatus": {
+      "type": "string",
+      "enum": [
+        "local_structural_only",
+        "not_measured_here"
+      ]
+    },
     "humanEvidence": {
       "type": "object",
       "required": ["status", "same_condition", "score", "source", "note"],

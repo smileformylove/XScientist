@@ -349,6 +349,54 @@ _SYSTEMS: tuple[dict[str, Any], ...] = (
         ],
     ),
     _row(
+        "far",
+        "FAR (Find–Attempt–Recommend)",
+        "Literature-to-open-problem discovery and resource-allocation cascade",
+        [
+            _source(
+                "The Problem Is the Problem: Towards Scalable Mathematical Discovery",
+                "https://arxiv.org/abs/2608.16977",
+            ),
+            _source(
+                "FAR official repository",
+                "https://github.com/zeyu-zheng/FAR",
+                "official_repository",
+            ),
+        ],
+        {
+            "framing": "reported_primary",
+            "literature": "reported_primary",
+            "exploration": "reported_primary",
+            "execution": "reported_primary",
+            "claims": "reported_primary",
+            "writing": "not_in_scope",
+            "review": "reported_primary",
+            "evolution": "not_measured_here",
+            "process": "reported_primary",
+            "reproduction": "reported_primary",
+        },
+        [
+            "Find–Attempt–Recommend cascade over a literature-derived open-problem pool",
+            "Combinatorics pilot: 51,110 mathematics papers → 5,245 combinatorics papers",
+            "Find stage: 6,453 candidate conjectures/open problems from 2,742 papers → 4,717 apparently well-posed and still-open conjectures",
+            "4,717 conjectures attempted → 1,050 claimed NEW → 598 judged PASS → 77 graded publishable outcomes",
+            "Difficulty/importance-guided allocation analysis (reported study; not rerun here)",
+        ],
+        "Starts from a human-specified research direction, extracts and checks open problems, "
+        "attempts every apparently well-posed candidate, then independently judges and grades "
+        "claimed discoveries before a small expert-review queue.",
+        limitations=[
+            "This is a domain-specific combinatorics pilot and a discovery/allocation cascade, not a standardized end-to-end benchmark.",
+            "The cited source is an arXiv preprint; its reported funnel outcomes are not an independently audited cross-system benchmark.",
+            "XScientist has not run FAR; all counts and outcomes remain reported_primary and comparison_status=not_measured_here.",
+            "No same-condition recruited human task-performance arm is reported; expert review and judging are not a human baseline.",
+            "The paper's 15 manually checked outcomes were author-selected and are not a benchmark accuracy estimate.",
+            "Full reproduction requires the source corpus, API/tool configuration, and a pinned repository revision; the public repository is not a turnkey pilot bundle.",
+        ],
+        source_status="reported_primary",
+        comparison_status="not_measured_here",
+    ),
+    _row(
         "adaevolve",
         "AdaEvolve",
         "Adaptive LLM-driven evolutionary optimization component",
@@ -659,6 +707,10 @@ _HUMAN_EVIDENCE_DEFAULT = {
     "note": "No same-condition recruited human task-performance arm was used here.",
 }
 _HUMAN_EVIDENCE_BY_ID: dict[str, dict[str, Any]] = {
+    "far": {
+        "status": "not_reported",
+        "note": "No same-condition recruited human task-performance arm is reported; expert judging/review is not a human baseline.",
+    },
     "scientistone": {
         "status": "human_SOTA_reference",
         "note": "ADRS human column is a published human-designed reference, not a new participant run.",
@@ -831,6 +883,7 @@ def build_system_comparison(workspace: str | Path | None = None) -> dict[str, An
                 "Google Paper Assistant Tool (PAT) integration",
                 "SingleAgent and Human (GD/GT) benchmark arms",
                 "AutoResearchEval benchmark itself",
+                "FAR (adjacent discovery/allocation reference; not named in attached talk)",
                 "MLE-STAR (adjacent execution-layer reference; not named in attached talk)",
                 "DS-STAR (adjacent data-science reference; not named in attached talk)",
             ],

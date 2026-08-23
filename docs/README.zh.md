@@ -252,6 +252,10 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 
 深入策略能力仍在 `xscientist research` 下，但第一次使用无需学习几十个命令。详见
 [深度科研协议](DEEP_RESEARCH_PROTOCOL.md)和[方法发现协议](METHOD_DISCOVERY_PROTOCOL.md)。
+如果要把“文献 → 开放问题 → 尝试/分配”做成可审计漏斗，可使用
+[FAR 启发的研究机会协议](OPPORTUNITY_FUNNEL.zh.md)。它保留每个候选、负结果、独立
+判定和分配假设，不会把外部论文数量冒充成本地分数。这是 XScientist 受 FAR 启发的
+协议集成，不是对 FAR 组合数学 pilot 的复现。
 
 ## 检查、审计与复现
 
@@ -478,10 +482,13 @@ hold/reject 门禁，元认知状态会标为 `open`，不会仅因“尚未发�
 附带 Expo Talk 中的方案其实处在不同层级：端到端科研代理（ScientistOne、AI
 Scientist v2、AutoResearchClaw、DeepScientist、AI-Researcher），自适应搜索组件
 （AdaEvolve、EvoX、MARS），同行评审组件 ScholarPeer，论文写作组件
-PaperOrchestra，以及科研绘图组件 PaperBanana。MLE-STAR、DS-STAR 是为了覆盖执行层
-而补充的相邻主来源方案；它们没有被声称出现在这份 107 页附件中。演讲稿里只出现的
+PaperOrchestra，以及科研绘图组件 PaperBanana。FAR（Find–Attempt–Recommend）是为了
+覆盖“文献 → 开放问题 → 尝试/分配”入口而补充的相邻主来源方案；MLE-STAR、DS-STAR
+则是为了覆盖执行层而补充的相邻主来源方案。这三者都没有被声称出现在这份 107 页附件中。演讲稿里只出现的
 Deep Researcher Agent 和 AST 角色图也会保留，但不会假装有匹配 benchmark。
 绘图或写作分数不是端到端发现分数，因此本项目不会把它们合成一个总榜。
+FAR 论文中的 expert/judge 审阅不是招募的人类任务性能臂，组合数学数量也不是
+XScientist 本地测量结果。
 只在背景页出现的名称和 ScientistTwo 等未来概念会在 `talk_inventory` 中保留页码，
 但不会被提升为已评测竞品。
 

@@ -27,6 +27,16 @@ obligations explicit:
 This improves the structure of exploration. It does not make an LLM, score, or
 green DAG node an authority on scientific truth.
 
+For the literature-to-opportunity part of a program, see the
+[FAR-inspired opportunity funnel](OPPORTUNITY_FUNNEL.md). It records a
+research direction, a complete candidate pool, explicit `known`/`new`/`fix`/
+`none` attempts, evaluator-disjoint judgments, and declared allocation
+estimates. The funnel is a process contract, not a quality or human-baseline
+score; it does not alter the information-value policy below or silently impute
+primary probabilities. The default conditional allocation mode may record an
+explicit neutral `1.0` assumption for a missing conditional artifact factor;
+joint-probability mode leaves that row unselected.
+
 Strict publication and quality-gated runs also require every LLM call trace to
 be persisted successfully. A trace storage failure stops the run instead of
 silently producing an unverifiable result. Independence receipts currently

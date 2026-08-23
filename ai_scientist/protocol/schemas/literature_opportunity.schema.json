@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/literature-opportunity.v1/literature_opportunity.schema.json",
+  "type": "object",
+  "title": "XScientist literature-opportunity funnel payload",
+  "description": "FAR-inspired, source-audited direction, opportunity, attempt, review, and allocation payloads. This schema describes process records; it does not certify novelty, quality, or human performance.",
+  "oneOf": [
+    {"$ref": "#/$defs/direction"},
+    {"$ref": "#/$defs/pool"},
+    {"$ref": "#/$defs/attempt"},
+    {"$ref": "#/$defs/judgment"},
+    {"$ref": "#/$defs/grade"},
+    {"$ref": "#/$defs/allocation"},
+    {"$ref": "#/$defs/summary"}
+  ],
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "objectId": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+    "refArray": {"type": "array", "maxItems": 64},
+    "probability": {"type": "number", "minimum": 0, "maximum": 1},
+    "direction": {
+      "type": "object",
+      "required": ["protocol_kind", "direction_id", "question", "objective", "goal_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-research-direction.v1"},
+        "direction_id": {"$ref": "#/$defs/text"},
+        "question": {"$ref": "#/$defs/text"},
+        "objective": {"$ref": "#/$defs/text"},
+        "goal_hash": {"$ref": "#/$defs/digest"},
+        "source_refs": {"$ref": "#/$defs/refArray"}
+      },
+      "additionalProperties": true
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "candidate_id",
+        "question",
+        "source_status",
+        "source_complete",
+        "lineage_bound",
+        "candidate_hash"
+      ],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/text"},
+        "question": {"$ref": "#/$defs/text"},
+        "source_status": {"enum": ["open", "solved", "invalid", "unknown"]},
+        "source_refs": {"$ref": "#/$defs/refArray"},
+        "source_object_ids": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/objectId"}},
+        "source_complete": {"type": "boolean"},
+        "lineage_bound": {"type": "boolean"},
+        "difficulty": {"$ref": "#/$defs/probability"},
+        "importance": {"$ref": "#/$defs/probability"},
+        "expected_success_probability": {"$ref": "#/$defs/probability"},
+        "expected_artifact_probability": {"$ref": "#/$defs/probability"},
+        "expected_artifact_probability_semantics": {"enum": ["conditional_on_success", "joint"]},
+        "expected_importance": {"$ref": "#/$defs/probability"},
+        "candidate_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "pool": {
+      "type": "object",
+      "required": ["protocol_kind", "direction_id", "candidates", "candidate_count", "candidate_set_complete", "candidate_set_hash", "pool_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-opportunity-pool.v1"},
+        "direction_id": {"$ref": "#/$defs/text"},
+        "candidates": {"type": "array", "minItems": 1, "maxItems": 100000, "items": {"$ref": "#/$defs/candidate"}},
+        "candidate_count": {"type": "integer", "minimum": 1},
+        "candidate_set_complete": {"type": "boolean"},
+        "lineage_complete": {"type": "boolean"},
+        "candidate_set_hash": {"$ref": "#/$defs/digest"},
+        "pool_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "attempt": {
+      "type": "object",
+      "required": ["protocol_kind", "pool_id", "candidate_id", "status", "outcome", "summary", "attempt_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-opportunity-attempt.v1"},
+        "pool_id": {"$ref": "#/$defs/text"},
+        "candidate_id": {"$ref": "#/$defs/text"},
+        "status": {"enum": ["completed", "failed", "timed_out"]},
+        "outcome": {"enum": ["known", "new", "fix", "none"]},
+        "summary": {"$ref": "#/$defs/text"},
+        "evidence_object_ids": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/objectId"}},
+        "attempt_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "independenceReceipt": {
+      "type": "object",
+      "required": ["identity_verified", "receipt_hash"],
+      "properties": {
+        "identity_verified": {"const": false},
+        "receipt_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "judgment": {
+      "type": "object",
+      "required": ["protocol_kind", "attempt_id", "evaluator_id", "verdict", "summary", "status", "independence_receipt", "judgment_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-opportunity-judgment.v1"},
+        "attempt_id": {"$ref": "#/$defs/text"},
+        "evaluator_id": {"$ref": "#/$defs/text"},
+        "verdict": {"enum": ["pass", "fail", "known"]},
+        "summary": {"$ref": "#/$defs/text"},
+        "status": {"const": "completed"},
+        "independence_receipt": {"$ref": "#/$defs/independenceReceipt"},
+        "target_outcome": {"enum": ["new", "known", "fix", "none"]},
+        "stage_gate_override": {"type": "object"},
+        "evidence_object_ids": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/objectId"}},
+        "judgment_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "grade": {
+      "type": "object",
+      "required": ["protocol_kind", "judgment_id", "evaluator_id", "grade", "summary", "status", "independence_receipt", "grade_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-opportunity-grade.v1"},
+        "judgment_id": {"$ref": "#/$defs/text"},
+        "evaluator_id": {"$ref": "#/$defs/text"},
+        "grade": {"enum": ["known", "minor", "substantial"]},
+        "summary": {"$ref": "#/$defs/text"},
+        "status": {"const": "completed"},
+        "independence_receipt": {"$ref": "#/$defs/independenceReceipt"},
+        "target_verdict": {"enum": ["pass", "fail", "known"]},
+        "stage_gate_override": {"type": "object"},
+        "evidence_object_ids": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/objectId"}},
+        "grade_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "allocation": {
+      "type": "object",
+      "required": ["protocol_kind", "objective", "candidate_set", "probability_semantics", "allocation_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-allocation-plan.v1"},
+        "budget": {"$ref": "#/$defs/text"},
+        "limits": {"type": "object"},
+        "information_value_required": {"const": true},
+        "pool_id": {"$ref": "#/$defs/text"},
+        "objective": {"enum": ["artifact_yield", "importance_yield", "best_artifact"]},
+        "probability_semantics": {"enum": ["conditional_artifact_given_success", "joint_artifact_probability"]},
+        "candidate_set_complete": {"const": true},
+        "allocation_scope": {"const": "complete_open_candidate_pool"},
+        "candidate_set": {"type": "array", "minItems": 1, "maxItems": 100000, "items": {"$ref": "#/$defs/allocationRow"}},
+        "allocation_hash": {"$ref": "#/$defs/digest"},
+        "budget_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    },
+    "allocationRow": {
+      "type": "object",
+      "required": [
+        "candidate_id",
+        "source_status",
+        "rank",
+        "allocation_eligible",
+        "selected",
+        "source_status_eligible",
+        "allocation_reason",
+        "allocation_objective",
+        "probability_semantics",
+        "candidate_probability_semantics",
+        "probability_formula",
+        "artifact_probability_assumed"
+      ],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/text"},
+        "source_status": {"enum": ["open", "solved", "invalid", "unknown"]},
+        "rank": {"type": "integer", "minimum": 1},
+        "allocation_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "allocation_importance": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "allocation_eligible": {"type": "boolean"},
+        "selected": {"type": "boolean"},
+        "source_status_eligible": {"type": "boolean"},
+        "allocation_reason": {"$ref": "#/$defs/text"},
+        "allocation_objective": {"enum": ["artifact_yield", "importance_yield", "best_artifact"]},
+        "probability_semantics": {"enum": ["conditional_artifact_given_success", "joint_artifact_probability"]},
+        "candidate_probability_semantics": {"enum": ["conditional_on_success", "joint"]},
+        "probability_formula": {"$ref": "#/$defs/text"},
+        "artifact_probability_assumed": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "summary": {
+      "type": "object",
+      "required": ["protocol_kind", "candidate_count", "attempt_count", "funnel_complete", "quality_claim_allowed", "human_baseline_claim_allowed", "summary_hash"],
+      "properties": {
+        "protocol_kind": {"const": "xscientist.far-funnel-summary.v1"},
+        "candidate_count": {"type": "integer", "minimum": 0},
+        "attempt_count": {"type": "integer", "minimum": 0},
+        "funnel_complete": {"type": "boolean"},
+        "quality_claim_allowed": {"const": false},
+        "human_baseline_claim_allowed": {"const": false},
+        "summary_hash": {"$ref": "#/$defs/digest"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

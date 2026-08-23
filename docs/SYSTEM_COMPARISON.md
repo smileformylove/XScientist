@@ -62,9 +62,10 @@ human-SOTA references, expert validation, and human+agent process studies.
 Those rows are not injected into this matrix or into `workspace.score`.
 
 MLE-STAR and DS-STAR are included below as adjacent primary-source execution
-references. They are useful for an execution-layer comparison, but are not
-claimed to be named in the attached 107-page talk; their `talk_slides` list is
-therefore empty in the JSON report.
+references. FAR (Find–Attempt–Recommend) is likewise included as an adjacent
+primary-source discovery/allocation reference: it is not claimed to be named
+in the attached 107-page talk, so its `talk_slides` list is empty in the JSON
+report. These adjacent rows are useful for coverage, but none is a local rerun.
 
 ## What is being compared
 
@@ -78,6 +79,7 @@ therefore empty in the JSON report.
 | **AutoResearchClaw** | End-to-end 23-stage pipeline | Multi-agent debate, self-healing `Pivot/Refine`, read-only result reporting, targeted HITL, cross-run lessons | ARC-Bench experiment/end-to-end modes and ablations; pin paper/repository commit before comparing |
 | **DeepScientist** | Long-horizon goal-oriented discovery | Hierarchical hypothesize → verify → analyze and cumulative Findings Memory | Large, GPU-intensive progressive-discovery study; reported scale is not comparable to the provider-free pilot |
 | **AI-Researcher** | End-to-end survey → algorithm implementation → publication-ready paper | Specialized survey, coding, and writing agents with code-validate-refine | Scientist-Bench guided and open-ended tasks; source reports an agent benchmark, not a human-run baseline |
+| **FAR (Find–Attempt–Recommend)** | Literature → open-problem pool → candidate attempts → judged/graded discoveries | Find unresolved problems from a research direction, attempt every apparently well-posed candidate, then allocate expert review | Combinatorics pilot reports 4,717 conjectures attempted, 1,050 claimed `NEW`, 598 judged `PASS`, and 77 graded publishable; **reported primary result, not rerun here and no human task-performance arm** |
 | **MARS** | MLE-focused execution/search component | Budget-aware MCTS, Design–Decompose–Implement, comparative reflective memory | MLE-Bench and cross-branch lesson transfer; not a complete literature-to-paper system |
 | **AdaEvolve** | Adaptive evolutionary optimization component | Progress-aware adaptation of exploration intensity and resource allocation | ADRS / open-ended optimization anchors; component search, not a full research pipeline |
 | **EvoX (Meta-Evolution)** | Meta-evolution search-strategy component | Co-evolves candidate solutions and the strategy that selects/mutates them | ADRS / broad optimization anchors; exact task/evaluator revision must be pinned |
@@ -92,6 +94,7 @@ Scientist-v2](https://arxiv.org/abs/2504.08066),
 [AutoResearchClaw](https://arxiv.org/abs/2605.20025),
 [DeepScientist](https://arxiv.org/abs/2509.26603),
 [AI-Researcher](https://arxiv.org/abs/2505.18705),
+[FAR](https://arxiv.org/abs/2608.16977) ([official repository](https://github.com/zeyu-zheng/FAR)),
 [MARS](https://arxiv.org/abs/2602.02660),
 [AdaEvolve](https://arxiv.org/abs/2602.20133),
 [EvoX](https://arxiv.org/abs/2602.23413),
@@ -106,6 +109,13 @@ Where a Google Research repository is linked, it is treated as an author/researc
 code release; a repository's “not an officially supported Google product”
 disclaimer is not converted into a product-support claim.
 
+For FAR, the funnel counts and allocation findings are copied only as
+source-reported anchors. The paper's manually checked subset is author-selected
+and is not a 100% accuracy estimate; the expert/judge stages do not constitute a
+human performance arm. It is an arXiv preprint rather than an independently
+audited cross-system benchmark. XScientist has not executed the FAR repository
+or its combinatorics corpus here.
+
 ## Capability matrix
 
 The following is a compact reading of the machine-readable `capabilities`
@@ -114,13 +124,13 @@ XScientist pilot can expose an artifact or contract. It is not a score.
 
 | Dimension | XScientist today | End-to-end systems in the talk | Focused systems in the talk and adjacent references |
 | --- | --- | --- | --- |
-| Problem framing | Local typed question/plan and explicit falsifier checks; no autonomous benchmark discovery in the pilot | Usually human-supplied research problem; ScientistOne and ARC describe investigator/scoping stages | MARS/MLE-STAR/DS-STAR accept task tuples or data files; review/writing/figure systems start later |
+| Problem framing | Local typed question/plan and explicit falsifier checks; no autonomous benchmark discovery in the pilot | Usually human-supplied research problem; ScientistOne and ARC describe investigator/scoping stages | FAR starts from a human-specified research direction and builds an open-problem pool; MARS/MLE-STAR/DS-STAR accept task tuples or data files; review/writing/figure systems start later |
 | Literature | Provenance/contract surfaces exist, but no provider-backed retrieval in the pilot | ScientistOne and ARC explicitly ground/retrieve literature; AI-Researcher has a collector/filter stage | ScholarPeer makes live context retrieval its central contribution; PaperOrchestra consumes supplied material |
-| Exploration | Branch and checkpoint metadata are observable; no model-generated search trajectory is claimed | AI Scientist v2 uses an experiment tree; ScientistOne uses parallel explore/exploit; DeepScientist uses persistent hierarchical search | MARS uses resource-aware MCTS; AdaEvolve/EvoX adapt evolutionary search; component systems do not claim full discovery search |
+| Exploration | Branch and checkpoint metadata are observable; no model-generated search trajectory is claimed | AI Scientist v2 uses an experiment tree; ScientistOne uses parallel explore/exploit; DeepScientist uses persistent hierarchical search | FAR enumerates and attempts literature-derived candidates; MARS uses resource-aware MCTS; AdaEvolve/EvoX adapt evolutionary search; component systems do not claim full discovery search |
 | Execution | Typed attempts, receipts, failures, and closure can be audited; no rollout score | All five end-to-end systems report execution, with different budgets and environments | MARS/MLE-STAR/DS-STAR focus execution/resource planning; review/writing/figure systems are downstream |
 | Claims | Closure, review debt, provenance and gates are local observables; no quality inference | ScientistOne makes claim evidence chains explicit; ARC reports verified result reporting; others require artifact-level audit to compare | ScholarPeer critiques claims; PaperOrchestra/PaperBanana can improve presentation but do not prove truth |
 | Writing/visuals | Output generation is not what the current pilot measures | End-to-end systems include writing; quality protocols differ | PaperOrchestra and PaperBanana isolate writing/figure quality and should be benchmarked separately |
-| Feedback/evolution | Append-only history, repair/gate signals, and self-evolution contracts are inspectable | ARC and DeepScientist explicitly report persistent lessons; AI Scientist v2 is primarily tree-search | MARS explicitly studies cross-branch lesson transfer |
+| Feedback/evolution | Append-only history, repair/gate signals, and self-evolution contracts are inspectable | ARC and DeepScientist explicitly report persistent lessons; AI Scientist v2 is primarily tree-search | FAR reports allocation analysis but not a persistent self-evolution arm; MARS explicitly studies cross-branch lesson transfer |
 | Process/fairness | Strongest current local signal: branch membership, bounded timeline, source totals, fairness checks, redaction | External papers report budgets/branches differently; no automatic claim that their histories are Git-like | Component benchmarks need their own matched harness |
 | Reproduction | `fsck`, bundles, CAS/ARA pointers, and `trace → replay → verify` contracts | External systems publish varying logs/code; claims require their own rerun protocol | Paper/figure outputs need separate artifact and evaluator checks |
 
@@ -158,6 +168,12 @@ This is an integration map, not a claim that one system subsumes the others:
   XScientist's append-only history and fairness gates;
 - use DeepScientist/MARS-style findings memory and resource-aware planning, but
   store the lesson provenance and credit assignment as typed objects;
+- adopt FAR's explicit research-direction → candidate-pool → attempt → judge →
+  grade funnel, preserving every candidate outcome (including `NONE`, `KNOWN`,
+  and failed/invalid status) instead of counting only successful discoveries;
+- expose FAR-style expected-yield and expected-importance allocation as an
+  optional policy, with calibration metadata and no claim that its reported
+  combinatorics rates transfer to another domain;
 - expose AdaEvolve/EvoX-style search-policy adaptation as an optional optimizer
   adapter, while retaining the candidate/strategy lineage and evaluator digest;
 - use MLE-STAR/DS-STAR as execution-layer adapters for code/data tasks, keeping
@@ -175,7 +191,7 @@ This is an integration map, not a claim that one system subsumes the others:
 At the current repository state we do **not** claim that XScientist:
 
 - beats a human, ScientistOne, AI Scientist, AutoResearchClaw, DeepScientist,
-  AI-Researcher, MARS, ScholarPeer, PaperOrchestra, or PaperBanana;
+  AI-Researcher, FAR, MARS, ScholarPeer, PaperOrchestra, or PaperBanana;
 - has reproduced any number in the talk or in the external papers;
 - has completed an autonomous provider-backed trajectory merely because its
   local process audit is complete;

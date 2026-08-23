@@ -38,6 +38,8 @@ nav:
       - Human baseline inventory: HUMAN_BASELINES.md
       - Research-system comparison: SYSTEM_COMPARISON.md
       - Research-system comparison (中文): SYSTEM_COMPARISON.zh.md
+      - Opportunity funnel: OPPORTUNITY_FUNNEL.md
+      - Opportunity funnel (中文): OPPORTUNITY_FUNNEL.zh.md
   - Operate:
       - Long-running studies: LONG_RUNNING_GUIDE.md
       - Configuration: CONFIG_REFERENCE.md

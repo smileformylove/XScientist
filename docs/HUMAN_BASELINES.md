@@ -82,6 +82,7 @@ new human run.
 | [ResearchGym](https://arxiv.org/abs/2602.15112) ([code](https://github.com/Anikethh/ResearchGym)) | `human_expert_artifact_reference` | Five recent paper environments/39 sub-tasks retain the source authors’ solution as a “soft upper bound” or known human-expert reference; the paper evaluates agents against it. | The source does not recruit people to run the packaged environment or report a human score distribution, participant count, or human budget. The reference artifact is not a measured human baseline. |
 | [AIRS-Bench](https://arxiv.org/abs/2602.06855) | `human_SOTA_reference` | 20 ML research tasks normalize a prior-literature “human SOTA” to 1.0; agents exceed it on 4 tasks and do not reach it on 16. | The reference is a result quoted from prior work, not people re-running these 20 tasks with a shared budget. Never call 1.0 “measured human performance”. |
 | [AutoResearchEval](https://arxiv.org/abs/2608.14905) ([official repo](https://github.com/PrentisAI/AutoResearchEval)) | `human_reference_proxy` / `expert_validation_only` / `not_reported` | 100 tasks and 800 trajectories; experts label a stratified 50-trajectory sample; artifact-aware judge agreement is reported (pattern κ=0.75, taxonomy κ=0.83). | The audited paper reports human annotation/calibration and task references, not a human task-performance arm. Its 50-trajectory labels are not a human baseline. |
+| [FAR — The Problem Is the Problem](https://arxiv.org/abs/2608.16977) ([official repo](https://github.com/zeyu-zheng/FAR)) | `expert_validation_only` / `not_reported` | The combinatorics pilot puts each claimed `NEW` resolution through three independent **agent** judges; 77 items remain after grading and 15 author-selected artifacts receive manual checks. | Agent judges and selective author review validate/prioritize generated resolutions; no recruited humans attempt the same 4,717-conjecture task pool under the pipeline contract. The paper reports no human task-performance score, and these counts are not XScientist measurements. |
 | [ScholarPeer](https://arxiv.org/abs/2601.22638) | `human_judgment_calibration` / `human_reference_proxy` | ScholarEval combines existing human reviews with DeepReview-Bench and AgentReview; a 100-paper expert subset is used to calibrate the automated reviewer. | Existing reviews and judge calibration are reference labels, not newly recruited reviewers completing the same review task under a declared budget. |
 | [PaperOrchestra](https://arxiv.org/abs/2604.05018) | `human_judgment_calibration` / `human_reference_proxy` | Eleven AI researchers provide side-by-side preferences on a 40-paper subset of PaperWritingBench. | These are quality-preference judgments of generated papers, not people independently writing the same papers from the raw-material protocol. |
 | [ScienceAgentBench](https://arxiv.org/abs/2410.05080) | `expert_validation_only` / `not_reported` | 102 tasks from 44 papers; nine subject-matter experts validate tasks and provide knowledge; evaluators score generated programs. | The nine experts did not constitute a same-task human performance arm. Any reported agent score must not be relabelled as a human comparison. |
@@ -102,8 +103,8 @@ human_annotation_is_a_score: false
 ```
 
 This is intentionally different from `0`, `unknown quality`, or “the agent
-beats humans”. The same rule applies to ScienceAgentBench, DeepResearch Bench,
-original CORE-Bench, and ReplicatorBench.
+beats humans”. The same rule applies to FAR, ScienceAgentBench, DeepResearch
+Bench, original CORE-Bench, and ReplicatorBench.
 
 ## What XScientist can claim today
 

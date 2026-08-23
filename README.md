@@ -278,6 +278,11 @@ Deep strategy commands remain available under `xscientist research`, but new
 users do not need to learn them before the first result. See the
 [deep-research protocol](https://github.com/smileformylove/XScientist/blob/main/docs/DEEP_RESEARCH_PROTOCOL.md)
 and [method-discovery protocol](https://github.com/smileformylove/XScientist/blob/main/docs/METHOD_DISCOVERY_PROTOCOL.md).
+For literature-to-open-problem discovery, the [FAR-inspired opportunity
+funnel](docs/OPPORTUNITY_FUNNEL.md) records every candidate, explicit negative
+outcome, independent judgment, and allocation assumption without turning an
+external paper's counts into a local score. This protocol is an XScientist
+integration inspired by FAR, not a reproduction of FAR's combinatorics pilot.
 
 ## Inspect and reproduce
 
@@ -538,13 +543,16 @@ The attached Expo Talk names systems that operate at different layers: full
 research agents (ScientistOne, AI Scientist v2, AutoResearchClaw, DeepScientist,
 AI-Researcher), adaptive search components (AdaEvolve, EvoX, MARS), a review
 component (ScholarPeer), a paper-writing component (PaperOrchestra), and a
-figure component (PaperBanana). MLE-STAR and DS-STAR are adjacent primary-
-source execution references added for coverage; they are not claimed to be
-named in the attached 107-page talk.
+figure component (PaperBanana). FAR (Find–Attempt–Recommend) is an adjacent
+primary-source discovery/allocation reference, while MLE-STAR and DS-STAR are
+adjacent primary-source execution references added for coverage; these three
+are not claimed to be named in the attached 107-page talk.
 The report also keeps talk-only references (Deep Researcher Agent and the AST
 role diagram) visible without pretending they have a matched benchmark. A
 figure or writing score is not an end-to-end discovery score, so the project
 keeps these scopes separate.
+FAR's reported expert/judge review is not a recruited human task-performance
+arm, and its combinatorics counts are not local XScientist measurements.
 Context-only mentions and future concepts (for example ScientistTwo) remain
 listed with their slide number in `talk_inventory` rather than being promoted
 to evaluated competitors.

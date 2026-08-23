@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -278,7 +279,7 @@ def _is_sha256(value: Any) -> bool:
 
 
 _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
-    "question": ("text", "question"),
+    "question": ("text", "question", "pool_hash"),
     "search_plan": ("queries", "question", "search_plan_hash"),
     "search_receipt": ("receipt_hash", "provider", "candidates"),
     "source_snapshot": (
@@ -294,7 +295,7 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "hypothesis": ("statement", "core_hypothesis", "title"),
     "preregistration": ("status", "registration_id", "hypothesis_id"),
     "research_plan": ("plan_id", "tasks", "summary", "hypothesis"),
-    "experiment_attempt": ("status",),
+    "experiment_attempt": ("status", "attempt_hash"),
     "observation": ("measurement", "result", "output_hash", "metrics"),
     "metric": ("name", "metric", "value"),
     "evidence": (
@@ -307,7 +308,14 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
         "ara_manifest_hash",
     ),
     "claim": ("statement", "text", "claim", "claim_hash"),
-    "review": ("summary", "status", "decision", "report_hash"),
+    "review": (
+        "summary",
+        "status",
+        "decision",
+        "report_hash",
+        "judgment_hash",
+        "grade_hash",
+    ),
     "gate_decision": ("decision", "claim_promotion_allowed"),
     "manuscript": ("title", "status", "final", "idea_idx"),
     "reproduction": (
@@ -354,7 +362,7 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "research_goal": ("question", "objective", "goal_hash"),
     "action_proposal": ("action", "summary", "proposal_hash"),
     "experiment_design": ("summary", "design", "design_hash"),
-    "resource_budget": ("budget", "limits", "budget_hash"),
+    "resource_budget": ("budget", "limits", "budget_hash", "allocation_hash"),
     "stopping_decision": ("decision", "reason", "decision_hash"),
     "novelty_check": ("verdict", "summary", "check_hash"),
     "evaluation_blinding": ("policy", "summary", "blinding_hash"),
@@ -889,6 +897,369 @@ def _discovery_protocol_issues(kind: str, payload: Mapping[str, Any]) -> list[st
 
     protocol_kind = payload.get("protocol_kind")
     issues: list[str] = []
+
+    far_kind_by_protocol = {
+        "xscientist.far-research-direction.v1": "research_goal",
+        "xscientist.far-opportunity-pool.v1": "question",
+        "xscientist.far-opportunity-attempt.v1": "experiment_attempt",
+        "xscientist.far-opportunity-judgment.v1": "review",
+        "xscientist.far-opportunity-grade.v1": "review",
+        "xscientist.far-allocation-plan.v1": "resource_budget",
+    }
+    expected_far_kind = far_kind_by_protocol.get(protocol_kind)
+    if expected_far_kind is not None and kind != expected_far_kind:
+        issues.append(
+            f"FAR protocol {protocol_kind} must be recorded as {expected_far_kind}"
+        )
+
+    # FAR-inspired opportunity funnel subtypes.  They intentionally live on
+    # existing Research VCS kinds so adding this protocol does not change any
+    # previously published semantic-profile digest.
+    if (
+        protocol_kind == "xscientist.far-research-direction.v1"
+        and kind == "research_goal"
+    ):
+        required = ("direction_id", "question", "objective", "goal_hash")
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"FAR research direction requires {field}")
+        if payload.get("goal_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "goal_hash"}
+            )
+            if payload.get("goal_hash") != expected:
+                issues.append("FAR research direction goal_hash mismatch")
+
+    if protocol_kind == "xscientist.far-opportunity-pool.v1" and kind == "question":
+        required = (
+            "direction_id",
+            "candidates",
+            "candidate_count",
+            "candidate_set_complete",
+            "candidate_set_hash",
+            "pool_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"FAR opportunity pool requires {field}")
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            issues.append("FAR opportunity pool candidates must be a non-empty array")
+        else:
+            ids = [
+                str(item.get("candidate_id") or "")
+                for item in candidates
+                if isinstance(item, Mapping)
+            ]
+            if len(ids) != len(candidates) or not all(ids) or len(set(ids)) != len(ids):
+                issues.append(
+                    "FAR opportunity candidate ids must be present and unique"
+                )
+            if payload.get("candidate_count") != len(candidates):
+                issues.append("FAR opportunity candidate_count mismatch")
+            if payload.get("candidate_set_hash") != canonical_content_hash(candidates):
+                issues.append("FAR opportunity candidate_set_hash mismatch")
+            for candidate in candidates:
+                if not isinstance(candidate, Mapping):
+                    continue
+                candidate_hash = candidate.get("candidate_hash")
+                expected_candidate_hash = canonical_content_hash(
+                    {
+                        key: value
+                        for key, value in candidate.items()
+                        if key != "candidate_hash"
+                    }
+                )
+                if candidate_hash != expected_candidate_hash:
+                    issues.append("FAR opportunity candidate_hash mismatch")
+                if candidate.get("source_status") not in {
+                    "open",
+                    "solved",
+                    "invalid",
+                    "unknown",
+                }:
+                    issues.append("FAR opportunity candidate source_status is invalid")
+                source_object_ids = candidate.get("source_object_ids")
+                if not isinstance(source_object_ids, list) or any(
+                    not isinstance(value, str)
+                    or re.fullmatch(r"rso-[0-9a-f]{16}", value) is None
+                    for value in source_object_ids
+                ):
+                    issues.append("FAR opportunity source_object_ids are invalid")
+                if candidate.get("lineage_bound") is not bool(source_object_ids):
+                    issues.append("FAR opportunity candidate lineage_bound mismatch")
+                if candidate.get("source_complete") is not bool(
+                    candidate.get("source_refs") or source_object_ids
+                ):
+                    issues.append("FAR opportunity candidate source_complete mismatch")
+                if (
+                    "expected_artifact_probability_semantics" in candidate
+                    and candidate.get("expected_artifact_probability_semantics")
+                    not in {"conditional_on_success", "joint"}
+                ):
+                    issues.append(
+                        "FAR opportunity expected_artifact_probability_semantics is invalid"
+                    )
+                for score_field in (
+                    "difficulty",
+                    "importance",
+                    "expected_success_probability",
+                    "expected_artifact_probability",
+                    "expected_importance",
+                ):
+                    if score_field in candidate:
+                        value = candidate.get(score_field)
+                        if (
+                            isinstance(value, bool)
+                            or not isinstance(value, (int, float))
+                            or not math.isfinite(float(value))
+                            or not 0 <= float(value) <= 1
+                        ):
+                            issues.append(
+                                f"FAR opportunity {score_field} must be finite in [0, 1]"
+                            )
+        if not isinstance(payload.get("candidate_set_complete"), bool):
+            issues.append("FAR opportunity candidate_set_complete must be boolean")
+        if not isinstance(payload.get("lineage_complete"), bool):
+            issues.append("FAR opportunity lineage_complete must be boolean")
+        elif isinstance(candidates, list):
+            expected_lineage = bool(candidates) and all(
+                isinstance(item, Mapping)
+                and bool(item.get("source_object_ids"))
+                and item.get("lineage_bound") is True
+                for item in candidates
+            )
+            if payload.get("lineage_complete") is not expected_lineage:
+                issues.append("FAR opportunity lineage_complete mismatch")
+        if payload.get("pool_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "pool_hash"}
+            )
+            if payload.get("pool_hash") != expected:
+                issues.append("FAR opportunity pool_hash mismatch")
+
+    if (
+        protocol_kind == "xscientist.far-opportunity-attempt.v1"
+        and kind == "experiment_attempt"
+    ):
+        required = (
+            "pool_id",
+            "candidate_id",
+            "status",
+            "outcome",
+            "summary",
+            "attempt_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"FAR opportunity attempt requires {field}")
+        if payload.get("status") not in {"completed", "failed", "timed_out"}:
+            issues.append("FAR opportunity attempt status is invalid")
+        if payload.get("outcome") not in {"known", "new", "fix", "none"}:
+            issues.append("FAR opportunity attempt outcome is invalid")
+        evidence_ids = payload.get("evidence_object_ids", [])
+        if not isinstance(evidence_ids, list) or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"rso-[0-9a-f]{16}", value) is None
+            for value in evidence_ids
+        ):
+            issues.append("FAR opportunity attempt evidence_object_ids are invalid")
+        if payload.get("attempt_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "attempt_hash"}
+            )
+            if payload.get("attempt_hash") != expected:
+                issues.append("FAR opportunity attempt_hash mismatch")
+
+    if (
+        protocol_kind
+        in {
+            "xscientist.far-opportunity-judgment.v1",
+            "xscientist.far-opportunity-grade.v1",
+        }
+        and kind == "review"
+    ):
+        is_judgment = protocol_kind.endswith("judgment.v1")
+        hash_field = "judgment_hash" if is_judgment else "grade_hash"
+        required = (
+            (
+                "attempt_id",
+                "evaluator_id",
+                "summary",
+                "independence_receipt",
+                hash_field,
+            )
+            if is_judgment
+            else (
+                "judgment_id",
+                "evaluator_id",
+                "summary",
+                "independence_receipt",
+                hash_field,
+            )
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"FAR opportunity review requires {field}")
+        if payload.get("status") != "completed":
+            issues.append("FAR opportunity review status must remain completed")
+        if is_judgment and payload.get("verdict") not in {"pass", "fail", "known"}:
+            issues.append("FAR opportunity judgment verdict is invalid")
+        if not is_judgment and payload.get("grade") not in {
+            "known",
+            "minor",
+            "substantial",
+        }:
+            issues.append("FAR opportunity grade is invalid")
+        stage_override = payload.get("stage_gate_override")
+        override_allowed = (
+            isinstance(stage_override, Mapping)
+            and stage_override.get("allowed") is True
+            and bool(str(stage_override.get("reason") or "").strip())
+        )
+        if is_judgment:
+            target_outcome = payload.get("target_outcome")
+            if target_outcome is not None and target_outcome not in {
+                "new",
+                "known",
+                "fix",
+                "none",
+            }:
+                issues.append("FAR opportunity judgment target_outcome is invalid")
+            if (
+                target_outcome is not None
+                and target_outcome != "new"
+                and not override_allowed
+            ):
+                issues.append(
+                    "FAR opportunity judgment outside NEW requires stage_gate_override"
+                )
+        else:
+            target_verdict = payload.get("target_verdict")
+            if target_verdict is not None and target_verdict not in {
+                "pass",
+                "fail",
+                "known",
+            }:
+                issues.append("FAR opportunity grade target_verdict is invalid")
+            if (
+                target_verdict is not None
+                and target_verdict not in {"pass", "known"}
+                and not override_allowed
+            ):
+                issues.append(
+                    "FAR opportunity grade outside PASS/KNOWN requires stage_gate_override"
+                )
+        evidence_ids = payload.get("evidence_object_ids", [])
+        if not isinstance(evidence_ids, list) or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"rso-[0-9a-f]{16}", value) is None
+            for value in evidence_ids
+        ):
+            issues.append("FAR opportunity review evidence_object_ids are invalid")
+        receipt = payload.get("independence_receipt")
+        if not isinstance(receipt, Mapping):
+            issues.append(
+                "FAR opportunity review independence_receipt must be an object"
+            )
+        else:
+            if receipt.get("identity_verified") is not False:
+                issues.append(
+                    "FAR opportunity review independence must remain declared"
+                )
+            if receipt.get("receipt_hash") != canonical_content_hash(
+                {key: value for key, value in receipt.items() if key != "receipt_hash"}
+            ):
+                issues.append("FAR opportunity review receipt_hash mismatch")
+        if payload.get(hash_field):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != hash_field}
+            )
+            if payload.get(hash_field) != expected:
+                issues.append(f"FAR opportunity {hash_field} mismatch")
+
+    if (
+        protocol_kind == "xscientist.far-allocation-plan.v1"
+        and kind == "resource_budget"
+    ):
+        required = (
+            "budget",
+            "limits",
+            "information_value_required",
+            "pool_id",
+            "objective",
+            "candidate_set",
+            "allocation_hash",
+            "budget_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"FAR allocation plan requires {field}")
+        if payload.get("objective") not in {
+            "artifact_yield",
+            "importance_yield",
+            "best_artifact",
+        }:
+            issues.append("FAR allocation objective is invalid")
+        if payload.get("probability_semantics") not in {
+            "conditional_artifact_given_success",
+            "joint_artifact_probability",
+        }:
+            issues.append("FAR allocation probability_semantics is invalid")
+        if payload.get("information_value_required") is not True:
+            issues.append("FAR allocation must require information-value accounting")
+        if payload.get("candidate_set_complete") is not True:
+            issues.append("FAR allocation must bind a complete candidate set")
+        if payload.get("allocation_scope") != "complete_open_candidate_pool":
+            issues.append("FAR allocation scope is invalid")
+        rows = payload.get("candidate_set")
+        if not isinstance(rows, list) or not rows:
+            issues.append("FAR allocation candidate_set must be a non-empty array")
+        else:
+            ranks = [item.get("rank") for item in rows if isinstance(item, Mapping)]
+            if sorted(ranks) != list(range(1, len(rows) + 1)):
+                issues.append("FAR allocation candidate ranks are invalid")
+            if any(
+                isinstance(item, Mapping)
+                and item.get("allocation_eligible") is True
+                and item.get("allocation_score") is None
+                for item in rows
+            ):
+                issues.append("FAR allocation eligible row lacks a score")
+            for item in rows:
+                if not isinstance(item, Mapping):
+                    issues.append("FAR allocation candidate row must be an object")
+                    continue
+                if (
+                    item.get("allocation_eligible") is True
+                    and item.get("source_status") != "open"
+                ):
+                    issues.append("FAR allocation cannot select a non-open opportunity")
+                if item.get("source_status") != "open":
+                    issues.append(
+                        "FAR allocation candidate_set must contain only open opportunities"
+                    )
+                if item.get("source_status_eligible") is not (
+                    item.get("source_status") == "open"
+                ):
+                    issues.append("FAR allocation source_status_eligible mismatch")
+        if payload.get("allocation_hash"):
+            expected = canonical_content_hash(
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"allocation_hash", "budget_hash"}
+                }
+            )
+            if payload.get("allocation_hash") != expected:
+                issues.append("FAR allocation allocation_hash mismatch")
+        if payload.get("budget_hash"):
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "budget_hash"}
+            )
+            if payload.get("budget_hash") != expected:
+                issues.append("FAR allocation budget_hash mismatch")
+
     if kind == "experiment_design" and protocol_kind == (
         "competitive_experiment_candidate"
     ):
@@ -1311,6 +1682,14 @@ def research_payload_issues(
         "evaluation_blinding_hash",
         "contract_hash",
         "context_hash",
+        "goal_hash",
+        "candidate_hash",
+        "pool_hash",
+        "attempt_hash",
+        "judgment_hash",
+        "grade_hash",
+        "allocation_hash",
+        "summary_hash",
     ):
         value = payload.get(field)
         if value not in (None, "") and not _is_sha256(value):

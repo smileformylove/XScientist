@@ -42,6 +42,23 @@ if TYPE_CHECKING:
         save_transfer_matrix,
         scan_research_anomalies,
     )
+    from .opportunity_funnel import (
+        build_opportunity_attempt,
+        build_opportunity_funnel_summary,
+        build_opportunity_grade,
+        build_opportunity_judgment,
+        build_opportunity_pool,
+        build_research_direction,
+        inspect_opportunity_funnel,
+        normalize_opportunity_candidates,
+        rank_opportunity_candidates,
+        save_opportunity_allocation,
+        save_opportunity_attempt,
+        save_opportunity_grade,
+        save_opportunity_judgment,
+        save_opportunity_pool,
+        save_research_direction,
+    )
     from .research_context import (
         build_research_context_snapshot,
         render_research_context_for_prompt,
@@ -77,6 +94,24 @@ _STRATEGY_EXPORTS = {
     "save_posterior_update",
     "save_transfer_matrix",
     "scan_research_anomalies",
+}
+
+_OPPORTUNITY_EXPORTS = {
+    "build_opportunity_attempt",
+    "build_opportunity_funnel_summary",
+    "build_opportunity_grade",
+    "build_opportunity_judgment",
+    "build_opportunity_pool",
+    "build_research_direction",
+    "inspect_opportunity_funnel",
+    "normalize_opportunity_candidates",
+    "rank_opportunity_candidates",
+    "save_opportunity_allocation",
+    "save_opportunity_attempt",
+    "save_opportunity_grade",
+    "save_opportunity_judgment",
+    "save_opportunity_pool",
+    "save_research_direction",
 }
 
 
@@ -148,6 +183,10 @@ def __getattr__(name: str) -> Any:
         from . import research_strategy
 
         value = getattr(research_strategy, name)
+    elif name in _OPPORTUNITY_EXPORTS:
+        from . import opportunity_funnel
+
+        value = getattr(opportunity_funnel, name)
     elif name in {"build_research_guide", "start_guided_research"}:
         from . import research_journey
 
@@ -241,6 +280,21 @@ __all__ = [
     "persist_benchmark_report",
     "verify_benchmark_report",
     "scan_research_anomalies",
+    "build_opportunity_attempt",
+    "build_opportunity_funnel_summary",
+    "build_opportunity_grade",
+    "build_opportunity_judgment",
+    "build_opportunity_pool",
+    "build_research_direction",
+    "inspect_opportunity_funnel",
+    "normalize_opportunity_candidates",
+    "rank_opportunity_candidates",
+    "save_opportunity_allocation",
+    "save_opportunity_attempt",
+    "save_opportunity_grade",
+    "save_opportunity_judgment",
+    "save_opportunity_pool",
+    "save_research_direction",
     "rollback_workspace_checkpoint",
     "__version__",
     "create_app",
