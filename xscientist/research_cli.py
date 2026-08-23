@@ -61,6 +61,7 @@ from .opportunity_funnel import (
     save_opportunity_pool,
     save_research_direction,
 )
+from .research_rollout import save_research_rollout
 
 
 def _print_json(payload: Any) -> None:
@@ -642,6 +643,19 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     opportunity_inspect.add_argument("pool_id")
     opportunity_inspect.add_argument("--repo", default=".")
     opportunity_inspect.add_argument("--json", action="store_true", dest="as_json")
+
+    rollout_parser = subparsers.add_parser(
+        "rollout",
+        help=(
+            "Record a metadata-only research-policy/tool rollout with a task rubric, "
+            "turn credit trace, and observational evaluator summary."
+        ),
+    )
+    rollout_parser.add_argument(
+        "episode",
+        help="JSON file containing task_hash, budget, tool calls, turns, and evaluations.",
+    )
+    _add_program_save_arguments(rollout_parser)
 
     literature_parser = subparsers.add_parser(
         "literature",
@@ -2048,6 +2062,17 @@ def main(
                 print(f"Outcomes: {summary['outcome_counts']}")
                 print(f"Unattempted: {summary['unattempted_candidate_ids']}")
                 print(f"Funnel complete: {summary['funnel_complete']}")
+                return 0
+
+        if args.command == "rollout":
+            episode = _read_json_mapping(args.episode, label="research rollout")
+            result = save_research_rollout(
+                args.repo,
+                episode,
+                message=args.message,
+                commit=not args.no_commit,
+            )
+            _print_saved_object("research rollout", result, as_json=args.as_json)
             return 0
 
         if args.command == "literature":

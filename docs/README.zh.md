@@ -755,6 +755,7 @@ print(result.returncode)
 | 第一个项目与恢复 | [入门](GETTING_STARTED.md) · [长任务指南](LONG_RUNNING_GUIDE.md) |
 | 科研历史与协议 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) · [协议 v2](RESEARCH_PROTOCOL_V2.md) |
 | 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
+| 研究策略 Rollout | [Rollout 契约](RESEARCH_ROLLOUTS.zh.md) · [Faraday 论文](https://arxiv.org/abs/2608.13331) |
 | 科研诚信与策略 | [科研诚信](RESEARCH_INTEGRITY.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 当前劣势与审计 | [2026 项目审计](PROJECT_AUDIT_2026-08.md) · [入门审计](ONBOARDING_AUDIT.md) |
 | SDK、HTTP API 与适配器 | [SDK/API](guides/SDK_AND_API.md) · [DAG/适配器](RESEARCH_DAG_AND_ADAPTERS.md) |

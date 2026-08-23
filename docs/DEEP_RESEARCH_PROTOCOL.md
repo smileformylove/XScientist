@@ -37,6 +37,13 @@ primary probabilities. The default conditional allocation mode may record an
 explicit neutral `1.0` assumption for a missing conditional artifact factor;
 joint-probability mode leaves that row unselected.
 
+For the execution/evaluation part of the loop, see the
+[research-policy rollout contract](RESEARCH_ROLLOUTS.md). It records which
+outer policy delegated each metadata-only tool call, the task-specific rubric,
+observational turn credit, and evaluator disagreement. It deliberately does
+not turn an LLM judge into a ground-truth oracle or claim Faraday's scores
+locally.
+
 Strict publication and quality-gated runs also require every LLM call trace to
 be persisted successfully. A trace storage failure stops the run instead of
 silently producing an unverifiable result. Independence receipts currently

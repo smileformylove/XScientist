@@ -80,11 +80,13 @@ STRATEGY_RESEARCH_OBJECT_KINDS = (
     *STRATEGY_RESEARCH_OBJECT_KINDS_V1,
     "posterior_update",
 )
+ROLLOUT_RESEARCH_OBJECT_KINDS = ("research_rollout",)
 RESEARCH_OBJECT_KINDS = (
     *CORE_RESEARCH_OBJECT_KINDS,
     *EPISTEMIC_RESEARCH_OBJECT_KINDS,
     *AUTONOMOUS_RESEARCH_OBJECT_KINDS,
     *STRATEGY_RESEARCH_OBJECT_KINDS,
+    *ROLLOUT_RESEARCH_OBJECT_KINDS,
 )
 RESEARCH_OBJECT_STATES = (
     "draft",
@@ -185,6 +187,12 @@ _STRATEGY_PROFILE = _profile_descriptor(
     STRATEGY_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
+_ROLLOUT_PROFILE = _profile_descriptor(
+    "https://xscientist.io/profiles/research-rollout/v1",
+    "1.0.0",
+    ROLLOUT_RESEARCH_OBJECT_KINDS,
+    RESEARCH_RELATION_TYPES,
+)
 BUILTIN_RESEARCH_PROFILES = {
     profile["uri"]: profile
     for profile in (
@@ -193,6 +201,7 @@ BUILTIN_RESEARCH_PROFILES = {
         _AUTONOMOUS_PROFILE,
         _STRATEGY_PROFILE_V1,
         _STRATEGY_PROFILE,
+        _ROLLOUT_PROFILE,
     )
 }
 
@@ -206,6 +215,8 @@ def _default_profile_for_kind(kind: str) -> dict[str, Any] | None:
         return deepcopy(_AUTONOMOUS_PROFILE)
     if kind in STRATEGY_RESEARCH_OBJECT_KINDS:
         return deepcopy(_STRATEGY_PROFILE)
+    if kind in ROLLOUT_RESEARCH_OBJECT_KINDS:
+        return deepcopy(_ROLLOUT_PROFILE)
     return None
 
 
@@ -377,6 +388,7 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "boundary_condition": ("condition", "boundary_hash"),
     "transfer_matrix": ("claim_id", "matrix_hash"),
     "posterior_update": ("portfolio_id", "update_hash"),
+    "research_rollout": ("task_id", "task_hash", "rollout_hash"),
 }
 
 
@@ -1559,6 +1571,11 @@ def research_payload_issues(
         issues.extend(
             _strategy_protocol_issues(normalized_kind, payload, semantic_profile)
         )
+    if normalized_kind == "research_rollout":
+        try:
+            validate_json(dict(payload), load_schema("research_rollout"))
+        except ValidationError as exc:
+            issues.append(f"research_rollout schema invalid: {exc.message}")
     required_fields: dict[str, tuple[str, ...]] = {
         "search_plan": ("question", "queries", "search_plan_hash"),
         "search_receipt": (
@@ -1690,6 +1707,11 @@ def research_payload_issues(
         "grade_hash",
         "allocation_hash",
         "summary_hash",
+        "rollout_hash",
+        "turn_credit_hash",
+        "tool_trace_hash",
+        "evaluation_hash",
+        "rubric_hash",
     ):
         value = payload.get(field)
         if value not in (None, "") and not _is_sha256(value):
@@ -1908,6 +1930,7 @@ __all__ = [
     "RESEARCH_RELATION_TYPES",
     "RESEARCH_SEMANTIC_PROFILE_SCHEMA",
     "STRATEGY_RESEARCH_OBJECT_KINDS",
+    "ROLLOUT_RESEARCH_OBJECT_KINDS",
     "ResearchObjectError",
     "build_research_object",
     "research_payload_issues",

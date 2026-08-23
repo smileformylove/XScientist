@@ -59,6 +59,16 @@ if TYPE_CHECKING:
         save_opportunity_pool,
         save_research_direction,
     )
+    from .research_rollout import (
+        ResearchRolloutError,
+        assess_tool_swap_compatibility,
+        build_replication_rubric,
+        build_research_rollout,
+        build_tool_delegation_trace,
+        build_turn_credit_summary,
+        evaluate_replication_rollout,
+        save_research_rollout,
+    )
     from .research_context import (
         build_research_context_snapshot,
         render_research_context_for_prompt,
@@ -112,6 +122,17 @@ _OPPORTUNITY_EXPORTS = {
     "save_opportunity_judgment",
     "save_opportunity_pool",
     "save_research_direction",
+}
+
+_ROLLOUT_EXPORTS = {
+    "ResearchRolloutError",
+    "assess_tool_swap_compatibility",
+    "build_replication_rubric",
+    "build_research_rollout",
+    "build_tool_delegation_trace",
+    "build_turn_credit_summary",
+    "evaluate_replication_rollout",
+    "save_research_rollout",
 }
 
 
@@ -187,6 +208,10 @@ def __getattr__(name: str) -> Any:
         from . import opportunity_funnel
 
         value = getattr(opportunity_funnel, name)
+    elif name in _ROLLOUT_EXPORTS:
+        from . import research_rollout
+
+        value = getattr(research_rollout, name)
     elif name in {"build_research_guide", "start_guided_research"}:
         from . import research_journey
 
@@ -295,6 +320,14 @@ __all__ = [
     "save_opportunity_judgment",
     "save_opportunity_pool",
     "save_research_direction",
+    "ResearchRolloutError",
+    "assess_tool_swap_compatibility",
+    "build_replication_rubric",
+    "build_research_rollout",
+    "build_tool_delegation_trace",
+    "build_turn_credit_summary",
+    "evaluate_replication_rollout",
+    "save_research_rollout",
     "rollback_workspace_checkpoint",
     "__version__",
     "create_app",

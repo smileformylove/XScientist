@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/profiles/research-rollout/v1/research_rollout.schema.json",
+  "title": "XScientist Research Policy Rollout",
+  "description": "Metadata-only policy/tool/evaluation trace. It is observational and does not prove scientific quality.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "task_id",
+    "task_hash",
+    "split",
+    "time_budget_seconds",
+    "outcome",
+    "policy_contract",
+    "rubric",
+    "tool_delegations",
+    "tool_trace_hash",
+    "turn_credit",
+    "evaluation",
+    "quality_claim_allowed",
+    "causal_claim_allowed",
+    "evaluation_scope",
+    "rollout_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "xscientist.research-rollout.v1"},
+    "profile": {"const": "https://xscientist.io/profiles/research-rollout/v1"},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "task_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "split": {"enum": ["train", "development", "validation", "test", "holdout", "external"]},
+    "time_budget_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "outcome": {"enum": ["completed", "failed", "timed_out", "cancelled"]},
+    "policy_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_id", "decision_owner", "execution_owner", "tool_selection_recorded", "quality_claim_allowed"],
+      "properties": {
+        "policy_id": {"const": "xscientist.research-policy-tool-delegation.v1"},
+        "decision_owner": {"const": "research_policy"},
+        "execution_owner": {"const": "coding_executor"},
+        "tool_selection_recorded": {"const": true},
+        "quality_claim_allowed": {"const": false}
+      }
+    },
+    "rubric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "task_id", "task_hash", "split", "reference_visibility", "dimensions", "scoring_scale", "quality_claim_allowed", "rubric_id", "rubric_hash"],
+      "properties": {
+        "schema_version": {"const": "xscientist.research-rollout.v1"},
+        "task_id": {"type": "string"},
+        "task_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "split": {"enum": ["train", "development", "validation", "test", "holdout", "external"]},
+        "reference_visibility": {"const": "evaluator_only"},
+        "dimensions": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "description", "weight", "score_min", "score_max"],
+            "properties": {
+              "id": {"enum": ["result_fidelity", "claim_support", "implementation_fidelity", "resource_efficiency", "scientific_integrity"]},
+              "description": {"type": "string", "minLength": 1, "maxLength": 512},
+              "weight": {"type": "number", "minimum": 0, "maximum": 1},
+              "score_min": {"const": 0.0},
+              "score_max": {"const": 1.0}
+            }
+          },
+          "uniqueItems": true
+        },
+        "scoring_scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "properties": {"min": {"const": 0.0}, "max": {"const": 1.0}}
+        },
+        "quality_claim_allowed": {"const": false},
+        "rubric_id": {"type": "string", "pattern": "^rubric-[0-9a-f]{16}$"},
+        "rubric_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "tool_delegations": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["call_id", "sequence", "role", "tool", "decision", "outcome", "follow_up_required"],
+        "properties": {
+          "call_id": {"type": "string", "maxLength": 128},
+          "sequence": {"type": "integer", "minimum": 0},
+          "role": {"enum": ["research_policy", "coding_executor", "evaluator", "other"]},
+          "tool": {"type": "string", "maxLength": 128},
+          "provider": {"type": ["string", "null"], "maxLength": 128},
+          "model": {"type": ["string", "null"], "maxLength": 128},
+          "decision": {"enum": ["plan", "delegate", "execute", "inspect", "repair", "stop"]},
+          "outcome": {"enum": ["success", "failed", "timeout", "skipped", "unknown"]},
+          "input_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "output_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "budget_before_seconds": {"type": ["number", "null"], "minimum": 0},
+          "budget_after_seconds": {"type": ["number", "null"], "minimum": 0},
+          "follow_up_required": {"type": "boolean"}
+        }
+      }
+    },
+    "tool_trace_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "turn_credit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turns", "turn_count", "credit_method", "credit_scope", "causal_claim_allowed", "reward_trace_complete", "positive_credit_total", "turn_credit_hash"],
+      "properties": {
+        "turns": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["turn_id", "index", "type", "outcome", "reward_before", "reward_after", "positive_delta", "credit"],
+            "properties": {
+              "turn_id": {"type": "string", "maxLength": 128},
+              "index": {"type": "integer", "minimum": 0},
+              "type": {"enum": ["plan", "delegate", "execute", "inspect", "repair", "judge", "stop"]},
+              "outcome": {"type": "string", "maxLength": 64},
+              "reward_before": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "reward_after": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "positive_delta": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "credit": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+            }
+          }
+        },
+        "turn_count": {"type": "integer", "minimum": 0},
+        "credit_method": {"enum": ["post_hoc_positive_delta_v1", "not_available"]},
+        "credit_scope": {"const": "observational"},
+        "causal_claim_allowed": {"const": false},
+        "reward_trace_complete": {"type": "boolean"},
+        "positive_credit_total": {"type": "number", "minimum": 0},
+        "turn_credit_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluations", "summary", "evaluation_hash"],
+      "properties": {
+        "evaluations": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sample_id", "evaluator_id", "authority", "scores", "evidence_refs"],
+            "properties": {
+              "sample_id": {"type": "string", "maxLength": 128},
+              "evaluator_id": {"type": "string", "maxLength": 128},
+              "authority": {"enum": ["independent_evaluator", "human", "deterministic_gate", "research_agent"]},
+              "scores": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["result_fidelity", "claim_support", "implementation_fidelity", "resource_efficiency", "scientific_integrity"],
+                "properties": {
+                  "result_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
+                  "claim_support": {"type": "number", "minimum": 0, "maximum": 1},
+                  "implementation_fidelity": {"type": "number", "minimum": 0, "maximum": 1},
+                  "resource_efficiency": {"type": "number", "minimum": 0, "maximum": 1},
+                  "scientific_integrity": {"type": "number", "minimum": 0, "maximum": 1}
+                }
+              },
+              "evidence_refs": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}}
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "sample_count", "distinct_evaluator_count", "dimension_means", "overall_mean", "overall_disagreement", "evaluation_scope", "quality_claim_allowed", "causal_claim_allowed", "judge_reference_only"],
+          "properties": {
+            "status": {"enum": ["not_evaluated", "complete"]},
+            "sample_count": {"type": "integer", "minimum": 0},
+            "distinct_evaluator_count": {"type": "integer", "minimum": 0},
+            "dimension_means": {
+              "type": "object",
+              "additionalProperties": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+            },
+            "overall_mean": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "overall_disagreement": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "evaluation_scope": {"const": "observational"},
+            "quality_claim_allowed": {"const": false},
+            "causal_claim_allowed": {"const": false},
+            "judge_reference_only": {"const": true}
+          }
+        },
+        "evaluation_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "quality_claim_allowed": {"const": false},
+    "causal_claim_allowed": {"const": false},
+    "evaluation_scope": {"const": "observational"},
+    "rollout_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

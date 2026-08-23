@@ -21,7 +21,7 @@ SUBCOMMANDS = {
     "history": "list show diff save rollback",
     "research": (
         "guide start hypothesis plan preregister experiment evidence infer review "
-        "claim status log dag opportunity"
+        "claim status log dag opportunity rollout"
     ),
     "opportunity": "direction pool attempt judge grade allocate inspect",
 }
@@ -59,6 +59,7 @@ OPTIONS = {
         "--allow-stage-override --override-reason --objective --max-attempts "
         "--calibration-status --probability-semantics --incomplete --extraction-notes"
     ),
+    "rollout": "--repo --message --no-commit --json",
     "metrics": "--json",
     "auth": "--user --lang --json",
     "init": "--profile --provider --model --force --json",
