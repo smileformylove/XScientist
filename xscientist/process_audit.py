@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 from collections import Counter
@@ -43,6 +44,9 @@ _HARD_MAX_COMMITS = 128
 _HARD_MAX_ARTIFACTS = 512
 _HARD_MAX_DECISIONS = 128
 _HARD_MAX_BRANCHES = 64
+_MAX_OBJECT_SCAN_FILES = 2048
+_MAX_OBJECT_SCAN_ENTRIES = 8192
+_MAX_OBJECT_SCAN_BYTES = 32 * 1024 * 1024
 _DEFAULT_MAX_BRANCHES = 32
 _SAFE_TASK_FILTERS = frozenset({"all", "open-ended", "optimization"})
 
@@ -109,10 +113,32 @@ _SAFE_STATES = frozenset(
         "blocked",
     }
 )
+_STAGE_ALIASES = {
+    "guided-start": "planning",
+    "guided_start": "planning",
+    "autopilot": "experiment",
+    "implementation": "experiment",
+    "analysis": "evidence",
+    "synthesis": "evidence",
+    "publication": "paper",
+    "final-review": "review",
+    "final_review": "review",
+}
+_STATE_ALIASES = {
+    "in_progress": "running",
+    "in-progress": "running",
+    "done": "completed",
+    "complete": "completed",
+    "error": "failed",
+    "pass": "verified",
+}
 _SAFE_KINDS = frozenset(str(item) for item in RESEARCH_OBJECT_KINDS)
 _SAFE_RELATIONS = frozenset(str(item) for item in RESEARCH_RELATION_TYPES)
 _SAFE_POLICIES = frozenset(
     {"milestone", "manual", "automatic", "strict", "none", "unknown"}
+)
+_SAFE_STORE_SCOPES = frozenset(
+    {"all_store_files", "bounded_store_prefix", "symlink_boundary", "not_observed"}
 )
 _REPAIR_RELATIONS = frozenset(
     {"addresses", "corrects", "repaired_by", "repairs", "resolves", "retests"}
@@ -199,6 +225,28 @@ def _short_commit(value: Any) -> str | None:
     if re.fullmatch(r"[0-9a-fA-F]{7,64}", text):
         return text[:12]
     return _short_hash(value)
+
+
+def _safe_git_commit(value: Any) -> str | None:
+    """Return a commit token safe to pass as a Git revision argument."""
+
+    text = " ".join(str(value or "").split()).strip()
+    return text if re.fullmatch(r"[0-9a-fA-F]{7,64}", text) else None
+
+
+def _safe_git_ref(value: Any) -> str | None:
+    """Reject option/revision syntax supplied by a third-party adapter."""
+
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > 256
+        or text.startswith("-")
+        or any(token in text for token in ("..", "@{", "~", "^", ":", "\\"))
+        or any(ord(char) < 0x20 or char.isspace() for char in text)
+    ):
+        return None
+    return text
 
 
 def _safe_token(value: Any, *, default: str = "unknown", limit: int = 64) -> str:
@@ -309,11 +357,13 @@ def _safe_decision(value: Any) -> str:
 
 def _safe_stage(value: Any) -> str:
     normalized = str(value or "").strip()
+    normalized = _STAGE_ALIASES.get(normalized.lower(), normalized)
     return normalized if normalized in _SAFE_STAGES else "other"
 
 
 def _safe_state(value: Any) -> str:
     normalized = str(value or "").strip().lower()
+    normalized = _STATE_ALIASES.get(normalized, normalized)
     return normalized if normalized in _SAFE_STATES else "other"
 
 
@@ -338,8 +388,28 @@ def _safe_policy(value: Any) -> str:
     return normalized if normalized in _SAFE_POLICIES else "unknown"
 
 
+def _safe_nonnegative_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value if value >= 0 else default
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value) if value >= 0 else default
+    return default
+
+
+def _safe_store_scope(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in _SAFE_STORE_SCOPES else "not_observed"
+
+
 def _bounded_limit(value: int | None, default: int, hard: int) -> tuple[int, bool]:
-    requested = default if value is None else int(value)
+    if value is None:
+        requested = default
+    elif isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("process audit limits must be positive integers")
+    else:
+        requested = value
     if requested <= 0:
         raise ValueError("process audit limits must be greater than zero")
     return min(requested, hard), requested > hard
@@ -363,11 +433,94 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
     """
 
     object_root = root / ".xscientist" / "objects"
-    paths = sorted(
-        path
-        for path in object_root.glob("*/*.json")
-        if path.is_file() and not path.is_symlink()
-    )
+
+    def crosses_symlink_boundary(path: Path) -> bool:
+        current = root
+        try:
+            for part in path.relative_to(root).parts:
+                current = current / part
+                if current.is_symlink():
+                    return True
+        except (OSError, RuntimeError, ValueError):
+            return True
+        return False
+
+    def collect_paths() -> tuple[list[Path], bool, int, int]:
+        """Collect a bounded, deterministic object-file prefix.
+
+        ``Path.glob`` both walks an unbounded tree and follows a directory
+        symlink in some Python/filesystem combinations.  The process report is
+        shareable, so its scan must be bounded before any JSON is opened and
+        must never cross the repository boundary.  The object contract is
+        one-level ``kind/*.json``; scanning that shape explicitly is both
+        faster and safer than a recursive glob.
+        """
+
+        if crosses_symlink_boundary(object_root):
+            return [], False, 0, 0
+        try:
+            if object_root.exists() and not object_root.is_dir():
+                return [], True, 0, 1
+        except OSError:
+            return [], True, 0, 1
+        if not object_root.is_dir():
+            return [], False, 0, 0
+        paths: list[Path] = []
+        entries_seen = 0
+        truncated = False
+        read_errors = 0
+
+        def bounded_entries(
+            directory: str | Path,
+        ) -> tuple[list[os.DirEntry[str]], bool, bool]:
+            entries: list[os.DirEntry[str]] = []
+            try:
+                with os.scandir(directory) as iterator:
+                    for entry in iterator:
+                        if len(entries) >= _MAX_OBJECT_SCAN_ENTRIES:
+                            return (
+                                sorted(entries, key=lambda item: item.name),
+                                True,
+                                False,
+                            )
+                        entries.append(entry)
+            except OSError:
+                return [], False, True
+            return sorted(entries, key=lambda item: item.name), False, False
+
+        kind_entries, kind_truncated, kind_error = bounded_entries(object_root)
+        read_errors += int(kind_error)
+        truncated = truncated or kind_truncated
+        for kind_entry in kind_entries:
+            entries_seen += 1
+            if entries_seen > _MAX_OBJECT_SCAN_ENTRIES:
+                truncated = True
+                break
+            if kind_entry.is_symlink() or not kind_entry.is_dir(follow_symlinks=False):
+                continue
+            files, files_truncated, files_error = bounded_entries(kind_entry.path)
+            read_errors += int(files_error)
+            truncated = truncated or files_truncated
+            for file_entry in files:
+                entries_seen += 1
+                if entries_seen > _MAX_OBJECT_SCAN_ENTRIES:
+                    truncated = True
+                    break
+                if file_entry.is_symlink() or not file_entry.is_file(
+                    follow_symlinks=False
+                ):
+                    continue
+                if not file_entry.name.endswith(".json"):
+                    continue
+                if len(paths) >= _MAX_OBJECT_SCAN_FILES:
+                    truncated = True
+                    break
+                paths.append(Path(file_entry.path))
+            if truncated:
+                break
+        return sorted(paths), truncated or bool(read_errors), entries_seen, read_errors
+
+    paths, scan_truncated, scan_entries, scan_errors = collect_paths()
     source_count = len(paths)
     source_kind_counts: Counter[str] = Counter(
         _safe_kind(path.parent.name) for path in paths
@@ -385,8 +538,15 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
                 "completed_attempts": 0,
             },
             "failed_or_blocked_count": 0,
+            "recovery_candidates": 0,
             "recovery_failed_ids": set(),
             "recovery_links": [],
+            "source_scan_complete": not scan_truncated,
+            "source_scan_scope": (
+                "bounded_object_prefix" if scan_truncated else "all_object_files"
+            ),
+            "source_scan_entries": scan_entries,
+            "read_error_count": scan_errors,
         }
 
     def accumulate_source_stats(stats: dict[str, Any], item: Mapping[str, Any]) -> None:
@@ -437,12 +597,63 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
                 stats["recovery_links"].append(targets)
 
     source_stats = new_source_stats()
-    if not paths:
+    if not paths and crosses_symlink_boundary(object_root):
+        source_stats["source_scan_complete"] = False
+        source_stats["source_scan_scope"] = "symlink_boundary"
+        source_stats["source_scan_entries"] = scan_entries
+        source_stats["read_error_count"] = max(1, scan_errors)
+        source_stats.pop("recovery_failed_ids", None)
+        source_stats.pop("recovery_links", None)
+        return (
+            [],
+            0,
+            True,
+            ["symlink_boundary"],
+            source_kind_counts,
+            [],
+            source_stats,
+        )
+    if not paths and not object_root.exists() and not scan_errors:
         # Keep a small compatibility seam for callers/tests that provide a
         # repository adapter without materializing an object directory.
         try:
-            rows = list_research_objects(root)
-        except (OSError, ValueError, ResearchGitError) as exc:
+            # Ask the adapter for the bounded public window.  A filesystem
+            # scan remains the authoritative path; an adapter that cannot
+            # honor these keyword caps is treated as unavailable rather than
+            # falling back to an unbounded materialization.
+            rows = list_research_objects(
+                root,
+                max_objects=_MAX_OBJECT_SCAN_FILES,
+                max_bytes=_MAX_OBJECT_SCAN_BYTES,
+            )
+        except TypeError:
+            # A legacy adapter may allocate its entire store before returning;
+            # do not call it from a shareable audit.  This is a visible,
+            # fail-closed compatibility boundary.
+            source_stats["source_scan_complete"] = False
+            source_stats["source_scan_scope"] = "bounded_adapter_unavailable"
+            source_stats["source_scan_entries"] = 0
+            return (
+                [],
+                0,
+                False,
+                ["bounded_adapter_unavailable"],
+                source_kind_counts,
+                [],
+                source_stats,
+            )
+        except (
+            OSError,
+            ValueError,
+            ResearchGitError,
+            RuntimeError,
+            UnicodeError,
+            RecursionError,
+            MemoryError,
+        ) as exc:
+            source_stats["source_scan_complete"] = False
+            source_stats["source_scan_scope"] = "adapter_error"
+            source_stats["source_scan_entries"] = 0
             return (
                 [],
                 0,
@@ -452,12 +663,34 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
                 [],
                 source_stats,
             )
-        source_count = len(rows)
-        source_kind_counts = Counter(_safe_kind(item.get("kind")) for item in rows)
+        invalid_adapter_rows = sum(1 for item in rows if not isinstance(item, Mapping))
+        rows = [dict(item) for item in rows if isinstance(item, Mapping)]
+        if invalid_adapter_rows:
+            source_stats["read_error_count"] = (
+                int(source_stats.get("read_error_count") or 0) + invalid_adapter_rows
+            )
+        adapter_source_count = len(rows) + invalid_adapter_rows
+        adapter_truncated = adapter_source_count > _MAX_OBJECT_SCAN_FILES
+        observed_rows = rows[-_MAX_OBJECT_SCAN_FILES:] if adapter_truncated else rows
+        source_count = adapter_source_count
+        source_kind_counts = Counter(
+            _safe_kind(item.get("kind")) for item in observed_rows
+        )
         decision_rows = [
-            item for item in rows if str(item.get("kind") or "") in _DECISION_KINDS
+            item
+            for item in observed_rows
+            if str(item.get("kind") or "") in _DECISION_KINDS
         ][-_HARD_MAX_DECISIONS:]
-        for item in rows:
+        source_stats["source_scan_complete"] = (
+            not adapter_truncated and not invalid_adapter_rows
+        )
+        source_stats["source_scan_scope"] = (
+            "bounded_adapter_prefix"
+            if adapter_truncated or invalid_adapter_rows
+            else "adapter_objects"
+        )
+        source_stats["source_scan_entries"] = len(observed_rows)
+        for item in observed_rows:
             accumulate_source_stats(source_stats, item)
         source_stats["recovery_candidates"] = sum(
             bool(targets.intersection(source_stats["recovery_failed_ids"]))
@@ -466,16 +699,16 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
         source_stats.pop("recovery_failed_ids", None)
         source_stats.pop("recovery_links", None)
         return (
-            rows[-limit:] if source_count > limit else rows,
+            observed_rows[-limit:] if len(observed_rows) > limit else observed_rows,
             source_count,
-            source_count > limit,
+            source_count > limit or adapter_truncated or bool(invalid_adapter_rows),
             [],
             source_kind_counts,
             decision_rows,
             source_stats,
         )
 
-    truncated = source_count > limit
+    truncated = source_count > limit or scan_truncated
     selected_paths = paths
     if truncated:
         buckets: dict[str, list[Path]] = {}
@@ -499,19 +732,40 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
 
     selected_set = set(selected_paths)
     rows: list[dict[str, Any]] = []
-    errors: list[str] = []
+    errors: list[str] = ["object_store_scan_error"] if scan_errors else []
+    parse_error_count = 0
     decision_rows: list[dict[str, Any]] = []
     # The scalar counters are computed over every valid header, while only
     # ``selected_paths`` are retained as artifact rows.  Decision rows have a
     # separate hard window so a large hypothesis/artifact history cannot hide
     # the latest gate/review events.
+    bytes_scanned = 0
     for path in paths:
+        if bytes_scanned >= _MAX_OBJECT_SCAN_BYTES:
+            scan_truncated = True
+            break
         try:
+            size = path.stat().st_size
+            if size > _MAX_OBJECT_SCAN_BYTES - bytes_scanned:
+                scan_truncated = True
+                break
+            bytes_scanned += size
             item = validate_research_object(
                 json.loads(path.read_text(encoding="utf-8"))
             )
-        except (OSError, json.JSONDecodeError, ResearchObjectError, ValueError) as exc:
+        except (
+            OSError,
+            json.JSONDecodeError,
+            ResearchObjectError,
+            ValueError,
+            TypeError,
+            UnicodeError,
+            OverflowError,
+            RecursionError,
+            MemoryError,
+        ) as exc:
             errors.append(type(exc).__name__)
+            parse_error_count += 1
             continue
         accumulate_source_stats(source_stats, item)
         if path in selected_set:
@@ -525,6 +779,13 @@ def _bounded_object_scan(root: Path, limit: int) -> tuple[
     )
     source_stats.pop("recovery_failed_ids", None)
     source_stats.pop("recovery_links", None)
+    source_stats["source_scan_complete"] = not scan_truncated and not scan_errors
+    source_stats["source_scan_scope"] = (
+        "bounded_object_prefix" if scan_truncated or scan_errors else "all_object_files"
+    )
+    source_stats["source_scan_entries"] = scan_entries
+    source_stats["read_error_count"] = scan_errors + parse_error_count
+    truncated = truncated or scan_truncated
     return (
         rows,
         source_count,
@@ -727,7 +988,12 @@ def _decision_row(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
+def _commit_row(
+    root: Path,
+    entry: Mapping[str, Any],
+    *,
+    inspect_checkpoint: bool = True,
+) -> dict[str, Any]:
     trailers = (
         entry.get("trailers") if isinstance(entry.get("trailers"), Mapping) else {}
     )
@@ -741,8 +1007,8 @@ def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
     stages = trailer("Research-Stage")
     states = trailer("Research-State")
     reproduce = trailer("Reproduce")
-    commit = str(entry.get("commit") or "")
-    git_parents = _git_parent_hashes(root, commit)
+    commit = _safe_git_commit(entry.get("commit")) or ""
+    git_parents = _git_parent_hashes(root, commit) if commit else []
     parents = git_parents or trailer_parents
     stage = _safe_stage(stages[0] if stages else "")
     status = _safe_state(states[0] if states else "")
@@ -769,6 +1035,8 @@ def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
     }
     # A checkpoint is useful as a compact “what changed” boundary.  We expose
     # counts only; changed paths and free-form summaries stay local.
+    if not inspect_checkpoint:
+        return row
     try:
         checkpoint = show_checkpoint(root, commit)
         payload = checkpoint.get("checkpoint") or {}
@@ -793,7 +1061,16 @@ def _commit_row(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
             isinstance(payload.get("reproduce"), Mapping)
             and str((payload.get("reproduce") or {}).get("command") or "").strip()
         )
-    except (OSError, ValueError, KeyError, ResearchGitError):
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        ResearchGitError,
+        RuntimeError,
+        UnicodeError,
+        RecursionError,
+        MemoryError,
+    ):
         pass
     return row
 
@@ -816,7 +1093,7 @@ def _order_commit_entries(
         return []
     by_commit: dict[str, Mapping[str, Any]] = {}
     for entry in entries:
-        commit = str(entry.get("commit") or "")
+        commit = _safe_git_commit(entry.get("commit")) or ""
         if commit:
             by_commit.setdefault(commit, entry)
     if not by_commit:
@@ -907,11 +1184,18 @@ def _unavailable_summary(
             "checkpoint_policy": "unknown",
             "staged_path_count": 0,
             "eligible_change_count": 0,
+            "object_store_scan_complete": False,
+            "object_store_scan_scope": "not_observed",
+            "object_store_scan_entries": 0,
+            "object_store_read_error_count": 0,
+            "object_store_truncated": False,
         },
         "branches": [],
         "branch_topology": {
             "branch_count": 0,
             "source_branch_count": 0,
+            "source_branch_count_scope": "no_repository",
+            "source_branch_scan_complete": False,
             "branching_observed": False,
             "merge_observed": False,
             "artifact_scope": "current_checkout_only",
@@ -926,6 +1210,10 @@ def _unavailable_summary(
             "object_count": 0,
             "source_object_count": 0,
             "valid_object_count": 0,
+            "source_scan_complete": False,
+            "source_scan_scope": "no_repository",
+            "source_scan_entries": 0,
+            "read_error_count": 0,
             "statistics_scope": "no_repository",
             "attempt_statistics_scope": "no_repository",
             "attempts_truncated": False,
@@ -1038,6 +1326,20 @@ def _fair_branch_comparison(
         # used the same scientific starting state, so leave this unverified.
         "same_base": False,
     }
+    unverified_reasons = [
+        name
+        for name in (
+            "same_manifest",
+            "same_task_slice",
+            "gold_exclusion",
+            "same_budget",
+            "same_evaluator",
+            "same_base",
+        )
+        if checks[name] is not True
+    ]
+    if branch_count <= 1:
+        unverified_reasons.insert(0, "branch_diversity_not_observed")
     return {
         "eligible": bool(branch_count > 1 and all(checks.values())),
         "requirements": [
@@ -1049,6 +1351,7 @@ def _fair_branch_comparison(
             "same_base",
         ],
         "checks": checks,
+        "unverified_reasons": unverified_reasons,
         "same_task_manifest_required": True,
         "same_budget_required": True,
         "same_evaluator_required": True,
@@ -1089,6 +1392,7 @@ def build_process_summary(
         "max_artifacts": effective_artifacts,
         "max_decisions": effective_decisions,
     }
+    commit_scan_saturated = effective_commits >= _HARD_MAX_COMMITS
     initial_truncation = {
         "branches": branches_clamped,
         "commits": commits_clamped,
@@ -1098,8 +1402,46 @@ def build_process_summary(
     root = Path(project_root).expanduser().resolve()
     errors: list[str] = []
     try:
-        status = repository_status(root)
-        all_branches = list_research_branches(root)
+        # Keep the repository-status portion bounded as well as the typed
+        # object scan below.  The CAS is intentionally not exported, but its
+        # metadata must not allow a large store to turn an audit into an
+        # unbounded recursive walk.
+        status = repository_status(
+            root,
+            max_store_entries=_MAX_OBJECT_SCAN_ENTRIES,
+            max_store_files=_MAX_OBJECT_SCAN_FILES,
+            max_store_bytes=_MAX_OBJECT_SCAN_BYTES,
+            skip_worktree_scan=True,
+            skip_checkpoint_scan=True,
+        )
+        if not isinstance(status, Mapping):
+            raise ValueError("repository status adapter returned a non-object")
+        branch_scan_saturated = effective_branches >= _HARD_MAX_BRANCHES
+        try:
+            # One sentinel branch keeps the scan bounded while allowing the
+            # report to distinguish an exact short list from a prefix.
+            all_branches = list_research_branches(
+                root,
+                max_branches=(
+                    _HARD_MAX_BRANCHES
+                    if branch_scan_saturated
+                    else effective_branches + 1
+                ),
+            )
+        except TypeError:
+            # Do not fall back to the historical unbounded adapter in a
+            # shareable audit.  A third-party adapter that cannot honor the
+            # cap is an explicit unavailable boundary, not an invitation to
+            # materialize an entire branch history.
+            raise ValueError("bounded branch adapter unavailable")
+        if not isinstance(all_branches, (list, tuple)):
+            raise ValueError("research branch adapter returned a non-list")
+        invalid_branch_rows = sum(
+            1 for row in all_branches if not isinstance(row, Mapping)
+        )
+        if invalid_branch_rows:
+            errors.append("invalid_branch_rows")
+        all_branches = [dict(row) for row in all_branches if isinstance(row, Mapping)]
         (
             all_objects,
             source_object_count,
@@ -1110,7 +1452,16 @@ def build_process_summary(
             source_stats,
         ) = _bounded_object_scan(root, effective_artifacts)
         errors.extend(object_read_errors)
-    except (OSError, ValueError, ResearchGitError) as exc:
+    except (
+        OSError,
+        ValueError,
+        ResearchGitError,
+        RuntimeError,
+        TypeError,
+        UnicodeError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
         return _unavailable_summary(
             task_manifest_sha256=task_manifest_sha256,
             task_count=task_count,
@@ -1122,7 +1473,7 @@ def build_process_summary(
             truncation=initial_truncation,
         )
 
-    branches_truncated = len(all_branches) > effective_branches
+    branches_truncated = branch_scan_saturated or len(all_branches) > effective_branches
     current_branch = str(status.get("branch") or "detached")
     current_head = str(status.get("head") or "")
     if branches_truncated:
@@ -1142,8 +1493,9 @@ def build_process_summary(
     branch_aliases: dict[str, str] = {}
     alternative_index = 0
     for branch in branches:
-        name = str(branch.get("name") or "")
+        name = _safe_git_ref(branch.get("name"))
         if not name:
+            errors.append("invalid_branch_ref")
             continue
         if name == current_branch or bool(branch.get("current")):
             alias = "current"
@@ -1155,14 +1507,57 @@ def build_process_summary(
             # Ask for one sentinel entry beyond the public cap so the report
             # can distinguish an exact short history from a truncated one
             # without reading an unbounded log.
-            log = research_log(root, ref=name, limit=effective_commits + 1)
-        except (OSError, ValueError, ResearchGitError) as exc:
+            log = research_log(
+                root,
+                ref=name,
+                limit=min(effective_commits + 1, _HARD_MAX_COMMITS),
+                bounded=True,
+            )
+        except (
+            OSError,
+            ValueError,
+            ResearchGitError,
+            RuntimeError,
+            UnicodeError,
+            RecursionError,
+            MemoryError,
+        ) as exc:
             errors.append(type(exc).__name__)
             log = []
+        if not isinstance(log, list):
+            errors.append("invalid_research_log")
+            log = []
+        else:
+            invalid_log_rows = sum(1 for row in log if not isinstance(row, Mapping))
+            if invalid_log_rows:
+                errors.append("invalid_research_log_rows")
+            log = [dict(row) for row in log if isinstance(row, Mapping)]
         branch_logs[name] = log
-        commit = str(branch.get("commit") or "")
+        commit = _safe_git_commit(branch.get("commit")) or ""
         stage = _safe_stage(branch.get("stage"))
         branch_status = _safe_state(branch.get("status"))
+        checkpoint_id = _short_hash(branch.get("checkpoint_id"))
+        # The bounded branch-topology query intentionally omits commit
+        # subjects/checkpoint payloads.  Recover the latest safe lifecycle
+        # tokens from the already-bounded log trailers so the visible branch
+        # row still explains where the line currently is.
+        if log:
+            latest_trailers = (
+                log[0].get("trailers")
+                if isinstance(log[0].get("trailers"), Mapping)
+                else {}
+            )
+            if stage == "other":
+                stage_values = latest_trailers.get("Research-Stage") or []
+                stage = _safe_stage(stage_values[0] if stage_values else "")
+            if branch_status == "other":
+                status_values = latest_trailers.get("Research-State") or []
+                branch_status = _safe_state(status_values[0] if status_values else "")
+            if checkpoint_id is None:
+                checkpoint_values = latest_trailers.get("Research-Checkpoint") or []
+                checkpoint_id = _short_hash(
+                    checkpoint_values[0] if checkpoint_values else None
+                )
         is_current = bool(branch.get("current")) or name == current_branch
         branch_rows.append(
             {
@@ -1172,7 +1567,7 @@ def build_process_summary(
                 "commit": _short_hash(commit),
                 "stage": stage,
                 "status": branch_status,
-                "checkpoint_id": _short_hash(branch.get("checkpoint_id")),
+                "checkpoint_id": checkpoint_id,
                 "commit_count": min(len(log), effective_commits),
                 "commit_count_truncated": len(log) > effective_commits,
                 "relation": (
@@ -1190,7 +1585,7 @@ def build_process_summary(
     unique_commits: dict[str, dict[str, Any]] = {}
     for log in branch_logs.values():
         for entry in log:
-            commit = str(entry.get("commit") or "")
+            commit = _safe_git_commit(entry.get("commit")) or ""
             if commit:
                 unique_commits.setdefault(commit, entry)
     all_ordered_entries = _order_commit_entries(root, list(unique_commits.values()))
@@ -1201,23 +1596,28 @@ def build_process_summary(
     )
     commits_truncated = (
         branches_truncated
+        or commit_scan_saturated
         or branch_log_truncated
         or len(all_ordered_entries) > effective_commits
     )
     ordered_entries = all_ordered_entries[-effective_commits:]
-    commits = [_commit_row(root, entry) for entry in ordered_entries]
+    commits = [
+        _commit_row(root, entry, inspect_checkpoint=False) for entry in ordered_entries
+    ]
     commit_branch_aliases: dict[str, set[str]] = {}
     for branch_name, log in branch_logs.items():
         alias = branch_aliases.get(branch_name)
         if not alias:
             continue
         for entry in log:
-            commit = str(entry.get("commit") or "")
+            commit = _safe_git_commit(entry.get("commit")) or ""
             if commit:
                 commit_branch_aliases.setdefault(commit, set()).add(alias)
     for entry, row in zip(ordered_entries, commits):
         row["branches"] = sorted(
-            commit_branch_aliases.get(str(entry.get("commit") or ""), set())
+            commit_branch_aliases.get(
+                _safe_git_commit(entry.get("commit")) or "", set()
+            )
         )
 
     ordered_objects = sorted(
@@ -1259,13 +1659,17 @@ def build_process_summary(
         for stage in stage_counts
         if stage in _STAGE_LABELS and stage_counts[stage] > 0
     )
+    source_scan_complete = bool(source_stats.get("source_scan_complete", True))
+    statistics_scope = (
+        "all_valid_objects" if source_scan_complete else "bounded_object_prefix"
+    )
     coverage = {
         "observed_stages": observed_stages,
         "stage_count": len(observed_stages),
         "stage_total": len(_STAGE_LABELS),
         "ratio": round(len(observed_stages) / len(_STAGE_LABELS), 3),
         "truncated": objects_truncated or commits_truncated,
-        "scope": "all_valid_objects",
+        "scope": statistics_scope,
         "quality_claim_allowed": False,
     }
     branch_fairness = _fair_branch_comparison(
@@ -1274,6 +1678,19 @@ def build_process_summary(
     # Branch aliases are intentionally the only branch labels exported.  Keep
     # a stable digest for local cross-report joins without exposing the ref.
     current_alias = "current" if current_branch in branch_aliases else None
+    object_store_status = (
+        status.get("object_store") if isinstance(status, Mapping) else {}
+    )
+    if not isinstance(object_store_status, Mapping):
+        object_store_status = {}
+    if _safe_nonnegative_int(object_store_status.get("read_error_count")) > 0:
+        errors.append("object_store_scan_error")
+    raw_store_scope = object_store_status.get("scan_scope")
+    if (
+        raw_store_scope not in (None, "")
+        and _safe_store_scope(raw_store_scope) == "not_observed"
+    ):
+        errors.append("invalid_object_store_scan_metadata")
     process = {
         "schema": PROCESS_SCHEMA,
         "available": True,
@@ -1284,15 +1701,38 @@ def build_process_summary(
             "branch": current_alias,
             "branch_digest": _ref_digest(current_branch),
             "head": _short_hash(current_head),
-            "worktree_clean": bool(status.get("worktree_clean")),
+            "worktree_clean": (
+                status.get("worktree_clean")
+                if isinstance(status.get("worktree_clean"), bool)
+                else None
+            ),
             "checkpoint_policy": _safe_policy(status.get("checkpoint_policy")),
             "staged_path_count": len(status.get("staged_paths") or []),
             "eligible_change_count": len(status.get("eligible_changes") or []),
+            "object_store_scan_complete": bool(
+                object_store_status.get("scan_complete", True)
+            ),
+            "object_store_scan_scope": _safe_store_scope(
+                object_store_status.get("scan_scope")
+            ),
+            "object_store_scan_entries": _safe_nonnegative_int(
+                object_store_status.get("scan_entries")
+            ),
+            "object_store_read_error_count": _safe_nonnegative_int(
+                object_store_status.get("read_error_count")
+            ),
+            "object_store_truncated": bool(object_store_status.get("truncated")),
         },
         "branches": branch_rows,
         "branch_topology": {
             "branch_count": len(branch_rows),
             "source_branch_count": len(all_branches),
+            "source_branch_count_scope": (
+                "bounded_prefix_lower_bound"
+                if branches_truncated
+                else "all_visible_branches"
+            ),
+            "source_branch_scan_complete": not branches_truncated,
             "branching_observed": branch_observed,
             "merge_observed": merge_observed,
             # Objects are read from the checked-out tree.  We expose branch
@@ -1307,10 +1747,22 @@ def build_process_summary(
         "intermediate": {
             "object_count": source_object_count,
             "source_object_count": source_object_count,
-            "statistics_scope": "all_valid_objects",
+            "source_scan_complete": source_scan_complete,
+            "source_scan_scope": str(
+                source_stats.get("source_scan_scope") or statistics_scope
+            ),
+            "source_scan_entries": _safe_nonnegative_int(
+                source_stats.get("source_scan_entries")
+            ),
+            "read_error_count": _safe_nonnegative_int(
+                source_stats.get("read_error_count")
+            ),
+            "statistics_scope": _safe_token(
+                statistics_scope, default="bounded_object_prefix", limit=64
+            ),
             "valid_object_count": int(source_stats["valid_object_count"]),
-            "attempt_statistics_scope": "all_valid_objects",
-            "attempts_truncated": objects_truncated,
+            "attempt_statistics_scope": statistics_scope,
+            "attempts_truncated": objects_truncated or not source_scan_complete,
             "kind_counts": dict(sorted(kind_counts.items())),
             "state_counts": dict(sorted(state_counts.items())),
             "stage_counts": dict(sorted(stage_counts.items())),
@@ -1318,15 +1770,19 @@ def build_process_summary(
             **attempt_metrics,
             "artifacts": artifact_rows,
             "decision_events": decisions,
-            "decision_statistics_scope": "all_decision_headers; events are bounded",
+            "decision_statistics_scope": (
+                "bounded_decision_headers; events are bounded"
+                if not source_scan_complete
+                else "all_decision_headers; events are bounded"
+            ),
             "failed_or_blocked_artifacts": failed,
             "failed_or_blocked_count": source_failed_count,
             "failed_or_blocked_visible_count": len(failed),
             "source_failed_or_blocked_count": source_failed_count,
-            "failure_statistics_scope": "all_valid_objects",
+            "failure_statistics_scope": statistics_scope,
             "recovery_candidates": int(source_stats["recovery_candidates"]),
             "recovery_claim_allowed": False,
-            "recovery_statistics_scope": "all_valid_objects",
+            "recovery_statistics_scope": statistics_scope,
         },
         "fairness": _fairness_report(
             task_manifest_sha256=task_manifest_sha256,
@@ -1344,12 +1800,21 @@ def build_process_summary(
                 "decision_events": source_decision_count,
             },
             "source_totals_scope": (
-                "bounded_branch_logs"
-                if branch_log_truncated
+                "bounded_object_and_branch_prefix"
+                if not source_scan_complete
+                and (branch_log_truncated or branches_truncated)
                 else (
-                    "visible_branch_subset"
-                    if branches_truncated
-                    else "all_visible_branches"
+                    "bounded_object_prefix"
+                    if not source_scan_complete
+                    else (
+                        "bounded_branch_logs"
+                        if branch_log_truncated
+                        else (
+                            "visible_branch_subset"
+                            if branches_truncated
+                            else "all_visible_branches"
+                        )
+                    )
                 )
             ),
             "truncated": {

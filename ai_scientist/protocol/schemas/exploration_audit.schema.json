@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/exploration-audit.v1/exploration_audit.schema.json",
+  "title": "XScientist bounded exploration audit",
+  "description": "Structural, redacted statistics over local ARA exploration graphs; not a quality score.",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "graph_count",
+    "node_count",
+    "unknown_nodes",
+    "planned",
+    "attempted",
+    "completed",
+    "failed",
+    "discarded",
+    "crashed",
+    "unattempted",
+    "stop_reasons",
+    "statistics_scope",
+    "truncated",
+    "read_error_count",
+    "walk_entries_observed",
+    "coverage_claim_allowed",
+    "node_content_included",
+    "counts_are_nonexclusive"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.exploration-audit.v1"},
+    "status": {"enum": ["unavailable", "unreadable", "observed_empty", "partially_observed", "observed"]},
+    "graph_count": {"type": "integer", "minimum": 0, "maximum": 32},
+    "node_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "unknown_nodes": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "planned": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "attempted": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "completed": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "failed": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "discarded": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "crashed": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "unattempted": {"type": ["integer", "null"], "minimum": 0, "maximum": 4096},
+    "stop_reasons": {
+      "type": "object",
+      "properties": {
+        "budget_exhausted": {"type": "integer", "minimum": 0},
+        "tool_error": {"type": "integer", "minimum": 0},
+        "model_selection": {"type": "integer", "minimum": 0},
+        "missing_data": {"type": "integer", "minimum": 0},
+        "unknown": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "statistics_scope": {"type": "string"},
+    "truncated": {"type": "boolean"},
+    "read_error_count": {"type": "integer", "minimum": 0},
+    "walk_entries_observed": {"type": "integer", "minimum": 0},
+    "coverage_claim_allowed": {"const": false},
+    "node_content_included": {"const": false},
+    "counts_are_nonexclusive": {"const": true}
+  },
+  "additionalProperties": false
+}

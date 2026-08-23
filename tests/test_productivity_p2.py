@@ -38,6 +38,14 @@ class _PyPIResponse(io.StringIO):
 
 
 class ProductivityP2Tests(unittest.TestCase):
+    def test_first_run_profile_is_normalized_and_invalid_profiles_fail_closed(
+        self,
+    ) -> None:
+        payload = benchmark_first_run(profile=" DISCOVERY ", max_seconds=30)
+        self.assertEqual(payload["profile"], "discovery")
+        with self.assertRaises(ValueError):
+            benchmark_first_run(profile="unknown")
+
     def test_first_run_benchmark_is_zero_cost_and_path_free(self) -> None:
         payload = benchmark_first_run(max_seconds=30)
         validate(payload, load_schema("first_run_benchmark"))
@@ -45,6 +53,10 @@ class ProductivityP2Tests(unittest.TestCase):
         self.assertFalse(payload["network_used"])
         self.assertEqual(payload["model_cost_usd"], 0.0)
         self.assertFalse(payload["workspace_retained"])
+        self.assertEqual(
+            payload["evidence_index"]["schema"], "xscientist.evidence-index.v1"
+        )
+        self.assertFalse(payload["evidence_index"]["workspace_mutated"])
         self.assertGreaterEqual(payload["research"]["dag_nodes"], 4)
         self.assertNotIn(str(Path.home()), json.dumps(payload))
 
@@ -76,11 +88,27 @@ class ProductivityP2Tests(unittest.TestCase):
                 "dag_relations": 0,
                 "closure": "blocked",
                 "run_started": True,
+                "status_ok": True,
                 "budget_available": True,
                 "next_step": "review",
             },
             "workspace_retained": False,
             "host_paths_disclosed": False,
+            "evidence_index": {
+                "schema": "xscientist.evidence-index.v1",
+                "available": False,
+                "mode": "unavailable",
+                "hash_algorithm": "sha256",
+                "workspace_root_disclosed": False,
+                "paths_disclosed": False,
+                "raw_content_included": False,
+                "workspace_mutated": False,
+                "limits": {"max_files_per_category": 512, "max_bytes": 1},
+                "categories": {},
+                "ara_contract": {},
+                "truncated": False,
+                "read_error_count": 0,
+            },
         }
         with tempfile.TemporaryDirectory() as raw:
             destination = Path(raw) / "reports" / "first-run.json"
@@ -197,6 +225,8 @@ class ProductivityP2Tests(unittest.TestCase):
             self.assertIn("show", script)
             self.assertIn("diff", script)
             self.assertIn("provider", script)
+            self.assertIn("verify", script)
+            self.assertTrue("--report" in script or "-l report" in script)
             self.assertTrue("--live" in script or "-l live" in script)
             self.assertTrue("--workspace" in script or "-l workspace" in script)
 

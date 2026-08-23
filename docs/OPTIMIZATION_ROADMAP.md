@@ -1,6 +1,6 @@
-# Benchmark-driven optimization roadmap
+# Benchmark-driven optimization status
 
-This roadmap is a decision aid, not a leaderboard. The local pilot is an
+This status document is a decision aid, not a leaderboard. The local pilot is an
 offline conformance audit: it does not run the 100-task/800-trajectory
 AutoResearchEval rollout, and it does not import human or competitor scores.
 All gaps below are therefore stated as missing evidence or missing capability,
@@ -17,7 +17,7 @@ The bundled balanced fixture is a useful integrity test:
 | Closure | trace/replay pass, verify blocked | A held-out conflict and independent reproduction gap remain visible |
 | Feedback | `contained`, two unresolved issues, zero shipped-with-issue | The gate blocks release, but containment is not repair |
 | Process | 3 commits, 1 branch, 16 typed artifacts | Intermediate decisions are inspectable; exploration diversity is not demonstrated |
-| First-run usability | 15.99 s in the latest local run (`benchmark_first_run(max_seconds=30)`) | Provider-free local latency only; do not compare it with model or network latency |
+| First-run usability | `benchmark_first_run` records the duration for the current machine and run; no stale point estimate is promoted | Provider-free local latency only; do not compare it with model or network latency |
 | Fairness | branch fixture remains `NOT VERIFIED` | Same task slice, base, budget, and evaluator are not evidenced |
 | External comparison | zero model rollouts and no matched human arm | No honest cross-system or human-vs-agent score exists yet |
 
@@ -27,65 +27,46 @@ usability improvement.
 
 ## Capability-gap map
 
-| Reference family | What it demonstrates | XScientist gap exposed | Optimization target |
-| --- | --- | --- | --- |
-| AutoResearchEval / ARFT | Long-horizon rollouts, artifact-aware judging, six-stage failure taxonomy | No official rollout harness, judge, or annotated trajectory package in this repository | A pinned evaluator adapter and trajectory bundle contract |
-| ScientistOne / Chain-of-Evidence | Claim provenance and integrity auditing across generated artifacts | Typed objects exist, but a shareable claim-level evidence package is still an explicit export rather than a default scored outcome | Claim → evidence → verifier manifest with independent replay receipts |
-| MARS / AdaEvolve / EvoX | Budget-aware search, branches, adaptive exploration | Git-like branches are visible, but per-branch outcome, budget, and evaluator evidence are not yet comparable | Branch experiment manifests and resource-aware scheduling |
-| ScholarPeer | Retrieval-assisted challenge and reviewer calibration | Review objects are recorded, but retrieval quality and citation entailment need a task-specific evaluator | Citation/claim entailment checks and adversarial review sets |
-| PaperOrchestra / PaperBanana | Specialized writing/figure outputs with dedicated benchmarks | XScientist has broad lifecycle coverage but no component-specific quality score | Plug-in evaluators for manuscript, figure, and citation artifacts |
-| Human studies | Matched human arms exist only for some neighboring tasks | No common human protocol for this pilot; external numbers are not interchangeable | Preregister a small matched arm only after the agent evaluator is fixed |
+| Reference family | What it demonstrates | XScientist current status |
+| --- | --- | --- |
+| AutoResearchEval / ARFT | Long-horizon rollouts, artifact-aware judging, six-stage failure taxonomy | The repository provides an offline conformance report only. Official rollouts, the artifact-aware judge, and the annotated trajectory package are not present. |
+| ScientistOne / Chain-of-Evidence | Claim provenance and integrity auditing across generated artifacts | Typed objects and explicit exports exist. A claim-level evidence package is not a default quality score, and no such score is claimed. |
+| MARS / AdaEvolve / EvoX | Budget-aware search, branches, adaptive exploration | Git-like branches are inspectable, but the current fixture has one branch and fairness metadata is unverified. |
+| ScholarPeer | Retrieval-assisted challenge and reviewer calibration | Review objects are recordable; retrieval quality and citation entailment are unassessed in the local pilot. |
+| PaperOrchestra / PaperBanana | Specialized writing/figure outputs with dedicated benchmarks | XScientist exposes a broad lifecycle, but no component-specific quality score is reported. |
+| Human studies | Matched human arms exist only for some neighboring tasks | The local human arm is explicitly `not_reported`; external numbers are kept as contextual evidence and are not substituted. |
 
 The attached Expo Talk is used for scope discovery only; the primary papers and
 repositories in [the system matrix](SYSTEM_COMPARISON.md) remain the evidence
 authority. The talk PDF is retained with its SHA-256 in the machine-readable
 source manifest.
 
-## 30 / 90 / 180 day plan
+## Completion status and explicit blockers
 
-### Next 30 days — make the audit unambiguous
+The repository has implemented the optimizations that can be verified without
+claiming an external rollout: schema-validated conformance reports, atomic
+redacted output, fixed-vocabulary diagnostics, bounded Git-like process
+inspection, fail-closed fairness metadata with fixed unverified reasons, a
+bounded read-only evidence/ARA index, exploration-graph counters, deterministic
+input fingerprints, offline report verification, conservative feedback
+attribution labels, lazy SDK exports, and bilingual documentation. These are
+completed repository capabilities, not benchmark quality claims.
 
-- Keep `quality_claim_allowed: false` until a registered evaluator and repeated
-  seed policy exist.
-- Use `--output` for a durable redacted report and retain the full ARA/VCS bundle
-  separately under an explicit, access-controlled export.
-- Close the current P0 diagnostics: record task-slice, fork-base, budget, and
-  evaluator metadata for every branch; keep `eligible=false` otherwise.
-- Add typed-object → ARFT evidence-channel mapping only as an explicit adapter,
-  with input errors and `unassessed` states preserved.
+The following blockers are intentionally still visible in the report. They are
+release conditions, not dated action items:
 
-Acceptance: a clean report validates its schemas, contains no task/gold text,
-and every “pass” has a fixed verification condition.
+| Blocker | Current evidence | Status changes only when |
+| --- | --- | --- |
+| No matched model rollout | `rollouts_evaluated: 0`; `official_comparable: false` | A pinned evaluator, task slice, environment, budget, seed policy, and recorded rollout are all present. |
+| No matched human arm | `human_baseline.status: not_reported`; score is `null` | A real human run uses the same task/tool/budget/verifier contract and reports uncertainty. |
+| Branch fairness unverified | Current fixture has one branch; task slice/base/budget/evaluator equality is not evidenced | Every compared branch has a machine-readable comparison contract and all required fields verify. |
+| Retrieval and independent verification gap | Local fixture is 5/6 structurally covered; `verify` is blocked | Required retrieval artifacts and an independent held-out verification receipt exist. |
+| Feedback debt contained, not repaired | Two issues remain `contained`; zero shipped-with-issue | The issues are repaired, regression-tested, and the gate records the new evidence. |
+| ARFT adapter absent | `AUDIT.ARFT_ADAPTER_MISSING` remains explicit | A typed adapter and evaluator are implemented with `unassessed`/error states preserved. |
 
-### Next 90 days — run a fair local benchmark
-
-- Freeze one task manifest, evaluator revision, environment/container, budget,
-  and three or more seeds.
-- Run the same slice through XScientist and at least one reproducible baseline;
-  publish raw hashes, run receipts, failure taxonomy, and cost/time intervals.
-- Add per-branch manifests and merge/rejection decisions so exploration can be
-  compared without exposing hidden chain-of-thought.
-- Add component evaluators: retrieval provenance/entailment, execution receipt,
-  uncertainty/negative-result accounting, manuscript claim trace, and
-  independent reproduction.
-
-Acceptance: `official_comparable` can become true only when all fairness checks
-are true; otherwise the report must remain explicitly unverified.
-
-### Next 180 days — evaluate research quality, not just observability
-
-- Reproduce the official evaluator for a pinned public task subset, with an
-  artifact-aware judge and blinded adjudication.
-- Add a preregistered human arm only for the same task/tool/budget protocol;
-  report participant count, uncertainty, attrition, and raw process receipts.
-- Measure feedback evolution: repair success, regression rate, recovery time,
-  branch reuse, and whether a held gate actually prevents release.
-- Publish bilingual benchmark reports containing both positive and negative
-  results, plus a manifest of unavailable evidence. Never aggregate unrelated
-  human baselines into one number.
-
-Acceptance: a result is publishable only with a pinned manifest, evaluator,
-environment, seeds, evidence bundle, and an explicit uncertainty statement.
+Until these conditions are evidenced, the report must keep
+`quality_claim_allowed: false` and must not turn structural coverage into a
+scientific score. No timeline or unverified completion date is implied.
 
 ## Operational commands
 
@@ -98,8 +79,11 @@ xscientist benchmark autoresearch \
 
 # Source-audited capability matrix (no external rollout)
 xscientist benchmark systems --json --output ./benchmark-evidence/system-matrix.json
+
+# Offline schema/boundary verification of a saved report
+xscientist benchmark verify --report ./benchmark-evidence/autoresearch-report.json --json
 ```
 
-Neither command produces a scientific leaderboard. They make the boundary,
-missing evidence, process branches, and next actions visible so a later,
-properly controlled run can be audited rather than retroactively rationalized.
+Neither command produces a scientific leaderboard. They expose the current
+completion state and explicit blockers so any separately controlled rerun can
+be audited without retroactively changing the claim boundary.

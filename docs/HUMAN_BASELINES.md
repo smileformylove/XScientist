@@ -1,6 +1,6 @@
 # External human baselines (source-audited)
 
-**Audit date: 2026-08-22.** This is a curated inventory of public primary
+**Audit date: 2026-08-23.** This is a curated inventory of public primary
 papers and official project pages that I could inspect. It is not a claim of
 mathematical exhaustiveness over the entire internet. A row is included only
 when its source and scope can be checked; an unreported result is written as
@@ -156,7 +156,7 @@ not measure long-horizon scientific exploration.
 | Benchmark / source | Human result actually reported | Scope and warning |
 | --- | --- | --- |
 | [GPQA](https://arxiv.org/abs/2311.12022) (`annotator_validation_reference`) | On the 448-question main set, expert-validator accuracy is reported as 71.9% and non-expert-validator accuracy as 30.4%; the paper’s extended-set headline is 65% expert accuracy (74% after conservative post-hoc correction). | These are validator/annotation measurements on graduate-level multiple-choice science questions, not an independently recruited, matched long-horizon researcher arm. They are a knowledge/oversight reference, not an autonomous research trajectory. |
-| [SUPERChem](https://arxiv.org/abs/2512.01274) (`measured_human_small_sample`) | 174 second-year Peking University chemistry undergraduates answered a 500/633-question chemistry-reasoning subset in a closed-book protocol. | Human accuracy **40.3%**. | A real chemistry reasoning/MCQ measurement, but undergraduate, closed-book, and not chemistry research execution or an expert end-to-end baseline. |
+| [SUPERChem](https://arxiv.org/abs/2512.01274) (`measured_human_small_sample`) | 174 second-year Peking University chemistry undergraduates answered a 500/633-question chemistry-reasoning subset in a closed-book protocol; human accuracy **40.3%**. | A real chemistry reasoning/MCQ measurement, but undergraduate, closed-book, and not chemistry research execution or an expert end-to-end baseline. |
 | [GAIA](https://arxiv.org/abs/2311.12983) (`annotator_validation_reference`) | The paper reports an estimated 92% human score (including level-specific values 94/92/87) on its validated questions. | General assistant questions, not scientific experiments. The paper derives this number from annotator answers on valid questions; it does not report an independently recruited, controlled long-horizon researcher study. |
 | [H-ARC](https://arxiv.org/abs/2409.01374) (`measured_human`) | 1,729 crowd workers; three-shot empirical average 76.2% on the 400-task training set and 64.2% on the 400-task public evaluation set, with reported uncertainty ranges. | Visual abstraction/program-synthesis puzzles. The source releases action traces, but the task and metric are unrelated to XScientist research artifacts. |
 | [SciFIBench](https://papers.neurips.cc/paper_files/paper/2024/file/217bb44ab14621754db8a392163e6b07-Paper-Datasets_and_Benchmarks_Track.pdf) ([project page](https://SciFIBench.github.io/)) (`measured_human_small_sample`) | Five undergraduate/postgraduate participants answered a randomly sampled 25-question-per-task CS subset: mean **86.4%** Figure→Caption and **78.4%** Caption→Figure. | Scientific-figure multiple choice, not end-to-end research. The paper flags small/non-representative sampling and possible learning across the 50-question survey; there was no shared time limit. |

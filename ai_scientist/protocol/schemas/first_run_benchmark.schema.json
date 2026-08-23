@@ -18,7 +18,8 @@
     "model_cost_usd",
     "research",
     "workspace_retained",
-    "host_paths_disclosed"
+    "host_paths_disclosed",
+    "evidence_index"
   ],
   "properties": {
     "schema": {"const": "xscientist.first-run-benchmark.v1"},
@@ -47,6 +48,7 @@
         "dag_relations",
         "closure",
         "run_started",
+        "status_ok",
         "budget_available",
         "next_step"
       ],
@@ -55,6 +57,7 @@
         "dag_relations": {"type": "integer", "minimum": 0},
         "closure": {"type": "string", "minLength": 1},
         "run_started": {"type": "boolean"},
+        "status_ok": {"type": "boolean"},
         "budget_available": {"type": "boolean"},
         "next_step": {"type": ["string", "null"]}
       },
@@ -62,6 +65,40 @@
     },
     "workspace_retained": {"type": "boolean"},
     "host_paths_disclosed": {"const": false},
+    "evidence_index": {
+      "type": "object",
+      "required": [
+        "schema",
+        "available",
+        "mode",
+        "hash_algorithm",
+        "workspace_root_disclosed",
+        "paths_disclosed",
+        "raw_content_included",
+        "workspace_mutated",
+        "limits",
+        "categories",
+        "ara_contract",
+        "truncated",
+        "read_error_count"
+      ],
+      "properties": {
+        "schema": {"const": "xscientist.evidence-index.v1"},
+        "available": {"type": "boolean"},
+        "mode": {"enum": ["read_only_bounded_hash_index", "unavailable"]},
+        "hash_algorithm": {"const": "sha256"},
+        "workspace_root_disclosed": {"const": false},
+        "paths_disclosed": {"const": false},
+        "raw_content_included": {"const": false},
+        "workspace_mutated": {"const": false},
+        "limits": {"type": "object"},
+        "categories": {"type": "object"},
+        "ara_contract": {"type": "object"},
+        "truncated": {"type": "boolean"},
+        "read_error_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
     "report_persistence": {"$ref": "#/$defs/reportPersistence"}
   },
   "$defs": {

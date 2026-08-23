@@ -396,8 +396,9 @@ three measurements separate: task-contract validity, A–F artifact coverage, an
 XScientist's `trace → replay → verify` plus metacognitive repair signals. See
 [the benchmark protocol](docs/BENCHMARKS.md) for the exact boundary and the
 [official task dataset](https://huggingface.co/datasets/PrentisAI/AutoResearchEval).
-The benchmark-driven comparison and 30/90/180-day acceptance plan are in the
-[optimization roadmap](docs/OPTIMIZATION_ROADMAP.md).
+The benchmark-driven completion status and explicit blockers are in the
+[optimization status](docs/OPTIMIZATION_ROADMAP.md); it contains no dated
+delivery plan or unverified completion promise.
 
 The report also contains a bounded `diagnostics` backlog. `P0` means a fair
 quality claim is blocked, `P1` is evidence/lifecycle debt, and `P2` is an
@@ -405,6 +406,38 @@ exploration or usability improvement. `stage_coverage` is explicitly a
 structural measure (`score_semantics: structural_stage_coverage_only`), never a
 scientific quality score; even 83.3% coverage keeps
 `quality_claim_allowed: false`.
+
+For workspaces, the report includes a read-only `evidence_index` covering the
+allowlisted Research VCS, ARA/CAS, and generated-view surfaces. It records
+bounded counts and aggregate SHA-256 digests, with an explicit `digest_scope`
+(`observed_files` or `bounded_prefix`), truncation, and read-error fields, but
+never filenames, paths, or raw payloads. The same
+report exposes `workspace.exploration` when an ARA exploration graph exists;
+missing graphs are `unavailable`, not zero failed or unattempted candidates.
+Its `ara_contract` record counts manifests, locks, graphs, and verify reports;
+`fsck_run` and `bundle_created` stay false in this redacted index: the benchmark
+does not attest that an external `fsck` or bundle command was run. Retain and
+verify those command outputs separately when a full audit package is required.
+The index also exposes `walk_entries_observed`, `walk_truncated`, and
+`source_count_complete`; when a scan is truncated, source counts describe a
+bounded prefix and are not complete totals. Exploration is versioned as
+`xscientist.exploration-audit.v1`; malformed nodes are surfaced as unknown/read
+errors rather than counted as successful or failed work.
+Use `xscientist benchmark verify --report <report.json> --json` to validate a
+saved report offline. Its `reproducibility.fingerprint` excludes timestamps and
+runtime noise while binding the manifest, task slice, workspace head, and
+bounded source totals.
+
+Feedback self-evolution uses the same conservative semantics: `health_score`
+is an `observational_heuristic`, not a scientific-quality or causal-effect
+score. `independence_status: "independence_unverified"` records an evaluator
+link without proving evaluator independence; paired observations remain
+traceability signals only. `causal_claim_allowed` and
+`promotion_signal_allowed` stay `false` until a fixed independent evolution
+gate is recorded, so feedback cannot silently label its own change as an
+improvement. The persisted history is also bounded and JSON-portable: oversized
+files, deep/cyclic metric trees, and non-finite values are rejected or surfaced
+as load errors rather than silently merged.
 
 #### Evidence and ARA retention boundary
 
@@ -567,7 +600,7 @@ usability, not claim that XScientist beats or matches researchers.
 #### External human baselines (source-audited)
 
 We also maintain a [source-audited inventory of public human baselines](docs/HUMAN_BASELINES.md),
-updated 2026-08-22. It separates real participant runs from leaderboard/SOTA
+updated 2026-08-23. It separates real participant runs from leaderboard/SOTA
 references, expert validation, human judge calibration, and human+agent
 workflow studies. The strongest directly measured rows include RE-Bench (61
 experts, 71 attempts), PaperBench (8 ML PhDs on a four-paper subset), and
@@ -607,7 +640,7 @@ reported figures are:
 | Mind2Web 2 | partial 0.79; success 0.54; Pass@3 0.83 (cross-participant) | Random Subset-30 of 130 long-horizon web tasks; 7 participants, 3 different people per task |
 
 These rows are external measurements with different tasks, tools, metrics, and
-budgets. They are evidence for how to design a future matched arm, not numbers
+budgets. They state the design requirements for a matched arm, not numbers
 that can be substituted into `workspace.score`.
 
 For the linked AutoResearchEval paper, the honest status is

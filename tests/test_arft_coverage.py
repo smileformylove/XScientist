@@ -211,6 +211,22 @@ class ARFTCoverageTests(unittest.TestCase):
         self.assertNotIn("manifest-do-not-leak", json.dumps(report))
         validate(report, load_schema("arft_coverage"))
 
+    def test_artifact_channel_exists_does_not_follow_symlink_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "project"
+            outside = Path(td) / "outside.json"
+            root.mkdir()
+            outside.write_text('{"private": "outside"}', encoding="utf-8")
+            (root / "idea_cards.json").symlink_to(outside)
+
+            report = build_arft_coverage(root)
+
+        self.assertFalse(report["artifact_channels"]["idea_cards"]["exists"])
+        self.assertIn(
+            {"artifact": "idea_cards", "error": "symlink_boundary"},
+            report["input_errors"],
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

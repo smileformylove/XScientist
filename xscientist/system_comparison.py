@@ -738,20 +738,47 @@ def _local_process_observation(workspace: str | Path | None) -> dict[str, Any]:
     }
     if workspace is None:
         return {"status": "not_requested", "process": None, **base}
-    root = Path(workspace).expanduser().resolve()
+    try:
+        root = Path(workspace).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return {
+            "status": "unavailable",
+            "process": None,
+            **base,
+        }
     if not root.is_dir():
         raise ValueError("workspace does not exist or is not a directory")
     try:
         from .process_audit import build_process_summary
 
         process = build_process_summary(root, gold_fields_used=False)
-    except (OSError, TypeError, ValueError, KeyError) as exc:
-        process = {
-            "schema": "xscientist.process-audit.v1",
-            "available": False,
-            "reason": "process_audit_unavailable",
-            "errors": [type(exc).__name__],
-        }
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        KeyError,
+        UnicodeError,
+        OverflowError,
+        RuntimeError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
+        from .process_audit import _unavailable_summary
+
+        process = _unavailable_summary(
+            task_manifest_sha256=None,
+            task_count=None,
+            task_filter="all",
+            task_limit=None,
+            gold_fields_used=False,
+            errors=[type(exc).__name__],
+            limits={
+                "max_branches": 32,
+                "max_commits": 32,
+                "max_artifacts": 96,
+                "max_decisions": 32,
+            },
+        )
     return {"status": "local_process_audit", "process": process, **base}
 
 

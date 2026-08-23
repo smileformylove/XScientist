@@ -444,6 +444,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="optional JSON file for the redacted report (atomic write)",
     )
     autoresearch.add_argument("--json", action="store_true", dest="as_json")
+    verify_report = benchmark_subparsers.add_parser(
+        "verify",
+        help=(
+            "Validate a saved benchmark report and its fail-closed comparison "
+            "boundary without network or providers."
+        ),
+    )
+    verify_report.add_argument(
+        "--report", required=True, help="path to a saved benchmark JSON report"
+    )
+    verify_report.add_argument("--json", action="store_true", dest="as_json")
     systems = benchmark_subparsers.add_parser(
         "systems",
         help=(
@@ -3378,9 +3389,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             benchmark_autoresearch_pilot,
             benchmark_first_run,
             persist_benchmark_report,
+            verify_benchmark_report,
         )
+        from .research_git import ResearchGitError
 
         try:
+            if parsed.benchmark_command == "verify":
+                payload = verify_benchmark_report(parsed.report)
+                if parsed.as_json:
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                else:
+                    state = "PASS" if payload.get("ok") else "FAIL"
+                    print(f"Benchmark report verification: {state}")
+                    for name, result in (payload.get("checks") or {}).items():
+                        print(f"  {name}: {result}")
+                    for error in payload.get("errors") or []:
+                        print(f"  error: {error}")
+                return 0 if payload.get("ok") else 1
             if parsed.benchmark_command == "systems":
                 from .system_comparison import build_system_comparison
 
@@ -3398,7 +3423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     profile=parsed.profile,
                     max_seconds=parsed.max_seconds,
                 )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, ResearchGitError, RuntimeError) as exc:
             print(f"xscientist benchmark: {exc}", file=sys.stderr)
             return 2
         output_path = getattr(parsed, "output", None)
@@ -3681,7 +3706,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 )
                             fair = topology.get("fair_branch_comparison") or {}
                             checks = fair.get("checks") or {}
-                            unverified = [
+                            unverified = fair.get("unverified_reasons") or [
                                 name
                                 for name in fair.get("requirements") or []
                                 if checks.get(name) is not True
@@ -3709,6 +3734,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                                         if value
                                     )
                                 )
+                            evidence_index = (
+                                workspace_report.get("evidence_index") or {}
+                            )
+                            categories = evidence_index.get("categories") or {}
+                            present = [
+                                name
+                                for name, row in categories.items()
+                                if isinstance(row, dict) and row.get("present")
+                            ]
+                            print(
+                                "  Evidence index: "
+                                + (", ".join(present) if present else "none")
+                                + (
+                                    " (bounded/truncated)"
+                                    if evidence_index.get("truncated")
+                                    else ""
+                                )
+                            )
+                            exploration = workspace_report.get("exploration") or {}
+                            print(
+                                "  Exploration: "
+                                f"{exploration.get('status', 'unavailable')}"
+                                + (
+                                    f" ({exploration.get('attempted')} attempted, "
+                                    f"{exploration.get('unattempted')} unattempted)"
+                                    if exploration.get("status")
+                                    in {"observed", "partially_observed"}
+                                    else ""
+                                )
+                            )
+                            if exploration.get("counts_are_nonexclusive"):
+                                print("  Exploration counters: non-exclusive")
                         if repository.get("worktree_clean") is False:
                             print("  WARN  worktree has uncheckpointed changes")
                 arft_summary = workspace_report.get("arft_coverage", {}).get(
@@ -3753,7 +3810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if diagnostics:
                     counts = diagnostics.get("priority_counts") or {}
                     print(
-                        "Optimization backlog: "
+                        "Current gap register: "
                         + ", ".join(
                             f"{priority}={counts[priority]}"
                             for priority in ("P0", "P1", "P2")
@@ -3771,7 +3828,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 diagnostics = payload.get("diagnostics") or {}
                 if diagnostics.get("next_required"):
                     print(
-                        "Next optimization: "
+                        "Current required evidence: "
                         f"{diagnostics['next_required']} (structural audit only)"
                     )
             if persisted_path is not None:

@@ -11,11 +11,13 @@ if TYPE_CHECKING:
     from .research_lifecycle import ResearchLifecycle
     from .research_closure import audit_research_closure, closure_level_summary
     from .process_audit import build_process_summary
+    from .evidence_index import build_evidence_index
     from .system_comparison import build_system_comparison
     from .benchmark import (
         benchmark_autoresearch_pilot,
         benchmark_first_run,
         persist_benchmark_report,
+        verify_benchmark_report,
     )
     from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
     from .research_dag import build_research_dag, export_research_dag
@@ -117,6 +119,10 @@ def __getattr__(name: str) -> Any:
         from .process_audit import build_process_summary
 
         value = build_process_summary
+    elif name == "build_evidence_index":
+        from .evidence_index import build_evidence_index
+
+        value = build_evidence_index
     elif name == "build_system_comparison":
         from .system_comparison import build_system_comparison
 
@@ -125,6 +131,7 @@ def __getattr__(name: str) -> Any:
         "benchmark_autoresearch_pilot",
         "benchmark_first_run",
         "persist_benchmark_report",
+        "verify_benchmark_report",
     }:
         from . import benchmark
 
@@ -198,6 +205,7 @@ __all__ = [
     "audit_research_closure",
     "build_arft_coverage",
     "build_process_summary",
+    "build_evidence_index",
     "build_system_comparison",
     "benchmark_autoresearch_pilot",
     "benchmark_first_run",
@@ -231,6 +239,7 @@ __all__ = [
     "save_workspace_checkpoint",
     "save_arft_coverage",
     "persist_benchmark_report",
+    "verify_benchmark_report",
     "scan_research_anomalies",
     "rollback_workspace_checkpoint",
     "__version__",

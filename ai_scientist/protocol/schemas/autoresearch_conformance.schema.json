@@ -14,7 +14,10 @@
     "execution",
     "human_baseline",
     "evidence_retention",
-    "diagnostics"
+    "diagnostics",
+    "dataset",
+    "reproducibility",
+    "workspace"
   ],
   "properties": {
     "schema": {"const": "xscientist.autoresearch-conformance.v1"},
@@ -102,12 +105,49 @@
       "additionalProperties": true
     },
     "workspace": {"type": ["object", "null"]},
-    "dataset": {"type": "object"},
+    "dataset": {
+      "type": "object",
+      "required": ["sha256", "paths_disclosed"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "paths_disclosed": {"const": false}
+      },
+      "additionalProperties": true
+    },
+    "reproducibility": {"$ref": "#/$defs/reproducibility"},
     "next_step": {"type": "string"},
     "report_persistence": {"$ref": "#/$defs/reportPersistence"},
     "diagnostics": {"$ref": "#/$defs/diagnostics"}
   },
   "$defs": {
+    "reproducibility": {
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "input_manifest_sha256",
+        "workspace_head",
+        "package_version",
+        "schema_versions",
+        "network_used",
+        "provider_used",
+        "seed",
+        "deterministic_fields",
+        "excluded_observations"
+      ],
+      "properties": {
+        "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "input_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "workspace_head": {"type": ["string", "null"]},
+        "package_version": {"type": "string"},
+        "schema_versions": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "network_used": {"const": false},
+        "provider_used": {"const": false},
+        "seed": {"type": ["integer", "null"]},
+        "deterministic_fields": {"const": true},
+        "excluded_observations": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
     "reportPersistence": {
       "type": "object",
       "required": ["requested", "format", "destination_digest", "raw_payloads_included"],

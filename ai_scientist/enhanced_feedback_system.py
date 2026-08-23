@@ -5,6 +5,7 @@ Provides robust feedback collection, aggregation, and action generation
 """
 
 import json
+import math
 import os
 import time
 from typing import Dict, List, Optional, Any, Tuple
@@ -17,6 +18,16 @@ import statistics
 import uuid
 
 from ai_scientist.utils.atomic_io import atomic_write_json
+
+# Feedback is shared mutable state.  Keep both the persisted bytes and the
+# in-memory validation walk bounded so a damaged history cannot turn a status
+# or health query into an unbounded JSON/recursion operation.
+_MAX_FEEDBACK_HISTORY_BYTES = 16 * 1024 * 1024
+_MAX_FEEDBACK_HISTORY_ITEMS = 20_000
+_MAX_FEEDBACK_HISTORY_FILES = 256
+_MAX_FEEDBACK_VALIDATION_NODES = 20_000
+_MAX_FEEDBACK_VALIDATION_DEPTH = 64
+_MAX_FEEDBACK_TEXT_LENGTH = 32_768
 
 
 class FeedbackPriority(Enum):
@@ -183,15 +194,29 @@ class EnhancedFeedbackSystem:
         Returns:
             Created feedback item
         """
+        if not isinstance(category, FeedbackCategory):
+            raise ValueError("category must be a FeedbackCategory")
+        if not isinstance(priority, FeedbackPriority):
+            raise ValueError("priority must be a FeedbackPriority")
+        if not isinstance(source, str) or not isinstance(message, str):
+            raise ValueError("feedback source and message must be strings")
+        if len(source) > _MAX_FEEDBACK_TEXT_LENGTH:
+            raise ValueError("feedback source is too long")
+        if len(message) > _MAX_FEEDBACK_TEXT_LENGTH:
+            raise ValueError("feedback message is too long")
+        if not isinstance(actionable, bool):
+            raise ValueError("actionable must be boolean")
         scope = self._normalize_evaluation_scope(evaluation_scope)
+        normalized_metrics = self._validate_metrics(metrics or {})
+        normalized_context = self._validate_metrics(context or {})
         item = FeedbackItem(
             timestamp=datetime.now().isoformat(),
             category=category.value,
             priority=priority.value,
             source=source,
             message=message,
-            metrics=metrics or {},
-            context=context or {},
+            metrics=normalized_metrics,
+            context=normalized_context,
             actionable=actionable,
             item_id=uuid.uuid4().hex,
             intervention_id=self._normalize_reference(
@@ -206,8 +231,8 @@ class EnhancedFeedbackSystem:
         self.feedback_history.append(item)
 
         # Update metric windows
-        for key, value in (metrics or {}).items():
-            if isinstance(value, (int, float)):
+        for key, value in normalized_metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
                 self.metric_windows[key].append((time.time(), value))
 
         # CLI commands and daemon callbacks may be short-lived processes. Persist
@@ -216,6 +241,113 @@ class EnhancedFeedbackSystem:
         self._save_feedback_batch()
 
         return item
+
+    @classmethod
+    def _validate_metrics(cls, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Reject non-finite numeric telemetry before it reaches JSON/history.
+
+        A feedback score is an observation, not a place to smuggle NaN/Infinity
+        into trend statistics or persisted reports.  Preserve the existing
+        JSON-shaped metric surface while validating nested mappings/lists.
+        """
+
+        if not isinstance(metrics, dict):
+            raise ValueError("metrics must be a JSON object")
+
+        nodes = 0
+
+        def visit(
+            value: Any,
+            path: str,
+            depth: int = 0,
+            active: set[int] | None = None,
+        ) -> Any:
+            nonlocal nodes
+            nodes += 1
+            if nodes > _MAX_FEEDBACK_VALIDATION_NODES:
+                raise ValueError("feedback metrics exceed validation limit")
+            if depth > _MAX_FEEDBACK_VALIDATION_DEPTH:
+                raise ValueError("feedback metrics exceed nesting limit")
+            active = set() if active is None else active
+            if isinstance(value, bool) or value is None or isinstance(value, str):
+                if isinstance(value, str) and len(value) > _MAX_FEEDBACK_TEXT_LENGTH:
+                    raise ValueError(f"metric {path} string is too long")
+                return value
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                if not math.isfinite(value):
+                    raise ValueError(f"metric {path} must be finite")
+                return value
+            if isinstance(value, dict):
+                marker = id(value)
+                if marker in active:
+                    raise ValueError(f"metric {path} contains a cycle")
+                active.add(marker)
+                try:
+                    result = {}
+                    for key, child in value.items():
+                        key_text = str(key)
+                        if len(key_text) > 256:
+                            raise ValueError(f"metric {path} key is too long")
+                        result[key_text] = visit(
+                            child, f"{path}.{key_text}", depth + 1, active
+                        )
+                    return result
+                finally:
+                    active.remove(marker)
+            if isinstance(value, list):
+                marker = id(value)
+                if marker in active:
+                    raise ValueError(f"metric {path} contains a cycle")
+                active.add(marker)
+                try:
+                    return [
+                        visit(child, f"{path}[{index}]", depth + 1, active)
+                        for index, child in enumerate(value)
+                    ]
+                finally:
+                    active.remove(marker)
+            raise ValueError(f"metric {path} is not JSON-compatible")
+
+        return {str(key): visit(value, str(key)) for key, value in metrics.items()}
+
+    def _sanitize_loaded_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate a disk item before it can be merged or written back.
+
+        History files are shared mutable state.  Loading them through the
+        dataclass constructor alone accepts values that are not portable JSON
+        (notably NaN/Infinity in ``context``) and bypasses the reference-link
+        normalization used by the public API.  Keep this gate fail-closed and
+        return a detached mapping so callers cannot mutate the parsed object
+        behind the validator's back.
+        """
+
+        if not isinstance(payload, dict):
+            raise ValueError("feedback item must be an object")
+        normalized = dict(payload)
+        for field in ("source", "message"):
+            if field in normalized and (
+                not isinstance(normalized[field], str)
+                or len(normalized[field]) > _MAX_FEEDBACK_TEXT_LENGTH
+            ):
+                raise ValueError(f"{field} is missing or too long")
+        normalized["metrics"] = self._validate_metrics(normalized.get("metrics") or {})
+        context = normalized.get("context") or {}
+        normalized["context"] = self._validate_metrics(context)
+        for field in ("intervention_id", "outcome_id", "evaluator_id"):
+            normalized[field] = self._normalize_reference(normalized.get(field), field)
+        normalized["evaluation_scope"] = self._normalize_evaluation_scope(
+            normalized.get("evaluation_scope", "observational")
+        )
+        for field in ("actionable", "resolved"):
+            if field in normalized and not isinstance(normalized[field], bool):
+                raise ValueError(f"{field} must be boolean")
+        if normalized.get("action_taken") is not None and not isinstance(
+            normalized["action_taken"], str
+        ):
+            raise ValueError("action_taken must be a string or null")
+        return normalized
 
     @staticmethod
     def _normalize_reference(value: Optional[str], label: str) -> Optional[str]:
@@ -296,6 +428,13 @@ class EnhancedFeedbackSystem:
             status = "unattributed"
         return {
             "status": status,
+            # An evaluator_id is an auditable link, not proof that the
+            # evaluator was independent of the producer or that a controlled
+            # holdout was used.  Keep the legacy status for compatibility, but
+            # expose the stronger epistemic boundary explicitly.
+            "independence_status": (
+                "independence_unverified" if independent else "not_observed"
+            ),
             "total_items": total,
             "paired_items": paired,
             "independent_paired_items": independent,
@@ -304,7 +443,10 @@ class EnhancedFeedbackSystem:
             "intervention_only_items": counts["intervention_only"],
             "outcome_only_items": counts["outcome_only"],
             "unattributed_items": counts["unattributed"],
+            "independence_unverified_items": independent,
+            "independent_measured_items": 0,
             "causal_attribution_established": False,
+            "causal_claim_allowed": False,
             "promotion_signal_allowed": False,
             "next_requirement": (
                 "link an intervention_id and outcome_id, then record an accountable "
@@ -583,6 +725,9 @@ class EnhancedFeedbackSystem:
             "trends": {},
             "recommended_actions": [],
             "health_score": None,
+            "health_score_semantics": "observational_heuristic",
+            "causal_claim_allowed": False,
+            "promotion_signal_allowed": False,
             "health_state": (
                 "corrupted"
                 if self.load_errors
@@ -635,6 +780,9 @@ class EnhancedFeedbackSystem:
 
     def mark_resolved(self, feedback_item: FeedbackItem, action_taken: str):
         """Mark feedback item as resolved"""
+        if not isinstance(action_taken, str):
+            raise ValueError("action_taken must be a string")
+        action_taken = self._normalize_reference(action_taken, "action_taken") or ""
         feedback_item.resolved = True
         feedback_item.action_taken = action_taken
         self._save_feedback_batch()
@@ -650,7 +798,11 @@ class EnhancedFeedbackSystem:
         starts a fresh process, so buffers smaller than ten disappeared on exit.
         A single canonical snapshot also prevents same-second batch collisions.
         """
+        if self.history_path.is_symlink():
+            raise OSError("feedback history must not be a symbolic link")
         lock_path = self.feedback_dir / ".feedback-history.lock"
+        if lock_path.is_symlink():
+            raise OSError("feedback history lock must not be a symbolic link")
         owner_path = lock_path / "owner.json"
         lock_token = uuid.uuid4().hex
         deadline = time.monotonic() + 5.0
@@ -665,6 +817,7 @@ class EnhancedFeedbackSystem:
                             "created_at": time.time(),
                             "token": lock_token,
                         },
+                        allow_nan=False,
                     )
                 except BaseException:
                     try:
@@ -682,15 +835,45 @@ class EnhancedFeedbackSystem:
         try:
             disk_items: list[FeedbackItem] = []
             if self.history_path.is_file():
-                raw_items = json.loads(self.history_path.read_text(encoding="utf-8"))
-                if not isinstance(raw_items, list):
-                    raise ValueError("feedback history root must be a list")
+                try:
+                    if self.history_path.stat().st_size > _MAX_FEEDBACK_HISTORY_BYTES:
+                        raise ValueError("feedback history exceeds byte limit")
+                    raw_items = json.loads(
+                        self.history_path.read_bytes().decode("utf-8"),
+                        parse_constant=lambda token: (_ for _ in ()).throw(
+                            ValueError(f"non-finite JSON constant: {token}")
+                        ),
+                    )
+                    if not isinstance(raw_items, list):
+                        raise ValueError("feedback history root must be a list")
+                except (
+                    OSError,
+                    UnicodeError,
+                    json.JSONDecodeError,
+                    ValueError,
+                    RecursionError,
+                    MemoryError,
+                ):
+                    self.load_errors.append("invalid_feedback_history_file")
+                    raw_items = []
+                if len(raw_items) > _MAX_FEEDBACK_HISTORY_ITEMS:
+                    self.load_errors.append("feedback_history_truncated")
+                    raw_items = raw_items[-_MAX_FEEDBACK_HISTORY_ITEMS:]
                 for payload in raw_items:
-                    identity = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-                    disk_item = FeedbackItem(**payload)
-                    if not disk_item.item_id:
-                        disk_item.item_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
-                    disk_items.append(disk_item)
+                    try:
+                        normalized = self._sanitize_loaded_payload(payload)
+                        identity = json.dumps(
+                            normalized, sort_keys=True, ensure_ascii=False
+                        )
+                        disk_item = FeedbackItem(**normalized)
+                        if not disk_item.item_id:
+                            disk_item.item_id = uuid.uuid5(
+                                uuid.NAMESPACE_URL, identity
+                            ).hex
+                        disk_items.append(disk_item)
+                    except (TypeError, ValueError, OverflowError, RecursionError):
+                        self.load_errors.append("invalid_feedback_history_item")
+                        continue
             current = {item.item_id: item for item in self.feedback_history}
             merged_order = [item.item_id for item in disk_items]
             for item in self.feedback_history:
@@ -734,9 +917,16 @@ class EnhancedFeedbackSystem:
                 item for item in self.feedback_history if not item.resolved
             ]
             self._rebuild_metric_windows()
+            # Validate the merged in-memory state once more before replacing
+            # the canonical file.  This closes the race where a caller or a
+            # stale process mutates a FeedbackItem after disk loading but
+            # before this writer serializes it.
+            for item in self.feedback_history:
+                self._sanitize_loaded_payload(asdict(item))
             atomic_write_json(
                 self.history_path,
                 [asdict(item) for item in self.feedback_history],
+                allow_nan=False,
             )
             return removed
         finally:
@@ -789,33 +979,82 @@ class EnhancedFeedbackSystem:
 
     def _load_feedback_history(self):
         """Load canonical history, with read compatibility for legacy batches."""
-        sources = (
-            [self.history_path]
-            if self.history_path.is_file()
-            else sorted(self.feedback_dir.glob("feedback_batch_*.json"))
-        )
+        if self.history_path.is_symlink():
+            self.load_errors.append("feedback_history_symlink_boundary")
+            sources = []
+        elif self.history_path.is_file():
+            sources = [self.history_path]
+        else:
+            sources: list[Path] = []
+            try:
+                with os.scandir(self.feedback_dir) as iterator:
+                    for entry in iterator:
+                        if len(sources) >= _MAX_FEEDBACK_HISTORY_FILES:
+                            self.load_errors.append("feedback_history_files_truncated")
+                            break
+                        if (
+                            entry.name.startswith("feedback_batch_")
+                            and entry.name.endswith(".json")
+                            and not entry.is_symlink()
+                            and entry.is_file(follow_symlinks=False)
+                        ):
+                            sources.append(Path(entry.path))
+            except OSError:
+                self.load_errors.append("feedback_history_directory_unreadable")
+            sources.sort()
         seen: set[str] = set()
         for batch_file in sources:
             try:
-                with open(batch_file, "r") as f:
-                    items = json.load(f)
-                    for item_dict in items:
+                if batch_file.stat().st_size > _MAX_FEEDBACK_HISTORY_BYTES:
+                    raise ValueError("history file exceeds byte limit")
+                raw = batch_file.read_bytes().decode("utf-8")
+                items = json.loads(
+                    raw,
+                    parse_constant=lambda token: (_ for _ in ()).throw(
+                        ValueError(f"non-finite JSON constant: {token}")
+                    ),
+                )
+                if not isinstance(items, list):
+                    raise ValueError("history root must be a list")
+                if len(items) > _MAX_FEEDBACK_HISTORY_ITEMS:
+                    self.load_errors.append("feedback_history_truncated")
+                    items = items[-_MAX_FEEDBACK_HISTORY_ITEMS:]
+                for item_dict in items:
+                    if not isinstance(item_dict, dict):
+                        self.load_errors.append("invalid_feedback_history_item")
+                        continue
+                    try:
+                        item_dict = self._sanitize_loaded_payload(dict(item_dict))
                         identity = json.dumps(
                             item_dict, sort_keys=True, ensure_ascii=False
                         )
-                        if identity in seen:
-                            continue
-                        seen.add(identity)
                         item = FeedbackItem(**item_dict)
-                        if not item.item_id:
-                            item.item_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
-                        self.feedback_history.append(item)
-                        if not item.resolved:
-                            self.feedback_buffer.append(item)
-            except Exception as e:
-                message = f"Failed to load {batch_file.name}: {e}"
-                self.load_errors.append(message)
-                print(f"Warning: {message}")
+                    except (
+                        TypeError,
+                        ValueError,
+                        OverflowError,
+                        RecursionError,
+                        MemoryError,
+                    ):
+                        self.load_errors.append("invalid_feedback_history_item")
+                        continue
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    if not item.item_id:
+                        item.item_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+                    self.feedback_history.append(item)
+                    if not item.resolved:
+                        self.feedback_buffer.append(item)
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                ValueError,
+                RecursionError,
+                MemoryError,
+            ):
+                self.load_errors.append("invalid_feedback_history_file")
         self._rebuild_metric_windows()
 
     def _rebuild_metric_windows(self) -> None:
@@ -828,13 +1067,17 @@ class EnhancedFeedbackSystem:
             except (TypeError, ValueError):
                 timestamp = time.time()
             for key, value in item.metrics.items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and (not isinstance(value, float) or math.isfinite(value))
+                ):
                     self.metric_windows[key].append((timestamp, value))
 
     def export_report(self, output_path: Path):
         """Export comprehensive report to file"""
         report = self.get_health_report()
-        atomic_write_json(output_path, report)
+        atomic_write_json(output_path, report, allow_nan=False)
 
 
 class LongRunningTaskMonitor:

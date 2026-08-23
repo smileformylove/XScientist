@@ -354,7 +354,8 @@ pilot 不下载数据、不读取 gold 结论、不调用 Provider，也不执�
 证据覆盖、XScientist 自己的 `trace → replay → verify` 与元认知修复信号。完整边界见
 [benchmark 说明](BENCHMARKS.md)，任务清单见
 [官方数据集](https://huggingface.co/datasets/PrentisAI/AutoResearchEval)。
-按对照结果整理的 30/90/180 天验收路线见[优化路线图](OPTIMIZATION_ROADMAP.zh.md)。
+按当前对照证据整理的完成状态与明确阻断见[优化状态](OPTIMIZATION_ROADMAP.zh.md)；其中
+不包含带日期的交付计划或未经验证的完成承诺。
 
 `benchmark first-run` 的 JSON 可用 `load_schema("first_run_benchmark")` 校验；使用
 `--output` 会原子保存脱敏结果，不复制原始科研 payload。
@@ -364,12 +365,40 @@ pilot 不下载数据、不读取 gold 结论、不调用 Provider，也不执�
 是 `structural_stage_coverage_only`，不是科研质量分数；即使显示 83.3%，仍固定
 `quality_claim_allowed: false`。
 
+工作区报告还会给出只读 `evidence_index`：只扫描 Research VCS、ARA/CAS 和有限的
+生成视图，输出有界文件/字节计数、聚合 SHA-256 及其 `digest_scope`（完整观测或有界前缀）、截断与读取错误；不会输出文件名、路径
+或原始 payload。若存在 ARA exploration graph，`workspace.exploration` 会统计计划、尝试、
+完成、失败、丢弃和停止原因；没有 graph 时明确写 `unavailable`，损坏图写 `unreadable`，
+无法映射节点状态时写 `partially_observed`，不会把缺失误报成零失败。计数可能重叠（attempted
+可以包含 completed/failed），且始终不允许据此声明覆盖完整性。
+其中 `ara_contract` 会单独统计 manifest、lock、graph 和 verify 报告数量；该索引不会证明外部
+命令是否执行，因此 `fsck_run` 与 `bundle_created` 在这里固定为 false；完整审计包需另存并核验
+对应命令的输出。
+索引还会给出 `walk_entries_observed`、`walk_truncated` 和
+`source_count_complete`：如果扫描被截断，源计数只代表已观察的有界前缀，不能读成完整总量。
+探索摘要契约为 `xscientist.exploration-audit.v1`；坏节点会进入 unknown/read-error，
+不会被静默算成成功或失败。
+在报告原记录路径保存后，可离线运行 `xscientist benchmark verify --report <report.json> --json`
+校验 schema 和不可比较边界。路径校验是有意的脱敏绑定；移动报告后该项可能显示
+`unverified`，不代表报告内容或 schema 失败。`reproducibility.fingerprint` 绑定清单、任务切片、
+工作区 head 与有界源计数，不把时间戳和运行时噪声纳入指纹。
+
+反馈健康报告也有明确的认识边界：`health_score` 的语义是
+`observational_heuristic`，不是科研质量或因果效果分数；
+`independence_status: "independence_unverified"` 只表示记录了 evaluator
+关联，并没有证明评估者独立。成对反馈可以帮助追踪，但在固定的独立自进化门禁
+记录之前，`causal_claim_allowed` 和 `promotion_signal_allowed` 始终为 `false`。
+因此反馈不会自行把某次改动标成“已改进”。持久化历史也有界且保持 JSON 可移植：超大文件、
+过深或循环的指标树、非有限数值会被拒绝或记录为加载错误，不会静默合并。
+
 #### 证据与 ARA 的保存边界
 
 这个 pilot 是只读审计：不会创建模型轨迹、复制任务清单，也不会自动写入 ARA。
 Python API 只在内存中返回报告；CLI 只有显式使用 `--output` 或重定向 stdout 时才会保存报告。
 工作区中原本存在的 Research VCS 对象、checkpoint、Git 引用、ARA 目录和 CAS
 产物会留在原位置，但 benchmark 报告本身只是有界、脱敏的索引，不是完整证据归档。
+Git 历史读取使用只取元数据的格式，并受输出字节数和时间上限约束；历史过大或不可读时会记录
+审计缺口，不会把原始提交正文复制进报告。
 
 也可以用原子写入选项保存摘要和诊断清单（不复制 prompt、模型响应、ARA 或 CAS payload）：
 
@@ -475,7 +504,7 @@ xscientist benchmark systems --workspace ./first-study --show-process
 `artifact_scope: current_checkout_only`，但不会导出 prompt 或隐藏自由推理。
 报告还记录附带 107 页演讲稿的文件名和 SHA-256，之后可以确认使用的是哪一份幻灯片来源。
 
-真正公平的下一步是注册匹配 rollout：相同 task slice、starting artifact、模型/骨干、
+真正公平的匹配 rollout 必须满足：相同 task slice、starting artifact、模型/骨干、
 硬件、预算、evaluator、重试规则、seed 数和 canonical rerun。在此之前，这只是能力与
 证据对比，不声称 XScientist 超过任何系统或人。
 
@@ -494,7 +523,7 @@ artifact-aware 过程诊断、时间/成本、证据完整性、可审查性和�
 
 #### 外部人类基线（已核对来源）
 
-另有一份[按来源核对的人类基线清单](HUMAN_BASELINES.md)（更新于 2026-08-22）。
+另有一份[按来源核对的人类基线清单](HUMAN_BASELINES.md)（更新于 2026-08-23）。
 清单严格区分：真正让人完成任务的实测基线、公开 leaderboard/SOTA 参考、专家验证、
 人类评审一致性，以及“人类 + Agent”的流程增益研究。直接实测的来源包括 RE-Bench
 （61 位专家、71 次尝试）、PaperBench（8 位 ML 博士、4 篇论文子集）、DiscoveryWorld
@@ -523,7 +552,7 @@ judge 校准/参考证据保存，不作为人类完成任务的实测对照组�
 | BrowseComp | solve rate 29.2%；已解题中 86.4% 与参考答案一致 | 1266 题中尝试 1255 题、人类训练师、2 小时上限；29.2% 是完成率，不是准确率 |
 | Mind2Web 2 | partial 0.79；success 0.54；Pass@3 0.83（跨参与者聚合） | 130 个长程网页任务中的随机 Subset-30；7 位参与者、每题 3 位不同参与者 |
 
-这些数字来自不同任务、工具、指标和预算，只能帮助设计未来的同条件人类对照，不能
+这些数字来自不同任务、工具、指标和预算，只能说明同条件人类对照的设计要求，不能
 写入 `workspace.score`，也不能合并成一个“人类平均分”。
 
 对本文引用的 AutoResearchEval，诚实记录是

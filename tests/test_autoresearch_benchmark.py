@@ -9,15 +9,22 @@ from pathlib import Path
 from unittest import mock
 
 from xscientist.benchmark import (
+    _exploration_audit,
     _metacognitive_report,
     benchmark_autoresearch_pilot,
     persist_benchmark_report,
+    verify_benchmark_report,
 )
 from xscientist.cli import main
 from xscientist.demo import create_autopilot_demo
-from xscientist.process_audit import _artifact_row, build_process_summary
+from xscientist.process_audit import (
+    _artifact_row,
+    _bounded_object_scan,
+    build_process_summary,
+)
 import xscientist.process_audit as process_audit_module
 from xscientist.research_vcs import ResearchRepository
+from xscientist.system_comparison import build_system_comparison
 from ai_scientist.protocol.schemas import load_schema
 from jsonschema import validate
 
@@ -75,6 +82,125 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
             report["diagnostics"]["next_required"], "QUALITY.NO_MATCHED_ROLLOUT"
         )
         validate(report, load_schema("autoresearch_conformance"))
+
+    def test_verifier_recomputes_fingerprint_and_rejects_nonfinite_values(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        self.assertTrue(verify_benchmark_report(report)["ok"])
+        report["tasks"]["count"] += 1
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("reproducibility_fingerprint_mismatch", checked["errors"])
+        report["tasks"]["count"] -= 1
+        report["duration_seconds"] = float("nan")
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("non_finite_number", checked["errors"])
+
+    def test_reproducibility_fingerprint_excludes_runtime_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report_a = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+            report_b = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        self.assertEqual(
+            report_a["reproducibility"]["fingerprint"],
+            report_b["reproducibility"]["fingerprint"],
+        )
+        self.assertIn(
+            "generated_at", report_a["reproducibility"]["excluded_observations"]
+        )
+
+    def test_verify_report_rejects_mutated_comparison_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        verification = verify_benchmark_report(report)
+        self.assertTrue(verification["ok"])
+        validate(verification, load_schema("benchmark_report_verification"))
+        report["quality_claim_allowed"] = True
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("comparison_boundary_mutated", checked["errors"])
+        validate(checked, load_schema("benchmark_report_verification"))
+
+    def test_verify_accepts_real_workspace_git_head_and_rejects_bad_digest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "demo"
+            create_autopilot_demo(root, profile="balanced", language="en")
+            report = benchmark_autoresearch_pilot(
+                self._tasks(Path(raw)), workspace=root, limit=1
+            )
+        self.assertTrue(verify_benchmark_report(report)["ok"])
+        report["dataset"]["sha256"] = "sha256:bad"
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("invalid_digest_format", checked["errors"])
+
+    def test_verify_malformed_execution_fails_closed_without_throwing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        report["execution"] = None
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("comparison_boundary_mutated", checked["errors"])
+
+    def test_verify_rejects_inconsistent_repeated_manifest_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        report["reproducibility"]["input_manifest_sha256"] = "b" * 64
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertIn("digest_consistency_mismatch", checked["errors"])
+
+    def test_verify_rejects_null_nested_evidence_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            report = benchmark_autoresearch_pilot(self._tasks(Path(raw)), limit=1)
+        report["workspace"] = {"evidence_index": None}
+        checked = verify_benchmark_report(report)
+        self.assertFalse(checked["ok"])
+        self.assertEqual(checked["checks"]["nested_contracts"], "failed")
+
+    def test_verifier_checks_first_run_threshold_semantics_and_system_null_process(
+        self,
+    ) -> None:
+        from xscientist.benchmark import benchmark_first_run
+
+        first_run = benchmark_first_run(max_seconds=30)
+        self.assertTrue(verify_benchmark_report(first_run)["ok"])
+        first_run["ok"] = False
+        tampered = verify_benchmark_report(first_run)
+        self.assertFalse(tampered["ok"])
+        self.assertIn("report_semantics_inconsistent", tampered["errors"])
+
+        # A system comparison without a supplied workspace intentionally has
+        # process=None; that is an explicit not-requested state, not a broken
+        # nested process contract.
+        self.assertTrue(verify_benchmark_report(build_system_comparison())["ok"])
+
+    def test_cli_verify_report_is_offline_and_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tasks = self._tasks(Path(raw))
+            report = benchmark_autoresearch_pilot(tasks, limit=1)
+            destination = Path(raw) / "report.json"
+            report["report_persistence"] = {
+                "requested": True,
+                "format": "json",
+                "destination_digest": "sha256:"
+                + __import__("hashlib")
+                .sha256(str(destination.resolve()).encode())
+                .hexdigest()[:16],
+                "raw_payloads_included": False,
+            }
+            persist_benchmark_report(report, destination)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    ["benchmark", "verify", "--report", str(destination), "--json"]
+                )
+            self.assertEqual(code, 0)
+            checked = json.loads(output.getvalue())
+        self.assertTrue(checked["ok"])
+        self.assertEqual(checked["checks"]["schema"], "passed")
 
     def test_diagnostics_turn_structural_gaps_into_bounded_actions(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -142,6 +268,9 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertNotIn("SECRET_OBJECT_IDENTIFIER", rendered)
         self.assertNotIn("SECRET_REVIEW_TEXT", rendered)
         self.assertEqual(report["unresolved_issues"][0]["source_kind"], "review")
+        self.assertEqual(report["repair_relation_count"], 0)
+        self.assertEqual(report["repair_rate"], 0.0)
+        self.assertFalse(report["recovery_claim_allowed"])
 
     def test_process_rows_digest_untrusted_identifiers(self) -> None:
         row = _artifact_row(
@@ -185,6 +314,71 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["workspace"]["stage_score"], 0.0)
         self.assertEqual(report["workspace"]["object_scan"]["visible_object_count"], 0)
         self.assertEqual(report["workspace"]["object_scan"]["source_object_count"], 2)
+
+    def test_fairness_exposes_fixed_unverified_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "study"
+            root.mkdir()
+            report = benchmark_autoresearch_pilot(
+                self._tasks(Path(raw)), workspace=root, limit=1
+            )
+        fair = report["workspace"]["process"]["branch_topology"][
+            "fair_branch_comparison"
+        ]
+        self.assertFalse(fair["eligible"])
+        self.assertIn("branch_diversity_not_observed", fair["unverified_reasons"])
+        self.assertIn("same_budget", fair["unverified_reasons"])
+
+    def test_exploration_audit_marks_unmapped_nodes_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "ara" / "run").mkdir(parents=True)
+            (root / "ara" / "run" / "exploration_graph.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ara.v1",
+                        "nodes": [
+                            {"id": "n1", "metric": {"value": 0.5}, "is_buggy": False},
+                            {"id": "n2"},
+                        ],
+                        "edges": [],
+                        "counts": {"nodes": 2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = _exploration_audit(root)
+        self.assertEqual(summary["status"], "partially_observed")
+        self.assertEqual(summary["attempted"], 1)
+        self.assertEqual(summary["completed"], 1)
+        self.assertEqual(summary["unknown_nodes"], 1)
+        self.assertTrue(summary["counts_are_nonexclusive"])
+
+    def test_exploration_audit_does_not_match_negated_stop_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            graph = root / "ara" / "run" / "exploration_graph.json"
+            graph.parent.mkdir(parents=True)
+            graph.write_text(
+                json.dumps({"nodes": [{"reason": "not_budget_exhausted"}]}),
+                encoding="utf-8",
+            )
+            summary = _exploration_audit(root)
+        self.assertEqual(summary["stop_reasons"], {"unknown": 1})
+        self.assertEqual(summary["status"], "partially_observed")
+
+    def test_exploration_audit_counts_malformed_nodes_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            graph = root / "ara" / "run" / "exploration_graph.json"
+            graph.parent.mkdir(parents=True)
+            graph.write_text(json.dumps({"nodes": [None, []]}), encoding="utf-8")
+            summary = _exploration_audit(root)
+        self.assertEqual(summary["node_count"], 2)
+        self.assertEqual(summary["unknown_nodes"], 2)
+        self.assertGreaterEqual(summary["read_error_count"], 2)
+        self.assertEqual(summary["status"], "partially_observed")
+        validate(summary, load_schema("exploration_audit"))
 
     def test_cli_autoresearch_pilot_emits_structured_report(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -513,7 +707,9 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
                 mock.patch.object(
                     process_audit_module,
                     "research_log",
-                    side_effect=lambda _root, *, ref, limit: logs[ref][:limit],
+                    side_effect=lambda _root, *, ref, limit, bounded=False: logs[ref][
+                        :limit
+                    ],
                 ),
                 mock.patch.object(
                     process_audit_module, "list_research_objects", return_value=objects
@@ -621,6 +817,31 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
         self.assertEqual(
             report["intermediate"]["decision_events"][0]["decision"], "hold"
         )
+
+    def test_process_object_scan_is_hard_bounded_and_skips_directory_symlinks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "workspace"
+            object_kind = root / ".xscientist" / "objects" / "hypothesis"
+            object_kind.mkdir(parents=True)
+            for index in range(20):
+                (object_kind / f"{index:04d}.json").write_text("{}", encoding="utf-8")
+            external = Path(raw) / "external"
+            external.mkdir()
+            (external / "outside.json").write_text("{}", encoding="utf-8")
+            (root / ".xscientist" / "objects" / "external-link").symlink_to(
+                external, target_is_directory=True
+            )
+            with mock.patch.object(process_audit_module, "_MAX_OBJECT_SCAN_FILES", 8):
+                rows, source_count, truncated, _errors, _kinds, _decisions, stats = (
+                    _bounded_object_scan(root, 1)
+                )
+        self.assertLessEqual(source_count, 8)
+        self.assertLessEqual(len(rows), 1)
+        self.assertTrue(truncated)
+        self.assertFalse(stats["source_scan_complete"])
+        self.assertEqual(stats["source_scan_scope"], "bounded_object_prefix")
 
 
 if __name__ == "__main__":

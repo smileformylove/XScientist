@@ -11,9 +11,22 @@ for its Python package; the ARA protocol has its own version in
 - Benchmark pilots now emit a fixed-vocabulary P0/P1/P2 diagnostics backlog,
   label stage coverage as structural-only, and expose an atomic `--output`
   path for retaining the redacted report without copying raw ARA/CAS payloads.
-- Added bilingual benchmark optimization roadmaps with capability-gap mapping
-  and 30/90/180-day acceptance criteria; public SDK exports now include the
-  benchmark helpers and report persistence function.
+- Added a bilingual benchmark optimization status report with capability-gap
+  mapping and explicit blockers (no dated delivery plan); public SDK exports
+  now include the benchmark helpers, report persistence, and offline report
+  verification function.
+- Benchmark workspace audits now include a bounded, read-only SHA-256 evidence
+  index for Research VCS, ARA/CAS, and generated views, plus a redacted
+  exploration-graph summary and deterministic input fingerprint.
+- Evidence/process scanners now cap directory-entry traversal before parsing,
+  reject symlink escapes, expose prefix-versus-complete scopes, and validate
+  exploration/process/evidence subcontracts during offline report verification.
+- Shell completion now includes `benchmark verify` and its `--report`/`--output`
+  options; malformed exploration nodes and inconsistent repeated manifest
+  digests fail closed instead of looking like complete evidence.
+- Feedback reports now label evaluator links as independence-unverified and
+  mark health scores as observational heuristics; process fairness reports
+  expose fixed unverified-reason codes.
 - Process fairness metadata now fails closed for invalid task counts (including
   non-integral or non-finite values) instead of producing schema-invalid audit
   reports.

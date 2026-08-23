@@ -86,12 +86,13 @@ The report contains three deliberately separate measurements:
 | `workspace.process` | Bounded commits, branch topology, typed intermediate artifacts, failure/recovery signals, and fairness boundaries | No; it is the inspectable process layer |
 | `human_baseline` | Explicit local human-arm status; external inventory is never substituted | No; `not_reported` is preserved until a matched local arm exists |
 
-The pilot also emits a bounded `diagnostics` backlog. It is an action list,
+The pilot also emits a bounded `diagnostics` status list. It is a gap register,
 not a score: `P0` blocks a fair quality claim, `P1` is evidence or lifecycle
 debt, and `P2` is an exploration/usability improvement. Typical findings are
 `QUALITY.NO_MATCHED_ROLLOUT`, `FAIRNESS.BRANCH_CONTRACT_UNVERIFIED`,
 `AUDIT.BOUNDED_VIEW`, and `FEEDBACK.CONTAINED_REVIEW_DEBT`. Every item includes
-a fixed verification condition so a later run can show whether the gap closed.
+a fixed verification condition so a separately recorded rerun can show whether
+the gap closed; the current report does not imply that it has.
 
 The stage percentage is explicitly `structural_stage_coverage_only`, never a
 scientific quality score. A run showing 83.3% coverage still has
@@ -110,6 +111,46 @@ payload, and the process view is a bounded redacted index. A caller may retain
 the JSON with `--output` or by redirecting stdout and may create a complete, sensitive audit
 package only with the explicit `fsck`, `ara bundle`, and payload-export
 commands below.
+
+The workspace report also contains `evidence_index`. It hashes only the
+allowlisted evidence surfaces (`.xscientist/objects`, checkpoints,
+`research-objects`, ARA roots/CAS, and selected generated views), with file and
+byte caps. It reports category presence, counts, a SHA-256 aggregate, the
+`digest_scope` (`observed_files` or `bounded_prefix`), read errors, and
+`truncated`; it never emits paths, filenames, or payloads. A saved
+report can therefore answer “what evidence was present when this ran?” without
+pretending that the raw ARA/VCS bundle was saved. Validate the standalone
+contract with `load_schema("evidence_index")`. Its `ara_contract` subrecord
+separately counts manifests, locks, exploration graphs, and verify reports;
+`fsck_run: false` and `bundle_created: false` are intentionally fixed in this
+index because it does not attest external command execution; retain the
+separate `fsck`/bundle outputs if a full audit package is needed.
+`walk_entries_observed`, `walk_truncated`, and `source_count_complete` make the
+directory-scan boundary explicit: a `bounded_prefix` count is a lower-bound
+observation, not a claim that the whole store was enumerated.
+
+For an offline report schema/boundary check at the recorded output path, run:
+
+```bash
+xscientist benchmark verify --report ./benchmark-evidence/autoresearch-report.json --json
+```
+
+This validates the report schema, fail-closed `official_comparable`/
+`quality_claim_allowed` boundary, digest shapes, and (when present) the
+recorded output destination. Because that destination check is intentionally
+path-bound and redacted, moving a report may make only that check
+`unverified`; this command does not prove source provenance, contact a provider,
+or re-run a task.
+The `reproducibility` block exposes a stable fingerprint over the manifest,
+task slice, package version, workspace head, and bounded source totals;
+timestamps and runtime observations are explicitly excluded from that
+fingerprint.
+
+Feedback history is bounded as well: oversized or malformed history files,
+non-finite values, cycles, and over-deep metric trees are rejected or reported
+as load errors instead of being merged back into a portable JSON snapshot.
+Health output remains an observational diagnostic, not a causal promotion
+signal.
 
 Each report also records a SHA-256 of the supplied manifest and redacted
 row-level contract failures, so two runs can be compared without copying task
@@ -146,7 +187,9 @@ summary. Existing Research VCS
 objects, checkpoints, Git refs, ARA roots, and CAS payloads remain in the
 workspace, while `workspace.process` and the stage report expose only bounded,
 redacted metadata. The report is therefore an audit index, not a complete raw
-evidence archive. `build_arft_coverage()` is also read-only; call
+evidence archive. Git log inspection uses a bounded metadata-only format and a
+hard output/time budget; an oversized or unreadable history is reported as an
+audit gap rather than copied into the report. `build_arft_coverage()` is also read-only; call
 `save_arft_coverage()` explicitly if its structural report should become a
 pipeline artifact.
 
@@ -214,10 +257,28 @@ eligible only when the same manifest/task slice, fork base, budget, and
 evaluator are all verified; otherwise the report names the unverified checks
 and refuses to turn branch visibility into a fairness claim.
 
+When an ARA `exploration_graph.json` is present, `workspace.exploration` adds
+bounded counts for planned, attempted, completed, failed, discarded, crashed,
+and explicitly unattempted nodes plus fixed stop-reason buckets. If no graph is
+present it reports `status: "unavailable"`, not zero failures or zero
+unattempted candidates; malformed graphs are `unreadable`, and graphs with
+unmapped node states are `partially_observed`. The counters are intentionally
+non-exclusive (`attempted` can include completed/failed nodes), and
+`coverage_claim_allowed` remains `false`. Node IDs, prompts, code, and
+free-form reasons are never exported.
+
+The exploration object is versioned as `xscientist.exploration-audit.v1` and
+can be checked with `load_schema("exploration_audit")`; malformed nodes count
+as unknown/read errors rather than silently becoming zero failures.
+
 The process payload is versioned as `xscientist.process-audit.v1` and can be
 validated offline with `load_schema("process_audit")`; both available and
 unavailable workspaces use the same top-level shape. This makes a missing local
 repository an explicit state rather than a schema-less empty result.
+`branch_topology.fair_branch_comparison.unverified_reasons` uses a fixed
+vocabulary (for example `same_budget`, `same_evaluator`, or
+`branch_diversity_not_observed`) so a `NOT VERIFIED` result is actionable
+without exposing branch or task prose.
 
 The complete conformance report is likewise validated by
 `load_schema("autoresearch_conformance")`. The schema fixes the redaction and
@@ -235,7 +296,7 @@ ability.
 ### External human-baseline inventory
 
 The companion [human-baseline inventory](HUMAN_BASELINES.md) records public
-sources as-of 2026-08-22. It does not pretend that every paper mentioning
+sources as-of 2026-08-23. It does not pretend that every paper mentioning
 “human” contains a human performance arm. `measured_human` is reserved for
 people who actually ran the stated tasks; public leaderboards and prior SOTA
 are marked as proxies; expert labeling, judge calibration, and human-verified
@@ -263,6 +324,14 @@ from the absence of a shipped artifact. On a Research VCS-only workspace, the
 embedded ARFT summary is `not_applicable` with
 `source: "research_vcs_typed_objects"` until a legacy-contract adapter is
 available. An empty workspace is reported separately as `not_initialized`.
+
+Feedback health reports use the same epistemic boundary. `health_score` is an
+`observational_heuristic`, not a quality or causal-effect estimate;
+`independence_status: "independence_unverified"` means that an evaluator link
+was recorded but independence was not established. Paired feedback is useful
+for traceability, but `causal_claim_allowed` and `promotion_signal_allowed`
+remain `false` until a fixed independent evolution gate is recorded. These
+fields describe evidence readiness, never a self-awarded improvement score.
 
 ## AutoResearchEval / ARFT observability audit
 

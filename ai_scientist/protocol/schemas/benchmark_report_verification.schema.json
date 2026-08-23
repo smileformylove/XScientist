@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/benchmark-report-verification.v1/benchmark_report_verification.schema.json",
+  "title": "XScientist benchmark report verification",
+  "description": "Offline validation result for a redacted benchmark report.",
+  "type": "object",
+  "required": ["schema", "ok", "checks", "errors", "network_used", "provider_used"],
+  "properties": {
+    "schema": {"const": "xscientist.benchmark-report-verification.v1"},
+    "ok": {"type": "boolean"},
+    "checks": {
+      "type": "object",
+      "required": [
+        "schema",
+        "nested_contracts",
+        "comparison_boundary",
+        "digest_format",
+        "digest_consistency",
+        "reproducibility_fingerprint",
+        "report_persistence"
+      ],
+      "properties": {
+        "schema": {"enum": ["passed", "failed", "not_checked"]},
+        "nested_contracts": {"enum": ["passed", "failed", "not_applicable", "not_checked"]},
+        "comparison_boundary": {"enum": ["passed", "failed", "not_checked"]},
+        "digest_format": {"enum": ["passed", "failed", "not_checked"]},
+        "digest_consistency": {"enum": ["passed", "failed", "not_applicable", "not_checked"]},
+        "reproducibility_fingerprint": {"enum": ["passed", "failed", "not_checked"]},
+        "report_persistence": {"enum": ["passed", "failed", "not_requested", "unverified", "not_checked"]}
+      },
+      "additionalProperties": false
+    },
+    "errors": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
+      "uniqueItems": true
+    },
+    "network_used": {"const": false},
+    "provider_used": {"const": false}
+  },
+  "additionalProperties": false
+}

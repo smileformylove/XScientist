@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/evidence-index.v1/evidence_index.schema.json",
+  "title": "XScientist bounded evidence index",
+  "description": "Read-only, privacy-preserving inventory of retained VCS, ARA, and generated evidence; it contains no raw payloads or paths.",
+  "type": "object",
+  "required": [
+    "schema",
+    "available",
+    "mode",
+    "hash_algorithm",
+    "workspace_root_disclosed",
+    "paths_disclosed",
+    "raw_content_included",
+    "workspace_mutated",
+    "limits",
+    "categories",
+    "ara_contract",
+    "truncated",
+    "read_error_count"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.evidence-index.v1"},
+    "available": {"type": "boolean"},
+    "mode": {"enum": ["read_only_bounded_hash_index", "unavailable"]},
+    "hash_algorithm": {"const": "sha256"},
+    "workspace_root_disclosed": {"const": false},
+    "paths_disclosed": {"const": false},
+    "raw_content_included": {"const": false},
+    "workspace_mutated": {"const": false},
+    "limits": {
+      "type": "object",
+      "required": ["max_files_per_category", "max_bytes"],
+      "properties": {
+        "max_files_per_category": {"type": "integer", "minimum": 1},
+        "max_bytes": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "categories": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "research_vcs": {"$ref": "#/$defs/category"},
+        "ara": {"$ref": "#/$defs/category"},
+        "generated_views": {"$ref": "#/$defs/category"}
+      },
+      "additionalProperties": false
+    },
+    "ara_contract": {
+      "type": "object",
+      "required": [
+        "manifest_count",
+        "lock_count",
+        "graph_count",
+        "verify_report_count",
+        "lock_state",
+        "control_digest",
+        "digest_scope",
+        "bytes_read",
+        "fsck_run",
+        "bundle_created",
+        "truncated",
+        "raw_payloads_included"
+      ],
+      "properties": {
+        "manifest_count": {"type": "integer", "minimum": 0},
+        "lock_count": {"type": "integer", "minimum": 0},
+        "graph_count": {"type": "integer", "minimum": 0},
+        "verify_report_count": {"type": "integer", "minimum": 0},
+        "lock_state": {"enum": ["not_observed", "lock_present", "lock_missing_or_incomplete"]},
+        "control_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "digest_scope": {"enum": ["observed_control_files", "bounded_prefix"]},
+        "bytes_read": {"type": "integer", "minimum": 0},
+        "fsck_run": {"const": false},
+        "bundle_created": {"const": false},
+        "truncated": {"type": "boolean"},
+        "raw_payloads_included": {"const": false},
+        "walk_entries_observed": {"type": "integer", "minimum": 0},
+        "walk_truncated": {"type": "boolean"},
+        "source_count_complete": {"type": "boolean"},
+        "read_error_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "truncated": {"type": "boolean"},
+    "read_error_count": {"type": "integer", "minimum": 0}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"available": {"const": true}}},
+      "then": {
+        "properties": {
+          "mode": {"const": "read_only_bounded_hash_index"},
+          "categories": {"required": ["research_vcs", "ara", "generated_views"]}
+        }
+      },
+      "else": {
+        "properties": {
+          "mode": {"const": "unavailable"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "category": {
+      "type": "object",
+      "required": [
+        "present",
+        "file_count",
+        "byte_count",
+        "digest",
+        "digest_scope",
+        "sources",
+        "truncated",
+        "read_error_count"
+      ],
+      "properties": {
+        "present": {"type": "boolean"},
+        "file_count": {"type": "integer", "minimum": 0},
+        "byte_count": {"type": "integer", "minimum": 0},
+        "digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "digest_scope": {"enum": ["observed_files", "bounded_prefix"]},
+        "sources": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "truncated": {"type": "boolean"},
+        "read_error_count": {"type": "integer", "minimum": 0},
+        "walk_entries_observed": {"type": "integer", "minimum": 0},
+        "walk_truncated": {"type": "boolean"},
+        "source_count_complete": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

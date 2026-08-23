@@ -41,7 +41,23 @@
         "worktree_clean": {"type": ["boolean", "null"]},
         "checkpoint_policy": {"type": "string"},
         "staged_path_count": {"type": "integer", "minimum": 0},
-        "eligible_change_count": {"type": "integer", "minimum": 0}
+        "eligible_change_count": {"type": "integer", "minimum": 0},
+        "object_store_scan_complete": {"type": "boolean"},
+        "object_store_scan_scope": {
+          "type": "string",
+          "enum": [
+            "all_store_files",
+            "bounded_store_prefix",
+            "symlink_boundary",
+            "not_observed"
+          ]
+        },
+        "object_store_scan_entries": {"type": "integer", "minimum": 0},
+        "object_store_read_error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "object_store_truncated": {"type": "boolean"}
       },
       "additionalProperties": false
     },
@@ -90,6 +106,15 @@
       "properties": {
         "branch_count": {"type": "integer", "minimum": 0, "maximum": 64},
         "source_branch_count": {"type": "integer", "minimum": 0},
+        "source_branch_count_scope": {
+          "type": "string",
+          "enum": [
+            "all_visible_branches",
+            "bounded_prefix_lower_bound",
+            "no_repository"
+          ]
+        },
+        "source_branch_scan_complete": {"type": "boolean"},
         "branching_observed": {"type": "boolean"},
         "merge_observed": {"type": "boolean"},
         "artifact_scope": {"const": "current_checkout_only"},
@@ -125,7 +150,11 @@
       },
       "additionalProperties": false
     },
-    "errors": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+    "errors": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
+      "uniqueItems": true
+    }
   },
   "$defs": {
     "commit": {
@@ -188,6 +217,21 @@
         "eligible": {"type": "boolean"},
         "requirements": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "checks": {"type": "object", "additionalProperties": {"type": "boolean"}},
+        "unverified_reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "same_manifest",
+              "same_task_slice",
+              "gold_exclusion",
+              "same_budget",
+              "same_evaluator",
+              "same_base",
+              "branch_diversity_not_observed"
+            ]
+          },
+          "uniqueItems": true
+        },
         "same_task_manifest_required": {"const": true},
         "same_budget_required": {"const": true},
         "same_evaluator_required": {"const": true},
@@ -311,6 +355,10 @@
         "object_count": {"type": "integer", "minimum": 0},
         "source_object_count": {"type": "integer", "minimum": 0},
         "valid_object_count": {"type": "integer", "minimum": 0},
+        "source_scan_complete": {"type": "boolean"},
+        "source_scan_scope": {"type": "string"},
+        "source_scan_entries": {"type": "integer", "minimum": 0},
+        "read_error_count": {"type": "integer", "minimum": 0},
         "statistics_scope": {"type": "string"},
         "attempt_statistics_scope": {"type": "string"},
         "attempts_truncated": {"type": "boolean"},

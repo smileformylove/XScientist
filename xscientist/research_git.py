@@ -10,10 +10,12 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import platform
 import re
+import selectors
 import shlex
 import shutil
 import subprocess
@@ -61,6 +63,14 @@ OBJECT_POINTER_SCHEMA = "xscientist.research-object-pointer.v1"
 BUNDLE_SCHEMA = "xscientist.research-bundle.v1"
 ENVIRONMENT_SCHEMA = "xscientist.research-environment.v1"
 REPRODUCTION_RECEIPT_SCHEMA = "xscientist.reproduction-receipt.v1"
+_HARD_MAX_STORE_ENTRIES = 32768
+_HARD_MAX_STORE_FILES = 8192
+_HARD_MAX_STORE_BYTES = 128 * 1024 * 1024
+_HARD_MAX_RESEARCH_OBJECTS = 8192
+_HARD_MAX_BOUNDED_LOG_OUTPUT = 1 * 1024 * 1024
+_BOUNDED_LOG_TIMEOUT_SECONDS = 10.0
+_MAX_RESEARCH_STAGE_BYTES = 1 * 1024 * 1024
+_MAX_RESEARCH_STAGE_ENTRIES = 4096
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -466,8 +476,136 @@ def _run_git(
         )
     except FileNotFoundError as exc:
         raise ResearchGitError("Git is required for local research history") from exc
+    except OSError as exc:
+        raise ResearchGitError("cannot start Git command") from exc
     if check and completed.returncode:
         detail = (completed.stderr or completed.stdout).strip()
+        raise ResearchGitError(f"git {' '.join(args)} failed: {detail}")
+    return completed
+
+
+def _run_git_bounded(
+    repo: Path,
+    args: Sequence[str],
+    *,
+    max_output_bytes: int = _HARD_MAX_BOUNDED_LOG_OUTPUT,
+    timeout_seconds: float = _BOUNDED_LOG_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    """Run a read-only Git command with a hard stdout/stderr budget.
+
+    ``subprocess.run(capture_output=True)`` allocates the complete stream
+    before a caller can truncate it.  Audit paths must not make that promise
+    against an untrusted repository, so this helper drains both pipes while
+    enforcing a combined byte cap and a wall-clock deadline.  It is kept
+    separate from the historical ``_run_git`` API so existing integrations and
+    test doubles retain their call signature.
+    """
+
+    if (
+        isinstance(max_output_bytes, bool)
+        or not isinstance(max_output_bytes, int)
+        or max_output_bytes <= 0
+        or max_output_bytes > _HARD_MAX_BOUNDED_LOG_OUTPUT
+    ):
+        raise ResearchGitError("bounded Git output limit is invalid")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0
+        or timeout_seconds > 60.0
+    ):
+        raise ResearchGitError("bounded Git timeout is invalid")
+
+    command = ["git", "-C", str(repo), *args]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except FileNotFoundError as exc:
+        raise ResearchGitError("Git is required for local research history") from exc
+    except OSError as exc:
+        raise ResearchGitError("cannot start bounded Git audit command") from exc
+
+    selector = selectors.DefaultSelector()
+    streams = []
+    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+        if stream is not None:
+            selector.register(stream, selectors.EVENT_READ, name)
+            streams.append(stream)
+    total = 0
+    buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + float(timeout_seconds)
+    timed_out = False
+    overflowed = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            events = selector.select(min(remaining, 0.25))
+            if not events:
+                continue
+            for key, _ in events:
+                stream = key.fileobj
+                try:
+                    chunk = os.read(stream.fileno(), min(65536, max_output_bytes + 1))
+                except (OSError, ValueError):
+                    chunk = b""
+                if not chunk:
+                    try:
+                        selector.unregister(stream)
+                    except (KeyError, ValueError):
+                        pass
+                    continue
+                room = max_output_bytes - total
+                if len(chunk) > room:
+                    overflowed = True
+                    break
+                buffers[key.data].extend(chunk)
+                total += len(chunk)
+            if overflowed:
+                break
+        if timed_out or overflowed:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait(timeout=1.0)
+    finally:
+        try:
+            selector.close()
+        finally:
+            for stream in streams:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    if timed_out:
+        raise ResearchGitError("bounded Git command exceeded time limit")
+    if overflowed:
+        raise ResearchGitError("bounded Git command exceeded output limit")
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout=bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
+        stderr=bytes(buffers["stderr"]).decode("utf-8", errors="replace"),
+    )
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()[:512]
         raise ResearchGitError(f"git {' '.join(args)} failed: {detail}")
     return completed
 
@@ -696,6 +834,23 @@ def _resolve_configured_path(root: Path, raw_path: Any, *, label: str) -> Path:
             f"configured {label} escapes research repository: {relative}"
         ) from exc
     return target
+
+
+def _has_symlink_component(root: Path, raw_path: Any) -> bool:
+    """Return whether an allowlisted relative path crosses a symlink."""
+
+    try:
+        relative = PurePosixPath(str(raw_path).replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            return True
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
 
 
 def load_repository_config(repo: str | Path) -> dict[str, Any]:
@@ -1058,14 +1213,105 @@ def list_research_objects(
     *,
     kind: str | None = None,
     state: str | None = None,
+    max_objects: int | None = None,
+    max_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
-    """List validated typed objects in deterministic order."""
+    """List validated typed objects in deterministic order.
+
+    ``max_objects``/``max_bytes`` are optional read-only safety caps used by
+    audit callers.  The default remains the historical complete listing API;
+    capped callers stop before opening an unbounded object store.
+    """
 
     root = _repository_root(repo)
     object_root = root / ".xscientist" / "objects"
-    pattern = f"{kind}/*.json" if kind else "*/*.json"
+    if max_objects is not None and (
+        isinstance(max_objects, bool)
+        or not isinstance(max_objects, int)
+        or max_objects <= 0
+        or max_objects > _HARD_MAX_RESEARCH_OBJECTS
+    ):
+        raise ValueError("max_objects must be a positive integer")
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or max_bytes <= 0
+        or max_bytes > _HARD_MAX_STORE_BYTES
+    ):
+        raise ValueError("max_bytes must be a positive integer")
+    if object_root.is_symlink() or not object_root.is_dir():
+        return []
+
+    if max_objects is None and max_bytes is None:
+        pattern = f"{kind}/*.json" if kind else "*/*.json"
+        paths = [
+            path
+            for path in sorted(object_root.glob(pattern))
+            if path.is_file() and not path.is_symlink()
+        ]
+    else:
+        # The capped path intentionally avoids ``glob`` and materialising an
+        # unbounded directory listing.  It is used by audit/report code where
+        # a hostile or simply very large object store must not become an I/O
+        # or memory denial of service.
+        paths = []
+        consumed_bytes = 0
+        entries_seen = 0
+        entry_cap = min(
+            _HARD_MAX_STORE_ENTRIES,
+            max(1024, (max_objects or 1) * 8),
+        )
+        kind_paths: list[Path] = []
+        try:
+            with os.scandir(object_root) as kind_entries:
+                for entry in kind_entries:
+                    entries_seen += 1
+                    if entries_seen > entry_cap:
+                        break
+                    if (
+                        entry.is_symlink()
+                        or not entry.is_dir(follow_symlinks=False)
+                        or (kind is not None and entry.name != kind)
+                    ):
+                        continue
+                    kind_paths.append(Path(entry.path))
+        except OSError:
+            return []
+        for kind_path in sorted(kind_paths):
+            if max_objects is not None and len(paths) >= max_objects:
+                break
+            try:
+                with os.scandir(kind_path) as object_entries:
+                    for entry in object_entries:
+                        entries_seen += 1
+                        if entries_seen > entry_cap:
+                            break
+                        if (
+                            entry.is_symlink()
+                            or not entry.is_file(follow_symlinks=False)
+                            or not entry.name.endswith(".json")
+                        ):
+                            continue
+                        try:
+                            current_size = int(
+                                entry.stat(follow_symlinks=False).st_size
+                            )
+                        except (OSError, ValueError):
+                            continue
+                        if (
+                            max_bytes is not None
+                            and consumed_bytes + current_size > max_bytes
+                        ):
+                            break
+                        paths.append(Path(entry.path))
+                        consumed_bytes += current_size
+                        if max_objects is not None and len(paths) >= max_objects:
+                            break
+            except OSError:
+                continue
+        paths.sort()
     rows: list[dict[str, Any]] = []
-    for path in sorted(object_root.glob(pattern)):
+    for path in paths:
         try:
             payload = validate_research_object(
                 json.loads(path.read_text(encoding="utf-8"))
@@ -1159,11 +1405,30 @@ def _stage_payload(repo: Path, entries: dict[str, str]) -> dict[str, Any]:
 
 def _load_research_stage(repo: Path) -> dict[str, Any]:
     path = _research_stage_path(repo)
+    # The stage file is a small control-plane receipt.  Refuse symlinks and
+    # oversized/deep JSON before parsing so status/audit commands cannot be
+    # turned into an unbounded read of an externally-owned file.
+    if path.is_symlink():
+        raise ResearchGitError("native research stage is outside the repository")
     if not path.is_file():
         return _stage_payload(repo, {})
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if path.stat().st_size > _MAX_RESEARCH_STAGE_BYTES:
+            raise ResearchGitError("native research stage exceeds safety limit")
+        raw = path.read_bytes().decode("utf-8")
+
+        def reject_constant(token: str) -> None:
+            raise ValueError(f"non-finite JSON constant: {token}")
+
+        payload = json.loads(raw, parse_constant=reject_constant)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+        MemoryError,
+    ) as exc:
         raise ResearchGitError("native research stage is damaged") from exc
     if not isinstance(payload, dict):
         raise ResearchGitError("native research stage is damaged")
@@ -1174,6 +1439,8 @@ def _load_research_stage(repo: Path) -> dict[str, Any]:
         or not isinstance(payload.get("entries"), list)
     ):
         raise ResearchGitError("native research stage failed integrity validation")
+    if len(payload["entries"]) > _MAX_RESEARCH_STAGE_ENTRIES:
+        raise ResearchGitError("native research stage exceeds entry limit")
     seen: set[str] = set()
     for item in payload["entries"]:
         if not isinstance(item, dict) or set(item) != {"path", "fingerprint"}:
@@ -2182,19 +2449,216 @@ def auto_checkpoint(
     )
 
 
-def repository_status(repo: str | Path) -> dict[str, Any]:
+def _validate_optional_positive_cap(
+    value: int | None, *, label: str, maximum: int | None = None
+) -> None:
+    """Validate an optional resource cap without accepting bool/int coercions."""
+
+    if value is not None and (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or (maximum is not None and value > maximum)
+    ):
+        raise ValueError(f"{label} must be a positive integer")
+
+
+def _bounded_store_summary(
+    store: Path,
+    *,
+    max_entries: int,
+    max_files: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    """Summarise a CAS tree without recursively materialising unbounded paths.
+
+    The ordinary repository APIs historically returned an exact count.  Audit
+    callers use this explicitly bounded variant so a large or hostile local
+    CAS cannot turn a benchmark report into an unbounded filesystem walk.
+    """
+
+    result: dict[str, Any] = {
+        "path": str(store),
+        "objects": 0,
+        "bytes": 0,
+        "truncated": False,
+        "scan_entries": 0,
+        "read_error_count": 0,
+        "scan_complete": True,
+        "scan_scope": "all_store_files",
+    }
+    files_seen = 0
+    if not store.exists():
+        return result
+    if store.is_symlink() or not store.is_dir():
+        result.update(
+            {
+                "truncated": True,
+                "scan_complete": False,
+                "scan_scope": "bounded_store_prefix",
+                "read_error_count": 1,
+            }
+        )
+        return result
+
+    pending = [store]
+    while pending:
+        current = pending.pop()
+        try:
+            iterator = os.scandir(current)
+        except OSError:
+            result["read_error_count"] += 1
+            result["scan_complete"] = False
+            result["scan_scope"] = "bounded_store_prefix"
+            continue
+        try:
+            while True:
+                try:
+                    entry = next(iterator)
+                except StopIteration:
+                    break
+                except OSError:
+                    result["read_error_count"] += 1
+                    result["scan_complete"] = False
+                    result["scan_scope"] = "bounded_store_prefix"
+                    break
+                result["scan_entries"] += 1
+                if result["scan_entries"] > max_entries:
+                    result["truncated"] = True
+                    result["scan_complete"] = False
+                    result["scan_scope"] = "bounded_store_prefix"
+                    break
+                try:
+                    if entry.is_symlink():
+                        # A symlink is deliberately not followed; its presence
+                        # still means the complete store cannot be claimed.
+                        result["truncated"] = True
+                        result["scan_complete"] = False
+                        result["scan_scope"] = "bounded_store_prefix"
+                        result["read_error_count"] += 1
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    size = int(entry.stat(follow_symlinks=False).st_size)
+                except (OSError, ValueError):
+                    result["read_error_count"] += 1
+                    result["scan_complete"] = False
+                    result["scan_scope"] = "bounded_store_prefix"
+                    continue
+                if result["bytes"] + size > max_bytes:
+                    result["truncated"] = True
+                    result["scan_complete"] = False
+                    result["scan_scope"] = "bounded_store_prefix"
+                    break
+                files_seen += 1
+                if files_seen > max_files:
+                    result["truncated"] = True
+                    result["scan_complete"] = False
+                    result["scan_scope"] = "bounded_store_prefix"
+                    break
+                result["objects"] += 1
+                result["bytes"] += size
+            if result["truncated"]:
+                break
+        finally:
+            iterator.close()
+    return result
+
+
+def repository_status(
+    repo: str | Path,
+    *,
+    max_store_entries: int | None = None,
+    max_store_files: int | None = None,
+    max_store_bytes: int | None = None,
+    skip_worktree_scan: bool = False,
+    skip_checkpoint_scan: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(skip_worktree_scan, bool):
+        raise ValueError("skip_worktree_scan must be boolean")
+    if not isinstance(skip_checkpoint_scan, bool):
+        raise ValueError("skip_checkpoint_scan must be boolean")
     root = _repository_root(repo)
     config = load_repository_config(root)
-    worktree = _worktree_change_summary(root, config)
-    previous = _previous_checkpoint(root)
+    if isinstance(skip_worktree_scan, bool) and skip_worktree_scan:
+        # Audit reports only need the repository identity and topology.  Git's
+        # untracked/staged path listing is intentionally not streamed here;
+        # callers that need the full worktree view can use the default status
+        # API explicitly.
+        worktree = {
+            "clean": None,
+            "backend_staged": [],
+            "tracked": [],
+            "eligible": [],
+            "excluded": [],
+            "research_stage_head": None,
+            "research_stage": [],
+        }
+    else:
+        worktree = _worktree_change_summary(root, config)
+    # A shareable process audit must not walk an unbounded first-parent history
+    # merely to recover the latest checkpoint.  Keep the historical default
+    # for callers that explicitly request the full repository status, while
+    # allowing bounded/read-only callers to opt out.
+    previous = None if skip_checkpoint_scan else _previous_checkpoint(root)
     store = _resolve_configured_path(
         root,
         (config.get("storage") or {}).get("root") or ".ara-store",
         label="CAS root",
     )
-    object_files = (
-        [path for path in store.rglob("*") if path.is_file()] if store.exists() else []
+    store_relative = (config.get("storage") or {}).get("root") or ".ara-store"
+    _validate_optional_positive_cap(
+        max_store_entries,
+        label="max_store_entries",
+        maximum=_HARD_MAX_STORE_ENTRIES,
     )
+    _validate_optional_positive_cap(
+        max_store_files,
+        label="max_store_files",
+        maximum=_HARD_MAX_STORE_FILES,
+    )
+    _validate_optional_positive_cap(
+        max_store_bytes,
+        label="max_store_bytes",
+        maximum=_HARD_MAX_STORE_BYTES,
+    )
+    if (
+        max_store_entries is None
+        and max_store_files is None
+        and max_store_bytes is None
+    ):
+        object_files = (
+            [path for path in store.rglob("*") if path.is_file()]
+            if store.exists()
+            else []
+        )
+        object_store = {
+            "path": str(store),
+            "objects": len(object_files),
+            "bytes": sum(path.stat().st_size for path in object_files),
+        }
+    else:
+        if _has_symlink_component(root, store_relative):
+            object_store = {
+                "path": str(store),
+                "objects": 0,
+                "bytes": 0,
+                "truncated": True,
+                "scan_entries": 0,
+                "read_error_count": 1,
+                "scan_complete": False,
+                "scan_scope": "symlink_boundary",
+            }
+        else:
+            object_store = _bounded_store_summary(
+                store,
+                max_entries=max_store_entries or 8192,
+                max_files=max_store_files or 4096,
+                max_bytes=max_store_bytes or 64 * 1024 * 1024,
+            )
     return {
         "repository": str(root),
         "name": config.get("name"),
@@ -2213,11 +2677,7 @@ def repository_status(repo: str | Path) -> dict[str, Any]:
         "eligible_changes": worktree["eligible"],
         "excluded_changes": worktree["excluded"],
         "last_checkpoint": previous,
-        "object_store": {
-            "path": str(store),
-            "objects": len(object_files),
-            "bytes": sum(path.stat().st_size for path in object_files),
-        },
+        "object_store": object_store,
     }
 
 
@@ -2236,27 +2696,51 @@ def _validate_research_ref_name(name: str, *, kind: str) -> str:
     return normalized
 
 
-def list_research_branches(repo: str | Path) -> list[dict[str, Any]]:
-    """List research lines with their latest scientific checkpoint."""
+def list_research_branches(
+    repo: str | Path, *, max_branches: int | None = None
+) -> list[dict[str, Any]]:
+    """List research lines with their latest scientific checkpoint.
+
+    ``max_branches`` is an optional metadata-scan cap for shareable audits;
+    the historical uncapped listing remains the default for repository APIs.
+    """
 
     root = _repository_root(repo)
+    if max_branches is not None and (
+        isinstance(max_branches, bool)
+        or not isinstance(max_branches, int)
+        or max_branches <= 0
+        or max_branches > 64
+    ):
+        raise ValueError("max_branches must be a positive integer")
     current = _branch(root)
-    raw = _run_git(
-        root,
-        [
-            "for-each-ref",
-            "--sort=refname",
-            "--format=%(refname:short)%00%(objectname)%00%(subject)",
-            "refs/heads",
-        ],
-    ).stdout
+    format_spec = (
+        "%(refname:short)%00%(objectname)%00%(subject)"
+        if max_branches is None
+        else "%(refname:short)%00%(objectname)%00"
+    )
+
+    def read_refs(ref_glob: str, *, count: int | None = None) -> str:
+        args = ["for-each-ref"]
+        if count is not None:
+            args.append(f"--count={count}")
+        args.extend(["--sort=refname", f"--format={format_spec}", ref_glob])
+        return _run_git(root, args).stdout
+
+    raw = read_refs("refs/heads", count=max_branches)
     rows: list[dict[str, Any]] = []
     for line in raw.splitlines():
         fields = line.split("\0", 2)
         if len(fields) != 3:
             continue
         name, commit, subject = fields
-        checkpoint = _latest_checkpoint_record(root, name)
+        # The capped audit path deliberately does not walk each branch's
+        # complete first-parent history or scan every checkpoint tree.  The
+        # process report obtains stage/status from its separately bounded log;
+        # a branch listing itself remains a cheap topology probe.
+        checkpoint = (
+            _latest_checkpoint_record(root, name) if max_branches is None else None
+        )
         checkpoint_payload = checkpoint[2] if checkpoint is not None else {}
         rows.append(
             {
@@ -2269,6 +2753,35 @@ def list_research_branches(repo: str | Path) -> list[dict[str, Any]]:
                 "status": checkpoint_payload.get("status"),
             }
         )
+    # A cap can hide the current line when refname sorting puts it after the
+    # prefix.  Read that single ref explicitly so process views always retain
+    # the current checkout, while the caller can still mark the source list as
+    # truncated.
+    if (
+        max_branches is not None
+        and current
+        and not any(str(row.get("name") or "") == current for row in rows)
+    ):
+        current_raw = read_refs(f"refs/heads/{current}", count=1)
+        for line in current_raw.splitlines():
+            fields = line.split("\0", 2)
+            if len(fields) != 3:
+                continue
+            name, commit, subject = fields
+            checkpoint = None
+            checkpoint_payload = checkpoint[2] if checkpoint is not None else {}
+            rows.append(
+                {
+                    "name": name,
+                    "current": True,
+                    "commit": commit,
+                    "subject": subject,
+                    "checkpoint_id": checkpoint_payload.get("checkpoint_id"),
+                    "stage": checkpoint_payload.get("stage"),
+                    "status": checkpoint_payload.get("status"),
+                }
+            )
+            break
     return rows
 
 
@@ -2968,23 +3481,57 @@ def verify_research_repository(
 
 
 def research_log(
-    repo: str | Path, *, limit: int = 20, ref: str = "HEAD"
+    repo: str | Path,
+    *,
+    limit: int = 20,
+    ref: str = "HEAD",
+    bounded: bool = False,
 ) -> list[dict[str, Any]]:
     root = _repository_root(repo)
-    if limit < 1:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ResearchGitError("log limit must be at least 1")
+    if not isinstance(bounded, bool):
+        raise ResearchGitError("bounded must be boolean")
+    if bounded and limit > 128:
+        raise ResearchGitError("bounded log limit exceeds safety cap")
+    if bounded and (
+        not isinstance(ref, str)
+        or not ref.strip()
+        or len(ref) > 256
+        or "\x00" in ref
+        or ref.startswith("-")
+    ):
+        raise ResearchGitError("bounded log ref is invalid")
     separator = "%x1f"
     record = "%x1e"
-    fmt = (
-        f"%H{separator}%h{separator}%aI{separator}%an{separator}%s{separator}%B{record}"
-    )
+    if bounded:
+        # A process audit needs commit identity, subject, and trailers only.
+        # ``%B`` can contain an arbitrarily large prompt/transcript-like body;
+        # trailers are sufficient for parent/checkpoint metadata and keep the
+        # Git subprocess output bounded by the number of rows.
+        subject = "%<(160,trunc)%s"
+        body = "%(trailers:unfold,only)"
+    else:
+        subject = "%s"
+        body = "%B"
+    author = "%<(160,trunc)%an" if bounded else "%an"
+    fmt = f"%H{separator}%h{separator}%aI{separator}{author}{separator}{subject}{separator}{body}{record}"
     resolved_ref = _run_git(
         root, ["rev-parse", "--verify", f"{ref}^{{commit}}"]
     ).stdout.strip()
-    raw = _run_git(
-        root,
-        ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
-    ).stdout
+    if bounded:
+        raw = _run_git_bounded(
+            root,
+            ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
+            max_output_bytes=min(
+                _HARD_MAX_BOUNDED_LOG_OUTPUT, max(64 * 1024, limit * 8192)
+            ),
+        ).stdout
+    else:
+        raw = _run_git(
+            root,
+            ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
+        ).stdout
     entries: list[dict[str, Any]] = []
     for item in raw.split("\x1e"):
         fields = item.strip("\n").split("\x1f", 5)
@@ -2997,7 +3544,11 @@ def research_log(
                 continue
             key, value = line.split(": ", 1)
             if key.startswith(("Research-", "ARA-", "Reproduce")):
-                trailers.setdefault(key, []).append(value)
+                # Trailer values are metadata hints, not a transcript.  Keep
+                # each value bounded before it reaches the redacted process
+                # report while preserving the prefix needed for stage/state
+                # recovery.
+                trailers.setdefault(key, []).append(value[:512])
         entries.append(
             {
                 "commit": full,

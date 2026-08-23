@@ -2,7 +2,7 @@
 
 This page compares XScientist with the systems named in the attached
 conference talk, using the primary papers and official repositories available
-on 2026-08-22. The talk is a discovery source, not an experimental protocol:
+on 2026-08-23. The talk is a discovery source, not an experimental protocol:
 details that appear only in the talk are labelled `talk_reported` and are not
 treated as independently reproduced results.
 

@@ -392,12 +392,17 @@ class TestEnhancedFeedbackSystem(unittest.TestCase):
         self.assertEqual(summary["intervention_only_items"], 1)
         self.assertFalse(summary["causal_attribution_established"])
         self.assertFalse(summary["promotion_signal_allowed"])
+        self.assertEqual(summary["independence_status"], "independence_unverified")
+        self.assertEqual(summary["independent_measured_items"], 0)
+        self.assertFalse(summary["causal_claim_allowed"])
         report = self.feedback_system.get_health_report()
         self.assertEqual(report["feedback_summary"]["attribution"]["paired_items"], 1)
         self.assertEqual(
             observational.evaluation_scope,
             "observational",
         )
+        self.assertEqual(report["health_score_semantics"], "observational_heuristic")
+        self.assertFalse(report["causal_claim_allowed"])
 
     def test_record_outcome_is_persistent_and_monotonic(self):
         item = self.feedback_system.add_feedback(

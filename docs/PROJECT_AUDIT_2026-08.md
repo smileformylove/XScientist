@@ -168,23 +168,25 @@ gold；它只在 manifest/task slice、fork base、预算和 evaluator 都可核
 
 推荐每次 release 公开这些指标，而不是只公开论文/模型分数：首次离线 DAG 时间、首次真实运行成功率、人工 ID 次数、provider live verification 覆盖率、trace→replay→verify 转化率、失败分支保留率、负对照覆盖率、平均成本、独立复现成功率和自进化回滚率。
 
-## 后续路线图
+## 未完成能力（无时间承诺）
 
-### 近期（P0）
+以下是仍可验证的能力缺口，按风险优先级排列；它们不是 30/90/180 天交付计划。
+
+### P0：证据与独立性
 
 1. 把 closure level、独立主体、外部时间/签名状态加入所有人类和 JSON 输出。
 2. 为 LLM call、experiment attempt、evidence、gate 建立同一份 provenance contract，并为旧对象提供显式 `unknown` 而非补猜。
 3. 增加一个真实、公开、带失败和负结果的端到端样例，记录成本、环境、数据 hash 和 reproduction receipt。
 4. 将 provider live probe、价格未知、客户端缺失、Docker 缺失汇总为统一 doctor remediation。
 
-### 中期（P1）
+### P1：执行与协议
 
 1. 让研究计划任务直接驱动 BFTS queue，并在 DAG 中显示未覆盖的判别实验。
 2. 为探索节点记录停止原因、覆盖率、预算/上下文影响和候选未尝试原因。
 3. 完成 ARA↔Research VCS 的确定性桥接和跨版本兼容矩阵。
 4. 加入独立 evaluator service、签名 attestation、prospective benchmark 和真实 canary adapter。
 
-### 长期（P2）
+### P2：生态与领域适配
 
 1. 以 conformance kit 培育第二个独立协议实现和多个外部 adapter。
 2. 引入可选外部透明日志/时间锚，但保持本地离线可用和隐私默认。

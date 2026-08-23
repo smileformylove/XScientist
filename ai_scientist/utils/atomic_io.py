@@ -47,6 +47,7 @@ def atomic_write_json(
     indent: int | None = 2,
     ensure_ascii: bool = False,
     default=None,
+    allow_nan: bool = True,
 ) -> None:
     atomic_write_text(
         path,
@@ -55,6 +56,7 @@ def atomic_write_json(
             indent=indent,
             ensure_ascii=ensure_ascii,
             default=default,
+            allow_nan=allow_nan,
         ),
     )
 

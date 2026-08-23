@@ -27,8 +27,6 @@ from typing import Any, Mapping
 from ai_scientist.utils.pipeline_contracts import (
     ARTIFACT_FILENAMES,
     artifact_path,
-    load_contract_artifact,
-    load_jsonl_artifact_with_errors,
     save_contract_artifact,
 )
 
@@ -41,6 +39,33 @@ ARFT_ROOT_CAUSES = (
     "engineering_robustness",
 )
 ARFT_STAGES = ("A", "B", "C", "D", "E", "F", "X")
+_MAX_INPUT_BYTES = 8 * 1024 * 1024
+_MAX_INPUT_LINES = 8192
+_MAX_SIGNAL_DEPTH = 64
+_MAX_SIGNAL_NODES = 10000
+
+
+def _owned_path(project_root: Path, path: Path) -> bool:
+    """Return whether *path* stays inside ``project_root`` without symlinks.
+
+    ARFT coverage is an offline, read-only audit.  Both contract loading and
+    the summary's existence indicators must refuse symlink components so a
+    report cannot accidentally inspect an external file (or mistake one for
+    a local artifact).
+    """
+
+    try:
+        relative = path.relative_to(project_root)
+        current = project_root
+        for part in relative.parts:
+            if current.is_symlink():
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _pattern(
@@ -461,29 +486,119 @@ def _has(value: Any) -> bool:
     return True
 
 
-def _field(value: Any, *keys: str) -> bool:
+def _field(
+    value: Any,
+    *keys: str,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+    _nodes: list[int] | None = None,
+) -> bool:
     """Return whether any key has a non-empty value in a shallow object tree."""
 
+    if _depth > _MAX_SIGNAL_DEPTH:
+        return False
+    if _seen is None:
+        _seen = set()
+    if _nodes is None:
+        _nodes = [0]
+    _nodes[0] += 1
+    if _nodes[0] > _MAX_SIGNAL_NODES:
+        return False
     if isinstance(value, Mapping):
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
         for key in keys:
             if _has(value.get(key)):
+                _seen.discard(marker)
                 return True
-        return any(_field(item, *keys) for item in value.values())
+        result = any(
+            _field(
+                item,
+                *keys,
+                _depth=_depth + 1,
+                _seen=_seen,
+                _nodes=_nodes,
+            )
+            for item in value.values()
+        )
+        _seen.discard(marker)
+        return result
     if isinstance(value, list):
-        return any(_field(item, *keys) for item in value)
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
+        result = any(
+            _field(
+                item,
+                *keys,
+                _depth=_depth + 1,
+                _seen=_seen,
+                _nodes=_nodes,
+            )
+            for item in value
+        )
+        _seen.discard(marker)
+        return result
     return False
 
 
-def _contains(value: Any, needles: tuple[str, ...]) -> bool:
+def _contains(
+    value: Any,
+    needles: tuple[str, ...],
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+    _nodes: list[int] | None = None,
+) -> bool:
+    if _depth > _MAX_SIGNAL_DEPTH:
+        return False
+    if _seen is None:
+        _seen = set()
+    if _nodes is None:
+        _nodes = [0]
+    _nodes[0] += 1
+    if _nodes[0] > _MAX_SIGNAL_NODES:
+        return False
     if isinstance(value, Mapping):
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
         for key, item in value.items():
             key_text = str(key).lower()
             if any(needle in key_text for needle in needles) and _has(item):
+                _seen.discard(marker)
                 return True
-            if _contains(item, needles):
+            if _contains(
+                item,
+                needles,
+                _depth=_depth + 1,
+                _seen=_seen,
+                _nodes=_nodes,
+            ):
+                _seen.discard(marker)
                 return True
+        _seen.discard(marker)
     elif isinstance(value, list):
-        return any(_contains(item, needles) for item in value)
+        marker = id(value)
+        if marker in _seen:
+            return False
+        _seen.add(marker)
+        result = any(
+            _contains(
+                item,
+                needles,
+                _depth=_depth + 1,
+                _seen=_seen,
+                _nodes=_nodes,
+            )
+            for item in value
+        )
+        _seen.discard(marker)
+        return result
     elif isinstance(value, str):
         lowered = value.lower()
         return any(needle in lowered for needle in needles)
@@ -493,41 +608,72 @@ def _contains(value: Any, needles: tuple[str, ...]) -> bool:
 def _load_inputs(project_root: Path) -> dict[str, Any]:
     input_errors: list[dict[str, Any]] = []
 
+    def safe_input_error(exc: BaseException) -> str:
+        if isinstance(exc, UnicodeError):
+            return "decode_error"
+        if isinstance(exc, RecursionError):
+            return "nesting_limit"
+        if isinstance(exc, MemoryError):
+            return "memory_limit"
+        if isinstance(exc, OSError):
+            return "read_error"
+        if isinstance(exc, ValueError):
+            token = str(exc)
+            if token in {"input_size_limit", "line_limit", "row_not_object"}:
+                return token
+            if token.startswith("non-finite JSON constant"):
+                return "non_finite_json"
+            return "invalid_input"
+        return "read_error"
+
+    def reject_constant(token: str) -> None:
+        raise ValueError(f"non-finite JSON constant: {token}")
+
     def contract(name: str, default: Any) -> Any:
         path = artifact_path(project_root, name)
-        if path.suffix == ".json" and path.exists():
-            try:
-                json_text = path.read_text(encoding="utf-8")
-                json.loads(json_text)
-            except json.JSONDecodeError as exc:
-                input_errors.append(
-                    {
-                        "artifact": name,
-                        "error": "invalid_json",
-                        "line": exc.lineno,
-                        "column": exc.colno,
-                    }
-                )
-                return deepcopy(default)
-            except OSError:
-                input_errors.append({"artifact": name, "error": "read_error"})
-                return deepcopy(default)
-        return load_contract_artifact(project_root, name, default=default)
+        if not _owned_path(project_root, path):
+            input_errors.append({"artifact": name, "error": "symlink_boundary"})
+            return deepcopy(default)
+        if not path.exists():
+            return deepcopy(default)
+        try:
+            size = path.stat().st_size
+            if size > _MAX_INPUT_BYTES:
+                raise ValueError("input_size_limit")
+            raw = path.read_bytes()
+            if path.suffix == ".json":
+                return json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+            if path.suffix == ".jsonl":
+                rows: list[dict[str, Any]] = []
+                for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+                    if line_number > _MAX_INPUT_LINES:
+                        input_errors.append({"artifact": name, "error": "line_limit"})
+                        break
+                    if not line.strip():
+                        continue
+                    value = json.loads(line, parse_constant=reject_constant)
+                    if not isinstance(value, dict):
+                        raise ValueError("row_not_object")
+                    rows.append(value)
+                return rows
+            return raw.decode("utf-8")
+        except json.JSONDecodeError as exc:
+            input_errors.append(
+                {
+                    "artifact": name,
+                    "error": "invalid_json",
+                    "line": exc.lineno,
+                    "column": exc.colno,
+                }
+            )
+        except (OSError, UnicodeError, ValueError, RecursionError, MemoryError) as exc:
+            input_errors.append({"artifact": name, "error": safe_input_error(exc)})
+        return deepcopy(default)
 
-    experiment_path = artifact_path(project_root, "experiment_registry")
-    experiments, experiment_errors = load_jsonl_artifact_with_errors(experiment_path)
-    input_errors.extend(
-        {
-            "artifact": "experiment_registry",
-            "error": str(error.get("error") or "invalid_jsonl"),
-            **{
-                key: error[key]
-                for key in ("line",)
-                if key in error and isinstance(error[key], int)
-            },
-        }
-        for error in experiment_errors
-    )
+    experiments = contract("experiment_registry", [])
+    experiment_errors = [
+        item for item in input_errors if item.get("artifact") == "experiment_registry"
+    ]
     return {
         # Coverage computation is read-only.  ``load_pipeline_manifest``
         # bootstraps a file when absent, which would make an audit have a
@@ -1040,7 +1186,8 @@ def build_arft_coverage(project_root: str | Path) -> dict[str, Any]:
             name: {
                 "registered": name in ARTIFACT_FILENAMES,
                 "exists": (
-                    artifact_path(root, name).exists()
+                    _owned_path(root, artifact_path(root, name))
+                    and artifact_path(root, name).exists()
                     if name in ARTIFACT_FILENAMES
                     else False
                 ),
