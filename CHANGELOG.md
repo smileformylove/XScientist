@@ -6,6 +6,42 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+### Added
+
+- Added a Faraday-inspired, metadata-only rollout policy projection with
+  contiguous budget accounting, decision ownership, failure/recovery signals,
+  and deterministic strategy hashes. Completed rollouts now require complete,
+  in-boundary budget continuity and successful required recovery (or an
+  explicit terminal stop) before verification eligibility.
+- Added a fail-closed `research-rollout-audit` contract and
+  `xscientist research rollout-audit`, binding successful executor artifacts to
+  resolved evaluator evidence and actor-disjoint provenance receipts. The
+  audit never enables quality or causal claims.
+- Added an optional hash-bound harness/resource/evaluator comparison boundary
+  so tool-swap eligibility cannot silently ignore network, seed, starting
+  artifact, or evaluator-protocol differences.
+- Added bilingual rollout documentation and regression coverage for strategy
+  tampering, artifact binding, evidence resolution, and the audit CLI. The
+  `research rollout --json` wrapper can be passed directly to
+  `research rollout-audit`.
+- Added a BCG-inspired, read-only belief-context projection over immutable
+  Research VCS closures, with ordinal evidence states, source-family
+  deduplication, temporal invalidation, explicit conflicts, hard graph limits,
+  payload-free audit output, and `research belief` / `belief-audit` commands.
+  Historical `as_of` projections exclude future evidence and future
+  invalidation events, while claim-to-evidence `depends_on` edges receive a
+  type-constrained support binding without promoting arbitrary lineage.
+- Added versioned belief-context and audit schemas, a v4 context-retrieval
+  receipt that hash-binds the projection, bilingual boundary documentation,
+  and compatibility validation for historical v3 context snapshots.
+- Hardened completed rollout verification: a caller-supplied
+  `identity_verified` boolean is observational only, while independent
+  evaluation now requires a signed attestation verified against a local trust
+  store and bound to all observed producer identities and executor artifacts.
+- Added fail-closed strict tool-swap eligibility, requiring a union evidence
+  hash resolver and local trust store to audit both rollouts before comparing
+  distinct tool signatures.
+
 ## [0.1.4] - 2026-08-23
 
 ### Changed

@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/schemas/belief_context.schema.json",
+  "title": "XScientist bounded belief-context projection",
+  "type": "object",
+  "required": [
+    "policy",
+    "confidence_semantics",
+    "as_of",
+    "as_of_source",
+    "target_ids",
+    "source_object_ids",
+    "source_closure_hash",
+    "target_assessments",
+    "conflict_sets",
+    "graph_audit",
+    "limits",
+    "complete",
+    "decision_context_usable",
+    "blockers",
+    "warnings",
+    "scientific_promotion_allowed",
+    "quality_claim_allowed",
+    "causal_claim_allowed",
+    "projection_hash"
+  ],
+  "properties": {
+    "policy": {"const": "xscientist.belief-context-projection.v1"},
+    "confidence_semantics": {"const": "deterministic_ordinal_evidence_state_not_calibrated_probability"},
+    "as_of": {"type": ["string", "null"], "format": "date-time"},
+    "as_of_source": {"enum": ["explicit", "latest_source_timestamp", "unavailable"]},
+    "target_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/objectId"}
+    },
+    "source_object_ids": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/objectId"}
+    },
+    "source_closure_hash": {"$ref": "#/$defs/sha256"},
+    "target_assessments": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/assessment"}
+    },
+    "conflict_sets": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/conflict"}
+    },
+    "graph_audit": {
+      "type": "object",
+      "required": [
+        "observed_node_count",
+        "input_node_count",
+        "observed_relation_count",
+        "lineage_relation_count",
+        "invalid_endpoint_count",
+        "lineage_cycle_detected",
+        "truncated"
+      ],
+      "properties": {
+        "observed_node_count": {"type": "integer", "minimum": 0, "maximum": 1024},
+        "input_node_count": {"type": "integer", "minimum": 0},
+        "observed_relation_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "lineage_relation_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "invalid_endpoint_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "lineage_cycle_detected": {"type": "boolean"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_nodes", "max_relations", "max_lineage_depth"],
+      "properties": {
+        "max_nodes": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "max_relations": {"type": "integer", "minimum": 1, "maximum": 8192},
+        "max_lineage_depth": {"const": 8}
+      },
+      "additionalProperties": false
+    },
+    "complete": {"type": "boolean"},
+    "decision_context_usable": {"type": "boolean"},
+    "blockers": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 128}
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 128}
+    },
+    "scientific_promotion_allowed": {"const": false},
+    "quality_claim_allowed": {"const": false},
+    "causal_claim_allowed": {"const": false},
+    "projection_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "objectId": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+    "signal": {
+      "type": "object",
+      "required": [
+        "object_id",
+        "content_hash",
+        "relation_type",
+        "state",
+        "authority",
+        "source_identity_hashes",
+        "independence_observed",
+        "selector_bound",
+        "temporal_status",
+        "valid_until",
+        "invalidated",
+        "active",
+        "lineage_truncated"
+      ],
+      "properties": {
+        "object_id": {"$ref": "#/$defs/objectId"},
+        "content_hash": {"$ref": "#/$defs/sha256"},
+        "relation_type": {"enum": ["supports", "qualified_supports", "replicates", "reproduces", "depends_on_evidence", "refutes", "qualified_refutes", "contradicts"]},
+        "state": {"type": "string", "maxLength": 128},
+        "authority": {"type": "string", "maxLength": 128},
+        "source_identity_hashes": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "independence_observed": {"type": "boolean"},
+        "selector_bound": {"type": "boolean"},
+        "temporal_status": {"enum": ["not_declared", "current", "expired", "invalid", "unassessed", "not_yet_observed"]},
+        "valid_until": {"type": ["string", "null"], "maxLength": 64},
+        "invalidated": {"type": "boolean"},
+        "active": {"type": "boolean"},
+        "lineage_truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "assessment": {
+      "type": "object",
+      "required": [
+        "target_id",
+        "target_content_hash",
+        "target_state",
+        "belief_state",
+        "supporting_signals",
+        "challenging_signals",
+        "active_support_count",
+        "active_challenge_count",
+        "independent_support_source_count",
+        "independent_challenge_source_count",
+        "independent_authority_observed",
+        "temporal_status",
+        "valid_until",
+        "decision_posture",
+        "action_blockers",
+        "scientific_promotion_allowed"
+      ],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/objectId"},
+        "target_content_hash": {"$ref": "#/$defs/sha256"},
+        "target_state": {"type": "string", "maxLength": 128},
+        "belief_state": {"enum": ["unassessed", "supported", "corroborated", "contested", "challenged", "stale", "superseded"]},
+        "supporting_signals": {"type": "array", "maxItems": 8192, "items": {"$ref": "#/$defs/signal"}},
+        "challenging_signals": {"type": "array", "maxItems": 8192, "items": {"$ref": "#/$defs/signal"}},
+        "active_support_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "active_challenge_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "independent_support_source_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "independent_challenge_source_count": {"type": "integer", "minimum": 0, "maximum": 8192},
+        "independent_authority_observed": {"type": "boolean"},
+        "temporal_status": {"enum": ["not_declared", "current", "expired", "invalid", "unassessed", "not_yet_observed"]},
+        "valid_until": {"type": ["string", "null"], "maxLength": 64},
+        "decision_posture": {"enum": ["investigate_conflict", "refresh_evidence", "collect_discriminating_evidence", "seek_independent_review", "review_with_scientific_gate"]},
+        "action_blockers": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "maxLength": 128}},
+        "scientific_promotion_allowed": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "conflict": {
+      "type": "object",
+      "required": ["target_id", "supporting_ids", "challenging_ids", "status", "conflict_id"],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/objectId"},
+        "supporting_ids": {"type": "array", "minItems": 1, "maxItems": 8192, "uniqueItems": true, "items": {"$ref": "#/$defs/objectId"}},
+        "challenging_ids": {"type": "array", "minItems": 1, "maxItems": 8192, "uniqueItems": true, "items": {"$ref": "#/$defs/objectId"}},
+        "status": {"const": "unresolved"},
+        "conflict_id": {"type": "string", "pattern": "^conflict-[0-9a-f]{16}$"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

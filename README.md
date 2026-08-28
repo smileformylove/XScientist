@@ -23,6 +23,7 @@
   <a href="#start-with-your-own-idea--no-api-key">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous study</a> ·
   <a href="#far-inspired-opportunity-funnel">Opportunity funnel</a> ·
+  <a href="#belief-context-projection-bcg-inspired">Belief context</a> ·
   <a href="#inspect-and-reproduce">Audit</a> ·
   <a href="#installation">Install</a> ·
   <a href="https://github.com/smileformylove/XScientist/tree/main/docs">Docs</a> ·
@@ -420,6 +421,77 @@ xscientist research export --repo ./first-study --dest ./exchange
 A generated DAG is a disposable view, not scientific source data. Regenerating
 it does not dirty a research checkpoint or prevent a bundle. Eligible research
 changes, tracked edits, or staged changes still block bundling until reviewed.
+
+### Research-policy rollout audit (Faraday-inspired)
+
+The [Faraday paper](https://arxiv.org/abs/2608.13331) is a trained outer
+research policy that delegates coding to a stronger tool on the authors'
+Replica benchmark. XScientist does not ship those weights, run that benchmark,
+or claim its scores. Our local contract records the transferable system
+boundary: policy decisions and budget continuity, tool execution hashes,
+five-dimension rubric observations, turn credit, and an explicit independent
+evaluator receipt. A completed rollout is not verification-eligible unless a
+known evidence hash resolver confirms that the evaluator actually references a
+successful executor artifact and a local trust store verifies the evaluator's
+signed actor-disjoint binding. For a completed episode, the audit also requires
+complete, contiguous budget accounting inside the declared boundary. A required
+failure response counts as recovered only after a successful repair/delegation
+or an explicit terminal stop; a failed repair does not silently pass the gate.
+
+For a fair tool swap, add the optional `comparison_boundary` with a harness
+identity, resource fingerprint, evaluator-protocol hash, starting-artifact
+hash, network policy, and seed policy. Missing or mismatched boundary metadata
+is reported as a comparison reason; it is never silently treated as parity.
+
+```bash
+xscientist research rollout episode.json \
+  --repo ./first-study --json > rollout.json
+xscientist research rollout-audit rollout.json \
+  --evidence-hash sha256:... \
+  --trust-store trust-store.json --json
+```
+
+The JSON emitted by `rollout --json` includes the canonical `rollout` payload,
+so the captured wrapper is accepted directly by `rollout-audit`. Programmatic
+strict tool-swap checks additionally require the union
+`audit_evidence_hashes` resolver and an `audit_trust_store` that verifies both
+rollouts; either missing input fails closed.
+
+The audit is payload-free and fail-closed. It reports blockers and warnings,
+never trusts the legacy `identity_verified` boolean by itself, never turns an
+LLM judge into ground truth, and keeps both quality and causal claims disabled.
+See the [rollout contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_ROLLOUTS.md)
+for the boundary and schema details.
+
+### Belief-context projection (BCG-inspired)
+
+The [Belief Context Graph project](https://github.com/bigai-nlco/belief-context-graph)
+shows why an agent needs explicit support, conflict, provenance, and temporal
+context rather than retrieval alone. XScientist adopts that system lesson
+without adding another mutable graph store or copying BCG's heuristic
+confidence formula. It derives one deterministic, read-only projection from
+the immutable Research VCS closure and keeps every state ordinal—not a
+calibrated probability.
+
+The projection deduplicates evidence by root source family, preserves support
+and challenge together, and maps `claim -> depends_on -> evidence/passage` to a
+typed support binding without treating arbitrary lineage as support. An
+explicit historical `as_of` excludes evidence and invalidation events created
+later. Expired, malformed, retracted, invalidated, or superseded signals cannot
+provide active support, and incomplete endpoints, graph cycles, or hard
+node/relation limits fail closed. The projection is hash-bound into the v4
+research-context receipt; every ordinal state is non-probabilistic context and
+can never serve as a sufficient or sole promotion gate.
+
+```bash
+xscientist research belief @latest:hypothesis \
+  --repo ./first-study --ref HEAD --json > belief.json
+xscientist research belief-audit belief.json --json
+```
+
+These commands audit context integrity, not scientific truth, and never inherit
+BCG's self-reported benchmark numbers. See the full
+[belief-context boundary](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md).
 
 ### Process benchmark comparison (offline and reproducible)
 
@@ -837,6 +909,7 @@ print(result.returncode)
 | Research history and protocol | [Local Research Git](https://github.com/smileformylove/XScientist/blob/main/docs/LOCAL_RESEARCH_GIT.md) · [Protocol v2](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md) |
 | Literature opportunities | [Opportunity funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) · [FAR paper](https://arxiv.org/abs/2608.16977) |
 | Research policy rollouts | [Rollout contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_ROLLOUTS.md) · [Faraday paper](https://arxiv.org/abs/2608.13331) |
+| Belief-aware decision context | [Belief-context projection](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md) · [BCG project](https://github.com/bigai-nlco/belief-context-graph) |
 | Integrity and scientific strategy | [Research integrity](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) · [Science constitution](https://github.com/smileformylove/XScientist/blob/main/docs/SCIENCE_CONSTITUTION.md) |
 | Current limitations and audit | [2026 project audit](https://github.com/smileformylove/XScientist/blob/main/docs/PROJECT_AUDIT_2026-08.md) · [Onboarding audit](https://github.com/smileformylove/XScientist/blob/main/docs/ONBOARDING_AUDIT.md) |
 | SDK, HTTP API, and adapters | [SDK/API](https://github.com/smileformylove/XScientist/blob/main/docs/guides/SDK_AND_API.md) · [DAG/adapters](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md) |

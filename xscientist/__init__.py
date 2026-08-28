@@ -60,18 +60,36 @@ if TYPE_CHECKING:
         save_research_direction,
     )
     from .research_rollout import (
+        COMPARISON_BOUNDARY_POLICY,
+        INDEPENDENCE_ASSURANCE,
+        INDEPENDENCE_ATTESTATION_PURPOSE,
+        INDEPENDENCE_POLICY,
         ResearchRolloutError,
         assess_tool_swap_compatibility,
+        audit_research_rollout,
         build_replication_rubric,
         build_research_rollout,
+        build_comparison_boundary,
+        build_independence_attestation_payload,
+        build_independence_receipt,
+        build_strategy_budget_summary,
         build_tool_delegation_trace,
         build_turn_credit_summary,
         evaluate_replication_rollout,
+        rollout_producer_actor_ids,
         save_research_rollout,
     )
     from .research_context import (
         build_research_context_snapshot,
         render_research_context_for_prompt,
+    )
+    from .research_belief import (
+        BELIEF_CONTEXT_POLICY,
+        BELIEF_CONTEXT_SEMANTICS,
+        BeliefContextError,
+        audit_belief_context_projection,
+        belief_context_issues,
+        build_belief_context_projection,
     )
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
@@ -125,14 +143,33 @@ _OPPORTUNITY_EXPORTS = {
 }
 
 _ROLLOUT_EXPORTS = {
+    "COMPARISON_BOUNDARY_POLICY",
+    "INDEPENDENCE_ASSURANCE",
+    "INDEPENDENCE_ATTESTATION_PURPOSE",
+    "INDEPENDENCE_POLICY",
     "ResearchRolloutError",
     "assess_tool_swap_compatibility",
+    "audit_research_rollout",
     "build_replication_rubric",
     "build_research_rollout",
+    "build_comparison_boundary",
+    "build_independence_attestation_payload",
+    "build_independence_receipt",
+    "build_strategy_budget_summary",
     "build_tool_delegation_trace",
     "build_turn_credit_summary",
     "evaluate_replication_rollout",
+    "rollout_producer_actor_ids",
     "save_research_rollout",
+}
+
+_BELIEF_CONTEXT_EXPORTS = {
+    "BELIEF_CONTEXT_POLICY",
+    "BELIEF_CONTEXT_SEMANTICS",
+    "BeliefContextError",
+    "audit_belief_context_projection",
+    "belief_context_issues",
+    "build_belief_context_projection",
 }
 
 
@@ -223,6 +260,10 @@ def __getattr__(name: str) -> Any:
         from . import research_context
 
         value = getattr(research_context, name)
+    elif name in _BELIEF_CONTEXT_EXPORTS:
+        from . import research_belief
+
+        value = getattr(research_belief, name)
     elif name == "ingest_tool_evidence":
         from .research_tools import ingest_tool_evidence
 
@@ -283,6 +324,12 @@ __all__ = [
     "discovery_contract_template",
     "export_research_dag",
     "render_research_context_for_prompt",
+    "BELIEF_CONTEXT_POLICY",
+    "BELIEF_CONTEXT_SEMANTICS",
+    "BeliefContextError",
+    "audit_belief_context_projection",
+    "belief_context_issues",
+    "build_belief_context_projection",
     "start_guided_research",
     "ingest_tool_evidence",
     "inspect_workspace_history",
@@ -321,12 +368,22 @@ __all__ = [
     "save_opportunity_pool",
     "save_research_direction",
     "ResearchRolloutError",
+    "COMPARISON_BOUNDARY_POLICY",
+    "INDEPENDENCE_ASSURANCE",
+    "INDEPENDENCE_ATTESTATION_PURPOSE",
+    "INDEPENDENCE_POLICY",
     "assess_tool_swap_compatibility",
+    "audit_research_rollout",
     "build_replication_rubric",
     "build_research_rollout",
+    "build_comparison_boundary",
+    "build_independence_attestation_payload",
+    "build_independence_receipt",
+    "build_strategy_budget_summary",
     "build_tool_delegation_trace",
     "build_turn_credit_summary",
     "evaluate_replication_rollout",
+    "rollout_producer_actor_ids",
     "save_research_rollout",
     "rollback_workspace_checkpoint",
     "__version__",

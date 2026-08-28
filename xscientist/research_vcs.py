@@ -261,6 +261,7 @@ class ResearchRepository:
         memory_refs: Sequence[str] = (),
         ref: str | None = None,
         budget_tokens: int = 4000,
+        belief_as_of: str | None = None,
     ) -> dict[str, Any]:
         """Compile a hash-bound view of the evidence and memory for a decision."""
 
@@ -278,6 +279,7 @@ class ResearchRepository:
             memory_refs=memory_refs,
             ref=ref,
             budget_tokens=budget_tokens,
+            belief_as_of=belief_as_of,
         )
 
     def context_prompt(
@@ -293,6 +295,7 @@ class ResearchRepository:
         memory_refs: Sequence[str] = (),
         ref: str | None = None,
         budget_tokens: int = 4000,
+        belief_as_of: str | None = None,
     ) -> str:
         """Render the bounded, decision-usable view intended for an agent prompt.
 
@@ -314,6 +317,7 @@ class ResearchRepository:
             memory_refs=memory_refs,
             ref=ref,
             budget_tokens=budget_tokens,
+            belief_as_of=belief_as_of,
         )
         return render_research_context_for_prompt(snapshot)
 

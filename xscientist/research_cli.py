@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,8 @@ from .opportunity_funnel import (
     save_opportunity_pool,
     save_research_direction,
 )
-from .research_rollout import save_research_rollout
+from .research_belief import audit_belief_context_projection
+from .research_rollout import audit_research_rollout, save_research_rollout
 
 
 def _print_json(payload: Any) -> None:
@@ -214,17 +215,23 @@ def _read_json_mapping(path_value: str, *, label: str) -> dict[str, Any]:
     return value
 
 
-def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) -> None:
+def _saved_object_json(result: Mapping[str, Any]) -> dict[str, Any]:
     recorded = result["object"]
     related = result.get("related") or []
     checkpoint = result.get("checkpoint")
-    payload = {
+    return {
         "object": recorded.to_dict(),
         "related_objects": [item.to_dict() for item in related],
         "checkpoint": checkpoint.to_dict() if checkpoint is not None else None,
     }
+
+
+def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) -> None:
+    recorded = result["object"]
+    related = result.get("related") or []
+    checkpoint = result.get("checkpoint")
     if as_json:
-        _print_json(payload)
+        _print_json(_saved_object_json(result))
         return
     action = "Recorded" if recorded.created else "Reused"
     print(f"{action} {label}: {recorded.object_id} ({recorded.state})")
@@ -657,6 +664,67 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     _add_program_save_arguments(rollout_parser)
 
+    rollout_audit_parser = subparsers.add_parser(
+        "rollout-audit",
+        help=(
+            "Audit a saved metadata-only rollout without exposing payloads; "
+            "completed reports fail closed without an evidence resolver."
+        ),
+    )
+    rollout_audit_parser.add_argument(
+        "report",
+        help="JSON rollout payload or JSON output from `research rollout --json`.",
+    )
+    rollout_audit_parser.add_argument(
+        "--evidence-hash",
+        action="append",
+        default=[],
+        help="Content hash known to the local evidence index (repeatable).",
+    )
+    rollout_audit_parser.add_argument(
+        "--trust-store",
+        help=(
+            "Local JSON trust store keyed by attestation key_id; required to "
+            "verify an independent evaluator signature."
+        ),
+    )
+    rollout_audit_parser.add_argument(
+        "--max-attestation-age-seconds",
+        type=int,
+        help="Optional non-negative evaluator-attestation freshness limit.",
+    )
+    rollout_audit_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    belief_parser = subparsers.add_parser(
+        "belief",
+        help=(
+            "Build a bounded candidate-belief projection from the immutable "
+            "Research VCS source closure."
+        ),
+    )
+    belief_parser.add_argument("target", nargs="+", help="Research Object selector.")
+    belief_parser.add_argument("--ref", default="WORKTREE")
+    belief_parser.add_argument(
+        "--as-of",
+        help=(
+            "Timezone-aware ISO-8601 validity boundary; defaults to the latest "
+            "source timestamp for deterministic replay."
+        ),
+    )
+    belief_parser.add_argument("--budget", type=int, default=4000)
+    belief_parser.add_argument("--repo", default=".")
+    belief_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    belief_audit_parser = subparsers.add_parser(
+        "belief-audit",
+        help="Audit a belief-context projection without returning source payloads.",
+    )
+    belief_audit_parser.add_argument(
+        "report",
+        help="JSON projection, research context, or JSON output containing context.",
+    )
+    belief_audit_parser.add_argument("--json", action="store_true", dest="as_json")
+
     literature_parser = subparsers.add_parser(
         "literature",
         help="Record a reproducible literature search and source-qualified passages.",
@@ -1044,6 +1112,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     context_parser.add_argument("--constraint", action="append", default=[])
     context_parser.add_argument("--memory-ref", action="append", default=[])
     context_parser.add_argument("--ref", default="WORKTREE")
+    context_parser.add_argument(
+        "--belief-as-of",
+        help="Timezone-aware ISO-8601 validity boundary for candidate beliefs.",
+    )
     context_parser.add_argument("--budget", type=int, default=4000)
     context_parser.add_argument("--record", action="store_true")
     context_parser.add_argument("--no-commit", action="store_true")
@@ -2072,8 +2144,97 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("research rollout", result, as_json=args.as_json)
+            if args.as_json:
+                _print_json(
+                    {
+                        **_saved_object_json(result),
+                        "rollout": result["rollout"],
+                    }
+                )
+            else:
+                _print_saved_object("research rollout", result, as_json=False)
             return 0
+
+        if args.command == "rollout-audit":
+            raw_report = _read_json_mapping(args.report, label="rollout audit report")
+            # Accept both the raw payload and the redacted JSON wrapper emitted
+            # by `research rollout --json`.
+            report = raw_report
+            if isinstance(raw_report.get("rollout"), dict):
+                report = raw_report["rollout"]
+            object_payload = raw_report.get("object")
+            if report is raw_report and isinstance(object_payload, dict):
+                candidate = object_payload.get("payload")
+                if isinstance(candidate, dict):
+                    report = candidate
+            trust_store = (
+                _read_json_mapping(args.trust_store, label="attestation trust store")
+                if args.trust_store
+                else None
+            )
+            audit = audit_research_rollout(
+                report,
+                evidence_hashes=args.evidence_hash or None,
+                trust_store=trust_store,
+                max_attestation_age_seconds=args.max_attestation_age_seconds,
+            )
+            if args.as_json:
+                _print_json(audit)
+            else:
+                print(f"Rollout audit: {audit['status']}")
+                print(f"Verification allowed: {audit['verification_allowed']}")
+                print(f"Blockers: {len(audit['blockers'])}")
+                for item in audit["blockers"]:
+                    print(f"  {item['code']}: {_display_text(item['message'])}")
+                if audit["warnings"]:
+                    print(f"Warnings: {len(audit['warnings'])}")
+            return 0 if audit["verification_allowed"] else 1
+
+        if args.command == "belief":
+            from .research_context import build_research_context_snapshot
+
+            context = build_research_context_snapshot(
+                args.repo,
+                target_ids=args.target,
+                intent="audit",
+                decision_kind="belief_context_review",
+                ref=args.ref,
+                budget_tokens=args.budget,
+                belief_as_of=args.as_of,
+            )
+            projection = context["belief_context"]
+            if args.as_json:
+                _print_json(projection)
+            else:
+                print(f"Belief context: {projection['projection_hash']}")
+                print(f"As of:          {projection['as_of'] or 'unavailable'}")
+                print(f"Complete:       {projection['complete']}")
+                print(f"Conflicts:      {len(projection['conflict_sets'])}")
+                for item in projection["target_assessments"]:
+                    print(
+                        f"  {item['target_id']}: {item['belief_state']} -> "
+                        f"{item['decision_posture']}"
+                    )
+            return 0 if projection["complete"] else 1
+
+        if args.command == "belief-audit":
+            raw_report = _read_json_mapping(args.report, label="belief audit report")
+            report = raw_report
+            if isinstance(raw_report.get("context"), dict):
+                report = raw_report["context"]
+            if isinstance(report.get("belief_context"), dict):
+                report = report["belief_context"]
+            audit = audit_belief_context_projection(report)
+            if args.as_json:
+                _print_json(audit)
+            else:
+                status = "passed" if audit["verification_allowed"] else "blocked"
+                print(f"Belief audit: {status}")
+                print(f"Projection:   {audit['projection_hash'] or 'unavailable'}")
+                print(f"Issues:       {len(audit['issues'])}")
+                for issue in audit["issues"]:
+                    print(f"  {issue}")
+            return 0 if audit["verification_allowed"] else 1
 
         if args.command == "literature":
             from .research_commands import (
@@ -2499,6 +2660,7 @@ def main(
                     constraints=args.constraint,
                     memory_refs=args.memory_ref,
                     budget_tokens=args.budget,
+                    belief_as_of=args.belief_as_of,
                 )
                 context_payload = load_research_object(args.repo, recorded.object_id)[
                     "payload"
@@ -2540,6 +2702,7 @@ def main(
                     memory_refs=args.memory_ref,
                     ref=args.ref,
                     budget_tokens=args.budget,
+                    belief_as_of=args.belief_as_of,
                 )
             context = payload.get("context") or payload
             if args.prompt:
@@ -2554,6 +2717,10 @@ def main(
                 print(f"Sources:          {len(context['source_object_ids'])}")
                 print(f"Memory objects:   {len(context['memory_object_ids'])}")
                 print(f"Negative memory:  {len(context['negative_knowledge_ids'])}")
+                print(
+                    "Belief conflicts: "
+                    f"{len(context['belief_context']['conflict_sets'])}"
+                )
                 print(f"Complete:         {context['complete']}")
                 for blocker in context["blockers"]:
                     print(f"  blocker: {_display_text(blocker)}")

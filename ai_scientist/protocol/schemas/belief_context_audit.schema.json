@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/schemas/belief_context_audit.schema.json",
+  "title": "XScientist belief-context audit result",
+  "type": "object",
+  "required": [
+    "policy",
+    "projection_hash",
+    "verification_allowed",
+    "projection_complete",
+    "decision_context_usable",
+    "issues",
+    "quality_claim_allowed",
+    "causal_claim_allowed",
+    "scientific_promotion_allowed",
+    "payloads_disclosed",
+    "audit_hash"
+  ],
+  "properties": {
+    "policy": {"const": "xscientist.belief-context-audit.v1"},
+    "projection_hash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "verification_allowed": {"type": "boolean"},
+    "projection_complete": {"type": "boolean"},
+    "decision_context_usable": {"type": "boolean"},
+    "issues": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 128}
+    },
+    "quality_claim_allowed": {"const": false},
+    "causal_claim_allowed": {"const": false},
+    "scientific_promotion_allowed": {"const": false},
+    "payloads_disclosed": {"const": false},
+    "audit_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

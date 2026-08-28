@@ -23,6 +23,7 @@
   <a href="#从自己的想法开始不需要-api-key">快速开始</a> ·
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#far-启发的研究机会漏斗">研究机会漏斗</a> ·
+  <a href="#信念上下文投影受-bcg-启发">信念上下文</a> ·
   <a href="#检查审计与复现">审计复现</a> ·
   <a href="#安装方式">安装</a> ·
   <a href="https://zhuanlan.zhihu.com/p/2027818800238666075">项目随笔</a> ·
@@ -370,6 +371,66 @@ xscientist research export --repo ./first-study --dest ./exchange
 
 生成的 DAG 是可随时重建的视图，不是科学源数据；重建它不会污染 checkpoint，也
 不会阻止打包。真正的科研改动、已跟踪编辑或暂存内容仍必须先审查。
+
+### 研究策略 Rollout 审计（受 Faraday 启发）
+
+[Faraday 论文](https://arxiv.org/abs/2608.13331)训练一个外层研究策略，
+把编码工作交给更强的工具，并在作者自己的 Replica benchmark 上评估。
+XScientist 不包含这些权重，不运行该 benchmark，也不声称论文分数。我们
+记录的是可迁移的系统边界：策略决策与预算连续性、工具执行 hash、五维
+rubric 观察、turn credit，以及显式的独立评估器 receipt。完成态 rollout
+只有在本地证据 hash resolver 确认评估器确实引用了成功执行 artifact，并且
+本地 trust store 验证了评估器签名的 actor-disjoint 绑定后，才能进入
+verification-eligible。对于完成态 episode，审计还要求声明边界内的预算核算完整
+且连续。需要跟进的失败只有在后续 repair/delegate 成功或显式终止 stop 时才算
+处理完成；失败的修复不会静默通过审计门。
+
+如果要做公平的工具替换，请额外提供 `comparison_boundary`：harness 身份、
+资源指纹、评估协议 hash、起始 artifact hash、网络策略和 seed 策略。缺失或
+不一致会成为可见的 comparison reason，不会被静默当作同条件。
+
+```bash
+xscientist research rollout episode.json \
+  --repo ./first-study --json > rollout.json
+xscientist research rollout-audit rollout.json \
+  --evidence-hash sha256:... \
+  --trust-store trust-store.json --json
+```
+
+`rollout --json` 输出中已经包含规范 `rollout` payload，因此捕获的 wrapper 可以
+直接交给 `rollout-audit`。程序化 strict 工具替换检查还要求提供两份 rollout 的
+`audit_evidence_hashes` 并集 resolver，以及能验证双方 receipt 的
+`audit_trust_store`；任一缺失都会 fail-closed。
+
+该审计不输出 payload，并采用 fail-closed 语义；它只报告 blocker/warning，
+不会单独信任旧的 `identity_verified` 自报字段，不会把 LLM judge 当成 ground
+truth，也始终关闭 quality 与 causal claim。
+边界和 schema 见[Rollout 契约](RESEARCH_ROLLOUTS.zh.md)。
+
+### 信念上下文投影（受 BCG 启发）
+
+[Belief Context Graph 项目](https://github.com/bigai-nlco/belief-context-graph)
+说明了一个重要系统问题：Agent 不能只有检索，还需要明确看到支持、冲突、来源和
+时效上下文。XScientist 借鉴这条系统经验，但不增加第二套可变 graph store，也不
+复制 BCG 的启发式 confidence 公式；它只从不可变 Research VCS 闭包派生一个
+确定、只读的投影，并把所有状态定义为序数标签，而不是校准概率。
+
+投影会按根来源族去重证据，同时保留支持与质疑，并把
+`claim -> depends_on -> evidence/passage` 映射为有类型约束的支持绑定，而不会把
+任意血缘都当成支持。显式历史 `as_of` 会排除之后才创建的证据和失效事件；过期、
+时效格式错误、撤稿、失效或被取代的信号也不能继续提供有效支持。关系端点不完整、
+graph cycle、节点或关系硬上限都会 fail-closed。投影会 hash 绑定到 v4
+research-context receipt；所有序数状态都只是非概率上下文，不能单独作为充分条件
+或唯一晋级门。
+
+```bash
+xscientist research belief @latest:hypothesis \
+  --repo ./first-study --ref HEAD --json > belief.json
+xscientist research belief-audit belief.json --json
+```
+
+这些命令审计的是上下文完整性，不是科学真实性，也不会继承 BCG 自报的 benchmark
+数字。完整边界见[信念上下文文档](BELIEF_CONTEXT.zh.md)。
 
 ### 过程 benchmark 对照（离线、可复现）
 
@@ -756,6 +817,7 @@ print(result.returncode)
 | 科研历史与协议 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) · [协议 v2](RESEARCH_PROTOCOL_V2.md) |
 | 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
 | 研究策略 Rollout | [Rollout 契约](RESEARCH_ROLLOUTS.zh.md) · [Faraday 论文](https://arxiv.org/abs/2608.13331) |
+| 信念感知决策上下文 | [信念上下文投影](BELIEF_CONTEXT.zh.md) · [BCG 项目](https://github.com/bigai-nlco/belief-context-graph) |
 | 科研诚信与策略 | [科研诚信](RESEARCH_INTEGRITY.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 当前劣势与审计 | [2026 项目审计](PROJECT_AUDIT_2026-08.md) · [入门审计](ONBOARDING_AUDIT.md) |
 | SDK、HTTP API 与适配器 | [SDK/API](guides/SDK_AND_API.md) · [DAG/适配器](RESEARCH_DAG_AND_ADAPTERS.md) |

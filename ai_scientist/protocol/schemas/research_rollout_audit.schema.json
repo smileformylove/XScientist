@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/profiles/research-rollout-audit/v1/research_rollout_audit.schema.json",
+  "title": "XScientist Research Rollout Audit",
+  "description": "Payload-free, fail-closed audit result for a research-policy rollout.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "task_hash",
+    "outcome",
+    "status",
+    "complete",
+    "verification_allowed",
+    "quality_claim_allowed",
+    "causal_claim_allowed",
+    "checks",
+    "blockers",
+    "warnings",
+    "payloads_disclosed",
+    "audit_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "xscientist.research-rollout-audit.v1"},
+    "task_id": {"type": "string", "maxLength": 128},
+    "task_hash": {"type": "string", "maxLength": 71},
+    "outcome": {"enum": ["", "completed", "failed", "timed_out", "cancelled"]},
+    "status": {"enum": ["blocked", "ready", "not_ready"]},
+    "complete": {"type": "boolean"},
+    "verification_allowed": {"type": "boolean"},
+    "quality_claim_allowed": {"const": false},
+    "causal_claim_allowed": {"const": false},
+    "checks": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"}
+    },
+    "blockers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "field", "message"],
+        "properties": {
+          "code": {"type": "string", "maxLength": 128},
+          "field": {"type": "string", "maxLength": 256},
+          "message": {"type": "string", "maxLength": 512}
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "field", "message"],
+        "properties": {
+          "code": {"type": "string", "maxLength": 128},
+          "field": {"type": "string", "maxLength": 256},
+          "message": {"type": "string", "maxLength": 512}
+        }
+      }
+    },
+    "payloads_disclosed": {"const": false},
+    "audit_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

@@ -16,6 +16,14 @@ from ai_scientist.utils.semantic_memory import (
     truncate_text_to_tokens,
 )
 
+from .research_belief import (
+    CHALLENGE_RELATIONS,
+    INVALIDATION_RELATIONS,
+    SUPPORT_RELATIONS,
+    belief_context_issues,
+    build_belief_context_projection,
+)
+
 from .research_git import (
     ResearchGitError,
     ResearchObjectResult,
@@ -24,8 +32,12 @@ from .research_git import (
 )
 from .research_vcs import ResearchRepository
 
-RESEARCH_CONTEXT_POLICY_VERSION = "3.0"
-RESEARCH_CONTEXT_RECEIPT_PROFILE = "xscientist.context-retrieval-receipt.v3"
+RESEARCH_CONTEXT_POLICY_VERSION = "4.0"
+RESEARCH_CONTEXT_RECEIPT_PROFILE = "xscientist.context-retrieval-receipt.v4"
+_RESEARCH_CONTEXT_RECEIPT_PROFILES = {
+    "3.0": "xscientist.context-retrieval-receipt.v3",
+    RESEARCH_CONTEXT_POLICY_VERSION: RESEARCH_CONTEXT_RECEIPT_PROFILE,
+}
 RESEARCH_CONTEXT_INTENTS = ("decide", "continue", "write", "audit", "reproduce")
 
 _DECISION_KINDS = {"review", "gate_decision", "agent_evaluation"}
@@ -41,7 +53,17 @@ _MEMORY_KINDS = {
     "reproduction",
 }
 _ACTIVE_NEGATIVE_STATES = {"failed", "timed_out", "cancelled", "rejected"}
-_EVIDENCE_KINDS = {"claim", "evidence", "experiment_attempt", "reproduction"}
+_ACTIVE_EVIDENCE_STATES = {"completed", "verified", "promoted"}
+_DECISION_MEMORY_STATES = _ACTIVE_EVIDENCE_STATES | {"rejected"}
+_EVIDENCE_KINDS = {
+    "claim",
+    "evidence",
+    "passage_evidence",
+    "inference",
+    "evidence_synthesis",
+    "experiment_attempt",
+    "reproduction",
+}
 _ROLE_BASE_SCORES = {
     "target": 120,
     "active_contradiction": 105,
@@ -104,6 +126,7 @@ def _effective_superseded_ids(
     superseded.update(
         target
         for item in objects.values()
+        if str(item.get("state") or "") in _ACTIVE_EVIDENCE_STATES
         for target in _relation_targets(item, {"supersedes"})
         if target in objects
     )
@@ -153,12 +176,13 @@ def _context_role(
     if object_id in prior_contexts:
         return "prior_context"
     authority = str((item.get("actor") or {}).get("authority") or "")
-    if item.get("state") in {"verified", "promoted"} or authority in {
-        "independent_evaluator",
-        "deterministic_gate",
-    }:
+    state = str(item.get("state") or "")
+    if state in _ACTIVE_EVIDENCE_STATES and (
+        state in {"verified", "promoted"}
+        or authority in {"independent_evaluator", "deterministic_gate"}
+    ):
         return "verified_evidence"
-    if item.get("kind") in _EVIDENCE_KINDS:
+    if item.get("kind") in _EVIDENCE_KINDS and state in _ACTIVE_EVIDENCE_STATES:
         return "active_evidence"
     return "lineage"
 
@@ -227,6 +251,24 @@ def _research_prompt_visible_payload(
     context_hash = payload.get("context_hash")
     if context_hash_placeholder and not context_hash:
         context_hash = "sha256:" + ("0" * 64)
+    belief_context = payload.get("belief_context") or {}
+    policy_version = str((payload.get("selection_policy") or {}).get("version") or "")
+    belief_guard = (
+        {
+            # Keep the injected guard deliberately compact so adding the belief
+            # projection cannot silently consume the bounded working-memory
+            # budget. Rows are [target_id, ordinal_state,
+            # scientific_promotion_allowed]. Full signals and conflicts stay in
+            # the hash-bound projection rather than becoming prompt payload.
+            "candidate_belief_guard": [
+                [item.get("target_id"), item.get("belief_state"), False]
+                for item in belief_context.get("target_assessments") or []
+                if isinstance(item, Mapping)
+            ]
+        }
+        if policy_version == RESEARCH_CONTEXT_POLICY_VERSION
+        else {}
+    )
     return {
         "intent": payload.get("intent"),
         "decision_kind": payload.get("decision_kind"),
@@ -242,6 +284,7 @@ def _research_prompt_visible_payload(
                 "source_views", 0
             ),
         },
+        **belief_guard,
         "audit": {
             "source_closure_hash": payload.get("source_closure_hash"),
             "memory_snapshot_hash": payload.get("memory_snapshot_hash"),
@@ -396,6 +439,7 @@ def build_research_context_snapshot(
     memory_refs: Sequence[str] = (),
     ref: str | None = None,
     budget_tokens: int = 4000,
+    belief_as_of: str | None = None,
 ) -> dict[str, Any]:
     """Compile the exact evidence and memory visible to one decision.
 
@@ -436,11 +480,15 @@ def build_research_context_snapshot(
     # Close over explicit provenance and related incoming memory in one indexed
     # traversal. Context snapshots are derived views and never recursively
     # expand the scientific source closure.
-    incoming: dict[str, list[str]] = {}
+    incoming: dict[str, list[tuple[str, str]]] = {}
     for object_id, item in objects.items():
-        for target in _targets(item):
-            if target in objects:
-                incoming.setdefault(target, []).append(object_id)
+        for relation in item.get("relations") or []:
+            if not isinstance(relation, Mapping):
+                continue
+            target = str(relation.get("target") or "")
+            relation_type = str(relation.get("type") or "")
+            if target in objects and relation_type:
+                incoming.setdefault(target, []).append((object_id, relation_type))
     closure = set(resolved_targets)
     queue = deque(resolved_targets)
     while queue:
@@ -449,16 +497,23 @@ def build_research_context_snapshot(
             if target in objects and target not in closure:
                 closure.add(target)
                 queue.append(target)
-        for object_id in incoming.get(current, []):
+        for object_id, relation_type in incoming.get(current, []):
             if object_id in closure:
                 continue
             item = objects[object_id]
             if item.get("kind") == "context_snapshot":
                 continue
             is_negative = item.get("state") in _ACTIVE_NEGATIVE_STATES or bool(
-                _relation_targets(item, {"refutes", "contradicts"}) & closure
+                _relation_targets(item, CHALLENGE_RELATIONS) & closure
             )
-            if item.get("kind") in _MEMORY_KINDS or is_negative:
+            is_epistemic_relation = relation_type in (
+                SUPPORT_RELATIONS | CHALLENGE_RELATIONS | INVALIDATION_RELATIONS
+            )
+            if (
+                item.get("kind") in _MEMORY_KINDS
+                or is_negative
+                or is_epistemic_relation
+            ):
                 closure.add(object_id)
                 queue.append(object_id)
 
@@ -489,13 +544,17 @@ def build_research_context_snapshot(
         if object_id not in superseded_ids
         and (
             objects[object_id].get("state") in _ACTIVE_NEGATIVE_STATES
-            or bool(_relation_targets(objects[object_id], {"refutes", "contradicts"}))
+            or (
+                objects[object_id].get("state") in _ACTIVE_EVIDENCE_STATES
+                and bool(_relation_targets(objects[object_id], CHALLENGE_RELATIONS))
+            )
         )
     }
     prior_decision_ids = {
         object_id
         for object_id in closure
         if objects[object_id].get("kind") in _DECISION_KINDS
+        and objects[object_id].get("state") in _DECISION_MEMORY_STATES
         and object_id not in superseded_ids
     }
     memory_object_ids = sorted(negative_ids | prior_decision_ids | prior_context_ids)
@@ -560,6 +619,13 @@ def build_research_context_snapshot(
                 "created_at": str(item.get("created_at") or ""),
             }
         )
+    belief_context = build_belief_context_projection(
+        [objects[object_id] for object_id in source_object_ids],
+        target_ids=resolved_targets,
+        as_of=belief_as_of,
+        max_nodes=1024,
+        max_relations=8192,
+    )
     memory_objects = [
         item for item in source_objects if item["object_id"] in memory_object_ids
     ]
@@ -710,6 +776,8 @@ def build_research_context_snapshot(
     blockers: list[str] = []
     if selected and len(options) < 2:
         blockers.append("a decision context must retain selected and rejected options")
+    if belief_context["complete"] is not True:
+        blockers.append("belief context projection is incomplete")
 
     if latest_prior_context_id is not None:
         previous_payload = objects[latest_prior_context_id].get("payload") or {}
@@ -752,6 +820,8 @@ def build_research_context_snapshot(
         "retrieval_receipt": retrieval_receipt,
         "source_refs": sorted(item["content_hash"] for item in source_objects),
         "source_closure_hash": source_closure_hash,
+        "belief_context": belief_context,
+        "belief_context_hash": belief_context["projection_hash"],
         "memory_object_ids": memory_object_ids,
         "memory_objects": memory_objects,
         "memory_refs": normalized_memory_refs,
@@ -843,6 +913,25 @@ def research_context_issues(
         {"source_objects": source_objects}
     ):
         issues.append("context source closure hash mismatch")
+    policy_version = str((payload.get("selection_policy") or {}).get("version") or "")
+    belief_context = payload.get("belief_context")
+    if not isinstance(belief_context, Mapping):
+        if policy_version == RESEARCH_CONTEXT_POLICY_VERSION:
+            issues.append("context belief projection is missing")
+    else:
+        for issue in belief_context_issues(belief_context):
+            issues.append(f"context belief projection {issue}")
+        if belief_context.get("projection_hash") != payload.get("belief_context_hash"):
+            issues.append("context belief projection hash mismatch")
+        if belief_context.get("target_ids") != payload.get("target_ids"):
+            issues.append("context belief projection targets do not match context")
+        if belief_context.get("source_object_ids") != source_ids:
+            issues.append("context belief projection sources do not match closure")
+        if (
+            payload.get("complete") is True
+            and belief_context.get("complete") is not True
+        ):
+            issues.append("complete context has an incomplete belief projection")
     if payload.get("memory_snapshot_hash") != content_hash(
         {"memory_objects": memory_objects, "memory_refs": memory_refs}
     ):
@@ -902,11 +991,13 @@ def research_context_issues(
                 issues.append(
                     "context selected retrieval candidates do not match source views"
                 )
-    policy_version = str((payload.get("selection_policy") or {}).get("version") or "")
-    if policy_version == RESEARCH_CONTEXT_POLICY_VERSION:
+    expected_receipt_profile = _RESEARCH_CONTEXT_RECEIPT_PROFILES.get(policy_version)
+    if expected_receipt_profile is None:
+        issues.append("context selection policy version is unsupported")
+    else:
         if (
             not isinstance(retrieval_receipt, Mapping)
-            or retrieval_receipt.get("profile") != RESEARCH_CONTEXT_RECEIPT_PROFILE
+            or retrieval_receipt.get("profile") != expected_receipt_profile
         ):
             issues.append("context retrieval receipt profile is invalid")
         else:
@@ -915,6 +1006,10 @@ def research_context_issues(
                 issues.append("context retrieval request targets do not match context")
             if request.get("as_of") != payload.get("as_of"):
                 issues.append("context retrieval request ref does not match context")
+            if (retrieval_receipt.get("algorithm") or {}).get(
+                "version"
+            ) != policy_version:
+                issues.append("context retrieval algorithm version is invalid")
             transforms = retrieval_receipt.get("transform_lineage") or []
             if not transforms or not isinstance(transforms[0], Mapping):
                 issues.append("context retrieval transform lineage is missing")
@@ -1032,6 +1127,7 @@ def record_research_context_snapshot(
     constraints: Sequence[str] = (),
     memory_refs: Sequence[str] = (),
     budget_tokens: int = 4000,
+    belief_as_of: str | None = None,
     actor_id: str = "research-context-recorder",
 ) -> ResearchObjectResult:
     repository = (
@@ -1049,6 +1145,7 @@ def record_research_context_snapshot(
         memory_refs=memory_refs,
         ref="WORKTREE",
         budget_tokens=budget_tokens,
+        belief_as_of=belief_as_of,
     )
     issues = research_context_issues(
         payload,

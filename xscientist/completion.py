@@ -21,7 +21,7 @@ SUBCOMMANDS = {
     "history": "list show diff save rollback",
     "research": (
         "guide start hypothesis plan preregister experiment evidence infer review "
-        "claim status log dag opportunity rollout"
+        "claim status log dag opportunity rollout rollout-audit belief belief-audit"
     ),
     "opportunity": "direction pool attempt judge grade allocate inspect",
 }
@@ -60,6 +60,11 @@ OPTIONS = {
         "--calibration-status --probability-semantics --incomplete --extraction-notes"
     ),
     "rollout": "--repo --message --no-commit --json",
+    "rollout-audit": (
+        "--evidence-hash --trust-store --max-attestation-age-seconds --json"
+    ),
+    "belief": "--repo --ref --as-of --budget --json",
+    "belief-audit": "--json",
     "metrics": "--json",
     "auth": "--user --lang --json",
     "init": "--profile --provider --model --force --json",

@@ -8,10 +8,13 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.protocol.hashing import content_hash
 from xscientist import ResearchRepository
 from xscientist.research_cli import main as research_main
 from xscientist.research_git import ResearchGitError
 from xscientist.research_context import (
+    _research_prompt_token_estimate,
     build_research_context_snapshot,
     record_research_context_snapshot,
     render_research_context_for_prompt,
@@ -98,9 +101,15 @@ class ResearchContextTests(unittest.TestCase):
             self.assertIn(ids["gate"], payload["prior_decision_ids"])
             self.assertIn(ids["evidence"], payload["negative_knowledge_ids"])
             self.assertTrue(payload["budget"]["hard_closure_preserved"])
+            belief = payload["belief_context"]
+            self.assertTrue(belief["complete"])
+            self.assertEqual(
+                belief["target_assessments"][0]["belief_state"], "challenged"
+            )
+            self.assertFalse(belief["scientific_promotion_allowed"])
             receipt = payload["retrieval_receipt"]
             self.assertEqual(
-                receipt["profile"], "xscientist.context-retrieval-receipt.v3"
+                receipt["profile"], "xscientist.context-retrieval-receipt.v4"
             )
             self.assertTrue(receipt["complete_candidate_set"])
             self.assertEqual(
@@ -108,6 +117,52 @@ class ResearchContextTests(unittest.TestCase):
                 set(payload["source_object_ids"]),
             )
             self.assertFalse(research_context_issues(payload))
+
+            # Versioned receipts remain readable after the v4 belief-context
+            # projection is introduced; legacy v3 snapshots did not contain it.
+            legacy = copy.deepcopy(payload)
+            legacy.pop("belief_context")
+            legacy.pop("belief_context_hash")
+            legacy["selection_policy"]["version"] = "3.0"
+            legacy["selection_policy_hash"] = content_hash(legacy["selection_policy"])
+            receipt = legacy["retrieval_receipt"]
+            receipt["profile"] = "xscientist.context-retrieval-receipt.v3"
+            receipt["algorithm"]["version"] = "3.0"
+            receipt["algorithm_hash"] = content_hash(receipt["algorithm"])
+            receipt_core = {
+                key: value for key, value in receipt.items() if key != "receipt_hash"
+            }
+            receipt["receipt_hash"] = content_hash(receipt_core)
+            legacy_estimate = _research_prompt_token_estimate(legacy)
+            legacy["working_set"]["estimated_tokens"] = legacy_estimate
+            working_core = {
+                key: value
+                for key, value in legacy["working_set"].items()
+                if key != "working_set_hash"
+            }
+            legacy["working_set"]["working_set_hash"] = content_hash(working_core)
+            legacy["budget"]["working_set_estimated_tokens"] = legacy_estimate
+            identity = {
+                key: value for key, value in legacy.items() if key != "context_hash"
+            }
+            legacy["context_hash"] = content_hash(identity)
+            self.assertFalse(research_context_issues(legacy))
+
+            unsupported = copy.deepcopy(legacy)
+            unsupported["selection_policy"]["version"] = "999.0"
+            unsupported["selection_policy_hash"] = content_hash(
+                unsupported["selection_policy"]
+            )
+            unsupported_identity = {
+                key: value
+                for key, value in unsupported.items()
+                if key != "context_hash"
+            }
+            unsupported["context_hash"] = content_hash(unsupported_identity)
+            self.assertIn(
+                "context selection policy version is unsupported",
+                research_context_issues(unsupported),
+            )
 
     def test_long_history_keeps_current_frontier_and_archives_superseded_evidence(
         self,
@@ -144,6 +199,75 @@ class ResearchContextTests(unittest.TestCase):
                         {"type": "supports", "target": hypothesis.object_id},
                     ],
                 )
+            draft_superseder = repository.record(
+                "evidence",
+                {
+                    "result": "unfinished replication",
+                    "measurement_hash": "sha256:" + "e" * 64,
+                },
+                state="draft",
+                relations=[
+                    {"type": "supersedes", "target": old_refutation.object_id},
+                    {"type": "refutes", "target": hypothesis.object_id},
+                ],
+                actor={
+                    "actor_id": "draft-reviewer",
+                    "authority": "independent_evaluator",
+                },
+            )
+            draft_review = repository.record(
+                "review",
+                {"summary": "unfinished evaluator review"},
+                state="draft",
+                relations=[
+                    {"type": "evaluates", "target": hypothesis.object_id},
+                ],
+                actor={
+                    "actor_id": "draft-gate",
+                    "authority": "deterministic_gate",
+                },
+            )
+            before_completion = build_research_context_snapshot(
+                repository,
+                target_ids=[hypothesis.object_id],
+                budget_tokens=400,
+            )
+            self.assertIn(
+                old_refutation.object_id,
+                before_completion["negative_knowledge_ids"],
+            )
+            self.assertNotIn(
+                old_refutation.object_id,
+                before_completion["archived_history_ids"],
+            )
+            self.assertNotIn(
+                draft_superseder.object_id,
+                before_completion["negative_knowledge_ids"],
+            )
+            draft_source = next(
+                item
+                for item in before_completion["source_objects"]
+                if item["object_id"] == draft_superseder.object_id
+            )
+            self.assertEqual(draft_source["role"], "lineage")
+            draft_review_source = next(
+                item
+                for item in before_completion["source_objects"]
+                if item["object_id"] == draft_review.object_id
+            )
+            self.assertEqual(draft_review_source["role"], "lineage")
+            self.assertNotIn(
+                draft_review.object_id,
+                before_completion["working_set"]["required_view_ids"],
+            )
+            draft_challenge = next(
+                item
+                for item in before_completion["belief_context"]["target_assessments"][
+                    0
+                ]["challenging_signals"]
+                if item["object_id"] == draft_superseder.object_id
+            )
+            self.assertFalse(draft_challenge["active"])
             current = repository.record(
                 "evidence",
                 {
@@ -184,7 +308,161 @@ class ResearchContextTests(unittest.TestCase):
             self.assertNotIn(
                 "source_objects", render_research_context_for_prompt(payload)
             )
+            self.assertIn(
+                "candidate_belief_guard",
+                render_research_context_for_prompt(payload),
+            )
             self.assertFalse(research_context_issues(payload))
+
+    def test_context_closes_over_passage_support_claim_evidence_and_retraction(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            hypothesis = repository.record(
+                "hypothesis", {"statement": "H", "falsifier": "not H"}
+            )
+            source_core = {
+                "title": "Source A",
+                "doi": "10.1000/source-a",
+                "content_hash": "sha256:" + "1" * 64,
+            }
+            source = repository.record(
+                "source_snapshot",
+                {
+                    **source_core,
+                    "source_hash": canonical_content_hash(source_core),
+                },
+                state="completed",
+            )
+            passage_core = {
+                "source_id": source.object_id,
+                "locator": "p. 1",
+                "quote": "Observed support for H.",
+                "quote_hash": canonical_content_hash("Observed support for H."),
+            }
+            passage = repository.record(
+                "passage_evidence",
+                {
+                    **passage_core,
+                    "passage_hash": canonical_content_hash(passage_core),
+                },
+                relations=[
+                    {"type": "quotes", "target": source.object_id},
+                    {
+                        "type": "qualified_supports",
+                        "target": hypothesis.object_id,
+                    },
+                ],
+                state="completed",
+            )
+            draft_passage_core = {
+                "source_id": source.object_id,
+                "locator": "p. 2",
+                "quote": "Unfinished observation for H.",
+                "quote_hash": canonical_content_hash("Unfinished observation for H."),
+            }
+            draft_passage = repository.record(
+                "passage_evidence",
+                {
+                    **draft_passage_core,
+                    "passage_hash": canonical_content_hash(draft_passage_core),
+                },
+                relations=[
+                    {"type": "quotes", "target": source.object_id},
+                    {
+                        "type": "qualified_supports",
+                        "target": hypothesis.object_id,
+                    },
+                ],
+                state="draft",
+                actor={
+                    "actor_id": "draft-independent-reviewer",
+                    "authority": "independent_evaluator",
+                },
+            )
+
+            hypothesis_context = build_research_context_snapshot(
+                repository, target_ids=[hypothesis.object_id]
+            )
+            self.assertIn(passage.object_id, hypothesis_context["source_object_ids"])
+            self.assertIn(source.object_id, hypothesis_context["source_object_ids"])
+            passage_view = next(
+                item
+                for item in hypothesis_context["source_objects"]
+                if item["object_id"] == passage.object_id
+            )
+            self.assertEqual(passage_view["role"], "active_evidence")
+            draft_passage_view = next(
+                item
+                for item in hypothesis_context["source_objects"]
+                if item["object_id"] == draft_passage.object_id
+            )
+            self.assertEqual(draft_passage_view["role"], "lineage")
+            self.assertIn(
+                passage.object_id,
+                hypothesis_context["working_set"]["required_view_ids"],
+            )
+            self.assertIn(
+                passage.object_id,
+                {item["object_id"] for item in hypothesis_context["source_views"]},
+            )
+            hypothesis_assessment = hypothesis_context["belief_context"][
+                "target_assessments"
+            ][0]
+            self.assertEqual(hypothesis_assessment["active_support_count"], 1)
+            self.assertEqual(hypothesis_assessment["belief_state"], "supported")
+            draft_signal = next(
+                item
+                for item in hypothesis_assessment["supporting_signals"]
+                if item["object_id"] == draft_passage.object_id
+            )
+            self.assertFalse(draft_signal["active"])
+
+            claim = repository.record(
+                "claim",
+                {"statement": "Claim H"},
+                relations=[{"type": "depends_on", "target": passage.object_id}],
+                state="completed",
+            )
+            claim_context = build_research_context_snapshot(
+                repository, target_ids=[claim.object_id]
+            )
+            claim_assessment = claim_context["belief_context"]["target_assessments"][0]
+            self.assertEqual(claim_assessment["active_support_count"], 1)
+            self.assertEqual(
+                claim_assessment["supporting_signals"][0]["relation_type"],
+                "depends_on_evidence",
+            )
+
+            update_core = {
+                "source_id": source.object_id,
+                "status": "retracted",
+                "provider": "publisher",
+                "checked_at": "2026-08-28T00:00:00+00:00",
+                "update_type": "retraction",
+            }
+            update = repository.record(
+                "source_update",
+                {
+                    **update_core,
+                    "update_hash": canonical_content_hash(update_core),
+                },
+                relations=[
+                    {"type": "updates", "target": source.object_id},
+                    {"type": "invalidates", "target": source.object_id},
+                ],
+                state="completed",
+            )
+            retracted_context = build_research_context_snapshot(
+                repository, target_ids=[hypothesis.object_id]
+            )
+            self.assertIn(update.object_id, retracted_context["source_object_ids"])
+            retracted_signal = retracted_context["belief_context"][
+                "target_assessments"
+            ][0]["supporting_signals"][0]
+            self.assertTrue(retracted_signal["invalidated"])
+            self.assertFalse(retracted_signal["active"])
 
     def test_tiny_context_budget_fails_closed_instead_of_hiding_semantics(
         self,

@@ -62,6 +62,8 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_vcs.py",
             "xscientist/research_lifecycle.py",
             "xscientist/research_closure.py",
+            "xscientist/research_rollout.py",
+            "xscientist/research_belief.py",
             "xscientist/research_authority.py",
             "xscientist/research_evolution.py",
             "xscientist/git_support.py",
@@ -85,6 +87,10 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "ai_scientist/protocol/schemas/evidence_index.schema.json",
             "ai_scientist/protocol/schemas/benchmark_report_verification.schema.json",
             "ai_scientist/protocol/schemas/exploration_audit.schema.json",
+            "ai_scientist/protocol/schemas/research_rollout.schema.json",
+            "ai_scientist/protocol/schemas/research_rollout_audit.schema.json",
+            "ai_scientist/protocol/schemas/belief_context.schema.json",
+            "ai_scientist/protocol/schemas/belief_context_audit.schema.json",
         }
         missing = sorted(required_wheel - wheel_names)
         if missing:
