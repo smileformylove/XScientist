@@ -101,18 +101,28 @@ def _call_main(
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
         missing = exc.name or "an optional runtime dependency"
+        base_install_hint = 'python -m pip install "xscientist[research]"'
         active_provider = str(
             os.environ.get("AI_SCIENTIST_ACTIVE_PROVIDER") or ""
         ).strip()
+        provider_install_hint: str | None = None
         if active_provider:
             from .dependency_profiles import installation_command
 
-            install_hint = installation_command(active_provider)
-        else:
-            install_hint = 'python -m pip install "xscientist[research]"'
+            try:
+                provider_install_hint = installation_command(active_provider)
+            except ValueError:
+                provider_install_hint = None
+        provider_hint = (
+            " For the selected provider client, the combined installation is "
+            f"`{provider_install_hint}`."
+            if provider_install_hint and provider_install_hint != base_install_hint
+            else ""
+        )
         print(
             f"XScientist workflow dependency {missing!r} is not installed. "
-            f"Install the selected runtime with `{install_hint}`.",
+            f"Install the base research runtime with `{base_install_hint}`."
+            f"{provider_hint}",
             file=sys.stderr,
         )
         return 2

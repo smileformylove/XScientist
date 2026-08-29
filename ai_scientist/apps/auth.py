@@ -55,7 +55,9 @@ def _reason(value: str, language: str) -> str:
     }.get(value, value)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Return the executable auth parser for help and shell completion."""
+
     parser = argparse.ArgumentParser(description="XScientist login session management")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
@@ -80,8 +82,13 @@ def main() -> int:
         command_parser.add_argument(
             "--lang", choices=["auto", "en", "zh"], default="auto"
         )
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+
+    args = parser.parse_args(argv)
     language = _language(args.lang)
 
     if args.cmd == "login":

@@ -25,9 +25,11 @@ from xscientist.research_dag import (
     export_research_dag,
     render_research_dag_html,
 )
+from xscientist.research_git import ResearchGitError
 from xscientist.research_journey import (
     _command_for_repo,
     build_research_guide,
+    public_research_guide_payload,
     start_guided_research,
 )
 
@@ -135,19 +137,67 @@ class ResearchDagTests(unittest.TestCase):
         guide = build_research_guide(self.repo_path, language="zh")
 
         self.assertEqual(guide["progress"]["completed_stages"], 1)
-        self.assertEqual(guide["next_steps"][0]["code"], "choose_study_mode")
+        self.assertEqual(guide["next_steps"][0]["code"], "record_rival_hypothesis")
         self.assertEqual(
             {step["code"] for step in guide["next_steps"]},
             {
+                "record_rival_hypothesis",
                 "choose_study_mode",
                 "preregister_confirmatory",
                 "lock_method_discovery",
             },
         )
-        self.assertIn("探索", guide["next_steps"][0]["title"])
-        self.assertIn("@latest:hypothesis", guide["next_steps"][0]["command"])
+        self.assertIn("竞争假设", guide["next_steps"][0]["title"])
+        self.assertIn('"竞争假设"', guide["next_steps"][0]["command"])
+        self.assertIn("什么结果会推翻竞争假设", guide["next_steps"][0]["command"])
         self.assertIn(f"--repo {self.repo_path}", guide["next_steps"][0]["command"])
+        self.assertEqual(guide["primary_action"]["owner"], "researcher")
+        self.assertEqual(
+            guide["primary_action"]["required_inputs"],
+            ["rival_hypothesis", "rival_disconfirming_result"],
+        )
         self.assertTrue(self.repository.fsck()["ok"])
+
+    def test_guide_locks_existing_competitors_before_choosing_study_mode(
+        self,
+    ) -> None:
+        rival = self.repository.record(
+            "hypothesis",
+            {
+                "statement": "Intervention A only changes measurement noise.",
+                "falsifier": "The effect remains under an independent outcome measure.",
+            },
+        )
+        self.repository.commit(stage="ideation", subject="record competing hypothesis")
+
+        guide = build_research_guide(self.repo_path, language="en")
+
+        self.assertEqual(guide["next_steps"][0]["code"], "lock_hypothesis_portfolio")
+        self.assertEqual(guide["next_steps"][1]["code"], "choose_study_mode")
+        command = guide["next_steps"][0]["command"]
+        self.assertIn(self.hypothesis_id, command)
+        self.assertIn(f"--alternative {rival.object_id}", command)
+        self.assertIn('--question "RESEARCH QUESTION"', command)
+        self.assertEqual(guide["primary_action"]["owner"], "researcher")
+        self.assertEqual(
+            guide["primary_action"]["required_inputs"],
+            ["research_question", "primary_hypothesis", "rival_hypothesis"],
+        )
+        public_guide = public_research_guide_payload(guide)
+        self.assertIn(
+            "{workspace}", public_guide["primary_action"]["action"]["argv_template"]
+        )
+        self.assertFalse(
+            public_guide["primary_action"]["action"]["executable_after_binding"]
+        )
+        self.assertTrue(
+            public_guide["primary_action"]["action"]["input_binding"]["required"]
+        )
+        self.assertIn(
+            "RESEARCH QUESTION",
+            public_guide["primary_action"]["action"]["input_binding"]["placeholders"],
+        )
+        self.assertNotIn(str(self.repo_path), json.dumps(public_guide))
 
     def test_guided_start_normalizes_plain_human_actor(self) -> None:
         second_repo = self.root / "actor-study"
@@ -166,6 +216,55 @@ class ResearchDagTests(unittest.TestCase):
             for item in ResearchRepository(second_repo).objects()
         }
         self.assertEqual(actors, {"human:alice"})
+
+    def test_guided_start_preserves_unrelated_existing_git_work(self) -> None:
+        existing = self.root / "existing-project"
+        existing.mkdir()
+        subprocess.run(
+            ["git", "-C", str(existing), "init", "-b", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        readme = existing / "README.md"
+        readme.write_text("user-owned uncommitted project\n", encoding="utf-8")
+
+        start_guided_research(
+            existing,
+            question="Can managed research coexist with project work?",
+            hypothesis="Only managed research paths enter the checkpoint.",
+            falsifier="The unrelated README is committed.",
+            git_user_name="Passed Researcher",
+            git_user_email="passed@example.invalid",
+        )
+
+        committed_paths = set(
+            subprocess.run(
+                ["git", "-C", str(existing), "ls-tree", "-r", "--name-only", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+        )
+        author = subprocess.run(
+            ["git", "-C", str(existing), "log", "-1", "--format=%an|%ae"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(existing), "status", "--short"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        self.assertNotIn("README.md", committed_paths)
+        self.assertIn("?? README.md", status)
+        self.assertEqual(author, "Passed Researcher|passed@example.invalid")
+        self.assertEqual(
+            readme.read_text(encoding="utf-8"), "user-owned uncommitted project\n"
+        )
 
     def test_unified_dag_exposes_challenge_and_layered_proof(self) -> None:
         ids = self._record_lineage()
@@ -585,16 +684,11 @@ class ResearchDagTests(unittest.TestCase):
             text=True,
         )
 
-        graph = build_research_dag(self.repo_path)
-
-        source = next(item for item in graph["sources"] if item["name"] == "ara:0")
-        self.assertEqual(source["graph_binding"]["state"], "mismatch")
+        with self.assertRaisesRegex(
+            ResearchGitError, "is not bound to a research checkpoint"
+        ):
+            build_research_dag(self.repo_path)
         self.assertFalse(self.repository.fsck()["ok"])
-        self.assertFalse(graph["integrity"]["is_dag"])
-        self.assertNotIn(
-            ("ara:0:bound", ids["evidence"], "anchors"),
-            {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]},
-        )
         self.repository.record(
             "hypothesis",
             {
@@ -608,6 +702,10 @@ class ResearchDagTests(unittest.TestCase):
         )
         self.assertEqual(later_source["graph_binding"]["state"], "mismatch")
         self.assertFalse(later["integrity"]["is_dag"])
+        self.assertNotIn(
+            ("ara:0:bound", ids["evidence"], "anchors"),
+            {(edge["source"], edge["target"], edge["type"]) for edge in later["edges"]},
+        )
 
     def test_invalid_ara_hash_does_not_claim_traceability(self) -> None:
         ara = self.root / "invalid-hash-ara"
@@ -762,6 +860,10 @@ class ResearchDagTests(unittest.TestCase):
         self.assertEqual(code, 0)
         started = json.loads(output.getvalue())
         self.assertTrue(started["hypothesis_id"].startswith("rso-"))
+        self.assertNotIn(str(cli_repo), output.getvalue())
+        self.assertFalse(Path(started["checkpoint"]["checkpoint_path"]).is_absolute())
+        self.assertFalse(started["workspace_context"]["host_path_disclosed"])
+        self.assertFalse(started["privacy"]["host_path_disclosed"])
 
         output = io.StringIO()
         with redirect_stdout(output):
@@ -769,10 +871,15 @@ class ResearchDagTests(unittest.TestCase):
                 ["guide", "--repo", str(cli_repo), "--lang", "en", "--json"]
             )
         self.assertEqual(code, 0)
+        public_guide = json.loads(output.getvalue())
         self.assertEqual(
-            json.loads(output.getvalue())["next_steps"][0]["code"],
-            "choose_study_mode",
+            public_guide["next_steps"][0]["code"], "record_rival_hypothesis"
         )
+        self.assertIn(
+            "{workspace}", public_guide["next_steps"][0]["action"]["argv_template"]
+        )
+        self.assertNotIn("--repo .", public_guide["next_steps"][0]["command"])
+        self.assertNotIn(str(cli_repo), output.getvalue())
 
         output = io.StringIO()
         with redirect_stdout(output):

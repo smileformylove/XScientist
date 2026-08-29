@@ -340,6 +340,80 @@ def test_explicit_as_of_excludes_future_evidence_and_future_invalidation() -> No
     assert current_evidence["active"] is False
 
 
+def test_explicit_as_of_excludes_future_lineage_roots() -> None:
+    target = _object(
+        35,
+        kind="claim",
+        created_at="2019-01-01T00:00:00+00:00",
+    )
+    first_source = _object(
+        36,
+        kind="source_snapshot",
+        payload={"doi": "10.1000/future-one"},
+        created_at="2030-01-01T00:00:00+00:00",
+    )
+    second_source = _object(
+        37,
+        kind="source_snapshot",
+        payload={"doi": "10.1000/future-two"},
+        created_at="2030-01-02T00:00:00+00:00",
+    )
+    first_evidence = _object(
+        38,
+        kind="passage_evidence",
+        payload={"selector_hash": "sha256:" + "3" * 64},
+        relations=[
+            {"type": "quotes", "target": first_source["object_id"]},
+            {"type": "qualified_supports", "target": target["object_id"]},
+        ],
+        created_at="2019-02-01T00:00:00+00:00",
+    )
+    second_evidence = _object(
+        39,
+        kind="passage_evidence",
+        payload={"selector_hash": "sha256:" + "4" * 64},
+        relations=[
+            {"type": "quotes", "target": second_source["object_id"]},
+            {"type": "qualified_supports", "target": target["object_id"]},
+        ],
+        created_at="2019-03-01T00:00:00+00:00",
+    )
+    objects = [
+        target,
+        first_source,
+        second_source,
+        first_evidence,
+        second_evidence,
+    ]
+
+    historical = build_belief_context_projection(
+        objects,
+        target_ids=[target["object_id"]],
+        as_of="2020-01-01T00:00:00+00:00",
+    )
+    historical_assessment = historical["target_assessments"][0]
+    assert historical_assessment["active_support_count"] == 0
+    assert historical_assessment["independent_support_source_count"] == 0
+    assert historical_assessment["belief_state"] == "stale"
+    assert "future_lineage_excluded" in historical["warnings"]
+    assert {
+        row["lineage_not_observed_as_of"]
+        for row in historical_assessment["supporting_signals"]
+    } == {True}
+    validate(historical, load_schema("belief_context"))
+    assert audit_belief_context_projection(historical)["issues"] == []
+
+    current = build_belief_context_projection(
+        objects,
+        target_ids=[target["object_id"]],
+        as_of="2031-01-01T00:00:00+00:00",
+    )
+    current_assessment = current["target_assessments"][0]
+    assert current_assessment["active_support_count"] == 2
+    assert current_assessment["independent_support_source_count"] == 2
+    assert current_assessment["belief_state"] == "corroborated"
+
+
 def test_lineage_cycle_and_hard_limits_fail_closed() -> None:
     first = _object(30, kind="hypothesis", state="locked")
     second = _object(31, kind="evidence")

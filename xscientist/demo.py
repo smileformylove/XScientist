@@ -12,7 +12,12 @@ from ai_scientist.utils.privacy import redact_sensitive_payload
 
 from .research_dag import export_research_dag
 from .research_git import ResearchGitError, create_checkpoint
-from .research_journey import build_research_guide, start_guided_research
+from .research_journey import (
+    build_research_guide,
+    public_research_guide_payload,
+    start_guided_research,
+    workspace_action_context,
+)
 from .research_lifecycle import ResearchLifecycle
 from .research_vcs import ResearchRepository
 
@@ -61,12 +66,20 @@ def public_demo_payload(
     if isinstance(guide, dict):
         guide["repository"] = "."
         try:
-            refreshed = build_research_guide(
-                root,
-                language=str(guide.get("language") or "auto"),
-                command_repo=".",
+            refreshed = public_research_guide_payload(
+                build_research_guide(
+                    root,
+                    language=str(guide.get("language") or "auto"),
+                    command_repo=".",
+                )
             )
-            for field in ("primary_action", "next_steps", "warnings", "program_review"):
+            for field in (
+                "primary_action",
+                "next_steps",
+                "warnings",
+                "program_review",
+                "workspace_context",
+            ):
                 if field in refreshed:
                     guide[field] = refreshed[field]
         except (OSError, ResearchGitError, ValueError):
@@ -76,6 +89,7 @@ def public_demo_payload(
         "matched_values_disclosed": False,
         "workspace_reference": ".",
     }
+    safe["workspace_context"] = workspace_action_context()
     return redact_sensitive_payload(safe)
 
 

@@ -9,6 +9,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from xscientist.entrypoints import research_main
+from xscientist.research_commands import save_hypothesis
+from xscientist.research_git import ResearchGitError
 from xscientist.research_vcs import ResearchRepository
 
 
@@ -149,6 +151,25 @@ class ResearcherCliTests(unittest.TestCase):
 
             self.assertEqual(code, 2)
             self.assertEqual(repository.objects(kind="claim"), [])
+
+    def test_one_command_save_refuses_to_absorb_preexisting_dirty_research(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "study"
+            repository = ResearchRepository.init(root, question="Fixed question")
+            question = root / "question.md"
+            question.write_text("# Locally edited question\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ResearchGitError, "clean research worktree"):
+                save_hypothesis(
+                    str(root),
+                    statement="Method A improves the metric",
+                    falsifier="delta <= 0",
+                )
+
+            self.assertEqual(repository.objects(kind="hypothesis"), [])
+            self.assertIn("question.md", repository.status()["tracked_changes"])
 
     def test_confirmatory_experiment_requires_preregistration(self) -> None:
         with tempfile.TemporaryDirectory() as td:

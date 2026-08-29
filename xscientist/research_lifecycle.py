@@ -7,7 +7,12 @@ from typing import Any, Mapping, Sequence
 
 from ai_scientist.utils.research_integrity import validate_preregistration
 
-from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
+from .research_git import (
+    CheckpointResult,
+    ResearchGitError,
+    ResearchObjectResult,
+    show_checkpoint,
+)
 from .research_vcs import ResearchRepository
 from .research_authority import require_independent_evaluator
 
@@ -32,18 +37,10 @@ class ResearchLifecycle:
     ) -> dict[str, Any]:
         """Record hypothesis -> plan -> preregistration provenance."""
 
-        hypothesis_result = self.repository.record(
-            "hypothesis",
-            hypothesis,
-            state="draft",
-        )
-        plan_result = self.repository.record(
-            "research_plan",
-            plan,
-            state="draft",
-            relations=[{"type": "depends_on", "target": hypothesis_result.object_id}],
-        )
-        preregistration_result: ResearchObjectResult | None = None
+        # Validate the whole multi-object transition before the first immutable
+        # object is written.  A malformed locked registration must not leave a
+        # hypothesis and plan behind for a later checkpoint to absorb.
+        registration_payload: dict[str, Any] | None = None
         locked = False
         validation: dict[str, Any] | None = None
         if preregistration is not None:
@@ -58,6 +55,20 @@ class ResearchLifecycle:
                     "locked preregistration failed integrity validation: "
                     + ", ".join(validation["errors"])
                 )
+
+        hypothesis_result = self.repository.record(
+            "hypothesis",
+            hypothesis,
+            state="draft",
+        )
+        plan_result = self.repository.record(
+            "research_plan",
+            plan,
+            state="draft",
+            relations=[{"type": "depends_on", "target": hypothesis_result.object_id}],
+        )
+        preregistration_result: ResearchObjectResult | None = None
+        if registration_payload is not None:
             preregistration_result = self.repository.record(
                 "preregistration",
                 registration_payload,
@@ -136,6 +147,16 @@ class ResearchLifecycle:
                 raise ResearchGitError(
                     "confirmatory experiment requires a locked preregistration"
                 )
+            if payload.get("study_phase") == "confirmatory":
+                registration_validation = validate_preregistration(
+                    registration.get("payload") or {},
+                    require_locked=True,
+                )
+                if not registration_validation["ok"]:
+                    raise ResearchGitError(
+                        "confirmatory experiment preregistration failed integrity "
+                        "validation: " + ", ".join(registration_validation["errors"])
+                    )
             relations.append(
                 {"type": "depends_on", "target": preregistration_id, "role": "protocol"}
             )
@@ -531,20 +552,38 @@ class ResearchLifecycle:
                 for item in gate.get("relations") or []
                 if item.get("type") == "evaluates"
             }
+            review_target_sets: list[set[str]] = []
             for target in list(evaluated):
                 try:
                     linked = self.repository.get(target)
                 except ResearchGitError:
                     continue
                 if linked.get("kind") == "review":
-                    evaluated.update(
+                    review_targets = {
                         str(item.get("target") or "")
                         for item in linked.get("relations") or []
                         if item.get("type") == "evaluates"
-                    )
-            if not evaluated.intersection(resolved_evidence_ids):
+                    }
+                    review_target_sets.append(review_targets)
+                    evaluated.update(review_targets)
+            required_closure_ids = set(resolved_evidence_ids)
+            required_closure_ids.update(
+                str(item["object_id"])
+                for rows in qualifications.values()
+                for item in rows
+            )
+            if not required_closure_ids.issubset(evaluated):
                 raise ResearchGitError(
-                    "verified claim gate does not evaluate the selected evidence"
+                    "verified claim gate does not evaluate the complete selected "
+                    "scientific closure"
+                )
+            if not any(
+                required_closure_ids.issubset(review_targets)
+                for review_targets in review_target_sets
+            ):
+                raise ResearchGitError(
+                    "verified claim requires one review covering the complete "
+                    "selected scientific closure"
                 )
             relations.append({"type": "depends_on", "target": gate_id, "role": "gate"})
         result = self.repository.record(
@@ -652,6 +691,171 @@ class ResearchLifecycle:
             raise ResearchGitError("reproduction receipt content hash mismatch")
         if receipt_payload.get("receipt_id") != expected_id:
             raise ResearchGitError("reproduction receipt identifier mismatch")
+        reproduced_objects = [
+            self.repository.get(object_id) for object_id in reproduces
+        ]
+        resolved_target_ids = sorted(
+            {str(item["object_id"]) for item in reproduced_objects}
+        )
+        if (
+            verified
+            and receipt_payload.get("schema_version")
+            == "xscientist.reproduction-receipt.v1"
+        ):
+            # Existing clients may still hand the lifecycle a locally generated
+            # v1 execution receipt. Upgrade it before recording, while resolving
+            # the checkpoint independently instead of trusting its copied fields.
+            source_record = show_checkpoint(
+                self.repository.path, str(receipt_payload.get("commit") or "")
+            )
+            source_checkpoint = source_record.get("checkpoint") or {}
+            checkpoint_core = {
+                "commit": str(source_record.get("commit") or ""),
+                "checkpoint_id": str(source_checkpoint.get("checkpoint_id") or ""),
+                "checkpoint_content_hash": str(
+                    source_checkpoint.get("content_hash") or ""
+                ),
+            }
+            if (
+                receipt_payload.get("commit") != checkpoint_core["commit"]
+                or receipt_payload.get("checkpoint_id")
+                != checkpoint_core["checkpoint_id"]
+                or receipt_payload.get("checkpoint_hash")
+                != checkpoint_core["checkpoint_content_hash"]
+            ):
+                raise ResearchGitError(
+                    "legacy reproduction receipt disagrees with its resolved checkpoint"
+                )
+            receipt_payload.update(
+                {
+                    "stdout_truncated": None,
+                    "stderr_truncated": None,
+                    "output_capture": "legacy_unknown",
+                    "max_output_chars": None,
+                }
+            )
+            execution_core = {
+                key: receipt_payload.get(key)
+                for key in (
+                    "command_hash",
+                    "reproduction_level",
+                    "verdict",
+                    "objects_complete",
+                    "executed",
+                    "returncode",
+                    "timed_out",
+                    "stdout_hash",
+                    "stderr_hash",
+                    "stdout_truncated",
+                    "stderr_truncated",
+                    "output_capture",
+                    "max_output_chars",
+                )
+            }
+            receipt_payload["schema_version"] = "xscientist.reproduction-receipt.v2"
+            receipt_payload["checkpoint_binding"] = {
+                **checkpoint_core,
+                "binding_hash": content_hash(checkpoint_core),
+            }
+            receipt_payload["execution_result"] = {
+                **execution_core,
+                "result_hash": content_hash(execution_core),
+            }
+            # Historical v1 receipts did not persist execution-boundary
+            # metadata. Preserve that uncertainty explicitly instead of
+            # inventing a platform or claiming that the old run was sanitized.
+            receipt_payload["execution_isolation"] = {
+                "isolated": False,
+                "security_boundary": False,
+                "environment": "legacy_unknown",
+                "environment_scope": "legacy_unknown",
+                "process_tree": "legacy_unknown_no_tree_guarantee",
+                "process_control": "legacy_unknown",
+                "process_tree_termination_guaranteed": False,
+                "filesystem": "host_visible",
+                "network": "host_unrestricted",
+            }
+        if (
+            receipt_payload.get("schema_version")
+            == "xscientist.reproduction-receipt.v2"
+        ):
+            from .research_closure import build_reproduction_target_binding
+
+            source_record = show_checkpoint(
+                self.repository.path, str(receipt_payload.get("commit") or "")
+            )
+            source_checkpoint = source_record.get("checkpoint") or {}
+            checkpoint_core = {
+                "commit": str(source_record.get("commit") or ""),
+                "checkpoint_id": str(source_checkpoint.get("checkpoint_id") or ""),
+                "checkpoint_content_hash": str(
+                    source_checkpoint.get("content_hash") or ""
+                ),
+            }
+            expected_checkpoint_binding = {
+                **checkpoint_core,
+                "binding_hash": content_hash(checkpoint_core),
+            }
+            if (
+                receipt_payload.get("commit") != checkpoint_core["commit"]
+                or receipt_payload.get("checkpoint_id")
+                != checkpoint_core["checkpoint_id"]
+                or receipt_payload.get("checkpoint_hash")
+                != checkpoint_core["checkpoint_content_hash"]
+                or receipt_payload.get("checkpoint_binding")
+                != expected_checkpoint_binding
+            ):
+                raise ResearchGitError(
+                    "reproduction receipt checkpoint binding is inconsistent"
+                )
+            execution_core = {
+                key: receipt_payload.get(key)
+                for key in (
+                    "command_hash",
+                    "reproduction_level",
+                    "verdict",
+                    "objects_complete",
+                    "executed",
+                    "returncode",
+                    "timed_out",
+                    "stdout_hash",
+                    "stderr_hash",
+                    "stdout_truncated",
+                    "stderr_truncated",
+                    "output_capture",
+                    "max_output_chars",
+                )
+            }
+            expected_execution_result = {
+                **execution_core,
+                "result_hash": content_hash(execution_core),
+            }
+            if receipt_payload.get("execution_result") != expected_execution_result:
+                raise ResearchGitError(
+                    "reproduction receipt execution-result binding is inconsistent"
+                )
+
+            receipt_payload["target_binding"] = build_reproduction_target_binding(
+                self.repository.path,
+                resolved_target_ids,
+                ref=str(receipt_payload.get("commit") or ""),
+            )
+            receipt_base = {
+                key: value
+                for key, value in receipt_payload.items()
+                if key not in {"receipt_id", "content_hash"}
+            }
+            expected_hash = content_hash(receipt_base)
+            receipt_payload["receipt_id"] = f"rr-{expected_hash.split(':', 1)[1][:16]}"
+            receipt_payload["content_hash"] = expected_hash
+            try:
+                validate_json(receipt_payload, load_schema("reproduction_receipt"))
+            except ValidationError as exc:  # pragma: no cover - contract guard
+                raise ResearchGitError(
+                    f"bound reproduction receipt is invalid: {exc.message}"
+                ) from exc
+        elif verified:  # pragma: no cover - schema currently permits only v1/v2
+            raise ResearchGitError("verified reproduction requires a v2 receipt")
         if verified and not str(verifier_id or "").strip():
             raise ResearchGitError("verified reproduction requires verifier_id")
         if verified and (
@@ -665,18 +869,22 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 "verified reproduction requires a successful computational rerun"
             )
-        relations: list[dict[str, str]] = []
-        for object_id in reproduces:
-            reproduced = self.repository.get(object_id)
-            relations.append(
-                {"type": "reproduces", "target": str(reproduced["object_id"])}
+        if verified and not any(
+            item.get("kind") == "claim" for item in reproduced_objects
+        ):
+            raise ResearchGitError(
+                "verified reproduction requires an exact reproduced claim target"
             )
+        relations = [
+            {"type": "reproduces", "target": object_id}
+            for object_id in resolved_target_ids
+        ]
         independence = None
         if verified:
             independence = require_independent_evaluator(
                 self.repository,
                 evaluator_id=str(verifier_id or ""),
-                target_ids=reproduces,
+                target_ids=resolved_target_ids,
                 label="verified reproduction",
             )
         payload = {
@@ -739,7 +947,11 @@ class ResearchLifecycle:
             if commit
             else None
         )
-        return {"reproduction": result, "checkpoint": checkpoint}
+        return {
+            "reproduction": result,
+            "checkpoint": checkpoint,
+            "receipt": receipt_payload,
+        }
 
 
 __all__ = ["ResearchLifecycle"]

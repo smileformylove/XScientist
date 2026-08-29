@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -15,11 +16,28 @@ from jsonschema import validate
 from ai_scientist.protocol.schemas import load_schema
 
 from xscientist.benchmark import benchmark_first_run
-from xscientist.cli import main
-from xscientist.completion import completion_script
+from xscientist.cli import (
+    _DELEGATES,
+    _build_capability_parser,
+    _build_doctor_parser,
+    _build_parser as build_public_parser,
+    _build_setup_parser,
+    _build_start_parser,
+    main,
+)
+from ai_scientist.apps.auth import build_parser as build_auth_parser
+from xscientist.completion import (
+    COMMANDS,
+    OPTIONS,
+    RESEARCH_COMMANDS,
+    RESEARCH_SUBCOMMANDS,
+    SUBCOMMANDS,
+    completion_script,
+)
 from xscientist.conformance import check_conformance, init_conformance_kit
 from xscientist.provider_config import CONFIG_RELATIVE_PATH, CONFIG_SCHEMA_VERSION
 from xscientist.research_git import REPOSITORY_SCHEMA, ResearchGitError
+from xscientist.research_cli import _build_parser as build_research_parser
 from xscientist.upgrade_check import check_upgrade
 from xscientist.usage_metrics import (
     export_metrics,
@@ -38,6 +56,42 @@ class _PyPIResponse(io.StringIO):
 
 
 class ProductivityP2Tests(unittest.TestCase):
+    @staticmethod
+    def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, object]:
+        action = next(
+            (
+                item
+                for item in parser._actions
+                if isinstance(item, argparse._SubParsersAction)
+            ),
+            None,
+        )
+        return dict(action.choices) if action is not None else {}
+
+    @classmethod
+    def _parser_tree_options(cls, parser: argparse.ArgumentParser) -> set[str]:
+        options = {
+            option for action in parser._actions for option in action.option_strings
+        }
+        for nested in cls._subparser_choices(parser).values():
+            options.update(cls._parser_tree_options(nested))
+        return options
+
+    @classmethod
+    def _parser_option_tables(
+        cls,
+        prefix: str,
+        parser: argparse.ArgumentParser,
+    ) -> dict[str, set[str]]:
+        result = {
+            prefix: {
+                option for action in parser._actions for option in action.option_strings
+            }
+        }
+        for command, nested in cls._subparser_choices(parser).items():
+            result.update(cls._parser_option_tables(f"{prefix}::{command}", nested))
+        return result
+
     def test_first_run_profile_is_normalized_and_invalid_profiles_fail_closed(
         self,
     ) -> None:
@@ -232,6 +286,184 @@ class ProductivityP2Tests(unittest.TestCase):
             self.assertTrue("--workspace" in script or "-l workspace" in script)
             self.assertIn("allocate", script)
             self.assertIn("probability-semantics", script)
+            for option in (
+                "falsifier",
+                "profile-file",
+                "preserve-conflicts",
+                "include-payloads",
+                "ttl-hours",
+            ):
+                self.assertIn(option, script)
+            for command in (
+                "discovery",
+                "program",
+                "literature",
+                "estimand",
+                "effect",
+                "context",
+                "decide",
+                "adapter",
+                "checkpoint",
+                "stage",
+                "merge",
+                "bundle",
+                "export",
+                "reproduce",
+            ):
+                self.assertIn(command, script)
+            for nested in (
+                "template plan assess",
+                "portfolio prediction prioritize",
+                "plan receipt source update passage",
+                "create verify restore",
+            ):
+                self.assertIn(nested, script)
+
+    def test_completion_command_tables_match_the_real_cli(self) -> None:
+        public_choices = self._subparser_choices(build_public_parser())
+        self.assertEqual(set(COMMANDS.split()), set(public_choices) | {"help"})
+
+        root_parsers = {
+            command: parser
+            for command, parser in public_choices.items()
+            if command not in _DELEGATES
+        }
+        root_parsers.update(
+            {
+                "start": _build_start_parser(),
+                "setup": _build_setup_parser(),
+                "doctor": _build_doctor_parser(),
+                "capability": _build_capability_parser(),
+            }
+        )
+        option_roots = {key.split("::", 1)[0] for key in OPTIONS}
+        self.assertEqual(
+            option_roots - set(_DELEGATES),
+            set(root_parsers) | {"help"},
+        )
+        for command, parser in root_parsers.items():
+            expected = self._parser_option_tables(command, parser)
+            actual = {
+                key: set(options.split())
+                for key, options in OPTIONS.items()
+                if key == command or key.startswith(f"{command}::")
+            }
+            self.assertEqual(actual, expected, command)
+
+        # Delegate stubs accept REMAINDER and intentionally expose no real
+        # options. Only delegates with lightweight executable parser contracts
+        # are included, and auth is checked against that actual parser here.
+        self.assertEqual(option_roots & set(_DELEGATES), {"auth", "batch", "project"})
+        expected_auth = self._parser_option_tables("auth", build_auth_parser())
+        actual_auth = {
+            key: set(options.split())
+            for key, options in OPTIONS.items()
+            if key == "auth" or key.startswith("auth::")
+        }
+        self.assertEqual(actual_auth, expected_auth)
+        for option in ("--user", "--ttl-hours", "--lang"):
+            self.assertIn(option, OPTIONS["auth::login"].split())
+        self.assertNotIn("--user", OPTIONS["auth::status"].split())
+        self.assertNotIn("--ttl-hours", OPTIONS["auth::status"].split())
+        self.assertIn("--live", OPTIONS["provider::check"].split())
+        self.assertNotIn("--live", OPTIONS["provider::list"].split())
+        self.assertEqual(OPTIONS["help"].split(), ["--all"])
+        self.assertEqual(
+            set(SUBCOMMANDS["auth"].split()),
+            set(self._subparser_choices(build_auth_parser())),
+        )
+
+        research_parser = build_research_parser()
+        research_choices = self._subparser_choices(research_parser)
+        self.assertEqual(set(RESEARCH_COMMANDS.split()), set(research_choices))
+        for command, expected in RESEARCH_SUBCOMMANDS.items():
+            parser = research_choices[command]
+            if command == "bundle":
+                action = next(item for item in parser._actions if item.dest == "action")
+                actual = set(action.choices)
+            else:
+                actual = set(self._subparser_choices(parser))
+            self.assertEqual(set(expected.split()), actual, command)
+
+    def test_completion_uses_the_research_frontend_for_the_git_alias(self) -> None:
+        bash = completion_script("bash")
+        zsh = completion_script("zsh")
+        fish = completion_script("fish")
+
+        self.assertIn("$command == research || $command == git", bash)
+        self.assertIn('"$command" == research || "$command" == git', zsh)
+        self.assertIn("__xscientist_research_frontend", fish)
+        self.assertNotIn("__fish_seen_subcommand_from", fish)
+        self.assertIn("__xscientist_word_is 3 literature", fish)
+        self.assertIn("__xscientist_word_is 4 plan", fish)
+        self.assertIn("__xscientist_word_is 3 hypothesis", fish)
+        literature_plan = [
+            line
+            for line in fish.splitlines()
+            if "__xscientist_word_is 3 literature" in line
+            and "__xscientist_word_is 4 plan" in line
+        ]
+        self.assertTrue(literature_plan)
+        self.assertFalse(any("-l test" in line for line in literature_plan))
+        for script in (bash, zsh, fish):
+            self.assertIn("literature", script)
+            self.assertIn("hypothesis", script)
+            self.assertTrue("--all" in script or "-l all" in script)
+
+    def test_completion_uses_exact_root_subcommand_option_paths(self) -> None:
+        bash = completion_script("bash")
+        zsh = completion_script("zsh")
+        fish = completion_script("fish")
+
+        for script in (bash, zsh):
+            self.assertIn("provider::list", script)
+            self.assertIn("provider::check", script)
+            self.assertIn("auth::status", script)
+            self.assertIn("auth::login", script)
+
+        bash_list = next(
+            line
+            for line in bash.splitlines()
+            if line.strip().startswith("provider::list)")
+        )
+        zsh_list = next(
+            line
+            for line in zsh.splitlines()
+            if line.strip().startswith("provider::list)")
+        )
+        self.assertNotIn("--live", bash_list)
+        self.assertNotIn("--live", zsh_list)
+        bash_auth_status = next(
+            line
+            for line in bash.splitlines()
+            if line.strip().startswith("auth::status)")
+        )
+        zsh_auth_status = next(
+            line
+            for line in zsh.splitlines()
+            if line.strip().startswith("auth::status)")
+        )
+        for line in (bash_auth_status, zsh_auth_status):
+            self.assertNotIn("--user", line)
+            self.assertNotIn("--ttl-hours", line)
+
+        fish_provider_list = [
+            line
+            for line in fish.splitlines()
+            if "__xscientist_word_is 2 provider" in line
+            and "__xscientist_word_is 3 list" in line
+        ]
+        fish_auth_status = [
+            line
+            for line in fish.splitlines()
+            if "__xscientist_word_is 2 auth" in line
+            and "__xscientist_word_is 3 status" in line
+        ]
+        self.assertTrue(fish_provider_list)
+        self.assertTrue(fish_auth_status)
+        self.assertFalse(any("-l live" in line for line in fish_provider_list))
+        self.assertFalse(any("-l user" in line for line in fish_auth_status))
+        self.assertFalse(any("-l ttl-hours" in line for line in fish_auth_status))
 
     def test_conformance_kit_expects_the_bad_fixture_to_fail(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

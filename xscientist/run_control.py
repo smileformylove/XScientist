@@ -5,18 +5,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from ai_scientist.utils.atomic_io import atomic_write_json
+from ai_scientist.utils.privacy import (
+    redact_sensitive_payload,
+    redact_sensitive_text,
+)
 
 RUN_SCHEMA = "xscientist.local-run.v1"
 RUN_STATE_ENV = "XSCIENTIST_RUN_STATE"
@@ -31,8 +36,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _state_dir(workspace: str | Path) -> Path:
-    return Path(workspace).expanduser().resolve() / "04_logs" / "runs"
+def _state_dir(workspace: str | Path, *, create: bool = False) -> Path:
+    root = Path(workspace).expanduser().resolve()
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    cursor = root
+    for part in ("04_logs", "runs"):
+        cursor = cursor / part
+        if create:
+            cursor.mkdir(mode=0o700, exist_ok=True)
+        if cursor.is_symlink():
+            raise RunControlError("run control directory must not be a symlink")
+        if cursor.exists() and not cursor.is_dir():
+            raise RunControlError("run control path is not a directory")
+    return cursor
 
 
 def _require_workspace(workspace: str | Path) -> Path:
@@ -46,7 +63,12 @@ def _state_path(workspace: str | Path, run_id: str) -> Path:
     normalized = str(run_id or "").strip()
     if not normalized or any(char not in "0123456789abcdef" for char in normalized):
         raise RunControlError("run id must contain lowercase hexadecimal characters")
-    return _state_dir(workspace) / f"{normalized}.json"
+    path = _state_dir(workspace) / f"{normalized}.json"
+    if path.is_symlink():
+        raise RunControlError("run state must not be a symlink")
+    if path.exists() and not path.is_file():
+        raise RunControlError("run state is not a regular file")
+    return path
 
 
 def _read_state(path: Path) -> dict[str, Any]:
@@ -62,11 +84,50 @@ def _read_state(path: Path) -> dict[str, Any]:
 
 
 def _write_state(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_json(path, payload)
+    for parent in (path.parent.parent, path.parent):
+        if parent.is_symlink() or not parent.is_dir():
+            raise RunControlError("run control directory failed integrity validation")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RunControlError("run state failed integrity validation")
+    descriptor, raw_temp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temp = Path(raw_temp)
+    try:
+        try:
+            os.fchmod(descriptor, 0o600)
+        except (AttributeError, OSError):  # pragma: no cover - platform dependent
+            pass
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.replace(path)
+        try:
+            path.chmod(0o600)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _open_private_log(path: Path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RunControlError("run log failed integrity validation")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+    except (AttributeError, OSError):  # pragma: no cover - platform dependent
+        pass
     try:
         path.chmod(0o600)
-    except OSError:
+    except OSError:  # pragma: no cover - platform dependent
         pass
+    return os.fdopen(descriptor, "a", encoding="utf-8")
 
 
 def _pid_is_alive(pid: Any, *, hostname: str | None = None) -> bool:
@@ -106,22 +167,107 @@ def _process_identity(pid: int) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _redacted_command(argv: Sequence[str]) -> list[str]:
-    rendered: list[str] = []
-    redact_next = False
-    for item in argv:
-        if redact_next:
-            rendered.append("<stored-in-workspace>")
-            redact_next = False
+_PUBLIC_VALUE_FLAGS = {
+    "--autopilot",
+    "--task",
+    "--provider",
+    "--model",
+    "--profile",
+    "--max-project-tokens",
+    "--max-project-hours",
+    "--max-cost-usd",
+    "--price-input-per-million",
+    "--price-output-per-million",
+    "--price-cached-input-per-million",
+}
+_PUBLIC_BOOLEAN_FLAGS = {
+    "--allow-synthetic-data",
+    "--build-executor",
+    "--skip-credentials",
+    "--non-interactive",
+    "--force",
+    "--prepare-only",
+    "--json",
+}
+_PUBLIC_PLACEHOLDER_FLAGS = {
+    "--question": "<stored-in-workspace>",
+    "--user": "<redacted>",
+    "--data-dir": "{data}",
+    "--base-url": "<redacted>",
+}
+
+
+def _safe_public_value(flag: str, value: str) -> str:
+    if redact_sensitive_text(value) != value:
+        return "<redacted>"
+    if flag.startswith("--max-") or flag.startswith("--price-"):
+        try:
+            float(value)
+        except ValueError:
+            return "<redacted>"
+        return value
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._:+/-]{1,160}", value)
+        or ".." in value
+        or "://" in value
+        or value.startswith(("/", "\\"))
+    ):
+        return "<redacted>"
+    return value
+
+
+def _public_command(argv: Sequence[str]) -> list[str]:
+    """Render a portable allowlisted command; exact argv stays in the manifest."""
+
+    values = [str(item) for item in argv]
+    if not values or values[0] != "start":
+        return ["start", "{workspace}"]
+    rendered = ["start", "{workspace}"]
+    index = 2  # argv[1] is the positional workspace and is never public.
+    while index < len(values):
+        item = values[index]
+        inline_flag, separator, inline_value = item.partition("=")
+        flag = inline_flag if separator and inline_flag.startswith("--") else item
+        if flag in _PUBLIC_BOOLEAN_FLAGS:
+            rendered.append(flag)
+            index += 1
             continue
-        rendered.append(str(item))
-        if item == "--question":
-            redact_next = True
+        if flag in _PUBLIC_PLACEHOLDER_FLAGS or flag in _PUBLIC_VALUE_FLAGS:
+            if separator:
+                value = inline_value
+                consumed = 1
+            elif index + 1 < len(values):
+                value = values[index + 1]
+                consumed = 2
+            else:
+                value = ""
+                consumed = 1
+            public_value = _PUBLIC_PLACEHOLDER_FLAGS.get(flag)
+            if public_value is None:
+                public_value = _safe_public_value(flag, value)
+            rendered.extend([flag, public_value])
+            index += consumed
+            continue
+        if item.startswith("--"):
+            # Preserve the presence of a future flag, never its unknown value.
+            rendered.append(item.split("=", 1)[0])
+            if "=" not in item and index + 1 < len(values):
+                if not values[index + 1].startswith("--"):
+                    index += 1
+            index += 1
+            continue
+        # Additional positionals are outside the public start contract.
+        rendered.append("<redacted>")
+        index += 1
     return rendered
 
 
 def _argv_option(argv: Sequence[str], flag: str) -> str | None:
     values = [str(item) for item in argv]
+    inline_prefix = flag + "="
+    for item in values:
+        if item.startswith(inline_prefix):
+            return item[len(inline_prefix) :].strip() or None
     try:
         index = values.index(flag)
     except ValueError:
@@ -195,8 +341,7 @@ def launch_detached_run(
 
     root = Path(workspace).expanduser().resolve()
     run_id = uuid.uuid4().hex[:16]
-    state_dir = _state_dir(root)
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = _state_dir(root, create=True)
     state_path = _state_path(root, run_id)
     stdout_path = state_dir / f"{run_id}.out.log"
     stderr_path = state_dir / f"{run_id}.err.log"
@@ -219,7 +364,7 @@ def launch_detached_run(
         "returncode": None,
         "cancel_requested_at": None,
         "resume_of": resume_of,
-        "command": _redacted_command(child_argv),
+        "command": _public_command(child_argv),
         # This file is local and forced to mode 0600.  Keeping the exact argv is
         # what makes recovery deterministic; it is never returned in public
         # JSON or human output.
@@ -242,8 +387,8 @@ def launch_detached_run(
             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         )
     with (
-        stdout_path.open("a", encoding="utf-8") as stdout_handle,
-        stderr_path.open("a", encoding="utf-8") as stderr_handle,
+        _open_private_log(stdout_path) as stdout_handle,
+        _open_private_log(stderr_path) as stderr_handle,
     ):
         process = subprocess.Popen(
             [sys.executable, "-m", "xscientist", *child_argv],
@@ -251,11 +396,6 @@ def launch_detached_run(
             stderr=stderr_handle,
             **popen_kwargs,
         )
-    for log_path in (stdout_path, stderr_path):
-        try:
-            log_path.chmod(0o600)
-        except OSError:
-            pass
     payload["pid"] = process.pid
     payload["process_identity"] = _process_identity(process.pid)
     payload["status"] = "running"
@@ -328,8 +468,17 @@ def finish_active_run(path: Path | None, returncode: int) -> None:
 
 
 def public_run_view(payload: dict[str, Any]) -> dict[str, Any]:
-    private = {"resume_argv", "process_identity"}
+    private = {"resume_argv", "process_identity", "hostname"}
     view = {key: value for key, value in payload.items() if key not in private}
+    view["workspace"] = "."
+    command_source = payload.get("resume_argv") or payload.get("command") or []
+    view["command"] = _public_command(
+        command_source if isinstance(command_source, list) else []
+    )
+    for key in ("provider", "model", "profile", "task"):
+        value = payload.get(key)
+        if value is not None:
+            view[key] = _safe_public_value(f"--{key}", str(value))
     started = str(payload.get("started_at") or "")
     finished = str(payload.get("finished_at") or "")
     if started:
@@ -347,7 +496,8 @@ def public_run_view(payload: dict[str, Any]) -> dict[str, Any]:
             view["duration_seconds"] = None
     else:
         view["duration_seconds"] = None
-    return view
+    redacted = redact_sensitive_payload(view)
+    return dict(redacted) if isinstance(redacted, dict) else {}
 
 
 def list_runs(workspace: str | Path) -> list[dict[str, Any]]:
@@ -383,16 +533,26 @@ def read_run_logs(
     if tail < 1 or tail > 10_000:
         raise RunControlError("tail must be between 1 and 10000 lines")
     root = _state_dir(workspace)
+    normalized_run_id = str(run_id or "").strip()
 
     def load(name: str) -> list[str]:
         filename = state.get(name)
         if not filename:
             return []
-        path = root / str(filename)
+        suffix = "out.log" if name == "stdout" else "err.log"
+        expected = f"{normalized_run_id}.{suffix}"
+        if str(filename) != expected:
+            raise RunControlError(f"run {name} log path failed integrity validation")
+        path = root / expected
+        if path.is_symlink():
+            raise RunControlError(f"run {name} log must not be a symlink")
+        if path.exists() and not path.is_file():
+            raise RunControlError(f"run {name} log is not a regular file")
         try:
-            return path.read_text(encoding="utf-8", errors="replace").splitlines()[
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[
                 -tail:
             ]
+            return [redact_sensitive_text(line) for line in lines]
         except OSError:
             return []
 

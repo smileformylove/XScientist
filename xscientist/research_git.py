@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 try:  # pragma: no cover - platform-specific import
     import fcntl
@@ -50,6 +50,7 @@ from ai_scientist.protocol.research_vcs import (
     validate_research_object,
 )
 from ai_scientist.protocol.schemas import load_schema
+from ai_scientist.utils.bounded_process import run_process_bounded
 from ai_scientist.utils.privacy import (
     format_privacy_findings,
     redact_sensitive_payload,
@@ -62,7 +63,8 @@ CHECKPOINT_SCHEMA = "xscientist.research-checkpoint.v1"
 OBJECT_POINTER_SCHEMA = "xscientist.research-object-pointer.v1"
 BUNDLE_SCHEMA = "xscientist.research-bundle.v1"
 ENVIRONMENT_SCHEMA = "xscientist.research-environment.v1"
-REPRODUCTION_RECEIPT_SCHEMA = "xscientist.reproduction-receipt.v1"
+REPRODUCTION_RECEIPT_SCHEMA = "xscientist.reproduction-receipt.v2"
+_MAX_REPRODUCTION_OUTPUT_CHARS = 20_000
 _HARD_MAX_STORE_ENTRIES = 32768
 _HARD_MAX_STORE_FILES = 8192
 _HARD_MAX_STORE_BYTES = 128 * 1024 * 1024
@@ -71,6 +73,7 @@ _HARD_MAX_BOUNDED_LOG_OUTPUT = 1 * 1024 * 1024
 _BOUNDED_LOG_TIMEOUT_SECONDS = 10.0
 _MAX_RESEARCH_STAGE_BYTES = 1 * 1024 * 1024
 _MAX_RESEARCH_STAGE_ENTRIES = 4096
+_MAX_BUNDLE_POINTER_BYTES = 1 * 1024 * 1024
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -183,6 +186,10 @@ SECRET_DENY_PATTERNS = (
     ".env.*",
     "**/.env",
     "**/.env.*",
+    ".secrets",
+    ".secrets/**",
+    "**/.secrets",
+    "**/.secrets/**",
     "**/*.pem",
     "**/*.key",
     "**/id_rsa",
@@ -257,6 +264,27 @@ research state and checkpoints. Large immutable evidence is stored under
 
 No remote is required and XScientist never pushes automatically.
 """
+
+
+def _merged_research_gitignore(existing: str) -> str:
+    """Append an ordered safety block without replacing project-owned rules."""
+
+    required_rules = [
+        line
+        for line in _RESEARCH_GITIGNORE.splitlines()
+        if line and not line.startswith("#")
+    ]
+    existing_rules = set(existing.splitlines())
+    if all(rule in existing_rules for rule in required_rules):
+        return existing
+    prefix = existing
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    if prefix and not prefix.endswith("\n\n"):
+        prefix += "\n"
+    # Repeat the complete ordered block. Negations such as ``!.env.example``
+    # must occur after the broad secret patterns to remain effective.
+    return prefix + _RESEARCH_GITIGNORE
 
 
 class ResearchGitError(RuntimeError):
@@ -811,7 +839,10 @@ def _repository_root(path: str | Path, *, require_config: bool = True) -> Path:
         raise ResearchGitError(f"research repository does not exist: {candidate}")
     completed = _run_git(candidate, ["rev-parse", "--show-toplevel"])
     root = Path(completed.stdout.strip()).resolve()
-    if require_config and not (root / "research.yaml").is_file():
+    config_path = root / "research.yaml"
+    if require_config and config_path.is_symlink():
+        raise ResearchGitError("research.yaml must not be a symlink")
+    if require_config and not config_path.is_file():
         raise ResearchGitError(
             f"{root} is a Git repository but not an XScientist research repository; "
             "run `xscientist research init <path>` first"
@@ -925,6 +956,50 @@ def _ensure_git_identity(repo: Path, name: str | None, email: str | None) -> Non
         _run_git(repo, ["config", "user.email", "xscientist@localhost"])
 
 
+def _local_git_identity(repo: Path) -> dict[str, str | None]:
+    identity: dict[str, str | None] = {}
+    for key in ("user.name", "user.email"):
+        result = _run_git(repo, ["config", "--local", "--get", key], check=False)
+        identity[key] = result.stdout.rstrip("\n") if result.returncode == 0 else None
+    return identity
+
+
+def _restore_local_git_identity(repo: Path, identity: Mapping[str, str | None]) -> None:
+    for key in ("user.name", "user.email"):
+        value = identity.get(key)
+        if value is None:
+            _run_git(
+                repo,
+                ["config", "--local", "--unset-all", key],
+                check=False,
+            )
+        else:
+            _run_git(repo, ["config", "--local", key, value])
+
+
+def _local_git_config_snapshot(repo: Path) -> str:
+    """Return an exact local-config snapshot without exposing its values."""
+
+    result = _run_git(
+        repo,
+        ["config", "--local", "--null", "--list"],
+        check=False,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def _refuse_private_research_metadata(
+    payload: Mapping[str, Any], *, operation: str
+) -> None:
+    """Reject private free text before it reaches Git or protocol metadata."""
+
+    candidate = dict(payload)
+    if redact_sensitive_payload(candidate) != candidate:
+        raise ResearchGitError(
+            f"privacy gate refused {operation} metadata; matched values were not displayed"
+        )
+
+
 def init_repository(
     path: str | Path,
     *,
@@ -941,58 +1016,352 @@ def init_repository(
         raise ResearchGitError("checkpoint policy must be manual, stage, or milestone")
     if max_file_bytes < 1024:
         raise ResearchGitError("max_file_bytes must be at least 1024")
+    _refuse_private_research_metadata(
+        {
+            "name": str(name or ""),
+            "question": str(question or ""),
+            "actor": str(actor or ""),
+        },
+        operation="research initialization",
+    )
     root = Path(path).expanduser().resolve()
+    root_existed = root.exists()
     root.mkdir(parents=True, exist_ok=True)
-    if (root / "research.yaml").exists():
+    config_path = root / "research.yaml"
+    question_path = root / "question.md"
+    note_path = root / ".xscientist" / "README.md"
+    gitignore_path = root / ".gitignore"
+    if config_path.exists() or config_path.is_symlink():
         raise ResearchGitError(f"research repository is already initialized: {root}")
 
+    managed_directories = (
+        root / ".xscientist",
+        root / "hypotheses",
+        root / "claims",
+        root / "manuscript",
+        root / "checkpoints",
+        root / "research-objects",
+        root / "ara",
+    )
+    managed_directories_existed = {
+        directory: directory.is_dir() and not directory.is_symlink()
+        for directory in managed_directories
+    }
+    for directory in managed_directories:
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise ResearchGitError(
+                "research initialization refused an unsafe managed directory: "
+                f"{directory.relative_to(root)}"
+            )
+    for managed_file in (gitignore_path, question_path, note_path):
+        if managed_file.is_symlink() or (
+            managed_file.exists() and not managed_file.is_file()
+        ):
+            raise ResearchGitError(
+                "research initialization refused an unsafe managed file: "
+                f"{managed_file.relative_to(root)}"
+            )
+
+    try:
+        existing_gitignore = (
+            gitignore_path.read_text(encoding="utf-8")
+            if gitignore_path.exists()
+            else ""
+        )
+        existing_question = (
+            question_path.read_text(encoding="utf-8")
+            if question_path.exists()
+            else None
+        )
+        existing_note = (
+            note_path.read_text(encoding="utf-8") if note_path.exists() else None
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ResearchGitError(
+            "research initialization could not safely read an existing managed file"
+        ) from exc
+
+    requested_question = (
+        question or "# Research question\n\nDescribe the research question.\n"
+    ).rstrip()
+    if (
+        existing_question is not None
+        and question
+        and existing_question.rstrip() != requested_question
+    ):
+        raise ResearchGitError(
+            "research initialization refused to overwrite existing question.md"
+        )
+    if existing_note is not None and existing_note != _REPOSITORY_NOTE:
+        raise ResearchGitError(
+            "research initialization refused to overwrite existing .xscientist/README.md"
+        )
+
+    git_control_path = root / ".git"
+    git_control_existed = git_control_path.exists() or git_control_path.is_symlink()
+    existing_git_probe = _run_git(root, ["rev-parse", "--show-toplevel"], check=False)
+    had_existing_git_repository = bool(
+        existing_git_probe.returncode == 0
+        and existing_git_probe.stdout.strip()
+        and Path(existing_git_probe.stdout.strip()).resolve() == root
+    )
+    if git_control_existed and not had_existing_git_repository:
+        raise ResearchGitError(
+            "research initialization refused a pre-existing .git control path "
+            "that is not an exact-root Git repository"
+        )
     init = _run_git(root, ["init", "-b", "main"], check=False)
     if init.returncode:
         _run_git(root, ["init"])
         _run_git(root, ["symbolic-ref", "HEAD", "refs/heads/main"])
-    _ensure_git_identity(root, git_user_name, git_user_email)
+    identity_before = _local_git_identity(root)
+    identity_after_transaction = dict(identity_before)
+    git_config_after_transaction = _local_git_config_snapshot(root)
+
+    staged_before, _changed_before = _changed_paths(root)
+    if staged_before:
+        raise ResearchGitError(
+            "research initialization refused because the Git index already "
+            "contains staged work: " + ", ".join(sorted(staged_before))
+        )
+    if had_existing_git_repository:
+        tracked_managed_dirt = sorted(
+            _git_paths(
+                root,
+                ["diff", "--no-renames", "--name-only", "-z"],
+            )
+            & {".gitignore", "question.md", ".xscientist/README.md"}
+        )
+        if tracked_managed_dirt:
+            raise ResearchGitError(
+                "research initialization refused to absorb existing edits to "
+                "managed files: " + ", ".join(tracked_managed_dirt)
+            )
 
     project_name = (name or root.name).strip() or "research-project"
-    _atomic_write_text(root / ".gitignore", _RESEARCH_GITIGNORE)
-    _atomic_write_text(
-        root / "research.yaml",
-        _config_text(
-            name=project_name,
-            policy=policy,
-            actor=actor,
-            max_file_bytes=max_file_bytes,
+    originals: dict[Path, dict[str, Any] | None] = {
+        gitignore_path: (
+            {
+                "content": gitignore_path.read_bytes(),
+                "mode": gitignore_path.stat().st_mode & 0o7777,
+            }
+            if gitignore_path.exists()
+            else None
         ),
-    )
-    question_text = (
-        question or "# Research question\n\nDescribe the research question.\n"
-    ).rstrip()
-    _atomic_write_text(root / "question.md", question_text + "\n")
-    _atomic_write_text(root / ".xscientist" / "README.md", _REPOSITORY_NOTE)
-    for directory in (
-        "hypotheses",
-        "claims",
-        "manuscript",
-        "checkpoints",
-        "research-objects",
-        "ara",
-    ):
-        (root / directory).mkdir(parents=True, exist_ok=True)
+        config_path: None,
+        question_path: (
+            {
+                "content": question_path.read_bytes(),
+                "mode": question_path.stat().st_mode & 0o7777,
+            }
+            if question_path.exists()
+            else None
+        ),
+        note_path: (
+            {
+                "content": note_path.read_bytes(),
+                "mode": note_path.stat().st_mode & 0o7777,
+            }
+            if note_path.exists()
+            else None
+        ),
+    }
+    head_before = _head(root)
+    transaction_outputs: dict[Path, dict[str, Any]] = {}
 
-    if not commit:
-        return CheckpointResult(
-            created=False,
-            committed=False,
-            reason="repository initialized without a commit",
+    def managed_file_matches(path: Path, expected: dict[str, Any] | None) -> bool:
+        if expected is None:
+            return not path.exists() and not path.is_symlink()
+        if path.is_symlink() or not path.is_file():
+            return False
+        try:
+            return path.read_bytes() == expected.get(
+                "content"
+            ) and path.stat().st_mode & 0o7777 == expected.get("mode")
+        except OSError:
+            return False
+
+    def write_transaction_file(path: Path, content: str) -> None:
+        """Record the exact write so rollback never erases a concurrent edit."""
+
+        original = originals.get(path)
+        if not managed_file_matches(path, original):
+            action = "appeared" if original is None else "changed"
+            raise ResearchGitError(
+                "research initialization stopped because a managed file "
+                f"{action} concurrently: {path.relative_to(root)}"
+            )
+
+        _atomic_write_text(path, content)
+        transaction_outputs[path] = {
+            "content": content.encode("utf-8"),
+            "mode": path.stat().st_mode & 0o7777,
+        }
+
+    def revalidate_managed_files() -> None:
+        for managed_file, original in originals.items():
+            expected = transaction_outputs.get(managed_file, original)
+            if not managed_file_matches(managed_file, expected):
+                raise ResearchGitError(
+                    "research initialization stopped because a managed file "
+                    f"changed concurrently: {managed_file.relative_to(root)}"
+                )
+
+    try:
+        merged_gitignore = _merged_research_gitignore(existing_gitignore)
+        if not gitignore_path.exists() or merged_gitignore != existing_gitignore:
+            write_transaction_file(gitignore_path, merged_gitignore)
+        write_transaction_file(
+            config_path,
+            _config_text(
+                name=project_name,
+                policy=policy,
+                actor=actor,
+                max_file_bytes=max_file_bytes,
+            ),
         )
-    return create_checkpoint(
-        root,
-        stage="init",
-        subject=f"initialize {project_name}",
-        summary="Initialize the local scientific repository and research question.",
-        status="completed",
-        actor=actor,
-        allow_checkpoint_only=True,
-    )
+        if existing_question is None:
+            write_transaction_file(question_path, requested_question + "\n")
+        if existing_note is None:
+            write_transaction_file(note_path, _REPOSITORY_NOTE)
+        for directory in managed_directories:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        if not commit:
+            # Batch callers record typed objects before their first checkpoint.
+            # Establish the requested local author only after every destructive
+            # preflight has passed; the exception path below restores it if this
+            # initialization transaction fails.
+            _ensure_git_identity(root, git_user_name, git_user_email)
+            identity_after_transaction = _local_git_identity(root)
+            git_config_after_transaction = _local_git_config_snapshot(root)
+            revalidate_managed_files()
+            return CheckpointResult(
+                created=False,
+                committed=False,
+                reason="repository initialized without a commit",
+            )
+        _staged, changed = _changed_paths(root)
+        managed_changes = sorted(
+            changed
+            & {
+                ".gitignore",
+                "research.yaml",
+                "question.md",
+                ".xscientist/README.md",
+            }
+        )
+        _ensure_git_identity(root, git_user_name, git_user_email)
+        identity_after_transaction = _local_git_identity(root)
+        git_config_after_transaction = _local_git_config_snapshot(root)
+        revalidate_managed_files()
+        return create_checkpoint(
+            root,
+            stage="init",
+            subject=f"initialize {project_name}",
+            summary="Initialize the local scientific repository and research question.",
+            status="completed",
+            actor=actor,
+            # Initializing inside an existing Git repository must not absorb
+            # unrelated dirty work. A new repository intentionally captures its
+            # policy-eligible workspace as the baseline scientific checkpoint.
+            only_paths=managed_changes if had_existing_git_repository else None,
+            allow_checkpoint_only=True,
+        )
+    except BaseException:
+        # Keep initialization non-destructive when a privacy/checkpoint gate
+        # fails before a commit is created.
+        if _head(root) == head_before:
+            if had_existing_git_repository:
+                # ``create_checkpoint`` restores only its own staged paths on
+                # failure.  Do not reset the whole index here: another process
+                # may have staged unrelated work while initialization was
+                # running.
+                current_identity = _local_git_identity(root)
+                selective_identity = dict(current_identity)
+                for key in ("user.name", "user.email"):
+                    if current_identity.get(key) == identity_after_transaction.get(key):
+                        selective_identity[key] = identity_before.get(key)
+                _restore_local_git_identity(root, selective_identity)
+            for managed_file, original in originals.items():
+                expected = transaction_outputs.get(managed_file)
+                if expected is None or not managed_file.is_file():
+                    continue
+                try:
+                    current_content = managed_file.read_bytes()
+                    current_mode = managed_file.stat().st_mode & 0o7777
+                except OSError:
+                    continue
+                if current_content != expected.get(
+                    "content"
+                ) or current_mode != expected.get("mode"):
+                    # A concurrent writer owns the newer state.  Preserving it
+                    # is safer than claiming a complete rollback.
+                    continue
+                if original is None:
+                    managed_file.unlink(missing_ok=True)
+                else:
+                    content = original.get("content")
+                    if not isinstance(content, bytes):  # pragma: no cover - invariant
+                        raise ResearchGitError(
+                            "research initialization rollback snapshot is invalid"
+                        )
+                    managed_file.parent.mkdir(parents=True, exist_ok=True)
+                    managed_file.write_bytes(content)
+                    original_mode = original.get("mode")
+                    managed_file.chmod(
+                        int(original_mode) if isinstance(original_mode, int) else 0o600
+                    )
+
+            for directory in reversed(managed_directories):
+                if managed_directories_existed[directory] or not directory.exists():
+                    continue
+                if directory.is_symlink() or not directory.is_dir():
+                    continue
+                try:
+                    directory.rmdir()
+                except OSError:
+                    # Unknown content may have arrived concurrently.  Keep it.
+                    pass
+
+            if not git_control_existed and (
+                git_control_path.exists() or git_control_path.is_symlink()
+            ):
+                config_unchanged = (
+                    _local_git_config_snapshot(root) == git_config_after_transaction
+                )
+                staged_probe = _run_git(
+                    root,
+                    [
+                        "diff",
+                        "--cached",
+                        "--ita-visible-in-index",
+                        "--name-only",
+                        "-z",
+                    ],
+                    check=False,
+                )
+                staged_now = {
+                    item
+                    for item in staged_probe.stdout.split("\0")
+                    if item and not item.endswith("/")
+                }
+                transaction_paths = {
+                    path.relative_to(root).as_posix() for path in transaction_outputs
+                }
+                has_external_stage = staged_probe.returncode != 0 or bool(
+                    staged_now - transaction_paths
+                )
+                if (
+                    config_unchanged
+                    and not has_external_stage
+                    and git_control_path.is_dir()
+                    and not git_control_path.is_symlink()
+                ):
+                    shutil.rmtree(git_control_path)
+            if not root_existed and root.is_dir() and not any(root.iterdir()):
+                root.rmdir()
+        raise
 
 
 def _research_object_path(root: Path, payload: dict[str, Any]) -> Path:
@@ -1333,8 +1702,18 @@ def _git_paths(repo: Path, args: Sequence[str]) -> set[str]:
 
 
 def _changed_paths(repo: Path) -> tuple[set[str], set[str]]:
-    staged = _git_paths(repo, ["diff", "--cached", "--name-only", "-z"])
-    unstaged = _git_paths(repo, ["diff", "--name-only", "-z"])
+    staged = _git_paths(
+        repo,
+        [
+            "diff",
+            "--no-renames",
+            "--cached",
+            "--ita-visible-in-index",
+            "--name-only",
+            "-z",
+        ],
+    )
+    unstaged = _git_paths(repo, ["diff", "--no-renames", "--name-only", "-z"])
     untracked = _git_paths(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
     return staged, unstaged | untracked
 
@@ -1586,6 +1965,9 @@ def _select_paths(
             excluded.append(f"{relative} (not tracked by policy)")
             continue
         target = repo / relative
+        if target.is_symlink():
+            excluded.append(f"{relative} (symbolic links are not checkpoint-safe)")
+            continue
         if target.exists() and target.is_file() and target.stat().st_size > max_bytes:
             excluded.append(
                 f"{relative} ({target.stat().st_size} bytes exceeds {max_bytes}; add as research object)"
@@ -1687,10 +2069,8 @@ def _checkpoint_parent_records(
         return []
     checkpoint_at_head = _checkpoint_id_from_commit(repo, head)
     if checkpoint_at_head:
-        resolved = _checkpoint_by_id_at_commit(repo, head, checkpoint_at_head)
-        if resolved is not None:
-            path, payload = resolved
-            return [(head, path, payload)]
+        path, payload = _checkpoint_at_commit(repo, head)
+        return [(head, path, payload)]
     ancestry = _run_git(repo, ["rev-list", "--parents", "-n", "1", head]).stdout.split()
     starts = ancestry[1:] if len(ancestry) > 2 else [head]
     records: list[tuple[str, str, dict[str, Any]]] = []
@@ -1720,13 +2100,13 @@ def _append_checkpoint_parent_records(
     output = list(records)
     seen = {str(record[2].get("content_hash") or "") for record in records}
     for ref in refs:
-        record = _latest_checkpoint_record(repo, ref)
-        if record is None:
-            raise ResearchGitError(f"research parent has no checkpoint: {ref}")
-        _validate_checkpoint_payload(
-            record[2], checkpoint_path=f"{record[0]}:{record[1]}"
-        )
-        checkpoint_hash = str(record[2].get("content_hash") or "")
+        resolved = _run_git(
+            repo,
+            ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+        ).stdout.strip()
+        checkpoint_path, payload = _checkpoint_at_commit(repo, resolved)
+        record = (resolved, checkpoint_path, payload)
+        checkpoint_hash = str(payload.get("content_hash") or "")
         if checkpoint_hash and checkpoint_hash not in seen:
             output.append(record)
             seen.add(checkpoint_hash)
@@ -2072,6 +2452,18 @@ def _create_checkpoint_locked(
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
     config = load_repository_config(root)
+    checkpoint_actor = actor or str(config.get("actor") or "xscientist")
+    _refuse_private_research_metadata(
+        {
+            "subject": subject,
+            "summary": summary,
+            "actor": checkpoint_actor,
+            "nodes": [str(item) for item in nodes],
+            "claims": [str(item) for item in claims],
+            "reproduce_command": str(reproduce_command or ""),
+        },
+        operation="checkpoint",
+    )
     if not stage or not stage.replace("-", "_").replace("_", "a").isalnum():
         raise ResearchGitError(
             "stage must contain only letters, numbers, hyphens, or underscores"
@@ -2095,7 +2487,20 @@ def _create_checkpoint_locked(
                 "staged research paths no longer contain a change: " + ", ".join(absent)
             )
         candidates = changed & normalized_only
-    selected, excluded = _select_paths(root, config, candidates, explicit=include)
+    explicit_paths = [*include, *(only_paths or ())]
+    selected, excluded = _select_paths(
+        root,
+        config,
+        candidates,
+        explicit=explicit_paths,
+    )
+    if allow_backend_stage:
+        excluded_backend_paths = sorted(set(staged_before) - set(selected))
+        if excluded_backend_paths:
+            raise ResearchGitError(
+                "checkpoint refused because the backend index contains paths outside "
+                "the research safety policy: " + ", ".join(excluded_backend_paths)
+            )
     material = [path for path in selected if not path.startswith("checkpoints/")]
     if not material and not allow_checkpoint_only:
         return CheckpointResult(
@@ -2187,7 +2592,7 @@ def _create_checkpoint_locked(
         "status": status,
         "subject": " ".join(subject.strip().split()),
         "summary": summary.strip(),
-        "actor": actor or str(config.get("actor") or "xscientist"),
+        "actor": checkpoint_actor,
         "branch": _branch(root),
         "parent_commit": _head(root),
         "previous_checkpoint_hash": (previous or {}).get("content_hash"),
@@ -2268,6 +2673,64 @@ def _create_checkpoint_locked(
         paths_to_add = sorted(set(stage_paths) - set(staged_before))
         if paths_to_add:
             _run_git(root, ["add", "-A", "--", *paths_to_add])
+        staged_for_commit = _git_paths(
+            root,
+            ["diff", "--no-renames", "--cached", "--name-only", "-z"],
+        )
+        expected_stage = set(stage_paths)
+        if staged_for_commit != expected_stage:
+            unexpected = sorted(staged_for_commit - expected_stage)
+            absent = sorted(expected_stage - staged_for_commit)
+            details: list[str] = []
+            if unexpected:
+                details.append("unexpected: " + ", ".join(unexpected))
+            if absent:
+                details.append("absent: " + ", ".join(absent))
+            raise ResearchGitError(
+                "checkpoint index does not exactly match the declared paths"
+                + (" (" + "; ".join(details) + ")" if details else "")
+            )
+        # Inspect the complete index-bound path set. Refuse a split
+        # index/worktree state so the scanner cannot inspect benign working
+        # bytes while Git commits a different staged blob.
+        index_drift = _git_paths(
+            root,
+            [
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+                *sorted(staged_for_commit),
+            ],
+        )
+        if index_drift:
+            raise ResearchGitError(
+                "checkpoint refused because staged content differs from the "
+                "working copy: " + ", ".join(sorted(index_drift))
+            )
+        privacy_findings = scan_paths(root, staged_for_commit)
+        if privacy_findings:
+            raise ResearchGitError(
+                "privacy gate refused the checkpoint; matched values were not displayed:\n"
+                + format_privacy_findings(privacy_findings)
+            )
+        index_drift = _git_paths(
+            root,
+            [
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+                *sorted(staged_for_commit),
+            ],
+        )
+        if index_drift:
+            raise ResearchGitError(
+                "checkpoint refused because staged content changed during privacy "
+                "validation: " + ", ".join(sorted(index_drift))
+            )
         if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
             raise ResearchGitError("checkpoint produced no staged Git change")
         trailers = [
@@ -2330,6 +2793,7 @@ def create_checkpoint(
     object_refs: Sequence[str] = (),
     reproduce_command: str | None = None,
     include: Sequence[str] = (),
+    only_paths: Sequence[str] | None = None,
     commit: bool = True,
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
@@ -2348,6 +2812,7 @@ def create_checkpoint(
             object_refs=object_refs,
             reproduce_command=reproduce_command,
             include=include,
+            only_paths=only_paths,
             commit=commit,
             allow_checkpoint_only=allow_checkpoint_only,
         )
@@ -2974,6 +3439,7 @@ def revert_research_checkpoint(
         _require_clean_research_switch(root)
         resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
         resolved_commit = resolved.stdout.strip()
+        _checkpoint_at_commit(root, resolved_commit)
         checkpoint_paths = [
             path
             for path in _run_git(
@@ -3184,18 +3650,115 @@ def add_research_object(
 
 
 def _checkpoint_at_commit(repo: Path, commit: str) -> tuple[str, dict[str, Any]]:
-    record = _latest_checkpoint_record(repo, commit)
+    resolved = _run_git(
+        repo,
+        ["rev-parse", "--verify", f"{commit}^{{commit}}"],
+    ).stdout.strip()
+    trailer_body = _run_git(
+        repo,
+        ["show", "-s", "--format=%(trailers:only,unfold)", resolved],
+    ).stdout
+    trailers: dict[str, list[str]] = {}
+    for line in trailer_body.splitlines():
+        if ": " not in line:
+            continue
+        key, value = line.split(": ", 1)
+        trailers.setdefault(key, []).append(value.strip())
+
+    required_trailers = (
+        "Research-Checkpoint",
+        "Research-Stage",
+        "Research-State",
+        "Research-Event",
+    )
+    for key in required_trailers:
+        values = trailers.get(key) or []
+        if len(values) != 1 or not values[0]:
+            detail = "missing" if not values else "ambiguous"
+            raise ResearchGitError(
+                f"commit {resolved} is not bound to a research checkpoint: "
+                f"{detail} {key} trailer"
+            )
+
+    checkpoint_id = trailers["Research-Checkpoint"][0]
+    record = _checkpoint_by_id_at_commit(repo, resolved, checkpoint_id)
     if record is None:
-        raise ResearchGitError(f"commit {commit!r} contains no research checkpoint")
-    _checkpoint_commit, checkpoint_path, payload = record
+        raise ResearchGitError(
+            f"commit {resolved} is not bound to research checkpoint "
+            f"{checkpoint_id}: matching checkpoint JSON is absent"
+        )
+    checkpoint_path, raw_payload = record
+    payload = _validate_checkpoint_payload(
+        raw_payload,
+        checkpoint_path=f"{resolved}:{checkpoint_path}",
+    )
+
+    event_hash = str(payload["content_hash"])
+    expected_checkpoint_id = f"rcp-{event_hash.split(':', 1)[1][:16]}"
+    binding_fields = {
+        "Research-Checkpoint": (checkpoint_id, expected_checkpoint_id),
+        "Research-Event": (trailers["Research-Event"][0], event_hash),
+        "Research-Stage": (trailers["Research-Stage"][0], str(payload["stage"])),
+        "Research-State": (trailers["Research-State"][0], str(payload["status"])),
+    }
+    for key, (actual, expected) in binding_fields.items():
+        if actual != expected:
+            raise ResearchGitError(
+                f"commit {resolved} research checkpoint binding mismatch: "
+                f"{key} does not match {checkpoint_path}"
+            )
+
+    ancestry = _run_git(
+        repo,
+        ["rev-list", "--parents", "-n", "1", resolved],
+    ).stdout.split()
+    first_parent = ancestry[1] if len(ancestry) > 1 else None
+    if payload.get("parent_commit") != first_parent:
+        raise ResearchGitError(
+            f"commit {resolved} is not bound to research checkpoint "
+            f"{checkpoint_id}: parent_commit does not match its first Git parent"
+        )
+
+    if first_parent is None:
+        commit_paths = set(
+            _run_git(repo, ["ls-tree", "-r", "--name-only", resolved])
+            .stdout.strip()
+            .splitlines()
+        )
+    else:
+        commit_paths = set(
+            _run_git(
+                repo,
+                ["diff", "--no-renames", "--name-only", first_parent, resolved],
+            )
+            .stdout.strip()
+            .splitlines()
+        )
+    if checkpoint_path not in commit_paths:
+        raise ResearchGitError(
+            f"commit {resolved} is not bound to research checkpoint "
+            f"{checkpoint_id}: checkpoint JSON was not changed by this commit"
+        )
+    declared_paths = {str(item) for item in payload.get("changed_paths") or []}
+    actual_material_paths = {
+        path for path in commit_paths if not path.startswith("checkpoints/")
+    }
+    if declared_paths != actual_material_paths:
+        raise ResearchGitError(
+            f"commit {resolved} is not bound to research checkpoint "
+            f"{checkpoint_id}: changed_paths does not match the committed material"
+        )
     return checkpoint_path, payload
 
 
 def show_checkpoint(repo: str | Path, commit: str = "HEAD") -> dict[str, Any]:
     root = _repository_root(repo)
-    path, payload = _checkpoint_at_commit(root, commit)
+    resolved = _run_git(
+        root, ["rev-parse", "--verify", f"{commit}^{{commit}}"]
+    ).stdout.strip()
+    path, payload = _checkpoint_at_commit(root, resolved)
     return {
-        "commit": _run_git(root, ["rev-parse", commit]).stdout.strip(),
+        "commit": resolved,
         "path": path,
         "checkpoint_hash_valid": _checkpoint_hash_valid(payload),
         "checkpoint": payload,
@@ -3999,7 +4562,6 @@ def _semantic_merge_conflicts(
     ours: dict[str, dict[str, Any]],
     theirs: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    ours_new = _new_objects_since(base, ours)
     theirs_new = _new_objects_since(base, theirs)
     conflicts: list[dict[str, Any]] = []
     combined_objects = {**base, **ours, **theirs}
@@ -4021,54 +4583,184 @@ def _semantic_merge_conflicts(
                     ).add(str(payload["object_id"]))
         return result
 
-    ours_relations = relation_objects(ours_new)
-    theirs_relations = relation_objects(theirs_new)
-    for target in sorted(set(ours_relations) & set(theirs_relations)):
-        combined_types = set(ours_relations[target]) | set(theirs_relations[target])
-        if combined_types == {"supports", "refutes"}:
-            supporting = sorted(
-                ours_relations[target].get("supports", set())
-                | theirs_relations[target].get("supports", set())
-            )
-            refuting = sorted(
-                ours_relations[target].get("refutes", set())
-                | theirs_relations[target].get("refutes", set())
-            )
-            from .research_semantics import scopes_compatible
+    # Compare the effective target frontier with the frontier produced by the
+    # merge.  Looking only at objects newly created on *both* branches misses a
+    # common scientific conflict: support already exists at the merge base and
+    # the source branch introduces a refutation (or vice versa).  A conflict is
+    # reported only when the merge introduces at least one new opposed pair;
+    # an already-contested target does not make every unrelated merge fail.
+    ours_relations = relation_objects(list(ours.values()))
+    merged_relations = relation_objects([*ours.values(), *theirs.values()])
 
-            overlapping_pairs = [
-                (support_id, refute_id)
-                for support_id in supporting
-                for refute_id in refuting
-                if scopes_compatible(
-                    (combined_objects.get(support_id, {}).get("payload") or {}).get(
-                        "scope"
-                    )
-                    or {},
-                    (combined_objects.get(refute_id, {}).get("payload") or {}).get(
-                        "scope"
-                    )
-                    or {},
-                )
-            ]
-            if not overlapping_pairs:
-                continue
-            conflicts.append(
-                {
-                    "type": "opposed_evidence",
-                    "target": target,
-                    "supporting_evidence": supporting,
-                    "refuting_evidence": refuting,
-                    "overlapping_scope_pairs": [
-                        list(item) for item in overlapping_pairs
-                    ],
-                    "message": "the same research object is supported and refuted",
-                }
+    from .research_semantics import scopes_compatible
+
+    def opposed_pairs(
+        target: str,
+        relations: dict[str, dict[str, set[str]]],
+    ) -> set[tuple[str, str]]:
+        supporting = relations.get(target, {}).get("supports", set())
+        refuting = relations.get(target, {}).get("refutes", set())
+        return {
+            (support_id, refute_id)
+            for support_id in supporting
+            for refute_id in refuting
+            if scopes_compatible(
+                (combined_objects.get(support_id, {}).get("payload") or {}).get("scope")
+                or {},
+                (combined_objects.get(refute_id, {}).get("payload") or {}).get("scope")
+                or {},
             )
+        }
+
+    for target in sorted(merged_relations):
+        merged_pairs = opposed_pairs(target, merged_relations)
+        introduced_pairs = merged_pairs - opposed_pairs(target, ours_relations)
+        if not introduced_pairs:
+            continue
+        supporting = sorted({item[0] for item in merged_pairs})
+        refuting = sorted({item[1] for item in merged_pairs})
+        conflicts.append(
+            {
+                "type": "opposed_evidence",
+                "target": target,
+                "supporting_evidence": supporting,
+                "refuting_evidence": refuting,
+                "overlapping_scope_pairs": [
+                    list(item) for item in sorted(introduced_pairs)
+                ],
+                "message": "the merge introduces support and refutation for the same research object",
+            }
+        )
+
+    def preregistration_hypotheses(item: dict[str, Any]) -> set[str]:
+        """Resolve the scientific hypothesis a registration governs."""
+
+        payload = item.get("payload") or {}
+        hypothesis_tokens: set[str] = set()
+
+        def add_token(target: set[str], prefix: str, value: Any) -> None:
+            normalized = " ".join(str(value or "").split()).casefold()
+            if normalized:
+                target.add(f"{prefix}:{normalized}")
+
+        add_token(hypothesis_tokens, "hypothesis", payload.get("hypothesis_id"))
+        add_token(hypothesis_tokens, "hypothesis", payload.get("idea_id"))
+        hypotheses = payload.get("hypotheses") or {}
+        if isinstance(hypotheses, dict):
+            add_token(
+                hypothesis_tokens,
+                "statement",
+                hypotheses.get("alternative"),
+            )
+
+        for relation in item.get("relations") or []:
+            if relation.get("type") != "depends_on":
+                continue
+            related = combined_objects.get(str(relation.get("target") or "")) or {}
+            if related.get("kind") == "hypothesis":
+                add_token(hypothesis_tokens, "hypothesis", related.get("object_id"))
+                continue
+            if related.get("kind") != "research_plan":
+                continue
+            plan_payload = related.get("payload") or {}
+            add_token(
+                hypothesis_tokens,
+                "hypothesis",
+                plan_payload.get("hypothesis_id"),
+            )
+            for plan_relation in related.get("relations") or []:
+                plan_target = (
+                    combined_objects.get(str(plan_relation.get("target") or "")) or {}
+                )
+                if (
+                    plan_relation.get("type") == "depends_on"
+                    and plan_target.get("kind") == "hypothesis"
+                ):
+                    add_token(
+                        hypothesis_tokens,
+                        "hypothesis",
+                        plan_target.get("object_id"),
+                    )
+        return hypothesis_tokens
+
+    def preregistration_plan_identity(item: dict[str, Any]) -> set[str]:
+        """Return immutable registration/plan identifiers, not broad topics."""
+
+        payload = item.get("payload") or {}
+        identities: set[str] = set()
+
+        def add(prefix: str, value: Any) -> None:
+            normalized = " ".join(str(value or "").split()).casefold()
+            if normalized:
+                identities.add(f"{prefix}:{normalized}")
+
+        add("registration", payload.get("preregistration_id"))
+        add("plan", payload.get("plan_id"))
+        for relation in item.get("relations") or []:
+            if relation.get("type") != "depends_on":
+                continue
+            related = combined_objects.get(str(relation.get("target") or "")) or {}
+            if related.get("kind") != "research_plan":
+                continue
+            add("plan_object", related.get("object_id"))
+            add("plan", (related.get("payload") or {}).get("plan_id"))
+        return identities
+
+    def preregistration_scopes(item: dict[str, Any]) -> dict[str, Any]:
+        payload = item.get("payload") or {}
+        structured = payload.get("scope")
+        outcome_scopes: set[tuple[str, str]] = set()
+        for outcome in payload.get("outcomes") or []:
+            if not isinstance(outcome, dict):
+                continue
+            dataset = " ".join(str(outcome.get("dataset") or "").split()).casefold()
+            metric = " ".join(str(outcome.get("metric") or "").split()).casefold()
+            if dataset or metric:
+                outcome_scopes.add((dataset, metric))
+        return {
+            "structured": structured if isinstance(structured, dict) else None,
+            "outcomes": outcome_scopes,
+        }
+
+    def preregistration_scopes_overlap(
+        left: dict[str, Any], right: dict[str, Any]
+    ) -> bool:
+        left_scope = preregistration_scopes(left)
+        right_scope = preregistration_scopes(right)
+        if (
+            left_scope["structured"] is not None
+            and right_scope["structured"] is not None
+        ):
+            return scopes_compatible(
+                left_scope["structured"], right_scope["structured"]
+            )
+        left_outcomes = left_scope["outcomes"]
+        right_outcomes = right_scope["outcomes"]
+        if left_outcomes and right_outcomes:
+            return any(
+                (not left_dataset or not right_dataset or left_dataset == right_dataset)
+                and (not left_metric or not right_metric or left_metric == right_metric)
+                for left_dataset, left_metric in left_outcomes
+                for right_dataset, right_metric in right_outcomes
+            )
+        # Missing scope is uncertainty, not evidence of independence.
+        return True
+
+    def preregistration_protocol(item: dict[str, Any]) -> dict[str, Any]:
+        payload = item.get("payload") or {}
+        volatile = {
+            "created_at",
+            "locked_at",
+            "registered_by",
+            "registration_hash",
+            "status",
+            "deviations",
+        }
+        return {key: value for key, value in payload.items() if key not in volatile}
 
     ours_locked = [
         item
-        for item in ours_new
+        for item in ours.values()
         if item.get("kind") == "preregistration" and item.get("state") == "locked"
     ]
     theirs_locked = [
@@ -4078,18 +4770,39 @@ def _semantic_merge_conflicts(
     ]
     for ours_item in ours_locked:
         for theirs_item in theirs_locked:
-            if ours_item.get("payload") != theirs_item.get("payload"):
+            ours_identity = preregistration_plan_identity(ours_item)
+            theirs_identity = preregistration_plan_identity(theirs_item)
+            if not ours_identity or not theirs_identity:
+                continue
+            if ours_identity.isdisjoint(theirs_identity):
+                continue
+            ours_hypotheses = preregistration_hypotheses(ours_item)
+            theirs_hypotheses = preregistration_hypotheses(theirs_item)
+            if not ours_hypotheses or not theirs_hypotheses:
+                continue
+            if ours_hypotheses.isdisjoint(theirs_hypotheses):
+                continue
+            if not preregistration_scopes_overlap(ours_item, theirs_item):
+                continue
+            if preregistration_protocol(ours_item) != preregistration_protocol(
+                theirs_item
+            ):
                 conflicts.append(
                     {
                         "type": "locked_preregistration",
                         "ours": ours_item["object_id"],
                         "theirs": theirs_item["object_id"],
-                        "message": "branches contain incompatible locked preregistrations",
+                        "message": (
+                            "branches contain incompatible locked preregistrations "
+                            "for the same hypothesis and overlapping scope"
+                        ),
                     }
                 )
 
-    def metrics(values: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        result: dict[str, dict[str, Any]] = {}
+    def metrics(
+        values: Sequence[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
         for item in values:
             if item.get("kind") != "metric":
                 continue
@@ -4101,19 +4814,33 @@ def _semantic_merge_conflicts(
                 or ""
             )
             if key:
-                result[key] = item
+                result.setdefault(key, []).append(item)
         return result
 
-    ours_metrics = metrics(ours_new)
+    ours_metrics = metrics(list(ours.values()))
     theirs_metrics = metrics(theirs_new)
     for key in sorted(set(ours_metrics) & set(theirs_metrics)):
-        if ours_metrics[key].get("payload") != theirs_metrics[key].get("payload"):
+        incompatible_pairs = [
+            (ours_item, theirs_item)
+            for ours_item in ours_metrics[key]
+            for theirs_item in theirs_metrics[key]
+            if ours_item.get("object_id") != theirs_item.get("object_id")
+            and ours_item.get("payload") != theirs_item.get("payload")
+        ]
+        if incompatible_pairs:
+            ours_item, theirs_item = sorted(
+                incompatible_pairs,
+                key=lambda pair: (
+                    str(pair[0].get("object_id") or ""),
+                    str(pair[1].get("object_id") or ""),
+                ),
+            )[0]
             conflicts.append(
                 {
                     "type": "metric_definition",
                     "metric": key,
-                    "ours": ours_metrics[key]["object_id"],
-                    "theirs": theirs_metrics[key]["object_id"],
+                    "ours": ours_item["object_id"],
+                    "theirs": theirs_item["object_id"],
                     "message": "primary metric definitions differ",
                 }
             )
@@ -4255,6 +4982,11 @@ def preview_research_merge(repo: str | Path, source: str) -> dict[str, Any]:
     target_commit = _head(root)
     if target_commit is None:
         raise ResearchGitError("research merge requires an existing checkpoint")
+    # A Research VCS merge may only converge exact scientific events. Falling
+    # back to an ancestor checkpoint would let an ordinary Git commit smuggle
+    # unreviewed paths into the merge index and then inherit trusted trailers.
+    _checkpoint_at_commit(root, target_commit)
+    _checkpoint_at_commit(root, source_commit)
     if source_commit == target_commit:
         raise ResearchGitError("research branch is already at the current checkpoint")
     base_commit = _run_git(
@@ -4421,6 +5153,143 @@ def merge_research_branch(
         )
 
 
+def _bundle_advertised_refs(repo: Path, bundle: Path) -> list[dict[str, str]]:
+    listed = _run_git(
+        repo,
+        ["bundle", "list-heads", str(bundle)],
+        check=False,
+    )
+    if listed.returncode:
+        detail = (listed.stderr or listed.stdout).strip()
+        raise ResearchGitError(f"cannot list Git bundle refs: {detail}")
+    refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in listed.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            raise ResearchGitError("cannot parse Git bundle advertised refs")
+        object_id, name = fields
+        if name in seen:
+            raise ResearchGitError(f"Git bundle advertises a duplicate ref: {name}")
+        seen.add(name)
+        refs.append({"name": name, "object": object_id})
+    return sorted(refs, key=lambda item: (item["name"], item["object"]))
+
+
+def _bundle_pointer_blob(repo: Path, object_id: str) -> bytes:
+    size_result = _run_git(
+        repo,
+        ["cat-file", "-s", object_id],
+        check=False,
+    )
+    try:
+        size = int(size_result.stdout.strip())
+    except (TypeError, ValueError) as exc:
+        raise ResearchGitError(f"cannot inspect pointer blob: {object_id}") from exc
+    if size_result.returncode or size < 0 or size > _MAX_BUNDLE_POINTER_BYTES:
+        raise ResearchGitError(
+            f"reachable research object pointer exceeds safety limit: {object_id}"
+        )
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "blob", object_id],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise ResearchGitError(f"cannot read pointer blob: {object_id}") from exc
+    if completed.returncode or len(completed.stdout) != size:
+        raise ResearchGitError(f"cannot read pointer blob: {object_id}")
+    return completed.stdout
+
+
+def _bundle_reachable_closure(
+    repo: Path,
+    advertised_refs: Sequence[dict[str, str]],
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    commit_tips: set[str] = set()
+    for item in advertised_refs:
+        object_id = str(item.get("object") or "")
+        resolved = _run_git(
+            repo,
+            ["rev-parse", "--verify", f"{object_id}^{{commit}}"],
+            check=False,
+        )
+        if resolved.returncode == 0 and resolved.stdout.strip():
+            commit_tips.add(resolved.stdout.strip())
+    if not commit_tips:
+        raise ResearchGitError("Git bundle advertises no commit-reachable refs")
+
+    commits = sorted(
+        set(_run_git(repo, ["rev-list", *sorted(commit_tips)]).stdout.splitlines())
+    )
+    reachable_objects = _run_git(
+        repo,
+        [
+            "rev-list",
+            "--objects",
+            *sorted(commit_tips),
+            "--",
+            "research-objects/",
+        ],
+    ).stdout.splitlines()
+    pointer_records: dict[tuple[str, str], dict[str, Any]] = {}
+    pointer_members: dict[str, bytes] = {}
+    for line in reachable_objects:
+        object_id, separator, path = line.partition(" ")
+        if (
+            not separator
+            or not path.startswith("research-objects/")
+            or not path.endswith(".json")
+        ):
+            continue
+        object_type = _run_git(
+            repo,
+            ["cat-file", "-t", object_id],
+            check=False,
+        )
+        if object_type.returncode or object_type.stdout.strip() != "blob":
+            continue
+        raw = _bundle_pointer_blob(repo, object_id)
+        try:
+            pointer = _validate_pointer_payload(
+                json.loads(raw.decode("utf-8")),
+                pointer_path=path,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ResearchGitError) as exc:
+            raise ResearchGitError(
+                f"cannot validate reachable research object pointer: {object_id}:{path}"
+            ) from exc
+        pointer_digest = hashlib.sha256(raw).hexdigest()
+        member = f"pointer-closure/sha256-{pointer_digest}.json"
+        pointer_members.setdefault(member, raw)
+        pointer_records[(path, object_id)] = {
+            "path": path,
+            "git_blob": object_id,
+            "member": member,
+            "blob_hash": f"sha256:{pointer_digest}",
+            "pointer_hash": str(pointer["pointer_hash"]),
+            "object_hash": str(pointer["object_hash"]),
+            "size": int(pointer["size"]),
+        }
+
+    pointers = [pointer_records[key] for key in sorted(pointer_records)]
+    required_objects = sorted({str(item["object_hash"]) for item in pointers})
+    closure = {
+        "version": 1,
+        "scope": "all-advertised-refs",
+        "refs": [dict(item) for item in advertised_refs],
+        "reachable_commits": {
+            "count": len(commits),
+            "content_hash": content_hash(commits),
+        },
+        "pointers": pointers,
+        "required_objects": required_objects,
+    }
+    return closure, pointer_members
+
+
 def _create_research_bundle_locked(
     root: Path,
     destination: str | Path,
@@ -4438,17 +5307,27 @@ def _create_research_bundle_locked(
             "tracked or research-eligible changes, a backend stage, or selected "
             "changes; generated views excluded by policy do not block bundling"
         )
+    head = _head(root)
+    if head is None:
+        raise ResearchGitError("bundle refused because the repository has no commit")
+    _checkpoint_at_commit(root, head)
+    branch = _branch(root)
     dest = Path(destination).expanduser().resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         raise ResearchGitError(f"bundle destination already exists: {dest}")
 
-    pointers = _pointer_records(root)
     missing: list[str] = []
     with tempfile.TemporaryDirectory(prefix="xscientist_research_bundle_") as td:
         temp = Path(td)
         git_bundle = temp / "repository.gitbundle"
         _run_git(root, ["bundle", "create", str(git_bundle), "--all"])
+        advertised_refs = _bundle_advertised_refs(root, git_bundle)
+        if head not in {item["object"] for item in advertised_refs}:
+            raise ResearchGitError(
+                "bundle refused because repository refs changed during capture"
+            )
+        closure, pointer_payloads = _bundle_reachable_closure(root, advertised_refs)
         entries: list[dict[str, Any]] = [
             {
                 "path": "repository.gitbundle",
@@ -4458,23 +5337,37 @@ def _create_research_bundle_locked(
         ]
         object_files: list[tuple[Path, str]] = []
         pointer_files: list[tuple[Path, str]] = []
-        for object_hash, pointer in sorted(pointers.items()):
-            pointer_source = root / str(pointer["pointer_path"])
-            pointer_arcname = str(pointer["pointer_path"])
+        for pointer_arcname, raw in sorted(pointer_payloads.items()):
+            pointer_source = temp / pointer_arcname
+            pointer_source.parent.mkdir(parents=True, exist_ok=True)
+            pointer_source.write_bytes(raw)
             pointer_files.append((pointer_source, pointer_arcname))
+        pointer_sizes: dict[str, set[int]] = {}
+        for pointer in closure["pointers"]:
+            pointer_sizes.setdefault(str(pointer["object_hash"]), set()).add(
+                int(pointer["size"])
+            )
+        for object_hash in closure["required_objects"]:
             if profile == "index":
                 continue
-            store_path, object_error = _verify_pointer_object(
-                root,
-                object_hash,
-                pointer,
-                store_root=store_root,
-            )
-            if object_error or store_path is None:
+            expected_sizes = pointer_sizes.get(object_hash) or set()
+            if len(expected_sizes) != 1:
+                raise ResearchGitError(
+                    "historical pointers disagree about CAS object size: "
+                    f"{object_hash}"
+                )
+            digest = object_hash.split(":", 1)[1]
+            store_path = store_root / "objects" / "sha256" / digest
+            if (
+                not store_path.is_file()
+                or store_path.stat().st_size != next(iter(expected_sizes))
+                or _hash_file(store_path) != object_hash
+            ):
                 missing.append(object_hash)
                 continue
-            object_arcname = f"objects/sha256/{object_hash.split(':', 1)[1]}"
+            object_arcname = f"objects/sha256/{digest}"
             object_files.append((store_path, object_arcname))
+        missing.sort()
         complete = not missing
         if missing and not allow_incomplete:
             raise ResearchGitError(
@@ -4493,8 +5386,9 @@ def _create_research_bundle_locked(
             "protocol_kind": "research_bundle",
             "created_at": _now_iso(),
             "profile": profile,
-            "repository_head": _head(root),
-            "repository_branch": _branch(root),
+            "repository_head": head,
+            "repository_branch": branch,
+            "closure": closure,
             "complete": complete,
             "missing_objects": missing,
             "entries": entries,
@@ -4623,7 +5517,10 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                     errors.append(f"bundle manifest entry is absent: {absent}")
 
                 pointer_payloads: dict[str, dict[str, Any]] = {}
+                closure_pointer_payloads: dict[str, bytes] = {}
                 object_entries: dict[str, dict[str, Any]] = {}
+                computed_closure: dict[str, Any] | None = None
+                computed_pointer_payloads: dict[str, bytes] = {}
                 with tempfile.TemporaryDirectory(
                     prefix="xscientist_bundle_verify_"
                 ) as td:
@@ -4681,6 +5578,11 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                                 ResearchGitError,
                             ) as exc:
                                 errors.append(str(exc))
+                        elif entry_path.startswith("pointer-closure/"):
+                            checked["pointers"] += 1
+                            source = archive.extractfile(matches[0])
+                            if source is not None:
+                                closure_pointer_payloads[entry_path] = source.read()
                         elif entry_path.startswith("objects/sha256/"):
                             checked["objects"] += 1
                             digest = PurePosixPath(entry_path).name
@@ -4703,35 +5605,142 @@ def verify_research_bundle(bundle: str | Path) -> dict[str, Any]:
                         if verified.returncode:
                             detail = (verified.stderr or verified.stdout).strip()
                             errors.append(f"invalid Git bundle: {detail}")
-                        heads = _run_git(
-                            verification_root,
-                            ["bundle", "list-heads", str(repository_bundle)],
-                            check=False,
-                        )
-                        advertised = {
-                            line.split()[0]
-                            for line in heads.stdout.splitlines()
-                            if line.split()
-                        }
+                        advertised_refs: list[dict[str, str]] = []
+                        try:
+                            advertised_refs = _bundle_advertised_refs(
+                                verification_root,
+                                repository_bundle,
+                            )
+                        except ResearchGitError as exc:
+                            errors.append(str(exc))
+                        advertised = {item["object"] for item in advertised_refs}
                         repository_head = str(manifest.get("repository_head") or "")
-                        if heads.returncode or repository_head not in advertised:
+                        if repository_head not in advertised:
                             errors.append(
                                 "bundle repository_head is not advertised by the Git bundle"
                             )
+                        declared_closure = manifest.get("closure")
+                        if declared_closure is not None:
+                            if not isinstance(declared_closure, dict):
+                                errors.append("bundle closure declaration is invalid")
+                            elif verified.returncode == 0 and advertised_refs:
+                                imported = _run_git(
+                                    verification_root,
+                                    [
+                                        "bundle",
+                                        "unbundle",
+                                        str(repository_bundle),
+                                    ],
+                                    check=False,
+                                )
+                                if imported.returncode:
+                                    detail = (
+                                        imported.stderr or imported.stdout
+                                    ).strip()
+                                    errors.append(
+                                        f"cannot independently inspect Git bundle: {detail}"
+                                    )
+                                else:
+                                    try:
+                                        (
+                                            computed_closure,
+                                            computed_pointer_payloads,
+                                        ) = _bundle_reachable_closure(
+                                            verification_root,
+                                            advertised_refs,
+                                        )
+                                    except ResearchGitError as exc:
+                                        errors.append(str(exc))
+                                    if (
+                                        computed_closure is not None
+                                        and declared_closure != computed_closure
+                                    ):
+                                        errors.append(
+                                            "bundle closure declaration does not match "
+                                            "the Git bundle reachable history"
+                                        )
+                                    expected_pointer_members = set(
+                                        computed_pointer_payloads
+                                    )
+                                    actual_pointer_members = set(
+                                        closure_pointer_payloads
+                                    )
+                                    for absent in sorted(
+                                        expected_pointer_members
+                                        - actual_pointer_members
+                                    ):
+                                        errors.append(
+                                            "bundle pointer closure member is absent: "
+                                            f"{absent}"
+                                        )
+                                    for unexpected in sorted(
+                                        actual_pointer_members
+                                        - expected_pointer_members
+                                    ):
+                                        errors.append(
+                                            "unexpected bundle pointer closure member: "
+                                            f"{unexpected}"
+                                        )
+                                    for member_name in sorted(
+                                        expected_pointer_members
+                                        & actual_pointer_members
+                                    ):
+                                        if (
+                                            closure_pointer_payloads[member_name]
+                                            != computed_pointer_payloads[member_name]
+                                        ):
+                                            errors.append(
+                                                "bundle pointer closure differs from Git "
+                                                f"history: {member_name}"
+                                            )
 
                 profile = str(manifest.get("profile") or "")
+                declared_closure = manifest.get("closure")
+                if isinstance(declared_closure, dict):
+                    closure_for_completeness = computed_closure or declared_closure
+                    required_objects = {
+                        str(item)
+                        for item in closure_for_completeness.get("required_objects")
+                        or []
+                    }
+                    pointer_sizes: dict[str, set[int]] = {}
+                    for pointer in closure_for_completeness.get("pointers") or []:
+                        if not isinstance(pointer, dict):
+                            continue
+                        object_hash = str(pointer.get("object_hash") or "")
+                        try:
+                            size = int(pointer.get("size"))
+                        except (TypeError, ValueError):
+                            continue
+                        pointer_sizes.setdefault(object_hash, set()).add(size)
+                    unexpected_objects = sorted(set(object_entries) - required_objects)
+                    for object_hash in unexpected_objects:
+                        errors.append(
+                            f"bundle contains CAS outside its Git closure: {object_hash}"
+                        )
+                else:
+                    required_objects = set(pointer_payloads)
+                    pointer_sizes = {
+                        object_hash: {int(pointer.get("size") or 0)}
+                        for object_hash, pointer in pointer_payloads.items()
+                    }
                 if profile == "index":
                     if object_entries:
                         errors.append("index bundle unexpectedly contains CAS payloads")
                     computed_missing: list[str] = []
                 else:
-                    computed_missing = sorted(
-                        set(pointer_payloads) - set(object_entries)
-                    )
-                    for object_hash, pointer in pointer_payloads.items():
+                    computed_missing = sorted(required_objects - set(object_entries))
+                    for object_hash, expected_sizes in pointer_sizes.items():
+                        if len(expected_sizes) != 1:
+                            errors.append(
+                                "historical pointers disagree about CAS object size: "
+                                f"{object_hash}"
+                            )
+                            continue
                         entry = object_entries.get(object_hash)
-                        if entry is not None and entry.get("size") != pointer.get(
-                            "size"
+                        if (
+                            entry is not None
+                            and entry.get("size") not in expected_sizes
                         ):
                             errors.append(
                                 f"CAS member size disagrees with pointer: {object_hash}"
@@ -4844,6 +5853,19 @@ def restore_research_bundle(
             else:
                 _run_git(worktree, ["checkout", "-q", "-B", branch, head])
             _run_git(worktree, ["remote", "remove", "origin"], check=False)
+            closure = manifest.get("closure")
+            if isinstance(closure, dict):
+                for item in closure.get("refs") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    ref_name = str(item.get("name") or "")
+                    object_id = str(item.get("object") or "")
+                    if not ref_name.startswith("refs/"):
+                        continue
+                    _run_git(
+                        worktree,
+                        ["update-ref", ref_name, object_id],
+                    )
             if _head(worktree) != head:
                 raise ResearchGitError(
                     f"restored Git HEAD does not match bundle manifest: {head}"
@@ -4899,7 +5921,7 @@ def restore_research_bundle(
 def _safe_hydration_target(worktree: Path, logical_path: str) -> Path:
     if str(logical_path).strip() in {"", "."}:
         return worktree.resolve()
-    relative = _normalise_relative(logical_path)
+    relative = PurePosixPath(_normalise_relative(logical_path))
     target = (worktree / relative).resolve()
     try:
         target.relative_to(worktree.resolve())
@@ -4908,6 +5930,100 @@ def _safe_hydration_target(worktree: Path, logical_path: str) -> Path:
             f"object logical path escapes worktree: {logical_path}"
         ) from exc
     return target
+
+
+def _safe_worktree_control_path(worktree: Path, logical_path: str) -> Path:
+    """Resolve a private reproduction path without following symlink parents."""
+
+    relative = PurePosixPath(_normalise_relative(logical_path))
+    cursor = worktree
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ResearchGitError(
+                "reproduction control path contains a symlink: " + relative.as_posix()
+            )
+    return _safe_hydration_target(worktree, relative.as_posix())
+
+
+def _sanitized_reproduction_environment(worktree: Path) -> dict[str, str]:
+    """Return a minimal host environment without inherited credentials.
+
+    Reproduction commands are repository-controlled input.  Passing the full
+    parent environment would expose provider keys, cloud credentials, agent
+    sockets, and user configuration to that code. The replacement home prevents
+    default home-directory lookup only; it does not block absolute host paths
+    and is not a filesystem sandbox.
+    """
+
+    environment = {
+        key: value
+        for key in (
+            "PATH",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TZ",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "VIRTUAL_ENV",
+        )
+        if (value := os.environ.get(key))
+    }
+    private_home = _safe_worktree_control_path(
+        worktree, ".xscientist/reproduction-home"
+    )
+    cache_home = _safe_worktree_control_path(worktree, ".xscientist/reproduction-cache")
+    private_home.mkdir(parents=True, exist_ok=True)
+    cache_home.mkdir(parents=True, exist_ok=True)
+    environment.update(
+        {
+            "HOME": str(private_home),
+            "USERPROFILE": str(private_home),
+            "XDG_CONFIG_HOME": str(private_home / "config"),
+            "XDG_CACHE_HOME": str(cache_home),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    return environment
+
+
+def _reproduction_execution_isolation(
+    platform_name: str | None = None,
+) -> dict[str, Any]:
+    """Describe actual execution controls without claiming a sandbox.
+
+    A POSIX process group lets the timeout path signal descendants that remain
+    in that group, but a child may create another session. On Windows the
+    bounded-process helper terminates only the parent process. Neither mode
+    restricts filesystem or network access, so this receipt must not be read as
+    an operating-system security boundary.
+    """
+
+    selected_platform = platform_name or os.name
+    posix_process_group = selected_platform == "posix"
+    return {
+        "isolated": False,
+        "security_boundary": False,
+        "environment": "sanitized",
+        "environment_scope": "variables_only",
+        "process_tree": (
+            "best_effort_process_group"
+            if posix_process_group
+            else "parent_only_no_tree_guarantee"
+        ),
+        "process_control": (
+            "posix_process_group_best_effort"
+            if posix_process_group
+            else "parent_process_only"
+        ),
+        "process_tree_termination_guaranteed": False,
+        "filesystem": "host_visible",
+        "network": "host_unrestricted",
+    }
 
 
 def reproduce_checkpoint(
@@ -4923,7 +6039,9 @@ def reproduce_checkpoint(
         raise ResearchGitError("environment policy must be ignore, warn, or strict")
     root = _repository_root(repo)
     store_root = _configured_store_root(root)
-    resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
+    resolved = _run_git(
+        root, ["rev-parse", "--verify", f"{commit}^{{commit}}"]
+    ).stdout.strip()
     checkpoint_path, checkpoint = _checkpoint_at_commit(root, resolved)
     checkpoint = _validate_checkpoint_payload(
         checkpoint,
@@ -4972,6 +6090,9 @@ def reproduce_checkpoint(
         "environment": environment,
         "worktree": None,
         "executed": False,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "execution_isolation": _reproduction_execution_isolation(),
     }
 
     def finalize() -> dict[str, Any]:
@@ -5030,6 +6151,70 @@ def reproduce_checkpoint(
                 if result.get("executed")
                 else None
             ),
+            "stdout_truncated": (
+                bool(result.get("stdout_truncated"))
+                if result.get("executed")
+                else False
+            ),
+            "stderr_truncated": (
+                bool(result.get("stderr_truncated"))
+                if result.get("executed")
+                else False
+            ),
+            "output_capture": "bounded_tail",
+            "max_output_chars": _MAX_REPRODUCTION_OUTPUT_CHARS,
+            "execution_isolation": dict(result["execution_isolation"]),
+        }
+        checkpoint_binding_core = {
+            "commit": result["commit"],
+            "checkpoint_id": str(result["checkpoint"].get("checkpoint_id") or ""),
+            "checkpoint_content_hash": str(
+                result["checkpoint"].get("content_hash") or ""
+            ),
+        }
+        target_binding_core = {
+            "policy": "xscientist.reproduction-target-binding.v2",
+            "audit_commit": result["commit"],
+            "audit_checkpoint_id": str(result["checkpoint"].get("checkpoint_id") or ""),
+            "audit_checkpoint_hash": str(
+                result["checkpoint"].get("content_hash") or ""
+            ),
+            # Generic inspection/materialization receipts have no scientific
+            # target yet. ResearchLifecycle replaces this empty binding with the
+            # exact immutable target and claim-closure snapshot before a receipt
+            # may be recorded as verified.
+            "target_objects": [],
+            "claim_closures": [],
+        }
+        execution_result_core = {
+            key: receipt_base[key]
+            for key in (
+                "command_hash",
+                "reproduction_level",
+                "verdict",
+                "objects_complete",
+                "executed",
+                "returncode",
+                "timed_out",
+                "stdout_hash",
+                "stderr_hash",
+                "stdout_truncated",
+                "stderr_truncated",
+                "output_capture",
+                "max_output_chars",
+            )
+        }
+        receipt_base["checkpoint_binding"] = {
+            **checkpoint_binding_core,
+            "binding_hash": content_hash(checkpoint_binding_core),
+        }
+        receipt_base["target_binding"] = {
+            **target_binding_core,
+            "binding_hash": content_hash(target_binding_core),
+        }
+        receipt_base["execution_result"] = {
+            **execution_result_core,
+            "result_hash": content_hash(execution_result_core),
         }
         receipt_hash = content_hash(receipt_base)
         receipt = {
@@ -5045,14 +6230,13 @@ def reproduce_checkpoint(
             ) from exc
         receipt_path: str | None = None
         if result.get("worktree"):
-            target = (
-                Path(str(result["worktree"]))
-                / ".xscientist"
-                / "reproductions"
-                / f"{receipt['receipt_id']}.json"
+            worktree_path = Path(str(result["worktree"]))
+            target = _safe_worktree_control_path(
+                worktree_path,
+                f".xscientist/reproductions/{receipt['receipt_id']}.json",
             )
             _atomic_write_json(target, receipt)
-            receipt_path = target.relative_to(Path(str(result["worktree"]))).as_posix()
+            receipt_path = target.relative_to(worktree_path).as_posix()
         result["receipt"] = receipt
         result["receipt_path"] = receipt_path
         return result
@@ -5079,71 +6263,96 @@ def reproduce_checkpoint(
     worktree = Path(destination).expanduser().resolve()
     if worktree.exists():
         raise ResearchGitError(f"reproduction destination already exists: {worktree}")
-    worktree.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(root, ["worktree", "add", "--detach", str(worktree), resolved])
-    for object_hash in required:
-        pointer = pointers[object_hash]
-        source = verified_sources[object_hash]
-        target = _safe_hydration_target(worktree, str(pointer["logical_path"]))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if target.is_file() and _hash_file(target) == object_hash:
-                continue
-            raise ResearchGitError(
-                f"refusing to overwrite reproduction target: {target}"
-            )
-        shutil.copy2(source, target)
-        if _hash_file(target) != object_hash:
-            target.unlink(missing_ok=True)
-            raise ResearchGitError(
-                f"reproduction object changed during hydration: {object_hash}"
-            )
-    dependency_mismatches = _compare_dependency_locks(worktree, environment_receipt)
-    environment["mismatches"].extend(dependency_mismatches)
-    environment["matches"] = environment["recorded"] and not environment["mismatches"]
-    if environment_policy == "strict" and dependency_mismatches:
-        _run_git(
-            root,
-            ["worktree", "remove", "--force", str(worktree)],
-            check=False,
-        )
-        raise ResearchGitError(
-            "reproduction dependency lock mismatch: "
-            + ", ".join(item["field"] for item in dependency_mismatches)
-        )
-    result["worktree"] = str(worktree)
+    argv: list[str] = []
     if execute:
         if not command:
             raise ResearchGitError("checkpoint does not declare a reproduction command")
         argv = shlex.split(command)
         if not argv:
             raise ResearchGitError("checkpoint reproduction command is empty")
-        working_directory = str(
-            (checkpoint.get("reproduce") or {}).get("working_directory") or "."
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    worktree_attempted = False
+    materialized = False
+    try:
+        worktree_attempted = True
+        _run_git(root, ["worktree", "add", "--detach", str(worktree), resolved])
+        for object_hash in required:
+            pointer = pointers[object_hash]
+            source = verified_sources[object_hash]
+            target = _safe_hydration_target(worktree, str(pointer["logical_path"]))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if target.is_file() and _hash_file(target) == object_hash:
+                    continue
+                raise ResearchGitError(
+                    f"refusing to overwrite reproduction target: {target}"
+                )
+            shutil.copy2(source, target)
+            if _hash_file(target) != object_hash:
+                target.unlink(missing_ok=True)
+                raise ResearchGitError(
+                    f"reproduction object changed during hydration: {object_hash}"
+                )
+        dependency_mismatches = _compare_dependency_locks(worktree, environment_receipt)
+        environment["mismatches"].extend(dependency_mismatches)
+        environment["matches"] = (
+            environment["recorded"] and not environment["mismatches"]
         )
-        cwd = _safe_hydration_target(worktree, working_directory)
-        try:
-            completed = subprocess.run(
-                argv,
-                cwd=cwd,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=timeout_seconds,
+        if environment_policy == "strict" and dependency_mismatches:
+            raise ResearchGitError(
+                "reproduction dependency lock mismatch: "
+                + ", ".join(item["field"] for item in dependency_mismatches)
             )
-        except subprocess.TimeoutExpired as exc:
-            result["executed"] = True
-            result["returncode"] = 124
-            result["timed_out"] = True
-            result["stdout"] = str(exc.stdout or "")[-20000:]
-            result["stderr"] = str(exc.stderr or "")[-20000:]
-            return finalize()
-        result["executed"] = True
-        result["timed_out"] = False
-        result["returncode"] = completed.returncode
-        result["stdout"] = (completed.stdout or "")[-20000:]
-        result["stderr"] = (completed.stderr or "")[-20000:]
-    return finalize()
+        result["worktree"] = str(worktree)
+        if execute:
+            working_directory = str(
+                (checkpoint.get("reproduce") or {}).get("working_directory") or "."
+            )
+            cwd = _safe_hydration_target(worktree, working_directory)
+            safe_environment = _sanitized_reproduction_environment(worktree)
+            try:
+                completed = run_process_bounded(
+                    argv,
+                    cwd=cwd,
+                    env=safe_environment,
+                    timeout=timeout_seconds,
+                    max_output_chars=_MAX_REPRODUCTION_OUTPUT_CHARS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                result["executed"] = True
+                result["returncode"] = 124
+                result["timed_out"] = True
+                result["stdout"] = str(exc.stdout or "")[
+                    -_MAX_REPRODUCTION_OUTPUT_CHARS:
+                ]
+                result["stderr"] = str(exc.stderr or "")[
+                    -_MAX_REPRODUCTION_OUTPUT_CHARS:
+                ]
+                result["stdout_truncated"] = (
+                    len(str(exc.stdout or "")) >= _MAX_REPRODUCTION_OUTPUT_CHARS
+                )
+                result["stderr_truncated"] = (
+                    len(str(exc.stderr or "")) >= _MAX_REPRODUCTION_OUTPUT_CHARS
+                )
+            else:
+                result["executed"] = True
+                result["timed_out"] = False
+                result["returncode"] = completed.returncode
+                result["stdout"] = completed.stdout
+                result["stderr"] = completed.stderr
+                result["stdout_truncated"] = completed.stdout_truncated
+                result["stderr_truncated"] = completed.stderr_truncated
+        finalized = finalize()
+        materialized = True
+        return finalized
+    finally:
+        if worktree_attempted and not materialized:
+            _run_git(
+                root,
+                ["worktree", "remove", "--force", str(worktree)],
+                check=False,
+            )
+            _run_git(root, ["worktree", "prune"], check=False)
 
 
 __all__ = [

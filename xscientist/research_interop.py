@@ -338,6 +338,10 @@ def _reproduction_commands(
     commands: list[dict[str, Any]] = []
     seen: set[str] = set()
     for entry in research_log(repo, limit=limit, ref=ref):
+        # Ordinary Git commits are allowed in the ancestry, but they are not
+        # scientific checkpoints and must never inherit one from an ancestor.
+        if not (entry.get("trailers") or {}).get("Research-Checkpoint"):
+            continue
         shown = show_checkpoint(repo, entry["commit"])
         checkpoint = shown["checkpoint"]
         command = str((checkpoint.get("reproduce") or {}).get("command") or "").strip()

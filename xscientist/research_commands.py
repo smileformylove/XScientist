@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+import re
 from typing import Any
+import unicodedata
+from urllib.parse import urlsplit, urlunsplit
 
 from ai_scientist.protocol import content_hash
 from ai_scientist.protocol.canonical_json import canonical_content_hash
@@ -39,8 +42,6 @@ def _required_text(value: str, *, label: str) -> str:
 
 
 def _hashes(values: Sequence[str], *, label: str) -> list[str]:
-    import re
-
     rows = sorted({str(value).strip() for value in values if str(value).strip()})
     invalid = [
         value for value in rows if not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
@@ -50,17 +51,215 @@ def _hashes(values: Sequence[str], *, label: str) -> list[str]:
     return rows
 
 
+def _normalized_literature_text(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
+
+
+def _normalized_literature_identifier(kind: str, value: Any) -> str:
+    """Normalize a persistent identifier conservatively for equality checks."""
+
+    text = _normalized_literature_text(value)
+    if not text:
+        return ""
+    folded = text.casefold()
+    if kind == "doi":
+        return re.sub(r"^(?:doi:\s*|https?://(?:dx\.)?doi\.org/)", "", folded)
+    if kind == "pmid":
+        return re.sub(r"^pmid:\s*", "", folded)
+    if kind == "arxiv_id":
+        return re.sub(
+            r"^(?:arxiv:\s*|https?://arxiv\.org/(?:abs|pdf)/)",
+            "",
+            folded,
+        ).removesuffix(".pdf")
+    if kind == "url":
+        parsed = urlsplit(text)
+        if parsed.scheme and parsed.netloc:
+            path = parsed.path.rstrip("/") or "/"
+            return urlunsplit(
+                (
+                    parsed.scheme.casefold(),
+                    parsed.netloc.casefold(),
+                    path,
+                    parsed.query,
+                    "",
+                )
+            )
+        return folded.rstrip("/")
+    return folded
+
+
+def _selected_candidate_matches(
+    receipt_payload: Mapping[str, Any],
+    *,
+    title: str,
+    doi: str,
+    pmid: str,
+    arxiv_id: str,
+    url: str,
+) -> list[Mapping[str, Any]]:
+    candidates = receipt_payload.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    selected = [
+        item
+        for item in candidates
+        if isinstance(item, Mapping)
+        and (
+            item.get("selection_status") == "selected"
+            or ("selection_status" not in item and item.get("selected") is True)
+        )
+    ]
+    source_identifiers = {
+        key: _normalized_literature_identifier(key, value)
+        for key, value in {
+            "doi": doi,
+            "pmid": pmid,
+            "arxiv_id": arxiv_id,
+            "url": url,
+        }.items()
+        if _normalized_literature_identifier(key, value)
+    }
+    if source_identifiers:
+        matches: list[Mapping[str, Any]] = []
+        for item in selected:
+            candidate_identifiers = {
+                key: normalized
+                for key in source_identifiers
+                if (normalized := _normalized_literature_identifier(key, item.get(key)))
+            }
+            shared = set(source_identifiers) & set(candidate_identifiers)
+            if shared and all(
+                source_identifiers[key] == candidate_identifiers[key] for key in shared
+            ):
+                matches.append(item)
+        return matches
+    normalized_title = _normalized_literature_text(title).casefold()
+    return [
+        item
+        for item in selected
+        if _normalized_literature_text(item.get("title")).casefold() == normalized_title
+    ]
+
+
+def _relation_targets(item: Mapping[str, Any], relation_type: str) -> set[str]:
+    return {
+        str(row.get("target") or "")
+        for row in item.get("relations") or []
+        if isinstance(row, Mapping) and row.get("type") == relation_type
+    }
+
+
+def _is_retraction_update(item: Mapping[str, Any]) -> bool:
+    payload = item.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    return str(payload.get("status") or "").strip().lower() in {
+        "retracted",
+        "withdrawn",
+        "invalid",
+    } or str(payload.get("update_type") or "").strip().lower() in {
+        "retraction",
+        "withdrawal",
+    }
+
+
+def _source_update_time(item: Mapping[str, Any]) -> datetime | None:
+    payload = item.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    try:
+        parsed = datetime.fromisoformat(
+            str(payload.get("checked_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _valid_reinstatement_pair(
+    successor: Mapping[str, Any], target: Mapping[str, Any]
+) -> bool:
+    payload = successor.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    target_payload = target.get("payload")
+    target_payload = target_payload if isinstance(target_payload, Mapping) else {}
+    successor_time = _source_update_time(successor)
+    target_time = _source_update_time(target)
+    successor_source = str(payload.get("source_id") or "")
+    target_source = str(target_payload.get("source_id") or "")
+    return bool(
+        successor.get("kind") == "source_update"
+        and target.get("kind") == "source_update"
+        and str(successor.get("state") or "") in {"completed", "verified", "promoted"}
+        and str(payload.get("update_type") or "").strip().lower() == "reinstatement"
+        and str(payload.get("status") or "").strip().lower()
+        not in {"retracted", "withdrawn", "invalid"}
+        and str(payload.get("notice_id") or "").strip()
+        and str(payload.get("provider") or "")
+        == str(target_payload.get("provider") or "")
+        and successor_source
+        and successor_source == target_source
+        and _relation_targets(successor, "updates") == {successor_source}
+        and len(_relation_targets(successor, "supersedes")) == 1
+        and _relation_targets(target, "updates") == {target_source}
+        and _relation_targets(target, "invalidates") == {target_source}
+        and _is_retraction_update(target)
+        and successor_time is not None
+        and target_time is not None
+        and successor_time > target_time
+    )
+
+
+def _active_retraction_updates(
+    objects: Sequence[Mapping[str, Any]], source_id: str
+) -> list[Mapping[str, Any]]:
+    by_id = {
+        str(item.get("object_id") or ""): item
+        for item in objects
+        if item.get("kind") == "source_update"
+    }
+    valid_superseded: set[str] = set()
+    for item in by_id.values():
+        for target_id in _relation_targets(item, "supersedes"):
+            target = by_id.get(target_id)
+            if target is not None and _valid_reinstatement_pair(item, target):
+                valid_superseded.add(target_id)
+    return [
+        item
+        for object_id, item in by_id.items()
+        if object_id not in valid_superseded
+        and str(item.get("state") or "") in {"completed", "verified", "promoted"}
+        and str((item.get("payload") or {}).get("source_id") or "") == source_id
+        and _relation_targets(item, "updates") == {source_id}
+        and _relation_targets(item, "invalidates") == {source_id}
+        and _is_retraction_update(item)
+    ]
+
+
 def _ensure_direct_save_is_safe(
     repository: ResearchRepository, *, commit: bool
 ) -> None:
     if not commit:
         return
-    staged = repository.status().get("research_stage", {}).get("paths") or []
+    status = repository.status()
+    staged = status.get("research_stage", {}).get("paths") or []
     if staged:
         raise ResearchGitError(
             "one-command research recording requires an empty native stage; "
             "commit it with `xscientist git commit` or clear it with "
             "`xscientist research unstage --all`"
+        )
+    pending = sorted(
+        {
+            *list(status.get("staged_paths") or []),
+            *list(status.get("tracked_changes") or []),
+            *list(status.get("eligible_changes") or []),
+        }
+    )
+    if pending:
+        raise ResearchGitError(
+            "one-command research recording requires a clean research worktree; "
+            "checkpoint, stage, or restore the pending paths first: "
+            + ", ".join(pending)
         )
 
 
@@ -77,16 +276,27 @@ def _finish(
 ) -> dict[str, Any]:
     checkpoint: CheckpointResult | None = None
     if commit:
+        created_results = [item for item in (result, *related) if item.created]
+        if not created_results:
+            return {
+                "object": result,
+                "related": list(related),
+                "checkpoint": CheckpointResult(
+                    created=False,
+                    committed=False,
+                    reason="research objects already exist",
+                ),
+            }
         includes = [
             item.path.relative_to(repository.path).as_posix()
-            for item in (result, *related)
+            for item in created_results
         ]
         checkpoint = create_checkpoint(
             repository.path,
             stage=stage,
             subject=subject,
             status=status,
-            include=includes,
+            only_paths=includes,
             reproduce_command=reproduce_command,
         )
     return {"object": result, "related": list(related), "checkpoint": checkpoint}
@@ -186,7 +396,8 @@ def save_search_plan(
     repository = ResearchRepository(repo)
     _ensure_direct_save_is_safe(repository, commit=commit)
     normalized_queries = [
-        _required_text(item, label="search query") for item in queries
+        _normalized_literature_text(_required_text(item, label="search query"))
+        for item in queries
     ]
     if not normalized_queries:
         raise ResearchGitError("search plan requires at least one query")
@@ -194,7 +405,12 @@ def save_search_plan(
         "question": _required_text(question, label="search question"),
         "queries": list(dict.fromkeys(normalized_queries)),
         "providers": sorted(
-            {_required_text(item, label="search provider") for item in providers}
+            {
+                _normalized_literature_text(
+                    _required_text(item, label="search provider")
+                )
+                for item in providers
+            }
         ),
         "inclusion_criteria": [
             _required_text(item, label="inclusion criterion")
@@ -244,11 +460,42 @@ def save_search_receipt(
     plan = repository.get(plan_id)
     if plan["kind"] != "search_plan":
         raise ResearchGitError("search receipt plan reference has wrong kind")
+    if plan.get("state") != "locked":
+        raise ResearchGitError("search receipt requires a locked search plan")
     resolved_plan = str(plan["object_id"])
+    plan_payload = plan.get("payload")
+    plan_payload = plan_payload if isinstance(plan_payload, Mapping) else {}
+    expected_plan_hash = canonical_content_hash(
+        {key: value for key, value in plan_payload.items() if key != "search_plan_hash"}
+    )
+    if plan_payload.get("search_plan_hash") != expected_plan_hash:
+        raise ResearchGitError("search plan commitment hash is invalid")
+    normalized_provider = _normalized_literature_text(
+        _required_text(provider, label="search provider")
+    )
+    normalized_query = _normalized_literature_text(
+        _required_text(query, label="search query")
+    )
+    locked_providers = plan_payload.get("providers") or []
+    if not isinstance(locked_providers, list):
+        raise ResearchGitError("locked search plan providers must be an array")
+    if locked_providers and normalized_provider not in {
+        _normalized_literature_text(item) for item in locked_providers
+    }:
+        raise ResearchGitError(
+            "search receipt provider is not allowed by the locked search plan"
+        )
+    locked_queries = plan_payload.get("queries")
+    if not isinstance(locked_queries, list) or normalized_query not in {
+        _normalized_literature_text(item) for item in locked_queries
+    }:
+        raise ResearchGitError(
+            "search receipt query must exactly match a locked search-plan query"
+        )
     try:
         payload = build_search_receipt_payload(
-            provider=_required_text(provider, label="search provider"),
-            query=_required_text(query, label="search query"),
+            provider=normalized_provider,
+            query=normalized_query,
             candidates=candidates,
             retrieved_at=(
                 retrieved_at.strip()
@@ -266,6 +513,16 @@ def save_search_receipt(
         )
     except ValueError as exc:
         raise ResearchGitError(str(exc)) from exc
+    plan_binding = {
+        "object_id": resolved_plan,
+        "content_hash": str(plan.get("content_hash") or ""),
+        "search_plan_hash": str(plan_payload.get("search_plan_hash") or ""),
+    }
+    receipt_core = {
+        **{key: value for key, value in payload.items() if key != "receipt_hash"},
+        "plan_binding": plan_binding,
+    }
+    payload = {**receipt_core, "receipt_hash": canonical_content_hash(receipt_core)}
     result = repository.record(
         "search_receipt",
         payload,
@@ -311,12 +568,46 @@ def save_source_snapshot(
     receipt = repository.get(receipt_id)
     if receipt["kind"] != "search_receipt":
         raise ResearchGitError("source receipt reference has wrong kind")
+    receipt_payload = receipt.get("payload")
+    receipt_payload = receipt_payload if isinstance(receipt_payload, Mapping) else {}
+    expected_receipt_hash = canonical_content_hash(
+        {key: value for key, value in receipt_payload.items() if key != "receipt_hash"}
+    )
+    if receipt_payload.get("receipt_hash") != expected_receipt_hash:
+        raise ResearchGitError("source receipt commitment hash is invalid")
+    if receipt_payload.get(
+        "profile"
+    ) == "xscientist.retrieval-receipt.v2" and receipt_payload.get(
+        "candidate_set_hash"
+    ) != canonical_content_hash(
+        receipt_payload.get("candidates") or []
+    ):
+        raise ResearchGitError("source receipt candidate-set hash is invalid")
     _hashes(
         [content_hash, *([metadata_hash] if metadata_hash else [])],
         label="source hash",
     )
+    normalized_title = _required_text(title, label="source title")
+    matching_candidates = _selected_candidate_matches(
+        receipt_payload,
+        title=normalized_title,
+        doi=doi,
+        pmid=pmid,
+        arxiv_id=arxiv_id,
+        url=url,
+    )
+    if not matching_candidates:
+        raise ResearchGitError(
+            "source must match a selected candidate in its search receipt"
+        )
+    if len(matching_candidates) != 1:
+        raise ResearchGitError(
+            "source matches multiple selected candidates; use an unambiguous "
+            "persistent identifier"
+        )
+    matched_candidate = matching_candidates[0]
     core = {
-        "title": _required_text(title, label="source title"),
+        "title": normalized_title,
         "content_hash": content_hash,
         "metadata_hash": metadata_hash or "",
         "doi": doi.strip(),
@@ -325,6 +616,15 @@ def save_source_snapshot(
         "url": url.strip(),
         "license": license_name.strip(),
         "retraction_status": retraction_status.strip() or "unknown",
+        "receipt_binding": {
+            "object_id": str(receipt["object_id"]),
+            "content_hash": str(receipt.get("content_hash") or ""),
+            "receipt_hash": str(receipt_payload.get("receipt_hash") or ""),
+        },
+        "candidate_binding": {
+            "candidate_hash": canonical_content_hash(dict(matched_candidate)),
+            "selection_status": "selected",
+        },
     }
     if status_provider.strip() or status_checked_at.strip() or status_notice_id.strip():
         checked_at = status_checked_at.strip()
@@ -405,8 +705,47 @@ def save_source_update(
         "notice_id": notice_id.strip(),
         "detail": detail.strip(),
     }
-    payload = {**core, "update_hash": canonical_content_hash(core)}
     relations = [{"type": "updates", "target": str(source["object_id"])}]
+    if core["update_type"] == "reinstatement":
+        if core["status"] in {"retracted", "withdrawn", "invalid"}:
+            raise ResearchGitError(
+                "source reinstatement requires a non-invalidating status"
+            )
+        if not core["notice_id"]:
+            raise ResearchGitError("source reinstatement requires a notice id")
+        active_retractions = _active_retraction_updates(
+            repository.objects(kind="source_update"), str(source["object_id"])
+        )
+        if not active_retractions:
+            raise ResearchGitError(
+                "source reinstatement requires an active retraction update"
+            )
+        latest_retraction = max(
+            active_retractions,
+            key=lambda item: (
+                _source_update_time(item) or datetime.min.replace(tzinfo=timezone.utc),
+                str(item.get("created_at") or ""),
+                str(item.get("object_id") or ""),
+            ),
+        )
+        latest_payload = latest_retraction.get("payload") or {}
+        if core["provider"] != str(latest_payload.get("provider") or ""):
+            raise ResearchGitError(
+                "source reinstatement provider must match the latest active retraction"
+            )
+        latest_time = _source_update_time(latest_retraction)
+        if latest_time is None or parsed_checked_at <= latest_time:
+            raise ResearchGitError(
+                "source reinstatement must be checked after the latest active "
+                "retraction"
+            )
+        relations.append(
+            {
+                "type": "supersedes",
+                "target": str(latest_retraction["object_id"]),
+            }
+        )
+    payload = {**core, "update_hash": canonical_content_hash(core)}
     if payload["status"] in {"retracted", "withdrawn", "invalid"} or payload[
         "update_type"
     ] in {"retraction", "withdrawal"}:

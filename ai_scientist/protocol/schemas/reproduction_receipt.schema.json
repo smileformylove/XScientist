@@ -6,7 +6,7 @@
   "type": "object",
   "required": ["schema_version", "receipt_id", "created_at", "commit", "checkpoint_id", "checkpoint_hash", "reproduction_level", "verdict", "objects_complete", "environment", "command_hash", "executed", "returncode", "timed_out", "stdout_hash", "stderr_hash", "content_hash"],
   "properties": {
-    "schema_version": {"type": "string", "const": "xscientist.reproduction-receipt.v1"},
+    "schema_version": {"type": "string", "enum": ["xscientist.reproduction-receipt.v1", "xscientist.reproduction-receipt.v2"]},
     "receipt_id": {"type": "string", "pattern": "^rr-[0-9a-f]{16}$"},
     "created_at": {"type": "string", "minLength": 1},
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
@@ -33,7 +33,137 @@
     "timed_out": {"type": "boolean"},
     "stdout_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
     "stderr_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "stdout_truncated": {"type": ["boolean", "null"]},
+    "stderr_truncated": {"type": ["boolean", "null"]},
+    "output_capture": {"type": "string", "enum": ["bounded_tail", "legacy_unknown"]},
+    "max_output_chars": {"type": ["integer", "null"], "minimum": 1},
+    "checkpoint_binding": {
+      "type": "object",
+      "required": ["commit", "checkpoint_id", "checkpoint_content_hash", "binding_hash"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "checkpoint_id": {"type": "string", "minLength": 1},
+        "checkpoint_content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "binding_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "target_binding": {
+      "type": "object",
+      "required": ["policy", "audit_commit", "audit_checkpoint_id", "audit_checkpoint_hash", "target_objects", "claim_closures", "binding_hash"],
+      "properties": {
+        "policy": {"type": "string", "const": "xscientist.reproduction-target-binding.v2"},
+        "audit_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "audit_checkpoint_id": {"type": "string", "minLength": 1},
+        "audit_checkpoint_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "target_objects": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/objectBinding"}
+        },
+        "claim_closures": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/claimClosureBinding"}
+        },
+        "binding_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "execution_result": {
+      "type": "object",
+      "required": ["command_hash", "reproduction_level", "verdict", "objects_complete", "executed", "returncode", "timed_out", "stdout_hash", "stderr_hash", "stdout_truncated", "stderr_truncated", "output_capture", "max_output_chars", "result_hash"],
+      "properties": {
+        "command_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "reproduction_level": {"type": "string", "enum": ["inspection", "artifact_replay", "computational_rerun"]},
+        "verdict": {"type": "string", "enum": ["ready", "materialized", "passed", "failed", "warning"]},
+        "objects_complete": {"type": "boolean"},
+        "executed": {"type": "boolean"},
+        "returncode": {"type": ["integer", "null"]},
+        "timed_out": {"type": "boolean"},
+        "stdout_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "stderr_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "stdout_truncated": {"type": ["boolean", "null"]},
+        "stderr_truncated": {"type": ["boolean", "null"]},
+        "output_capture": {"type": "string", "enum": ["bounded_tail", "legacy_unknown"]},
+        "max_output_chars": {"type": ["integer", "null"], "minimum": 1},
+        "result_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "execution_isolation": {
+      "type": "object",
+      "required": ["isolated", "security_boundary", "environment", "environment_scope", "process_tree", "process_control", "process_tree_termination_guaranteed", "filesystem", "network"],
+      "properties": {
+        "isolated": {"const": false},
+        "security_boundary": {"const": false},
+        "environment": {"type": "string", "enum": ["sanitized", "legacy_unknown"]},
+        "environment_scope": {"type": "string", "enum": ["variables_only", "legacy_unknown"]},
+        "process_tree": {"type": "string", "enum": ["best_effort_process_group", "parent_only_no_tree_guarantee", "legacy_unknown_no_tree_guarantee"]},
+        "process_control": {"type": "string", "enum": ["posix_process_group_best_effort", "parent_process_only", "legacy_unknown"]},
+        "process_tree_termination_guaranteed": {"const": false},
+        "filesystem": {"const": "host_visible"},
+        "network": {"const": "host_unrestricted"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "environment": {"const": "sanitized"},
+            "environment_scope": {"const": "variables_only"},
+            "process_tree": {"const": "best_effort_process_group"},
+            "process_control": {"const": "posix_process_group_best_effort"}
+          }
+        },
+        {
+          "properties": {
+            "environment": {"const": "sanitized"},
+            "environment_scope": {"const": "variables_only"},
+            "process_tree": {"const": "parent_only_no_tree_guarantee"},
+            "process_control": {"const": "parent_process_only"}
+          }
+        },
+        {
+          "properties": {
+            "environment": {"const": "legacy_unknown"},
+            "environment_scope": {"const": "legacy_unknown"},
+            "process_tree": {"const": "legacy_unknown_no_tree_guarantee"},
+            "process_control": {"const": "legacy_unknown"}
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": "xscientist.reproduction-receipt.v2"}}},
+      "then": {"required": ["checkpoint_binding", "target_binding", "execution_result", "execution_isolation", "stdout_truncated", "stderr_truncated", "output_capture", "max_output_chars"]}
+    }
+  ],
+  "$defs": {
+    "objectBinding": {
+      "type": "object",
+      "required": ["object_id", "content_hash"],
+      "properties": {
+        "object_id": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "claimClosureBinding": {
+      "type": "object",
+      "required": ["claim_id", "claim_content_hash", "objects", "closure_hash"],
+      "properties": {
+        "claim_id": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+        "claim_content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "objects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/objectBinding"}
+        },
+        "closure_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

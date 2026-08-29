@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import io
 import shutil
+import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from contextlib import redirect_stdout
+
+import yaml
 
 from ai_scientist.protocol.research_vcs import (
     RESEARCH_SEMANTIC_PROFILE_SCHEMA,
@@ -119,6 +122,44 @@ class ResearchRepositoryTests(unittest.TestCase):
             git_user_email="research@example.invalid",
         )
 
+    def _record_locked_preregistration(
+        self,
+        repository: ResearchRepository,
+        *,
+        hypothesis_id: str,
+        plan_id: str,
+        registration_id: str,
+        dataset: str,
+        metric: str,
+        baseline: str,
+    ):
+        plan = repository.record(
+            "research_plan",
+            {"plan_id": plan_id, "hypothesis_id": hypothesis_id},
+            state="draft",
+            relations=[{"type": "depends_on", "target": hypothesis_id}],
+        )
+        return repository.record(
+            "preregistration",
+            {
+                "preregistration_id": registration_id,
+                "plan_id": plan_id,
+                "hypothesis_id": hypothesis_id,
+                "hypotheses": {"alternative": hypothesis_id},
+                "outcomes": [
+                    {
+                        "dataset": dataset,
+                        "metric": metric,
+                        "baseline": baseline,
+                    }
+                ],
+                "analysis_plan": {"method": f"compare against {baseline}"},
+                "status": "locked",
+            },
+            state="locked",
+            relations=[{"type": "depends_on", "target": plan.object_id}],
+        )
+
     def test_record_list_load_commit_and_verify(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "research"
@@ -194,7 +235,9 @@ class ResearchRepositoryTests(unittest.TestCase):
                 second.object_id,
             )
 
-    def test_blame_resolves_latest_selector_at_requested_historical_commit(self) -> None:
+    def test_blame_resolves_latest_selector_at_requested_historical_commit(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             repository = self._init(Path(td) / "research")
             first = repository.record("hypothesis", {"statement": "H1"})
@@ -248,6 +291,27 @@ class ResearchRepositoryTests(unittest.TestCase):
             self.assertNotIn(hypothesis_path, checkpoint.staged_paths)
             self.assertEqual(repository.status()["research_stage"]["paths"], [])
             self.assertIn(hypothesis_path, repository.status()["eligible_changes"])
+
+    def test_native_stage_honors_an_explicit_safe_file_outside_default_patterns(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            notes = root / "notes.txt"
+            notes.write_text("bounded observation\n", encoding="utf-8")
+
+            staged = repository.stage(["notes.txt"])
+            checkpoint = repository.commit(
+                stage="observation",
+                subject="record explicitly selected notes",
+                staged_only=True,
+            )
+
+            self.assertEqual(staged.paths, ("notes.txt",))
+            self.assertTrue(checkpoint.committed)
+            self.assertIn("notes.txt", checkpoint.staged_paths)
+            self.assertNotIn("notes.txt", repository.status()["eligible_changes"])
 
     def test_native_stage_detects_content_changed_after_selection(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -389,8 +453,151 @@ class ResearchRepositoryTests(unittest.TestCase):
             self.assertIn(
                 branch_checkpoint.content_hash, checkpoint["parent_checkpoint_hashes"]
             )
+            first_parent = subprocess.run(
+                ["git", "rev-parse", f"{merged.commit}^1"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            committed_material = {
+                path
+                for path in subprocess.run(
+                    ["git", "diff", "--name-only", first_parent, merged.commit],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                ).stdout.splitlines()
+                if not path.startswith("checkpoints/")
+            }
+            self.assertEqual(set(checkpoint["changed_paths"]), committed_material)
             self.assertEqual(repository.get(hypothesis.object_id)["kind"], "hypothesis")
             self.assertTrue(verification["ok"], verification["errors"])
+
+    def test_research_merge_refuses_an_uncheckpointed_source_tip(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.fork("unreviewed", switch=True)
+            secret = root / ".env"
+            secret.write_text(
+                "deny-listed fixture path\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-f", ".env"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "raw unreviewed change"],
+                cwd=root,
+                capture_output=True,
+                check=True,
+            )
+            repository.switch("main")
+            head_before = repository.status()["head"]
+
+            with self.assertRaisesRegex(ResearchGitError, "not bound"):
+                repository.merge_preview("unreviewed")
+            with self.assertRaisesRegex(ResearchGitError, "not bound"):
+                repository.merge("unreviewed")
+
+            self.assertEqual(repository.status()["head"], head_before)
+            self.assertFalse(secret.exists())
+
+    def test_research_merge_refuses_a_source_path_denied_by_target_policy(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.fork("source", switch=True)
+            source_path = root / "claims" / "source.md"
+            source_path.write_text("source-only result\n", encoding="utf-8")
+            repository.commit(stage="evidence", subject="record source result")
+            repository.switch("main")
+            config_path = root / "research.yaml"
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["git"]["deny_patterns"].append("claims/source.md")
+            config_path.write_text(
+                yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+            )
+            repository.commit(stage="policy", subject="deny source path")
+            preexisting_view = root / "local-view.log"
+            preexisting_view.write_text(
+                "preserve this generated local view\n", encoding="utf-8"
+            )
+            head_before = repository.status()["head"]
+
+            self.assertTrue(repository.merge_preview("source")["clean"])
+            with self.assertRaisesRegex(ResearchGitError, "outside.*safety policy"):
+                repository.merge("source")
+
+            self.assertEqual(repository.status()["head"], head_before)
+            self.assertFalse(source_path.exists())
+            self.assertEqual(
+                preexisting_view.read_text(encoding="utf-8"),
+                "preserve this generated local view\n",
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "diff", "--cached", "--quiet"], cwd=root
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.run(["git", "diff", "--quiet"], cwd=root).returncode,
+                0,
+            )
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                    cwd=root,
+                    capture_output=True,
+                ).returncode,
+                0,
+            )
+            self.assertTrue(repository.status()["worktree_clean"])
+
+    def test_strict_checkpoint_rejects_an_undeclared_amended_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.record("hypothesis", {"statement": "H1"})
+            repository.commit(stage="ideation", subject="record H1")
+            hidden = root / "claims" / "hidden.md"
+            hidden.write_text("undeclared material\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(hidden)], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "--amend", "--no-edit"],
+                cwd=root,
+                capture_output=True,
+                check=True,
+            )
+
+            with self.assertRaisesRegex(ResearchGitError, "changed_paths"):
+                repository.show()
+
+    def test_exact_checkpoint_paths_remain_stable_with_git_rename_detection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            subprocess.run(
+                ["git", "config", "diff.renames", "true"], cwd=root, check=True
+            )
+            original = root / "claims" / "original.md"
+            renamed = root / "claims" / "renamed.md"
+            original.write_text("stable scientific material\n", encoding="utf-8")
+            repository.commit(stage="evidence", subject="record original")
+            original.rename(renamed)
+
+            repository.commit(stage="evidence", subject="rename material")
+            checkpoint = repository.show()["checkpoint"]
+
+            self.assertEqual(
+                set(checkpoint["changed_paths"]),
+                {"claims/original.md", "claims/renamed.md"},
+            )
 
     def test_merge_preflight_blocks_opposed_scientific_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -443,6 +650,200 @@ class ResearchRepositoryTests(unittest.TestCase):
                 opposed["conflict_id"],
             )
             self.assertTrue(repository.fsck()["ok"])
+
+    def test_merge_allows_independent_locked_preregistrations(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            first_hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=first_hypothesis.object_id,
+                plan_id="plan-h1",
+                registration_id="prereg-h1",
+                dataset="dataset-a",
+                metric="accuracy",
+                baseline="baseline-a",
+            )
+            repository.commit(stage="preregister", subject="lock H1 plan")
+            repository.fork("independent")
+            second_hypothesis = repository.record("hypothesis", {"statement": "H2"})
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=second_hypothesis.object_id,
+                plan_id="plan-h2",
+                registration_id="prereg-h2",
+                dataset="dataset-b",
+                metric="f1",
+                baseline="baseline-b",
+            )
+            repository.commit(stage="preregister", subject="lock H2 plan")
+            repository.switch("main")
+
+            preview = repository.merge_preview("independent")
+            merged = repository.merge("independent")
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
+            self.assertTrue(merged.commit)
+
+    def test_merge_allows_same_hypothesis_in_disjoint_registered_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=hypothesis.object_id,
+                plan_id="shared-plan",
+                registration_id="prereg-a",
+                dataset="dataset-a",
+                metric="accuracy",
+                baseline="baseline-a",
+            )
+            repository.commit(stage="preregister", subject="lock scope A")
+            repository.fork("scope-b")
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=hypothesis.object_id,
+                plan_id="shared-plan",
+                registration_id="prereg-b",
+                dataset="dataset-b",
+                metric="accuracy",
+                baseline="baseline-b",
+            )
+            repository.commit(stage="preregister", subject="lock scope B")
+            repository.switch("main")
+
+            preview = repository.merge_preview("scope-b")
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
+
+    def test_merge_blocks_incompatible_registration_for_same_plan_and_scope(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=hypothesis.object_id,
+                plan_id="shared-plan",
+                registration_id="prereg-a",
+                dataset="dataset-a",
+                metric="accuracy",
+                baseline="baseline-a",
+            )
+            repository.commit(stage="preregister", subject="lock baseline A")
+            repository.fork("incompatible")
+            self._record_locked_preregistration(
+                repository,
+                hypothesis_id=hypothesis.object_id,
+                plan_id="shared-plan",
+                registration_id="prereg-b",
+                dataset="dataset-a",
+                metric="accuracy",
+                baseline="baseline-b",
+            )
+            repository.commit(stage="preregister", subject="lock baseline B")
+            repository.switch("main")
+
+            preview = repository.merge_preview("incompatible")
+
+            self.assertFalse(preview["clean"])
+            self.assertIn(
+                "locked_preregistration",
+                {item["type"] for item in preview["conflicts"]},
+            )
+
+    def test_merge_preflight_detects_base_support_and_branch_refutation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            support = repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "supports", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="record base support")
+            repository.fork("challenge")
+            refutation = repository.record(
+                "evidence",
+                {"result": "negative"},
+                relations=[{"type": "refutes", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="challenge base support")
+            repository.switch("main")
+
+            preview = repository.merge_preview("challenge")
+
+            self.assertFalse(preview["clean"])
+            opposed = next(
+                item
+                for item in preview["conflicts"]
+                if item["type"] == "opposed_evidence"
+            )
+            self.assertEqual(opposed["supporting_evidence"], [support.object_id])
+            self.assertEqual(opposed["refuting_evidence"], [refutation.object_id])
+
+    def test_merge_does_not_repeat_a_preexisting_contested_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "supports", "target": hypothesis.object_id}],
+            )
+            repository.record(
+                "evidence",
+                {"result": "negative"},
+                relations=[{"type": "refutes", "target": hypothesis.object_id}],
+            )
+            repository.commit(stage="evidence", subject="retain contested evidence")
+            repository.fork("notes")
+            repository.record("question", {"text": "Which boundary explains H1?"})
+            repository.commit(stage="ideation", subject="add an unrelated question")
+            repository.switch("main")
+
+            preview = repository.merge_preview("notes")
+
+            self.assertTrue(preview["clean"], preview["conflicts"])
+
+    def test_merge_preflight_detects_base_metric_redefined_on_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            repository.record(
+                "metric",
+                {
+                    "metric_id": "accuracy",
+                    "name": "accuracy",
+                    "definition": "top-1 accuracy",
+                },
+            )
+            repository.commit(stage="plan", subject="lock base metric")
+            repository.fork("metric-change")
+            repository.record(
+                "metric",
+                {
+                    "metric_id": "accuracy",
+                    "name": "accuracy",
+                    "definition": "balanced accuracy",
+                },
+            )
+            repository.commit(stage="plan", subject="redefine source metric")
+            repository.switch("main")
+
+            preview = repository.merge_preview("metric-change")
+
+            self.assertFalse(preview["clean"])
+            self.assertIn(
+                "metric_definition",
+                {item["type"] for item in preview["conflicts"]},
+            )
 
     def test_merge_does_not_confuse_disjoint_scopes_with_a_contradiction(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -813,6 +1214,52 @@ class ResearchRepositoryTests(unittest.TestCase):
                 lifecycle.repository.get(timed_out["attempt"].object_id)["state"],
                 "timed_out",
             )
+
+    def test_invalid_locked_planning_is_rejected_before_any_object_is_written(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            lifecycle = ResearchLifecycle(repository)
+            head = repository.status()["head"]
+
+            with self.assertRaisesRegex(
+                ResearchGitError, "failed integrity validation"
+            ):
+                lifecycle.planning(
+                    hypothesis={"core_hypothesis": "H1"},
+                    plan={"plan_id": "p1", "tasks": []},
+                    preregistration={"status": "locked"},
+                )
+
+            self.assertEqual(repository.objects(), [])
+            self.assertEqual(repository.status()["head"], head)
+            self.assertTrue(repository.status()["worktree_clean"])
+
+    def test_confirmatory_attempt_revalidates_a_declared_locked_registration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            forged = repository.record(
+                "preregistration",
+                {"status": "locked"},
+                state="locked",
+            )
+            repository.commit(stage="preregister", subject="record invalid fixture")
+
+            with self.assertRaisesRegex(
+                ResearchGitError, "failed integrity validation"
+            ):
+                ResearchLifecycle(repository).experiment_attempt(
+                    {"status": "success", "study_phase": "confirmatory"},
+                    preregistration_id=forged.object_id,
+                    commit=False,
+                )
+
+            self.assertEqual(repository.objects(kind="experiment_attempt"), [])
 
     def test_damaged_object_is_never_returned_as_valid(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -16,6 +16,43 @@ from .research_git import ResearchGitError, init_repository
 from .research_vcs import ResearchRepository
 
 GUIDE_SCHEMA = "xscientist.research-guide.v1"
+WORKSPACE_ACTION_SCHEMA = "xscientist.workspace-action.v1"
+WORKSPACE_ACTION_CONTEXT_SCHEMA = "xscientist.workspace-action-context.v1"
+WORKSPACE_PLACEHOLDER = "{workspace}"
+_COMMAND_PLACEHOLDER_TRANSLATIONS = {
+    "YOUR HYPOTHESIS": "你的假设",
+    "WHAT RESULT WOULD DISPROVE IT": "什么结果会推翻它",
+    "RIVAL HYPOTHESIS": "竞争假设",
+    "WHAT RESULT WOULD DISPROVE THE RIVAL": "什么结果会推翻竞争假设",
+    "RESEARCH QUESTION": "研究问题",
+    "WHAT TO TEST": "要检验什么",
+    "WHAT RESULT SEPARATES THE EXPLANATIONS": "什么结果能区分这些解释",
+    "NAME=VALUE": "名称=数值",
+    "DATASET": "数据集",
+    "METRIC": "指标",
+    "BASELINE": "基线",
+    "SPLIT_FILE": "划分文件",
+    "YOUR_NAME": "你的姓名",
+    "WHAT YOU RAN": "运行了什么",
+    "WHAT THE RESULT SHOWS": "结果说明了什么",
+    "BOUNDED CONCLUSION": "有边界的结论",
+    "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION": "该证据为何支持这一结论",
+    "REVIEW SUMMARY": "复核摘要",
+    "REVIEWER": "复核人",
+    "BOUNDED CLAIM": "有边界的主张",
+    "TESTED CONDITIONS": "已检验条件",
+    "TEST THE CONTESTED BOUNDARY": "检验存在争议的边界",
+    "WHAT RESULT WOULD RESOLVE THE CONFLICT": "什么结果能解决冲突",
+    "RESOLUTION EXPERIMENT": "争议解决实验",
+    "RESOLUTION METRIC": "解决指标",
+    "RESOLUTION RESULT": "争议解决结果",
+    "RESOLUTION CONCLUSION": "争议解决结论",
+    "WHY THE NEW EVIDENCE RESOLVES THE CONFLICT": "新证据为何能解决冲突",
+    "RESOLUTION REVIEW": "争议解决复核",
+    "NARROWED CLAIM": "缩小范围后的主张",
+    "RESOLVED CONDITIONS": "已解决的适用条件",
+    "REPRODUCER": "复现人",
+}
 
 
 def _required(value: str, *, label: str) -> str:
@@ -73,40 +110,22 @@ def _step(
 def _localize_command(language: str, command: str) -> str:
     if language != "zh":
         return command
-    replacements = {
-        "YOUR HYPOTHESIS": "你的假设",
-        "WHAT RESULT WOULD DISPROVE IT": "什么结果会推翻它",
-        "WHAT TO TEST": "要检验什么",
-        "WHAT RESULT SEPARATES THE EXPLANATIONS": "什么结果能区分这些解释",
-        "DATASET": "数据集",
-        "METRIC": "指标",
-        "BASELINE": "基线",
-        "SPLIT_FILE": "划分文件",
-        "YOUR_NAME": "你的姓名",
-        "WHAT YOU RAN": "运行了什么",
-        "WHAT THE RESULT SHOWS": "结果说明了什么",
-        "BOUNDED CONCLUSION": "有边界的结论",
-        "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION": "该证据为何支持这一结论",
-        "REVIEW SUMMARY": "复核摘要",
-        "REVIEWER": "复核人",
-        "BOUNDED CLAIM": "有边界的主张",
-        "TESTED CONDITIONS": "已检验条件",
-        "TEST THE CONTESTED BOUNDARY": "检验存在争议的边界",
-        "WHAT RESULT WOULD RESOLVE THE CONFLICT": "什么结果能解决冲突",
-        "RESOLUTION EXPERIMENT": "争议解决实验",
-        "RESOLUTION METRIC": "解决指标",
-        "RESOLUTION RESULT": "争议解决结果",
-        "RESOLUTION CONCLUSION": "争议解决结论",
-        "WHY THE NEW EVIDENCE RESOLVES THE CONFLICT": "新证据为何能解决冲突",
-        "RESOLUTION REVIEW": "争议解决复核",
-        "NARROWED CLAIM": "缩小范围后的主张",
-        "RESOLVED CONDITIONS": "已解决的适用条件",
-        "REPRODUCER": "复现人",
-    }
     rendered = command
-    for source, target in replacements.items():
+    for source, target in _COMMAND_PLACEHOLDER_TRANSLATIONS.items():
         rendered = rendered.replace(source, target)
     return rendered
+
+
+def _command_input_placeholders(command: str) -> list[str]:
+    """Return unresolved human-input markers without mistaking HEAD for one."""
+
+    found = {
+        placeholder
+        for pair in _COMMAND_PLACEHOLDER_TRANSLATIONS.items()
+        for placeholder in pair
+        if placeholder in command
+    }
+    return sorted(found)
 
 
 def _command_for_repo(command: str, repo: str | Path) -> str:
@@ -133,8 +152,184 @@ def _command_for_repo(command: str, repo: str | Path) -> str:
     return f"{contextual} {arguments}" if separator else contextual
 
 
+def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
+    """Return a host-path-free execution contract for one suggested command.
+
+    Human output can bind a command directly to the path supplied by the user.
+    Portable JSON cannot disclose that absolute host path, so it must expose an
+    explicit placeholder and say whether the selected workspace is passed as an
+    argument or used as the process working directory. A bare ``.`` therefore
+    never masquerades as a command that is safe from an arbitrary caller cwd.
+    """
+
+    normalized = str(command or "").strip()
+    if not normalized:
+        return None
+    try:
+        argv = shlex.split(normalized)
+    except ValueError:
+        return {
+            "schema_version": WORKSPACE_ACTION_SCHEMA,
+            "command_template": None,
+            "argv_template": [],
+            "executable_after_binding": False,
+            "workspace_binding": {
+                "mode": "unavailable",
+                "source": None,
+                "placeholder": None,
+                "required": False,
+                "host_path_disclosed": False,
+            },
+            "cwd_binding": {"mode": "caller", "template": None},
+            "input_binding": {
+                "mode": "unavailable",
+                "required": True,
+                "placeholders": [],
+            },
+        }
+
+    binding_mode = "none"
+    cwd_mode = "caller"
+
+    for flag in ("--repo", "--workspace"):
+        if flag in argv:
+            index = argv.index(flag)
+            if index + 1 < len(argv):
+                argv[index + 1] = WORKSPACE_PLACEHOLDER
+                binding_mode = "argument"
+                break
+
+    if binding_mode == "none" and len(argv) >= 3:
+        if argv[:2] in (
+            ["xscientist", "explore"],
+            ["xscientist", "start"],
+            ["xscientist", "status"],
+            ["xscientist", "audit"],
+        ):
+            argv[2] = WORKSPACE_PLACEHOLDER
+            binding_mode = "argument"
+        elif argv[:2] == ["xscientist", "history"] and len(argv) >= 4:
+            argv[3] = WORKSPACE_PLACEHOLDER
+            binding_mode = "argument"
+        elif argv[:3] == ["xscientist", "research", "init"] and len(argv) >= 4:
+            argv[3] = WORKSPACE_PLACEHOLDER
+            binding_mode = "argument"
+
+    if binding_mode == "none" and argv[:2] == ["xscientist", "research"]:
+        repository_neutral_template = (
+            len(argv) >= 4
+            and argv[2] in {"program", "discovery"}
+            and argv[3] == "template"
+        )
+        if repository_neutral_template:
+            binding_mode = "cwd"
+            cwd_mode = "workspace_root"
+        else:
+            argv.extend(["--repo", WORKSPACE_PLACEHOLDER])
+            binding_mode = "argument"
+
+    if binding_mode == "none" and argv[:2] == ["xscientist", "demo"]:
+        # ``./xscientist-demo`` is intentionally relative, but portable status
+        # JSON must bind that relative destination to the inspected workspace
+        # instead of whichever directory an automation caller happens to use.
+        binding_mode = "cwd"
+        cwd_mode = "workspace_root"
+
+    if binding_mode == "none" and argv[:2] in (
+        ["xscientist", "doctor"],
+        ["xscientist", "executor"],
+    ):
+        argv.extend(["--workspace", WORKSPACE_PLACEHOLDER])
+        binding_mode = "argument"
+    if (
+        binding_mode == "none"
+        and len(argv) >= 3
+        and argv[:2] == ["xscientist", "provider"]
+        and argv[2] in {"add", "check", "test", "activate", "remove"}
+    ):
+        argv.extend(["--workspace", WORKSPACE_PLACEHOLDER])
+        binding_mode = "argument"
+    if binding_mode == "none" and argv[:2] == ["xscientist", "preflight"]:
+        binding_mode = "cwd"
+        cwd_mode = "workspace_root"
+
+    quoted_placeholder = shlex.quote(WORKSPACE_PLACEHOLDER)
+    command_template = shlex.join(argv).replace(
+        quoted_placeholder, WORKSPACE_PLACEHOLDER
+    )
+    workspace_required = binding_mode in {"argument", "cwd"}
+    input_placeholders = _command_input_placeholders(command_template)
+    return {
+        "schema_version": WORKSPACE_ACTION_SCHEMA,
+        "command_template": command_template,
+        "argv_template": argv,
+        "executable_after_binding": not input_placeholders,
+        "workspace_binding": {
+            "mode": binding_mode,
+            "source": "invocation_workspace" if workspace_required else None,
+            "placeholder": WORKSPACE_PLACEHOLDER if workspace_required else None,
+            "required": workspace_required,
+            "host_path_disclosed": False,
+        },
+        "cwd_binding": {
+            "mode": cwd_mode,
+            "template": (
+                WORKSPACE_PLACEHOLDER if cwd_mode == "workspace_root" else None
+            ),
+        },
+        "input_binding": {
+            "mode": "template" if input_placeholders else "none",
+            "required": bool(input_placeholders),
+            "placeholders": input_placeholders,
+        },
+    }
+
+
+def workspace_action_context() -> dict[str, Any]:
+    """Describe how portable action templates bind the selected workspace."""
+
+    return {
+        "schema_version": WORKSPACE_ACTION_CONTEXT_SCHEMA,
+        "workspace_placeholder": WORKSPACE_PLACEHOLDER,
+        "workspace_source": "workspace argument supplied to this invocation",
+        "binding_required_before_execution": True,
+        "template_inputs_may_be_required": True,
+        "host_path_disclosed": False,
+    }
+
+
+def public_workspace_action(step: dict[str, Any]) -> dict[str, Any]:
+    """Make one next-step row safe and unambiguous for portable JSON."""
+
+    safe = deepcopy(step)
+    contract = workspace_action_contract(safe.get("command"))
+    safe["action"] = contract
+    if contract is not None:
+        safe["command"] = contract.get("command_template")
+    return safe
+
+
+def public_research_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a portable guide whose actions require explicit workspace binding."""
+
+    safe = deepcopy(payload)
+    safe["repository"] = "."
+    safe["workspace_context"] = workspace_action_context()
+    safe["next_steps"] = [
+        public_workspace_action(step)
+        for step in safe.get("next_steps") or []
+        if isinstance(step, dict)
+    ]
+    primary = safe.get("primary_action")
+    if isinstance(primary, dict):
+        safe["primary_action"] = public_workspace_action(primary)
+    return redact_sensitive_payload(safe)
+
+
 _ACTION_OWNERS = {
     "record_hypothesis": "researcher",
+    "record_rival_hypothesis": "researcher",
+    "lock_hypothesis_portfolio": "researcher",
     "choose_first_test": "researcher",
     "choose_study_mode": "researcher",
     "preregister_confirmatory": "researcher",
@@ -157,6 +352,15 @@ _ACTION_OWNERS = {
 
 _ACTION_INPUTS = {
     "record_hypothesis": ["expected_observation", "disconfirming_result"],
+    "record_rival_hypothesis": [
+        "rival_hypothesis",
+        "rival_disconfirming_result",
+    ],
+    "lock_hypothesis_portfolio": [
+        "research_question",
+        "primary_hypothesis",
+        "rival_hypothesis",
+    ],
     "choose_first_test": ["dataset_or_observation", "fair_comparison"],
     "choose_study_mode": ["research_question", "candidate_explanations"],
     "preregister_confirmatory": [
@@ -173,7 +377,11 @@ _ACTION_INPUTS = {
     "independent_review": ["reviewer_identity", "review_decision", "review_scope"],
     "state_claim": ["reviewed_inference", "tested_conditions", "claim_scope"],
     "reproduce": ["checkpoint_or_ref", "independent_executor", "receipt"],
-    "strengthen_research_program": ["rival_hypothesis", "mechanism", "transfer_boundary"],
+    "strengthen_research_program": [
+        "rival_hypothesis",
+        "mechanism",
+        "transfer_boundary",
+    ],
 }
 
 
@@ -188,7 +396,11 @@ def _primary_action(
         return {
             "code": "none",
             "title": _text(language, "No pending action", "没有待处理动作"),
-            "why": _text(language, "The guide has no unresolved step.", "当前指南没有未解决步骤。"),
+            "why": _text(
+                language,
+                "The guide has no unresolved step.",
+                "当前指南没有未解决步骤。",
+            ),
             "command": None,
             "priority": "P2",
             "blocking_level": "advisory",
@@ -287,6 +499,13 @@ def build_research_guide(
         for relation in item.get("relations") or []
     ]
     latest_claim = _latest(objects, "claim")
+    latest_hypothesis = _latest(objects, "hypothesis")
+    latest_plan = _latest(objects, "research_plan")
+    latest_attempt = _latest(objects, "experiment_attempt")
+    latest_evidence = _latest(objects, "evidence") or _latest(
+        objects, "passage_evidence"
+    )
+    latest_inference = _latest(objects, "inference")
     contested_claim = (
         latest_claim
         if latest_claim is not None
@@ -334,6 +553,58 @@ def build_research_guide(
             )
         )
     elif not counts["research_plan"]:
+        hypotheses = sorted(
+            (item for item in objects if item.get("kind") == "hypothesis"),
+            key=lambda item: (_created_at(item), str(item.get("object_id") or "")),
+        )
+        primary_hypothesis_id = str(hypotheses[0]["object_id"])
+        if len(hypotheses) == 1:
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="record_rival_hypothesis",
+                    title_en="Record a falsifiable rival hypothesis",
+                    title_zh="记录一个可证伪的竞争假设",
+                    why_en=(
+                        "A rival explanation makes the first study discriminate "
+                        "between plausible accounts instead of only seeking support."
+                    ),
+                    why_zh=(
+                        "竞争解释能让第一个研究区分多个可能解释，"
+                        "而不是只寻找支持性结果。"
+                    ),
+                    command=(
+                        'xscientist research hypothesis "RIVAL HYPOTHESIS" '
+                        '--falsifier "WHAT RESULT WOULD DISPROVE THE RIVAL"'
+                    ),
+                )
+            )
+        elif not counts["hypothesis_portfolio"]:
+            alternative_flags = " ".join(
+                "--alternative " + shlex.quote(str(item["object_id"]))
+                for item in hypotheses[1:]
+            )
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="lock_hypothesis_portfolio",
+                    title_en="Lock the competing hypotheses before choosing a test",
+                    title_zh="在选择检验前锁定竞争假设组合",
+                    why_en=(
+                        "A locked portfolio preserves the alternatives and their "
+                        "priors before results can influence the comparison."
+                    ),
+                    why_zh=(
+                        "在结果影响比较之前锁定竞争假设及其先验，"
+                        "可以避免事后改写解释。"
+                    ),
+                    command=(
+                        "xscientist research program portfolio "
+                        f"{shlex.quote(primary_hypothesis_id)} {alternative_flags} "
+                        '--question "RESEARCH QUESTION"'
+                    ),
+                )
+            )
         if user_idea_entry:
             next_steps.append(
                 _step(
@@ -354,56 +625,59 @@ def build_research_guide(
                     ),
                 )
             )
-        else:
-            next_steps.append(
-                _step(
-                    selected_language,
-                    code="choose_study_mode",
-                    title_en="Option A — plan exploratory work",
-                    title_zh="选项 A — 规划探索性研究",
-                    why_en="Use this while comparing explanations or discovering which test is most informative.",
-                    why_zh="当你仍在比较不同解释，或寻找最有信息量的检验时，使用这条路径。",
-                    command=(
-                        'xscientist research plan @latest:hypothesis "WHAT TO TEST" '
-                        '--test "WHAT RESULT SEPARATES THE EXPLANATIONS"'
-                    ),
-                )
+        next_steps.append(
+            _step(
+                selected_language,
+                code="choose_study_mode",
+                title_en="Option A — plan exploratory work",
+                title_zh="选项 A — 规划探索性研究",
+                why_en="Use this while comparing explanations or discovering which test is most informative.",
+                why_zh="当你仍在比较不同解释，或寻找最有信息量的检验时，使用这条路径。",
+                command=(
+                    "xscientist research plan "
+                    f'{shlex.quote(primary_hypothesis_id)} "WHAT TO TEST" '
+                    '--test "WHAT RESULT SEPARATES THE EXPLANATIONS"'
+                ),
             )
-            next_steps.append(
-                _step(
-                    selected_language,
-                    code="preregister_confirmatory",
-                    title_en="Option B — lock a confirmatory study",
-                    title_zh="选项 B — 锁定确证性研究",
-                    why_en="Use this when the metric, baseline, data split, and success rule are fixed before the test.",
-                    why_zh="当指标、基线、数据切分和成功标准都能在实验前确定时，使用这条路径。",
-                    command=(
-                        "xscientist research preregister @latest:hypothesis "
-                        "--dataset DATASET --metric METRIC --baseline BASELINE "
-                        "--split-file SPLIT_FILE --registered-by human:YOUR_NAME"
-                    ),
-                )
+        )
+        next_steps.append(
+            _step(
+                selected_language,
+                code="preregister_confirmatory",
+                title_en="Option B — lock a confirmatory study",
+                title_zh="选项 B — 锁定确证性研究",
+                why_en="Use this when the metric, baseline, data split, and success rule are fixed before the test.",
+                why_zh="当指标、基线、数据切分和成功标准都能在实验前确定时，使用这条路径。",
+                command=(
+                    "xscientist research preregister "
+                    f"{shlex.quote(primary_hypothesis_id)} "
+                    "--dataset DATASET --metric METRIC --baseline BASELINE "
+                    "--split-file SPLIT_FILE --registered-by human:YOUR_NAME"
+                ),
             )
-            next_steps.append(
-                _step(
-                    selected_language,
-                    code="lock_method_discovery",
-                    title_en="Option C — test a transferable method",
-                    title_zh="选项 C — 检验可迁移的新方法",
-                    why_en=(
-                        "Use a generated contract to prevent a local score gain or "
-                        "larger resource budget from being mislabeled as discovery."
-                    ),
-                    why_zh=(
-                        "用生成的契约隔离变量、锁定资源和盲测条件，避免把局部分数提升"
-                        "或扩大算力误称为方法发现。"
-                    ),
-                    command=(
-                        "xscientist research discovery template --output discovery.json"
-                    ),
-                )
+        )
+        next_steps.append(
+            _step(
+                selected_language,
+                code="lock_method_discovery",
+                title_en="Option C — test a transferable method",
+                title_zh="选项 C — 检验可迁移的新方法",
+                why_en=(
+                    "Use a generated contract to prevent a local score gain or "
+                    "larger resource budget from being mislabeled as discovery."
+                ),
+                why_zh=(
+                    "用生成的契约隔离变量、锁定资源和盲测条件，避免把局部分数提升"
+                    "或扩大算力误称为方法发现。"
+                ),
+                command=(
+                    "xscientist research discovery template --output discovery.json"
+                ),
             )
+        )
     elif not counts["experiment_attempt"]:
+        if latest_plan is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError("research guide cannot resolve the active plan")
         next_steps.append(
             _step(
                 selected_language,
@@ -414,27 +688,37 @@ def build_research_guide(
                 why_zh="成功、失败和超时都属于研究路径中的有效信息。",
                 command=(
                     'xscientist research experiment "WHAT YOU RAN" --status completed '
-                    "--plan @latest:research_plan --metric NAME=VALUE --seed 1"
+                    f"--plan {shlex.quote(str(latest_plan['object_id']))} "
+                    "--metric NAME=VALUE --seed 1"
                 ),
             )
         )
     elif not (counts["evidence"] or counts["passage_evidence"]):
+        if latest_attempt is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError("research guide cannot resolve the active attempt")
         next_steps.append(
             _step(
                 selected_language,
                 code="bind_evidence",
-                title_en="Connect the result to the hypothesis",
-                title_zh="把结果连接到假设",
-                why_en="A result is not scientific evidence until its source attempt and direction are explicit.",
-                why_zh="只有明确结果来自哪个实验、支持还是反驳什么，它才成为科学证据。",
+                title_en="Record the result before interpreting its direction",
+                title_zh="先记录结果，再判断它的方向",
+                why_en=(
+                    "Bind the result to the exact attempt first. Add --supports or "
+                    "--refutes only after comparing it with the locked prediction."
+                ),
+                why_zh=(
+                    "先把结果绑定到确切实验；与锁定预测比较后，再明确添加 "
+                    "--supports 或 --refutes。"
+                ),
                 command=(
                     'xscientist research evidence "WHAT THE RESULT SHOWS" '
-                    "--attempt @latest:experiment_attempt --supports @latest:hypothesis"
+                    f"--attempt {shlex.quote(str(latest_attempt['object_id']))}"
                 ),
             )
         )
     elif not counts["inference"]:
-        premise_kind = "evidence" if counts["evidence"] else "passage_evidence"
+        if latest_evidence is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError("research guide cannot resolve the active evidence")
         next_steps.append(
             _step(
                 selected_language,
@@ -448,12 +732,14 @@ def build_research_guide(
                 why_zh="把证据和推理依据分开，才能暴露隐藏假设并让科学论证可审查。",
                 command=(
                     'xscientist research infer "BOUNDED CONCLUSION" '
-                    f"--premise @latest:{premise_kind} "
+                    f"--premise {shlex.quote(str(latest_evidence['object_id']))} "
                     '--warrant "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION"'
                 ),
             )
         )
     elif not counts["review"]:
+        if latest_inference is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError("research guide cannot resolve the active inference")
         next_steps.append(
             _step(
                 selected_language,
@@ -464,11 +750,16 @@ def build_research_guide(
                 why_zh="证据生产者不能同时成为判断证据是否通过的唯一裁判。",
                 command=(
                     'xscientist research review "REVIEW SUMMARY" '
-                    "--evaluates @latest:inference --verifier human:REVIEWER --decision hold"
+                    f"--evaluates {shlex.quote(str(latest_inference['object_id']))} "
+                    "--verifier human:REVIEWER --decision hold"
                 ),
             )
         )
     elif not counts["claim"]:
+        if latest_inference is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError(
+                "research guide cannot resolve the reviewed inference"
+            )
         next_steps.append(
             _step(
                 selected_language,
@@ -479,7 +770,8 @@ def build_research_guide(
                 why_zh="结论范围不能超过实际检验的数据、指标和条件。",
                 command=(
                     'xscientist research claim "BOUNDED CLAIM" '
-                    '--evidence @latest:inference --scope "TESTED CONDITIONS"'
+                    f"--evidence {shlex.quote(str(latest_inference['object_id']))} "
+                    '--scope "TESTED CONDITIONS"'
                 ),
             )
         )
@@ -508,6 +800,8 @@ def build_research_guide(
             else None
         )
         if resolution_plan is None:
+            if latest_hypothesis is None:  # pragma: no cover - a claim needs lineage
+                raise ResearchGitError("research guide cannot resolve a hypothesis")
             step = _step(
                 selected_language,
                 code="resolve_contested_claim",
@@ -521,7 +815,8 @@ def build_research_guide(
                 ),
                 why_zh="被暂缓或反驳的结论，需要先增加有区分度的条件检验。",
                 command=(
-                    "xscientist research plan @latest:hypothesis "
+                    "xscientist research plan "
+                    f"{shlex.quote(str(latest_hypothesis['object_id']))} "
                     '"TEST THE CONTESTED BOUNDARY" '
                     '--test "WHAT RESULT WOULD RESOLVE THE CONFLICT"'
                 ),
@@ -536,7 +831,8 @@ def build_research_guide(
                 why_zh="只有记录新计划对应的实验结果，争议解决流程才会继续。",
                 command=(
                     'xscientist research experiment "RESOLUTION EXPERIMENT" '
-                    "--status completed --plan @latest:research_plan "
+                    "--status completed "
+                    f"--plan {shlex.quote(str(resolution_plan['object_id']))} "
                     "--metric RESOLUTION_METRIC=0 --seed 1"
                 ),
             )
@@ -550,7 +846,7 @@ def build_research_guide(
                 why_zh="明确新实验支持或反驳了什么。",
                 command=(
                     'xscientist research evidence "RESOLUTION RESULT" '
-                    "--attempt @latest:experiment_attempt --supports @latest:hypothesis"
+                    f"--attempt {shlex.quote(str(resolution_attempt['object_id']))}"
                 ),
             )
         elif resolution_inference is None:
@@ -563,7 +859,7 @@ def build_research_guide(
                 why_zh="说明新证据为何改变了原结论的适用边界。",
                 command=(
                     'xscientist research infer "RESOLUTION CONCLUSION" '
-                    "--premise @latest:evidence "
+                    f"--premise {shlex.quote(str(resolution_evidence['object_id']))} "
                     '--warrant "WHY THE NEW EVIDENCE RESOLVES THE CONFLICT"'
                 ),
             )
@@ -577,7 +873,8 @@ def build_research_guide(
                 why_zh="修改后的结论边界仍需要独立门禁。",
                 command=(
                     'xscientist research review "RESOLUTION REVIEW" '
-                    "--evaluates @latest:inference --verifier human:REVIEWER "
+                    f"--evaluates {shlex.quote(str(resolution_inference['object_id']))} "
+                    "--verifier human:REVIEWER "
                     "--decision hold"
                 ),
             )
@@ -591,11 +888,14 @@ def build_research_guide(
                 why_zh="保留原争议主张，同时新增受证据约束的替代主张。",
                 command=(
                     'xscientist research claim "NARROWED CLAIM" '
-                    '--evidence @latest:inference --scope "RESOLVED CONDITIONS"'
+                    f"--evidence {shlex.quote(str(resolution_inference['object_id']))} "
+                    '--scope "RESOLVED CONDITIONS"'
                 ),
             )
         next_steps.append(step)
     elif not counts["reproduction"]:
+        if latest_claim is None:  # pragma: no cover - guarded by the branch above
+            raise ResearchGitError("research guide cannot resolve the active claim")
         next_steps.append(
             _step(
                 selected_language,
@@ -606,7 +906,8 @@ def build_research_guide(
                 why_zh="已保存的结论只是可追踪；独立重跑成功后才具备更强的可验证性。",
                 command=(
                     "xscientist research reproduce HEAD --execute --record "
-                    "--reproduces @latest:claim --verifier human:REPRODUCER"
+                    f"--reproduces {shlex.quote(str(latest_claim['object_id']))} "
+                    "--verifier human:REPRODUCER"
                 ),
             )
         )
@@ -722,8 +1023,15 @@ def public_exploration_payload(
             return "[REDACTED_PATH]"
 
     safe["repository"] = "."
-    safe["continue_command"] = "xscientist explore ."
-    safe["status_command"] = "xscientist status ."
+    continue_action = workspace_action_contract("xscientist explore .")
+    status_action = workspace_action_contract("xscientist status .")
+    if continue_action is None or status_action is None:  # pragma: no cover
+        raise ResearchGitError("portable workspace action contract is unavailable")
+    safe["continue_action"] = continue_action
+    safe["status_action"] = status_action
+    safe["continue_command"] = continue_action["command_template"]
+    safe["status_command"] = status_action["command_template"]
+    safe["workspace_context"] = workspace_action_context()
     checkpoint = safe.get("checkpoint")
     if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_path"):
         checkpoint["checkpoint_path"] = relative_value(checkpoint["checkpoint_path"])
@@ -738,10 +1046,7 @@ def public_exploration_payload(
                 language=str(safe.get("language") or guide.get("language") or "auto"),
                 command_repo=".",
             )
-            guide["next_steps"] = refreshed.get("next_steps", guide.get("next_steps"))
-            guide["primary_action"] = refreshed.get(
-                "primary_action", guide.get("primary_action")
-            )
+            safe["guide"] = public_research_guide_payload(refreshed)
         except (OSError, ResearchGitError, ValueError):
             for step in guide.get("next_steps") or []:
                 if isinstance(step, dict):
@@ -750,7 +1055,45 @@ def public_exploration_payload(
                 guide["primary_action"]["command"] = _command_for_repo(
                     guide["primary_action"].get("command", ""), "."
                 )
+            safe["guide"] = public_research_guide_payload(guide)
     safe["privacy"] = {
+        "host_paths_disclosed": False,
+        "matched_values_disclosed": False,
+        "workspace_reference": ".",
+    }
+    return redact_sensitive_payload(safe)
+
+
+def public_guided_research_start_payload(
+    payload: dict[str, Any], *, workspace: str | Path | None = None
+) -> dict[str, Any]:
+    """Return a portable guided-start response without absolute host paths."""
+
+    safe = deepcopy(payload)
+    raw_workspace = workspace or safe.get("repository") or "."
+    root = Path(raw_workspace).expanduser().resolve()
+
+    def relative_value(value: Any) -> str:
+        try:
+            candidate = Path(str(value)).expanduser().resolve()
+            return candidate.relative_to(root).as_posix() or "."
+        except (OSError, TypeError, ValueError):
+            return "[REDACTED_PATH]"
+
+    safe["repository"] = "."
+    checkpoint = safe.get("checkpoint")
+    if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_path"):
+        checkpoint["checkpoint_path"] = relative_value(checkpoint["checkpoint_path"])
+    guide = safe.get("guide")
+    if isinstance(guide, dict):
+        safe["guide"] = public_research_guide_payload(guide)
+    open_action = workspace_action_contract(safe.get("open_command"))
+    safe["open_action"] = open_action
+    if open_action is not None:
+        safe["open_command"] = open_action["command_template"]
+    safe["workspace_context"] = workspace_action_context()
+    safe["privacy"] = {
+        "host_path_disclosed": False,
         "host_paths_disclosed": False,
         "matched_values_disclosed": False,
         "workspace_reference": ".",
@@ -1013,6 +1356,18 @@ def start_guided_research(
     question_text = _required(question, label="research question")
     hypothesis_text = _required(hypothesis, label="hypothesis")
     falsifier_text = _required(falsifier, label="falsifier")
+    prospective = {
+        "question": question_text,
+        "hypothesis": hypothesis_text,
+        "falsifier": falsifier_text,
+        "name": name,
+        "actor": actor,
+    }
+    if redact_sensitive_payload(prospective) != prospective:
+        raise ResearchGitError(
+            "guided research inputs must not contain credentials, host-local "
+            "paths, email addresses, or other private literals"
+        )
     actor_id = _human_actor(actor)
     root = Path(path).expanduser().resolve()
     init_repository(
@@ -1052,10 +1407,25 @@ def start_guided_research(
         ],
         actor={"actor_id": actor_id, "authority": "human"},
     )
+    managed_paths = {
+        ".gitignore",
+        "research.yaml",
+        "question.md",
+        ".xscientist/README.md",
+        question_object.path.relative_to(root).as_posix(),
+        goal_object.path.relative_to(root).as_posix(),
+        hypothesis_object.path.relative_to(root).as_posix(),
+    }
+    eligible_paths = set(repository.status()["eligible_changes"])
+    selected_paths = sorted(managed_paths & eligible_paths)
+    if not selected_paths:  # pragma: no cover - records above are newly created
+        raise ResearchGitError("guided research start produced no managed changes")
+    repository.stage(selected_paths)
     checkpoint = repository.commit(
         stage="guided-start",
         subject="start falsifiable research question",
         status="draft",
+        staged_only=True,
     )
     return {
         "schema_version": "xscientist.guided-research-start.v1",
@@ -1071,9 +1441,17 @@ def start_guided_research(
 
 __all__ = [
     "GUIDE_SCHEMA",
+    "WORKSPACE_ACTION_CONTEXT_SCHEMA",
+    "WORKSPACE_ACTION_SCHEMA",
+    "WORKSPACE_PLACEHOLDER",
     "build_research_guide",
     "explore_research_idea",
     "inspect_idea_research",
     "public_exploration_payload",
+    "public_guided_research_start_payload",
+    "public_research_guide_payload",
+    "public_workspace_action",
     "start_guided_research",
+    "workspace_action_context",
+    "workspace_action_contract",
 ]

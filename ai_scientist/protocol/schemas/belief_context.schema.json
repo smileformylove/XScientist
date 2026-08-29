@@ -143,7 +143,8 @@
         "valid_until": {"type": ["string", "null"], "maxLength": 64},
         "invalidated": {"type": "boolean"},
         "active": {"type": "boolean"},
-        "lineage_truncated": {"type": "boolean"}
+        "lineage_truncated": {"type": "boolean"},
+        "lineage_not_observed_as_of": {"type": "boolean"}
       },
       "additionalProperties": false
     },

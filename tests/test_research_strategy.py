@@ -15,8 +15,9 @@ from ai_scientist.protocol.research_vcs import (
 )
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 from xscientist import ResearchLifecycle, ResearchRepository
-from xscientist.research_commands import save_claim
+from xscientist.research_authority import require_independent_evaluator
 from xscientist.research_cli import main as research_main
+from xscientist.research_commands import save_claim
 from xscientist.research_dag import build_research_dag, render_research_dag_html
 from xscientist.research_git import ResearchGitError
 from xscientist.research_strategy import (
@@ -348,6 +349,13 @@ class ResearchStrategyTests(unittest.TestCase):
             self.assertEqual(
                 scan_research_anomalies(repository.path)["candidate_count"], 0
             )
+            repeated_review = review_research_program(repository.path, record=False)
+            self.assertEqual(repeated_review["anomalies"]["existing_open_count"], 1)
+            self.assertEqual(repeated_review["anomalies"]["open_count"], 1)
+            self.assertIn(
+                "open_anomalies",
+                {item["code"] for item in repeated_review["report"]["gaps"]},
+            )
             other_core = {
                 "protocol_kind": "research_anomaly",
                 "anomaly_type": "unexpected_distribution_shift",
@@ -384,11 +392,9 @@ class ResearchStrategyTests(unittest.TestCase):
                 ],
             )
             reopened = scan_research_anomalies(repository.path)
-            self.assertEqual(reopened["candidate_count"], 1)
-            self.assertEqual(
-                reopened["candidates"][0]["anomaly_type"],
-                "failed_or_incomplete_experiment",
-            )
+            self.assertEqual(reopened["candidate_count"], 0)
+            self.assertEqual(reopened["existing_open_count"], 1)
+            self.assertEqual(reopened["open_count"], 1)
 
     def test_mechanism_quality_boundaries_and_claim_insight(self):
         with tempfile.TemporaryDirectory() as td:
@@ -651,11 +657,31 @@ class ResearchStrategyTests(unittest.TestCase):
                 boundary_condition="large",
                 boundary_role="scale",
             )
+            review_independence = require_independent_evaluator(
+                repository,
+                evaluator_id="independent-claim-reviewer",
+                target_ids=[evidence.object_id],
+                label="causal-transfer claim review",
+            )
+            review = repository.record(
+                "review",
+                {
+                    "summary": "Independent causal-transfer review passed",
+                    "status": "verified",
+                    "independence": review_independence,
+                },
+                state="verified",
+                relations=[{"type": "evaluates", "target": evidence.object_id}],
+                actor={
+                    "actor_id": "independent-claim-reviewer",
+                    "authority": "independent_evaluator",
+                },
+            )
             gate = repository.record(
                 "gate_decision",
                 {"decision": "pass", "claim_promotion_allowed": True},
                 state="verified",
-                relations=[{"type": "evaluates", "target": evidence.object_id}],
+                relations=[{"type": "evaluates", "target": review.object_id}],
                 actor={"actor_id": "gate", "authority": "deterministic_gate"},
             )
             with self.assertRaisesRegex(
@@ -727,6 +753,55 @@ class ResearchStrategyTests(unittest.TestCase):
                 ],
                 commit=False,
             )["object"]
+            with self.assertRaisesRegex(ResearchGitError, "scientific closure"):
+                save_claim(
+                    repository.path,
+                    statement="M causes a transferable effect",
+                    evidence_ids=[evidence.object_id],
+                    depth_level="transferable",
+                    mechanism_ids=[mechanism.object_id],
+                    quality_ids=[quality.object_id],
+                    transfer_ids=[matrix.object_id],
+                    gate_id=gate.object_id,
+                    verified=True,
+                    commit=False,
+                )
+            full_closure_ids = [
+                evidence.object_id,
+                mechanism.object_id,
+                quality.object_id,
+                matrix.object_id,
+            ]
+            full_independence = require_independent_evaluator(
+                repository,
+                evaluator_id="full-closure-reviewer",
+                target_ids=full_closure_ids,
+                label="full causal-transfer claim review",
+            )
+            full_review = repository.record(
+                "review",
+                {
+                    "summary": "Independent full-closure review passed",
+                    "status": "verified",
+                    "independence": full_independence,
+                },
+                state="verified",
+                relations=[
+                    {"type": "evaluates", "target": object_id}
+                    for object_id in full_closure_ids
+                ],
+                actor={
+                    "actor_id": "full-closure-reviewer",
+                    "authority": "independent_evaluator",
+                },
+            )
+            full_gate = repository.record(
+                "gate_decision",
+                {"decision": "pass", "claim_promotion_allowed": True},
+                state="verified",
+                relations=[{"type": "evaluates", "target": full_review.object_id}],
+                actor={"actor_id": "gate", "authority": "deterministic_gate"},
+            )
             verified = save_claim(
                 repository.path,
                 statement="M causes a transferable effect",
@@ -735,7 +810,7 @@ class ResearchStrategyTests(unittest.TestCase):
                 mechanism_ids=[mechanism.object_id],
                 quality_ids=[quality.object_id],
                 transfer_ids=[matrix.object_id],
-                gate_id=gate.object_id,
+                gate_id=full_gate.object_id,
                 verified=True,
                 commit=False,
             )["object"]

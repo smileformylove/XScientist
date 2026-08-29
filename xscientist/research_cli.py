@@ -1599,7 +1599,10 @@ def main(
             return 0 if payload["ok"] else 1
 
         if args.command == "start":
-            from .research_journey import start_guided_research
+            from .research_journey import (
+                public_guided_research_start_payload,
+                start_guided_research,
+            )
 
             payload = start_guided_research(
                 args.path,
@@ -1613,7 +1616,12 @@ def main(
                 git_user_email=args.git_user_email,
             )
             if args.as_json:
-                _print_json(payload)
+                _print_json(
+                    public_guided_research_start_payload(
+                        payload,
+                        workspace=payload.get("repository") or args.path,
+                    )
+                )
             else:
                 print(f"Research workspace: {_display_path(payload['repository'])}")
                 print(f"Question:           {payload['question_id']}")
@@ -1626,11 +1634,14 @@ def main(
             return 0
 
         if args.command == "guide":
-            from .research_journey import build_research_guide
+            from .research_journey import (
+                build_research_guide,
+                public_research_guide_payload,
+            )
 
             payload = build_research_guide(args.repo, language=args.lang)
             if args.as_json:
-                _print_json(payload)
+                _print_json(public_research_guide_payload(payload))
             else:
                 progress = payload["progress"]
                 print(

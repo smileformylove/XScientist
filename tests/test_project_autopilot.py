@@ -114,6 +114,19 @@ class ProjectAutopilotTests(unittest.TestCase):
                 total=3,
                 selected_indices=[0, 1, 2],
             )
+            persisted_text = (root / "04_logs" / "progress.json").read_text(
+                encoding="utf-8"
+            )
+            persisted = json.loads(persisted_text)
+            self.assertNotIn(str(root.resolve()), persisted_text)
+            self.assertEqual(
+                persisted["results"][1]["checkpoint_path"],
+                "02_experiments/run_1/logs/bfts/stage_0/checkpoint.json",
+            )
+            self.assertEqual(
+                persisted["results"][2]["checkpoint_path"],
+                "missing.json",
+            )
 
             pending, prior, checkpoints = _resolve_resume_work(
                 root, [0, 1, 2], enabled=True
@@ -121,7 +134,7 @@ class ProjectAutopilotTests(unittest.TestCase):
 
             self.assertEqual(pending, [1, 2])
             self.assertEqual([item["idea_idx"] for item in prior], [0])
-            self.assertEqual(checkpoints, {1: str(checkpoint)})
+            self.assertEqual(checkpoints, {1: str(checkpoint.resolve())})
 
     def test_resume_refuses_to_change_original_question(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -436,6 +449,32 @@ class ProjectAutopilotTests(unittest.TestCase):
             self.assertTrue(
                 (project_root / "00_config" / "data_manifest.json").is_file()
             )
+            progress_text = (project_root / "04_logs" / "progress.json").read_text(
+                encoding="utf-8"
+            )
+            progress = json.loads(progress_text)
+            self.assertNotIn(str(project_root), progress_text)
+            self.assertNotIn(str(project_root.resolve()), progress_text)
+            self.assertEqual(
+                progress["results"][0]["exp_dir"],
+                "02_experiments/idea_0",
+            )
+            summary_text = (
+                project_root / "04_logs" / "project_summary.json"
+            ).read_text(encoding="utf-8")
+            summary = json.loads(summary_text)
+            self.assertNotIn(str(project_root), summary_text)
+            self.assertNotIn(str(project_root.resolve()), summary_text)
+            self.assertEqual(summary["project_dir"], ".")
+            self.assertEqual(
+                summary["results"][0]["exp_dir"],
+                "02_experiments/idea_0",
+            )
+            shortlist_text = (
+                project_root / "04_logs" / "submission_shortlist.md"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn(str(project_root), shortlist_text)
+            self.assertNotIn(str(project_root.resolve()), shortlist_text)
 
 
 if __name__ == "__main__":

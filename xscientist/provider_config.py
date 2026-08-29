@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import yaml
 
 from ai_scientist.utils.atomic_io import atomic_write_text
+from ai_scientist.utils.privacy import redact_sensitive_text
 from ai_scientist.utils.provider_registry import resolve_model_provider
 from .dependency_profiles import (
     installation_command,
@@ -283,11 +284,29 @@ def workspace_config_path(root: str | Path) -> Path:
     return Path(root).expanduser().resolve() / CONFIG_RELATIVE_PATH
 
 
-def resolve_env_file(root: str | Path, env_file: str) -> Path:
-    workspace = Path(root).expanduser().resolve()
+def _normalized_private_env_name(env_file: str) -> str:
+    """Limit credential storage to an ignored, dedicated root-level env file."""
+
     relative = Path(str(env_file or DEFAULT_ENV_FILE).strip())
+    name = relative.as_posix()
     if relative.is_absolute():
         raise ProviderConfigError("provider env_file must be relative to the workspace")
+    if ".." in relative.parts:
+        raise ProviderConfigError("provider env_file cannot escape the workspace")
+    if len(relative.parts) != 1:
+        raise ProviderConfigError(
+            "provider env_file must be a root-level private .env file"
+        )
+    if not (name == ".env" or name.startswith(".env.")) or name == ".env.example":
+        raise ProviderConfigError(
+            "provider env_file must be .env or a private .env.* variant"
+        )
+    return name
+
+
+def resolve_env_file(root: str | Path, env_file: str) -> Path:
+    workspace = Path(root).expanduser().resolve()
+    relative = Path(_normalized_private_env_name(env_file))
     target = (workspace / relative).resolve()
     try:
         target.relative_to(workspace)
@@ -295,8 +314,11 @@ def resolve_env_file(root: str | Path, env_file: str) -> Path:
         raise ProviderConfigError(
             "provider env_file cannot escape the workspace"
         ) from exc
-    if target == workspace_config_path(workspace):
-        raise ProviderConfigError("provider env_file cannot replace provider metadata")
+    unresolved = workspace / relative
+    if unresolved.is_symlink():
+        raise ProviderConfigError("provider env_file must not be a symlink")
+    if unresolved.exists() and not unresolved.is_file():
+        raise ProviderConfigError("provider env_file must be a regular file")
     return target
 
 
@@ -398,12 +420,7 @@ def provider_config_payload(
     env_file: str = DEFAULT_ENV_FILE,
 ) -> dict[str, Any]:
     normalized_provider, selected_model = validate_provider_model(provider, model)
-    normalized_env_file = Path(env_file or DEFAULT_ENV_FILE).as_posix()
-    if (
-        Path(normalized_env_file).is_absolute()
-        or ".." in Path(normalized_env_file).parts
-    ):
-        raise ProviderConfigError("provider env_file must stay inside the workspace")
+    normalized_env_file = _normalized_private_env_name(env_file)
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "active_provider": normalized_provider,
@@ -422,6 +439,13 @@ def provider_config_payload(
 
 
 def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]:
+    for label, raw_value in (("provider", provider), ("model", model)):
+        value = str(raw_value or "").strip()
+        if value and redact_sensitive_text(value) != value:
+            raise ProviderConfigError(
+                f"{label} contains a credential or private literal; refusing "
+                "to persist it"
+            )
     normalized = normalize_provider_name(provider)
     if normalized not in PROVIDER_FIELDS:
         choices = ", ".join(PROVIDER_NAMES)
@@ -435,6 +459,10 @@ def validate_provider_model(provider: str, model: str | None) -> tuple[str, str]
         raise ProviderConfigError(
             f"--model is required for provider {normalized!r}; use a provider-prefixed "
             f"ID such as {normalized}/<model>"
+        )
+    if redact_sensitive_text(selected) != selected:
+        raise ProviderConfigError(
+            "model contains a credential or private literal; refusing to persist it"
         )
     spec = resolve_model_provider(selected)
     if spec.provider != normalized:
@@ -819,9 +847,7 @@ def provider_statuses(
     # Discovery-only listing is allowed to inspect process environment and
     # free local services, but local files require an initialized workspace.
     stored = read_env_file(env_file) if initialized else {}
-    effective_environ = _effective_workspace_environment(
-        workspace, stored, environ
-    )
+    effective_environ = _effective_workspace_environment(workspace, stored, environ)
     active = str(config.get("active_provider") or "")
     configured_entries = config.get("providers", {})
     rows = []

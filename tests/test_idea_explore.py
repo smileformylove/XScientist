@@ -52,8 +52,31 @@ class IdeaExploreTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["guide"]["next_steps"][0]["command"],
-                "xscientist explore .",
+                "xscientist explore {workspace}",
             )
+            action = payload["guide"]["next_steps"][0]["action"]
+            self.assertEqual(
+                action["argv_template"],
+                ["xscientist", "explore", "{workspace}"],
+            )
+            self.assertEqual(action["workspace_binding"]["mode"], "argument")
+            self.assertTrue(action["executable_after_binding"])
+            self.assertEqual(
+                action["workspace_binding"]["source"], "invocation_workspace"
+            )
+            self.assertEqual(action["cwd_binding"]["mode"], "caller")
+            self.assertEqual(
+                payload["continue_command"], "xscientist explore {workspace}"
+            )
+            self.assertEqual(
+                payload["continue_action"]["argv_template"],
+                ["xscientist", "explore", "{workspace}"],
+            )
+            self.assertEqual(
+                payload["workspace_context"]["workspace_placeholder"], "{workspace}"
+            )
+            self.assertNotIn(str(workspace), output.getvalue())
+            self.assertNotIn("xscientist explore .", output.getvalue())
             self.assertFalse(payload["privacy"]["host_paths_disclosed"])
             repository = ResearchRepository(workspace)
             self.assertEqual(len(repository.objects(kind="question")), 1)
@@ -246,6 +269,204 @@ class IdeaExploreTests(unittest.TestCase):
             self.assertEqual(
                 ResearchRepository(workspace).status()["eligible_changes"], []
             )
+
+    def test_start_rejects_a_conflicting_existing_question_before_any_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(workspace),
+                            "--idea",
+                            "Does X change Y?",
+                            "--non-interactive",
+                        ]
+                    ),
+                    0,
+                )
+            question_before = (workspace / "question.md").read_bytes()
+            self.assertFalse((workspace / "topic.md").exists())
+
+            output = io.StringIO()
+            with (
+                mock.patch("xscientist.onboarding.create_workspace") as create,
+                contextlib.redirect_stdout(output),
+            ):
+                code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does A change B?",
+                        "--provider",
+                        "ollama",
+                        "--model",
+                        "ollama/qwen2.5:7b",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertIn("conflicts", json.loads(output.getvalue())["error"])
+            create.assert_not_called()
+            self.assertEqual((workspace / "question.md").read_bytes(), question_before)
+            self.assertFalse((workspace / "topic.md").exists())
+            self.assertFalse((workspace / ".xscientist" / "providers.json").exists())
+
+    def test_start_rejects_a_conflicting_topic_without_rewriting_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(workspace),
+                            "--idea",
+                            "Does X change Y?",
+                            "--non-interactive",
+                        ]
+                    ),
+                    0,
+                )
+            question_path = workspace / "question.md"
+            topic_path = workspace / "topic.md"
+            topic_path.write_text(
+                "# Research question\n\nDoes A change B?\n",
+                encoding="utf-8",
+            )
+            question_before = question_path.read_bytes()
+            topic_before = topic_path.read_bytes()
+            output = io.StringIO()
+            with (
+                mock.patch("xscientist.onboarding.create_workspace") as create,
+                contextlib.redirect_stdout(output),
+            ):
+                code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "ollama",
+                        "--model",
+                        "ollama/qwen2.5:7b",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertIn("topic.md", json.loads(output.getvalue())["error"])
+            create.assert_not_called()
+            self.assertEqual(question_path.read_bytes(), question_before)
+            self.assertEqual(topic_path.read_bytes(), topic_before)
+
+    def test_start_failures_do_not_rewrite_existing_research_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(workspace),
+                            "--idea",
+                            "Does X change Y?",
+                            "--non-interactive",
+                        ]
+                    ),
+                    0,
+                )
+
+            question_path = workspace / "question.md"
+            topic_path = workspace / "topic.md"
+            question_path.write_text(
+                "# Research question\n\nDoes   X change Y?\n",
+                encoding="utf-8",
+            )
+            topic_path.write_text(
+                "# Research topic\n\nDoes X change   Y?\n",
+                encoding="utf-8",
+            )
+            question_before = question_path.read_bytes()
+            topic_before = topic_path.read_bytes()
+            unready = {
+                "schema": "xscientist.doctor.v1",
+                "ok": False,
+                "configuration_ready": True,
+                "runtime_ready": False,
+                "checks": {},
+                "next_actions": ["install the configured runtime"],
+            }
+            ready = {
+                **unready,
+                "ok": True,
+                "runtime_ready": True,
+                "next_actions": [],
+            }
+            auth = (True, "ok", {"username": "test-researcher"})
+
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=auth,
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=unready),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                doctor_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        " does x change y? ",
+                        "--provider",
+                        "ollama",
+                        "--model",
+                        "ollama/qwen2.5:7b",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(doctor_code, 1)
+            self.assertEqual(question_path.read_bytes(), question_before)
+            self.assertEqual(topic_path.read_bytes(), topic_before)
+
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=auth,
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
+                mock.patch("xscientist.cli.project_main", return_value=1),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                launch_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X change Y?",
+                        "--allow-synthetic-data",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(launch_code, 1)
+            self.assertEqual(question_path.read_bytes(), question_before)
+            self.assertEqual(topic_path.read_bytes(), topic_before)
 
     def test_interactive_flow_uses_plain_questions_and_can_finish_a_plan(self) -> None:
         with tempfile.TemporaryDirectory() as td:

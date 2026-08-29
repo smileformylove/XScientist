@@ -567,7 +567,96 @@ def _load_project_progress(project_dir: str | Path) -> dict[str, Any]:
     payload = _safe_load_json(
         Path(project_dir) / "04_logs" / "progress.json", default={}
     )
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    return _resolve_project_progress_paths(payload, project_dir=project_dir)
+
+
+_PROJECT_PROGRESS_PATH_FIELDS = frozenset(
+    {
+        "ara_manifest",
+        "pipeline_manifest",
+    }
+)
+
+
+def _is_project_progress_path_field(name: object) -> bool:
+    rendered = str(name)
+    return rendered in _PROJECT_PROGRESS_PATH_FIELDS or rendered.endswith(
+        ("_dir", "_file", "_path")
+    )
+
+
+def _portable_project_progress_payload(
+    payload: Any,
+    *,
+    project_dir: str | Path,
+) -> Any:
+    """Persist project-local paths without retaining host filesystem identity."""
+
+    from ai_scientist.utils.privacy import portable_path, redact_sensitive_payload
+
+    root = Path(project_dir).expanduser().resolve()
+
+    def transform(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[object, Any] = {}
+            for key, nested in value.items():
+                if (
+                    _is_project_progress_path_field(key)
+                    and isinstance(nested, (str, os.PathLike))
+                    and str(nested).strip()
+                    and "://" not in str(nested)
+                ):
+                    candidate = Path(nested).expanduser()
+                    result[key] = (
+                        portable_path(candidate, base=root)
+                        if candidate.is_absolute()
+                        else candidate.as_posix()
+                    )
+                else:
+                    result[key] = transform(nested)
+            return result
+        if isinstance(value, list):
+            return [transform(item) for item in value]
+        if isinstance(value, tuple):
+            return [transform(item) for item in value]
+        return value
+
+    return redact_sensitive_payload(transform(payload))
+
+
+def _resolve_project_progress_paths(
+    payload: Any,
+    *,
+    project_dir: str | Path,
+) -> Any:
+    """Hydrate portable progress references for in-process resume consumers."""
+
+    from ai_scientist.utils.privacy import resolve_portable_path
+
+    root = Path(project_dir).expanduser().resolve()
+
+    def transform(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[object, Any] = {}
+            for key, nested in value.items():
+                if (
+                    _is_project_progress_path_field(key)
+                    and isinstance(nested, str)
+                    and nested.strip()
+                    and "://" not in nested
+                ):
+                    resolved = resolve_portable_path(nested, base=root)
+                    result[key] = str(resolved) if resolved is not None else nested
+                else:
+                    result[key] = transform(nested)
+            return result
+        if isinstance(value, list):
+            return [transform(item) for item in value]
+        return value
+
+    return transform(payload)
 
 
 def _save_project_progress(
@@ -581,14 +670,19 @@ def _save_project_progress(
     for fallback_idx, result in enumerate(results):
         latest[int(result.get("idea_idx", fallback_idx))] = result
     ordered = [latest[index] for index in sorted(latest)]
-    payload = {
-        "schema_version": "xscientist.project-progress.v1",
-        "completed": sum(1 for result in ordered if result.get("status") == "success"),
-        "attempted": len(ordered),
-        "total": int(total),
-        "selected_indices": list(selected_indices),
-        "results": ordered,
-    }
+    payload = _portable_project_progress_payload(
+        {
+            "schema_version": "xscientist.project-progress.v1",
+            "completed": sum(
+                1 for result in ordered if result.get("status") == "success"
+            ),
+            "attempted": len(ordered),
+            "total": int(total),
+            "selected_indices": list(selected_indices),
+            "results": ordered,
+        },
+        project_dir=project_dir,
+    )
     path = Path(project_dir) / "04_logs" / "progress.json"
     atomic_write_json(path, payload, indent=2, ensure_ascii=False, default=str)
     return str(path)
@@ -1721,9 +1815,13 @@ def _build_experiment_registry_rows(
     for idx, task in enumerate(research_plan.get("tasks") or []):
         stage = stages[min(idx, len(stages) - 1)] if stages else {}
         best = stage.get("best") or {}
-        attempts = [item for item in stage.get("attempts") or [] if isinstance(item, dict)]
+        attempts = [
+            item for item in stage.get("attempts") or [] if isinstance(item, dict)
+        ]
         if not attempts and best:
-            attempts = [{**best, "node_id": best.get("best_node_id"), "is_buggy": False}]
+            attempts = [
+                {**best, "node_id": best.get("best_node_id"), "is_buggy": False}
+            ]
         if not attempts:
             attempts = [{"node_id": f"missing-{idx}", "is_buggy": True}]
         for attempt_idx, attempt in enumerate(attempts):
@@ -1733,7 +1831,9 @@ def _build_experiment_registry_rows(
             status = "completed" if has_metric and not buggy else "failed"
             if not stages and not best:
                 status = "planned"
-            is_best = bool(best) and node_id == str(best.get("node_id") or best.get("best_node_id") or "")
+            is_best = bool(best) and node_id == str(
+                best.get("node_id") or best.get("best_node_id") or ""
+            )
             result_summary = {
                 "metric_name": attempt.get("metric_name"),
                 "metric_mean": attempt.get("metric_mean"),
@@ -1741,7 +1841,9 @@ def _build_experiment_registry_rows(
                 "dataset_names": attempt.get("dataset_names") or [task.get("dataset")],
                 "seed": attempt.get("seed"),
                 "evaluation_report": attempt.get("evaluation_report"),
-                "delta_objective_vs_prev_stage": stage.get("delta_objective_vs_prev_stage"),
+                "delta_objective_vs_prev_stage": stage.get(
+                    "delta_objective_vs_prev_stage"
+                ),
                 "warnings": warnings,
                 "attempt_node_id": node_id,
                 "node_counts": stage.get("node_counts"),
@@ -1758,42 +1860,51 @@ def _build_experiment_registry_rows(
                 artifacts.update(attempt["artifacts"])
             rows.append(
                 build_experiment_record(
-                record_id=f"{str(task.get('task_id') or f'task_{idx}')}:stage_{idx}:{node_id}",
-                task_id=str(task.get("task_id") or f"task_{idx}"),
-                dataset=str(task.get("dataset") or "dataset_to_be_selected"),
-                metric=str(task.get("metric") or "primary_task_metric"),
-                baseline_ref=str(task.get("baseline") or "strong_existing_baseline"),
-                config={
-                    "goal": task.get("goal"),
-                    "priority": task.get("priority"),
-                },
-                seed=attempt.get("seed"),
-                status=status,
-                result_summary=result_summary,
-                artifacts=artifacts,
-                error_type=None if status == "completed" else "buggy_or_missing_attempt",
-                error_message=None if status == "completed" else "; ".join(warnings[:3]) or "Attempt did not produce a valid metric.",
-                entered_storyline=is_best,
-                budget=task.get("budget"),
-                workflow_mode=research_plan.get("workflow_mode"),
-                policy_name=(research_plan.get("execution_policy") or {}).get(
-                    "policy_name"
-                ),
-                acceptance_checks=task.get("acceptance_checks"),
-                acceptance_results=[
-                    {
-                        "check": str(check),
-                        "passed": status == "completed",
-                        "source": "experiment_journal_attempt",
-                    }
-                    for check in (task.get("acceptance_checks") or [])
-                ],
-                budget_audit={
-                    "audited": status == "completed",
-                    "within_budget": status == "completed",
-                    "source": "experiment_registry_builder",
-                },
-                budget_status="within_budget" if status == "completed" else None,
+                    record_id=f"{str(task.get('task_id') or f'task_{idx}')}:stage_{idx}:{node_id}",
+                    task_id=str(task.get("task_id") or f"task_{idx}"),
+                    dataset=str(task.get("dataset") or "dataset_to_be_selected"),
+                    metric=str(task.get("metric") or "primary_task_metric"),
+                    baseline_ref=str(
+                        task.get("baseline") or "strong_existing_baseline"
+                    ),
+                    config={
+                        "goal": task.get("goal"),
+                        "priority": task.get("priority"),
+                    },
+                    seed=attempt.get("seed"),
+                    status=status,
+                    result_summary=result_summary,
+                    artifacts=artifacts,
+                    error_type=(
+                        None if status == "completed" else "buggy_or_missing_attempt"
+                    ),
+                    error_message=(
+                        None
+                        if status == "completed"
+                        else "; ".join(warnings[:3])
+                        or "Attempt did not produce a valid metric."
+                    ),
+                    entered_storyline=is_best,
+                    budget=task.get("budget"),
+                    workflow_mode=research_plan.get("workflow_mode"),
+                    policy_name=(research_plan.get("execution_policy") or {}).get(
+                        "policy_name"
+                    ),
+                    acceptance_checks=task.get("acceptance_checks"),
+                    acceptance_results=[
+                        {
+                            "check": str(check),
+                            "passed": status == "completed",
+                            "source": "experiment_journal_attempt",
+                        }
+                        for check in (task.get("acceptance_checks") or [])
+                    ],
+                    budget_audit={
+                        "audited": status == "completed",
+                        "within_budget": status == "completed",
+                        "source": "experiment_registry_builder",
+                    },
+                    budget_status="within_budget" if status == "completed" else None,
                 )
             )
     return rows
@@ -3541,10 +3652,17 @@ def save_project_summary(
         "results": results,
     }
 
+    persisted_summary = _portable_project_progress_payload(
+        summary,
+        project_dir=project_dir,
+    )
     summary_file = logs_dir / "project_summary.json"
-    atomic_write_json(summary_file, summary, indent=4, default=str)
+    atomic_write_json(summary_file, persisted_summary, indent=4, default=str)
 
-    shortlist_pool = [r for r in results if r.get("status") == "success"] or results
+    persisted_results = list(persisted_summary.get("results") or [])
+    shortlist_pool = [
+        result for result in persisted_results if result.get("status") == "success"
+    ] or persisted_results
     ranked = sorted(
         shortlist_pool,
         key=lambda result: (

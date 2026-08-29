@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 from collections.abc import Iterable
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -12,7 +13,11 @@ import yaml
 
 from ai_scientist.resources import bfts_config_path
 from ai_scientist.utils.atomic_io import atomic_write_text
-from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
+from ai_scientist.utils.privacy import (
+    REDACTED_PATH,
+    portable_path,
+    redact_sensitive_text,
+)
 from ._version import __version__
 from .dependency_profiles import (
     capability_installation_spec,
@@ -30,6 +35,17 @@ from .provider_config import (
 
 class WorkspaceInitError(ValueError):
     """Raised when a workspace cannot be created without surprising data loss."""
+
+
+def _validate_persisted_config_value(label: str, value: object) -> str:
+    """Reject private literals before rendering them into several managed files."""
+
+    selected = str(value or "").strip()
+    if selected and redact_sensitive_text(selected) != selected:
+        raise WorkspaceInitError(
+            f"{label} contains a credential or private literal; refusing to persist it"
+        )
+    return selected
 
 
 PROVIDER_ENV_LINES: dict[str, tuple[str, ...]] = {
@@ -51,6 +67,9 @@ WORKSPACE_FILES = (
     "bfts_config.yaml",
     "topic.md",
 )
+
+_WORKSPACE_GITIGNORE_BEGIN = "# BEGIN XScientist managed workspace ignores v1"
+_WORKSPACE_GITIGNORE_END = "# END XScientist managed workspace ignores v1"
 
 
 def _resolve_model(provider: str, model: str | None) -> str:
@@ -406,20 +425,13 @@ def _render_files(
     capabilities: tuple[str, ...] | None = None,
     provider_required: bool = True,
 ) -> dict[str, str]:
-    secret_ignores = (
-        ".env\n"
-        ".env.*\n"
-        "!.env.example\n"
-        ".secrets/\n"
-        "*.pem\n"
-        "*.key\n"
-        "credentials.json\n"
-        "secrets.json\n"
-    )
+    secret_ignores = _workspace_gitignore_rules()
     return {
         ".dockerignore": secret_ignores + "outputs/\n__pycache__/\n*.py[cod]\n",
         ".env.example": _render_env(provider, provider_required=provider_required),
-        ".gitignore": secret_ignores + "outputs/\n__pycache__/\n*.py[cod]\n",
+        ".gitignore": _workspace_gitignore_block(
+            secret_ignores + "outputs/\n__pycache__/\n*.py[cod]\n"
+        ),
         ".xscientist/providers.json": json.dumps(
             (
                 provider_config_payload(provider=provider, model=model)
@@ -448,6 +460,132 @@ def _render_files(
     }
 
 
+def _workspace_gitignore_rules() -> str:
+    return (
+        ".env\n"
+        ".env.*\n"
+        "!.env.example\n"
+        ".secrets/\n"
+        "*.pem\n"
+        "*.key\n"
+        "credentials.json\n"
+        "secrets.json\n"
+    )
+
+
+def _workspace_gitignore_block(rules: str) -> str:
+    return f"{_WORKSPACE_GITIGNORE_BEGIN}\n{rules}{_WORKSPACE_GITIGNORE_END}\n"
+
+
+def _merged_workspace_gitignore(existing: str, generated: str) -> str:
+    """Add the complete generated safety block without deleting project rules."""
+
+    if generated in existing:
+        return existing
+    prefix = existing
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    if prefix and not prefix.endswith("\n\n"):
+        prefix += "\n"
+    return f"{prefix}{generated}"
+
+
+def ensure_workspace_gitignore(directory: str | Path) -> bool:
+    """Idempotently add the complete versioned safety block to .gitignore."""
+
+    root = Path(directory).expanduser().resolve()
+    target = root / ".gitignore"
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise WorkspaceInitError("refusing an unsafe .gitignore")
+    try:
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    except (OSError, UnicodeError) as exc:
+        raise WorkspaceInitError("could not safely read .gitignore") from exc
+    generated = _workspace_gitignore_block(
+        _workspace_gitignore_rules() + "outputs/\n__pycache__/\n*.py[cod]\n"
+    )
+    merged = _merged_workspace_gitignore(existing, generated)
+    if merged == existing:
+        return False
+    atomic_write_text(target, merged)
+    return True
+
+
+def refresh_generated_bfts_profile(directory: str | Path, profile: str) -> bool:
+    """Refresh only untouched generated BFTS fields, preserving user overrides."""
+
+    normalized_profile = _validate_persisted_config_value("profile", profile).lower()
+    if normalized_profile not in {"default", "deep"}:
+        raise WorkspaceInitError("unsupported generated BFTS profile")
+    root = Path(directory).expanduser().resolve()
+    target = root / "bfts_config.yaml"
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise WorkspaceInitError("refusing an unsafe bfts_config.yaml")
+    if not target.is_file():
+        return False
+    try:
+        original = target.read_text(encoding="utf-8")
+        header = original.splitlines()[0] if original else ""
+        matched = re.fullmatch(
+            r"# Generated by xscientist init from the '(default|deep)' profile\.",
+            header,
+        )
+        if matched is None:
+            return False
+        current = yaml.safe_load(original)
+        if not isinstance(current, dict):
+            raise WorkspaceInitError("generated BFTS configuration must be a mapping")
+        report = current.get("report")
+        current_model = (
+            str(report.get("model") or "") if isinstance(report, dict) else ""
+        )
+        if not current_model:
+            current_model = DEFAULT_MODELS["zhipu"]
+        _validate_persisted_config_value("existing BFTS model", current_model)
+
+        def rendered_payload(selected_profile: str) -> dict[str, Any]:
+            rendered = _render_bfts_config(selected_profile, current_model)
+            parsed = yaml.safe_load(rendered.split("\n", 1)[1])
+            if not isinstance(parsed, dict):  # pragma: no cover - package invariant
+                raise WorkspaceInitError("packaged BFTS profile is invalid")
+            return parsed
+
+        previous_generated = rendered_payload(matched.group(1))
+        next_generated = rendered_payload(normalized_profile)
+
+        def merge_generated(
+            destination: dict[str, Any],
+            previous: dict[str, Any],
+            replacement: dict[str, Any],
+        ) -> None:
+            for key, replacement_value in replacement.items():
+                if key not in destination or key not in previous:
+                    continue
+                previous_value = previous[key]
+                current_value = destination[key]
+                if all(
+                    isinstance(value, dict)
+                    for value in (current_value, previous_value, replacement_value)
+                ):
+                    merge_generated(current_value, previous_value, replacement_value)
+                elif current_value == previous_value:
+                    destination[key] = replacement_value
+
+        merge_generated(current, previous_generated, next_generated)
+        generated = (
+            f"# Generated by xscientist init from the {normalized_profile!r} profile.\n"
+            + yaml.safe_dump(current, sort_keys=False, allow_unicode=True)
+        )
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise WorkspaceInitError(
+            "could not safely refresh generated BFTS profile"
+        ) from exc
+    if generated == original:
+        return False
+    atomic_write_text(target, generated)
+    return True
+
+
 def create_workspace(
     directory: str | Path,
     *,
@@ -459,18 +597,31 @@ def create_workspace(
     capabilities: Iterable[str] | None = None,
     provider_required: bool = True,
     preserve_existing: bool = False,
+    preserve_paths: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Create a safe, installed-package-first XScientist workspace."""
-    normalized_profile = str(profile or "default").strip().lower()
-    normalized_provider = normalize_provider_name(provider or "zhipu")
+    raw_profile = _validate_persisted_config_value("profile", profile or "default")
+    raw_provider = _validate_persisted_config_value("provider", provider or "zhipu")
+    raw_model = (
+        _validate_persisted_config_value("model", model) if model is not None else None
+    )
+    raw_task = _validate_persisted_config_value("task", task or "research")
+    normalized_profile = raw_profile.lower()
+    normalized_provider = normalize_provider_name(raw_provider)
     if normalized_provider not in PROVIDER_ENV_LINES:
         choices = ", ".join(sorted(PROVIDER_ENV_LINES))
         raise WorkspaceInitError(
             f"unknown provider {provider!r}; expected one of: {choices}"
         )
-    selected_model = _resolve_model(normalized_provider, model)
+    selected_model = _resolve_model(normalized_provider, raw_model)
+    _validate_persisted_config_value("resolved model", selected_model)
     selected_capabilities = (
-        tuple(dict.fromkeys(str(item) for item in capabilities))
+        tuple(
+            dict.fromkeys(
+                _validate_persisted_config_value("capability", item)
+                for item in capabilities
+            )
+        )
         if capabilities is not None
         else None
     )
@@ -478,14 +629,53 @@ def create_workspace(
         profile=normalized_profile,
         provider=normalized_provider,
         model=selected_model,
-        task=str(task or "research"),
+        task=raw_task,
         capabilities=selected_capabilities,
         provider_required=provider_required,
     )
+    protected_paths = {str(path) for path in preserve_paths}
+    unsupported_protected = protected_paths - set(WORKSPACE_FILES)
+    if unsupported_protected:
+        raise WorkspaceInitError(
+            "unknown managed paths requested for preservation: "
+            + ", ".join(sorted(unsupported_protected))
+        )
 
     root = Path(directory).expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise WorkspaceInitError("workspace path is not a directory")
+    metadata_root = root / ".xscientist"
+    if metadata_root.is_symlink():
+        raise WorkspaceInitError(
+            "refusing to write through a symlinked .xscientist directory"
+        )
+    if metadata_root.exists() and not metadata_root.is_dir():
+        raise WorkspaceInitError("workspace .xscientist path is not a directory")
+    managed_symlinks: list[str] = []
+    unsafe_managed_leaves: list[str] = []
+    for name in WORKSPACE_FILES:
+        target = root / name
+        try:
+            mode = target.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise WorkspaceInitError(
+                f"could not safely inspect managed workspace file: {name}"
+            ) from exc
+        if stat.S_ISLNK(mode):
+            managed_symlinks.append(name)
+        elif not stat.S_ISREG(mode):
+            unsafe_managed_leaves.append(name)
+    if managed_symlinks:
+        raise WorkspaceInitError(
+            "refusing symlinked managed workspace files: " + ", ".join(managed_symlinks)
+        )
+    if unsafe_managed_leaves:
+        raise WorkspaceInitError(
+            "refusing non-regular managed workspace files: "
+            + ", ".join(unsafe_managed_leaves)
+        )
     conflicts = [name for name in WORKSPACE_FILES if (root / name).exists()]
     directory_conflicts = [name for name in conflicts if (root / name).is_dir()]
     if directory_conflicts:
@@ -500,11 +690,137 @@ def create_workspace(
             + "; pass --force to replace only these generated files"
         )
 
-    root.mkdir(parents=True, exist_ok=True)
-    for relative, content in files.items():
-        if preserve_existing and (root / relative).exists():
-            continue
-        atomic_write_text(root / relative, content)
+    root_existed = root.exists()
+    metadata_root_existed = metadata_root.exists()
+    try:
+        originals = {
+            relative: (
+                {
+                    "content": (root / relative).read_bytes(),
+                    "mode": (root / relative).stat().st_mode & 0o7777,
+                }
+                if (root / relative).is_file()
+                else None
+            )
+            for relative in WORKSPACE_FILES
+        }
+    except (OSError, UnicodeError) as exc:
+        raise WorkspaceInitError(
+            "could not safely snapshot existing managed workspace files"
+        ) from exc
+
+    written_post_states: dict[str, dict[str, Any]] = {}
+
+    def leaf_still_matches_snapshot(relative: str) -> bool:
+        target = root / relative
+        original = originals[relative]
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError:
+            return original is None
+        except OSError:
+            return False
+        if original is None or not stat.S_ISREG(metadata.st_mode):
+            return False
+        try:
+            return (
+                target.read_bytes() == original["content"]
+                and metadata.st_mode & 0o7777 == original["mode"]
+            )
+        except (OSError, TypeError):
+            return False
+
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        for relative, content in files.items():
+            target = root / relative
+            if target.is_symlink():
+                raise WorkspaceInitError(
+                    f"refusing symlinked managed workspace file: {relative}"
+                )
+            if relative in protected_paths or (preserve_existing and target.exists()):
+                continue
+            if relative.startswith(".xscientist/") and metadata_root.is_symlink():
+                raise WorkspaceInitError(
+                    "refusing to write through a symlinked .xscientist directory"
+                )
+            if not leaf_still_matches_snapshot(relative):
+                raise WorkspaceInitError(
+                    f"managed workspace file changed concurrently: {relative}"
+                )
+            if relative == ".gitignore" and target.exists():
+                try:
+                    content = _merged_workspace_gitignore(
+                        target.read_text(encoding="utf-8"),
+                        content,
+                    )
+                except (OSError, UnicodeError) as exc:
+                    raise WorkspaceInitError(
+                        "could not safely merge the existing .gitignore"
+                    ) from exc
+            atomic_write_text(target, content)
+            try:
+                metadata = target.lstat()
+                post_content = target.read_bytes()
+            except OSError as write_exc:
+                raise WorkspaceInitError(
+                    f"could not verify managed workspace file after writing: {relative}"
+                ) from write_exc
+            expected_content = content.encode("utf-8")
+            if not stat.S_ISREG(metadata.st_mode) or post_content != expected_content:
+                raise WorkspaceInitError(
+                    f"managed workspace file changed concurrently: {relative}"
+                )
+            written_post_states[relative] = {
+                "content": expected_content,
+                "mode": metadata.st_mode & 0o7777,
+            }
+    except BaseException as exc:
+        rollback_failed = False
+        for relative, post_state in written_post_states.items():
+            original = originals[relative]
+            target = root / relative
+            try:
+                metadata = target.lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or target.read_bytes() != post_state["content"]
+                    or metadata.st_mode & 0o7777 != post_state["mode"]
+                ):
+                    rollback_failed = True
+                    continue
+                if original is None:
+                    target.unlink()
+                else:
+                    if not isinstance(original.get("content"), bytes):
+                        raise OSError("invalid workspace rollback snapshot")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(original["content"])
+                    target.chmod(int(original.get("mode") or 0o600))
+            except (FileNotFoundError, OSError, TypeError):
+                rollback_failed = True
+        try:
+            if (
+                not metadata_root_existed
+                and metadata_root.is_dir()
+                and not metadata_root.is_symlink()
+                and not any(metadata_root.iterdir())
+            ):
+                metadata_root.rmdir()
+            if (
+                not root_existed
+                and root.is_dir()
+                and not root.is_symlink()
+                and not any(root.iterdir())
+            ):
+                root.rmdir()
+        except OSError:
+            rollback_failed = True
+        if rollback_failed:
+            raise WorkspaceInitError(
+                "workspace creation failed and managed-file rollback was incomplete"
+            ) from exc
+        raise
 
     workspace_view = portable_path(root, base=Path.cwd())
     if workspace_view == REDACTED_PATH:
@@ -524,12 +840,12 @@ def create_workspace(
                 f"xscientist provider add {normalized_provider}",
                 "xscientist auth login",
                 "xscientist executor prepare --workspace .",
-                f"xscientist doctor --workspace . --task {task} --deep",
+                f"xscientist doctor --workspace . --task {raw_task} --deep",
                 'xscientist start . --question "YOUR QUESTION" --allow-synthetic-data',
             ]
         )
     else:
-        next_steps.append(f"xscientist doctor --workspace . --task {task}")
+        next_steps.append(f"xscientist doctor --workspace . --task {raw_task}")
     return {
         "ok": True,
         "workspace": workspace_view,
@@ -537,7 +853,9 @@ def create_workspace(
         "provider": normalized_provider if provider_required else None,
         "model": selected_model if provider_required else None,
         "files": list(WORKSPACE_FILES),
-        "preserved_files": conflicts if preserve_existing else [],
+        "preserved_files": (
+            conflicts if preserve_existing else sorted(set(conflicts) & protected_paths)
+        ),
         "secrets_written": False,
         "next_steps": next_steps,
     }
@@ -549,4 +867,6 @@ __all__ = [
     "WORKSPACE_FILES",
     "WorkspaceInitError",
     "create_workspace",
+    "ensure_workspace_gitignore",
+    "refresh_generated_bfts_profile",
 ]

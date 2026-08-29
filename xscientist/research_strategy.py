@@ -1519,7 +1519,14 @@ def scan_research_anomalies(
     record: bool = False,
 ) -> dict[str, Any]:
     repository = ResearchRepository(repo)
+    all_objects = {str(item["object_id"]): item for item in repository.objects()}
     objects = _effective_objects(repository)
+    existing_open = [
+        item
+        for item in objects.values()
+        if item.get("kind") == "anomaly"
+        and (item.get("payload") or {}).get("status") == "open"
+    ]
     existing = {
         (
             str((item.get("payload") or {}).get("anomaly_type") or ""),
@@ -1528,12 +1535,39 @@ def scan_research_anomalies(
                 for value in (item.get("payload") or {}).get("source_ids") or []
             ),
         )
-        for item in objects.values()
-        if item.get("kind") == "anomaly"
-        and (item.get("payload") or {}).get("status") == "open"
+        for item in existing_open
     }
+    resolved: set[tuple[str, ...]] = set()
+    for item in objects.values():
+        payload = item.get("payload") or {}
+        if (
+            item.get("kind") != "anomaly"
+            or item.get("state") not in {"completed", "verified", "promoted"}
+            or payload.get("status") != "resolved"
+        ):
+            continue
+        key = (
+            str(payload.get("anomaly_type") or ""),
+            *sorted(str(value) for value in payload.get("source_ids") or []),
+        )
+        for target_id in _targets(item, {"supersedes"}):
+            target = all_objects.get(target_id)
+            target_payload = (target or {}).get("payload") or {}
+            target_key = (
+                str(target_payload.get("anomaly_type") or ""),
+                *sorted(str(value) for value in target_payload.get("source_ids") or []),
+            )
+            if (
+                (target or {}).get("kind") == "anomaly"
+                and target_payload.get("status") == "open"
+                and target_key == key
+            ):
+                resolved.add(key)
     candidates: list[dict[str, Any]] = []
-    for object_id, item in objects.items():
+    # Historical failures and contradictions remain discoverable after ordinary
+    # object supersession.  They disappear from the open queue only through an
+    # exact, immutable anomaly-resolution relation above.
+    for object_id, item in all_objects.items():
         if item.get("kind") == "experiment_attempt" and item.get("state") in {
             "failed",
             "timed_out",
@@ -1553,10 +1587,12 @@ def scan_research_anomalies(
                 "refutes",
                 "contradicts",
                 "qualified_refutes",
+                "challenges_inference",
+                "invalidates",
             }:
                 continue
             target = str(relation.get("target") or "")
-            if target in objects:
+            if target in all_objects:
                 candidates.append(
                     {
                         "anomaly_type": "conflicting_evidence",
@@ -1572,7 +1608,7 @@ def scan_research_anomalies(
             candidate["anomaly_type"],
             *sorted(candidate["source_ids"]),
         )
-        if key not in existing:
+        if key not in existing and key not in resolved:
             unique[key] = candidate
     pending = [unique[key] for key in sorted(unique)]
     recorded: list[ResearchObjectResult] = []
@@ -1598,6 +1634,24 @@ def scan_research_anomalies(
     return {
         "candidate_count": len(pending),
         "candidates": pending,
+        "existing_open_count": len(existing_open),
+        "existing_open": [
+            {
+                "object_id": str(item.get("object_id") or ""),
+                "anomaly_type": str(
+                    (item.get("payload") or {}).get("anomaly_type") or ""
+                ),
+                "source_ids": sorted(
+                    str(value)
+                    for value in (item.get("payload") or {}).get("source_ids") or []
+                ),
+            }
+            for item in sorted(
+                existing_open,
+                key=lambda value: str(value.get("object_id") or ""),
+            )
+        ],
+        "open_count": len(existing_open) + len(pending),
         "recorded": recorded,
     }
 
@@ -1744,15 +1798,15 @@ def review_research_program(
             "Claims exist without an explicit boundary and transfer matrix.",
             "Test domain, scale, population, resource, and failure conditions.",
         )
-    if anomalies["candidate_count"]:
+    if anomalies["open_count"]:
         gap(
             "open_anomalies",
-            f"{anomalies['candidate_count']} unresolved anomalies need explanation.",
+            f"{anomalies['open_count']} unresolved anomalies need explanation.",
             "Promote failures and contradictions into mechanism or boundary tests.",
         )
     review_due = bool(
         new_object_count >= RESEARCH_REVIEW_INTERVAL
-        or anomalies["candidate_count"]
+        or anomalies["open_count"]
         or not by_kind.get("research_review")
     )
     summary = (
@@ -1814,6 +1868,16 @@ def review_research_program(
         "object": result,
         "related": related,
         "checkpoint": checkpoint,
+        "anomalies": {
+            key: anomalies[key]
+            for key in (
+                "candidate_count",
+                "candidates",
+                "existing_open_count",
+                "existing_open",
+                "open_count",
+            )
+        },
     }
 
 

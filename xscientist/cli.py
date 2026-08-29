@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -80,9 +82,20 @@ _TASK_CHOICES = [
     "service",
 ]
 
+_SPECIAL_COMMAND_OPTIONS = {"help": ("--all",)}
+
+
+class _ArgumentParseFailure(ValueError):
+    """A parser error that the CLI can render without leaking raw argv."""
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _ArgumentParseFailure(message)
+
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SafeArgumentParser(
         prog="xscientist",
         description="XScientist SDK, workflow CLI, and API service.",
         epilog=(
@@ -690,7 +703,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _build_setup_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SafeArgumentParser(
         prog="xscientist setup",
         description="Create, configure, and diagnose a first research workspace.",
     )
@@ -748,7 +761,7 @@ def _build_setup_parser() -> argparse.ArgumentParser:
 
 
 def _build_start_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SafeArgumentParser(
         prog="xscientist start",
         usage="xscientist start DIRECTORY [study options] [safety options]",
         description=(
@@ -1289,7 +1302,11 @@ def _interactive_start_inputs(
 ) -> None:
     """Fill only missing first-run choices without weakening automation."""
 
-    if parsed.non_interactive or not sys.stdin.isatty():
+    if (
+        parsed.non_interactive
+        or bool(getattr(parsed, "as_json", False))
+        or not sys.stdin.isatty()
+    ):
         return
     if not str(parsed.question or "").strip():
         parsed.question = input("Research question: ").strip()
@@ -1365,7 +1382,7 @@ def _research_model_arguments(model: str) -> list[str]:
 
 
 def _build_doctor_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SafeArgumentParser(
         prog="xscientist doctor",
         description=(
             "Check workspace, Research VCS, provider, auth, and task capabilities."
@@ -1384,7 +1401,7 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
 
 
 def _build_capability_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _SafeArgumentParser(
         prog="xscientist capability",
         description="Resolve optional modules for a concrete research task.",
     )
@@ -1796,7 +1813,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "providers": rows,
             }
             if parsed.as_json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(payload),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
             else:
                 if initialized:
                     print(f"Workspace: {workspace_label}")
@@ -1891,7 +1914,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "response_content_recorded": False,
             }
             if parsed.as_json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(payload),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
             else:
                 print(f"Provider test: {provider}")
                 print(f"Requested model: {probe.get('client_model') or model}")
@@ -2148,7 +2177,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "remediations": remediations,
             }
             if parsed.as_json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(payload),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
             else:
                 state = (
                     "live provider request verified"
@@ -2240,7 +2275,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "bfts_updated": bfts_updated,
             }
             if parsed.as_json:
-                print(json.dumps(payload, indent=2))
+                print(json.dumps(_safe_public_json_payload(payload), indent=2))
             else:
                 print(f"Removed provider metadata: {parsed.name}")
                 print("Stored credentials were left untouched.")
@@ -2261,7 +2296,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "bfts_updated": bfts_updated,
             }
             if parsed.as_json:
-                print(json.dumps(payload, indent=2))
+                print(json.dumps(_safe_public_json_payload(payload), indent=2))
             else:
                 print(f"Active provider: {parsed.name}")
                 print(f"Default model: {model}")
@@ -2278,7 +2313,13 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             non_interactive=parsed.non_interactive,
         )
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(f"Configured provider: {payload['provider']}")
             print(f"Default model: {payload['model']}")
@@ -2387,6 +2428,920 @@ def _run_evolution_gate(parsed: argparse.Namespace) -> int:
     return 0 if report.get("decision") in {"promote_to_canary", "approved"} else 3
 
 
+def _research_question_body(value: object) -> str:
+    """Normalize the first Markdown section that carries a research question."""
+
+    lines = str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines:
+        heading = re.sub(r"^#{1,6}\s*", "", lines[0].strip()).casefold()
+        if heading in {"question", "research question", "topic", "research topic"}:
+            lines.pop(0)
+    body: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if body and re.match(r"^#{1,6}\s+", stripped):
+            break
+        if stripped:
+            body.append(stripped)
+    return re.sub(r"\s+", " ", " ".join(body)).strip()
+
+
+def _validated_existing_research_question(
+    workspace: Path,
+    requested_question: object,
+) -> tuple[str, bool]:
+    """Read one immutable question identity without rewriting scientific files."""
+
+    from .onboarding import _render_topic
+    from .research_vcs import ResearchRepository
+
+    repository = ResearchRepository(workspace)
+    question_objects = repository.objects(kind="question")
+    latest_question = (
+        max(question_objects, key=lambda item: str(item.get("created_at") or ""))
+        if question_objects
+        else None
+    )
+    object_question = ""
+    if latest_question is not None:
+        payload = latest_question.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError("the recorded Research VCS question payload is invalid")
+        object_question = _research_question_body(payload.get("question"))
+
+    source_paths = {
+        "question.md": workspace / "question.md",
+        "topic.md": workspace / "topic.md",
+        "00_config/topic.md": workspace / "00_config" / "topic.md",
+    }
+    source_questions: dict[str, str] = {}
+    source_texts: dict[str, str] = {}
+    for label, path in source_paths.items():
+        if path.is_symlink():
+            raise ValueError(
+                f"existing Research VCS question source {label} must not be a symlink"
+            )
+        if not path.exists():
+            if label == "question.md":
+                raise ValueError("existing Research VCS is missing question.md")
+            continue
+        if not path.is_file():
+            raise ValueError(
+                f"existing Research VCS question source {label} is not a file"
+            )
+        source_texts[label] = path.read_text(encoding="utf-8")
+        source_questions[label] = _research_question_body(source_texts[label])
+
+    status = repository.status()
+    scientific_dirt = {
+        "question.md",
+        "topic.md",
+        "00_config/topic.md",
+    } & (
+        set(status.get("eligible_changes") or [])
+        | set(status.get("staged_paths") or [])
+        | set((status.get("research_stage") or {}).get("paths") or [])
+    )
+    packaged_placeholder = _render_topic()
+    pristine_packaged_placeholder = bool(
+        not object_question
+        and not scientific_dirt
+        and source_texts.get("question.md") == packaged_placeholder
+        and source_texts.get("topic.md") == packaged_placeholder
+        and "00_config/topic.md" not in source_texts
+    )
+    if pristine_packaged_placeholder:
+        requested = _research_question_body(requested_question)
+        if requested.casefold() == source_questions["question.md"].casefold():
+            requested = ""
+        return requested, True
+
+    canonical_question = object_question or source_questions.get("question.md", "")
+    canonical_key = canonical_question.casefold()
+    if not canonical_key:
+        raise ValueError("existing Research VCS has no usable research question")
+
+    conflicts = sorted(
+        label
+        for label, question in source_questions.items()
+        if question.casefold() != canonical_key
+    )
+    if conflicts:
+        raise ValueError(
+            "existing Research VCS question sources disagree ("
+            + ", ".join(conflicts)
+            + "); refusing to rewrite question.md or topic.md"
+        )
+
+    requested = _research_question_body(requested_question)
+    if requested and requested.casefold() != canonical_key:
+        raise ValueError(
+            "--question conflicts with the existing Research VCS question; "
+            "reuse the original question or choose a new directory"
+        )
+    return canonical_question, False
+
+
+def _safe_json_error_payload(error: object, **fields: object) -> dict[str, object]:
+    """Build one portable machine error without host paths or secret values."""
+
+    from ai_scientist.utils.privacy import redact_sensitive_payload
+
+    payload: dict[str, object] = {
+        **fields,
+        "ok": False,
+        "workspace": ".",
+        "error": str(error),
+    }
+    redacted = redact_sensitive_payload(payload)
+    return dict(redacted) if isinstance(redacted, dict) else payload
+
+
+def _safe_public_json_payload(payload: object) -> object:
+    """Apply the public JSON privacy boundary to success and failure payloads."""
+
+    from ai_scientist.utils.privacy import redact_sensitive_payload
+
+    return redact_sensitive_payload(payload)
+
+
+def _validated_workspace_file(workspace: Path, relative: str) -> Path | None:
+    """Resolve a managed file without following parent or leaf symlinks."""
+
+    root = workspace.resolve()
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError("managed workspace path must stay below the workspace")
+    cursor = root
+    for part in relative_path.parts[:-1]:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError(
+                f"managed workspace parent for {relative} must not be a symlink"
+            )
+        if cursor.exists() and not cursor.is_dir():
+            raise ValueError(
+                f"managed workspace parent for {relative} is not a directory"
+            )
+    target = root / relative_path
+    if target.is_symlink():
+        raise ValueError(f"managed workspace file {relative} must not be a symlink")
+    if target.exists() and not target.is_file():
+        raise ValueError(f"managed workspace file {relative} is not a regular file")
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"managed workspace file {relative} escapes the workspace"
+        ) from exc
+    return target if target.is_file() else None
+
+
+def _workspace_git_changes(
+    workspace: Path,
+    *,
+    required: bool = False,
+) -> tuple[bool, set[str], set[str]]:
+    """Return exact-root Git state without mutating or discovering parent repos."""
+
+    if not workspace.is_dir():
+        return False, set(), set()
+    if shutil.which("git") is None:
+        if required:
+            raise OSError("Git is required for local Research VCS setup")
+        return False, set(), set()
+    probe = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode or not probe.stdout.strip():
+        return False, set(), set()
+    try:
+        if Path(probe.stdout.strip()).resolve() != workspace.resolve():
+            return False, set(), set()
+    except OSError:
+        return False, set(), set()
+
+    def paths(*arguments: str) -> set[str]:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), *arguments],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode:
+            raise OSError("could not inspect the existing Git worktree")
+        return {
+            item.decode("utf-8", errors="surrogateescape")
+            for item in completed.stdout.split(b"\0")
+            if item
+        }
+
+    staged = paths(
+        "diff",
+        "--cached",
+        "--ita-visible-in-index",
+        "--name-only",
+        "--no-renames",
+        "-z",
+    )
+    tracked_changes = paths("diff", "--name-only", "--no-renames", "-z")
+    return True, staged, tracked_changes
+
+
+def _workspace_git_head_contains(workspace: Path, relative: str) -> bool:
+    """Return whether an exact-root repository HEAD owns a managed path."""
+
+    if Path(relative).is_absolute() or ".." in Path(relative).parts:
+        return False
+    had_git, _staged, _tracked = _workspace_git_changes(workspace)
+    if not had_git:
+        return False
+    completed = subprocess.run(
+        ["git", "-C", str(workspace), "cat-file", "-e", f"HEAD:{relative}"],
+        check=False,
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+_SETUP_TRANSACTION_FILES = (
+    ".dockerignore",
+    ".env.example",
+    ".gitignore",
+    ".xscientist/providers.json",
+    ".xscientist/README.md",
+    ".xscientist/readiness.json",
+    "Dockerfile.executor",
+    "README.md",
+    "bfts_config.yaml",
+    "question.md",
+    "research.yaml",
+    "topic.md",
+)
+_SETUP_TRANSACTION_DIRS = (
+    ".git",
+    ".xscientist",
+    ".ara-store",
+    "ara",
+    "checkpoints",
+    "claims",
+    "hypotheses",
+    "manuscript",
+    "research-objects",
+)
+
+
+def _setup_workspace_snapshot(
+    workspace: Path,
+    *,
+    extra_files: Sequence[str] = (),
+) -> dict[str, object]:
+    """Capture only files and repository state setup is authorized to mutate."""
+
+    import os
+
+    from . import provider_config as provider_config_module
+
+    workspace_existed = workspace.exists()
+    files: dict[str, dict[str, object] | None] = {}
+    for relative in _SETUP_TRANSACTION_FILES:
+        target = _validated_workspace_file(workspace, relative)
+        files[relative] = (
+            {
+                "content": target.read_bytes(),
+                "mode": target.stat().st_mode & 0o7777,
+            }
+            if target is not None
+            else None
+        )
+    directories: dict[str, dict[str, object]] = {}
+    for relative in _SETUP_TRANSACTION_DIRS:
+        target = workspace / relative
+        if target.is_symlink():
+            directories[relative] = {"kind": "symlink"}
+        elif target.is_dir():
+            directories[relative] = {"kind": "directory"}
+        elif target.is_file():
+            directories[relative] = {
+                "kind": "file",
+                "content": target.read_bytes(),
+                "mode": target.stat().st_mode & 0o7777,
+            }
+        else:
+            directories[relative] = {"kind": "absent"}
+    checkpoint_entries = (
+        {path.name for path in (workspace / "checkpoints").iterdir()}
+        if directories["checkpoints"]["kind"] == "directory"
+        else set()
+    )
+    extra_file_state: dict[str, dict[str, object] | None] = {}
+    extra_parent_state: dict[str, bool] = {}
+    for relative in extra_files:
+        target = _validated_workspace_file(workspace, relative)
+        extra_file_state[relative] = (
+            {
+                "content": target.read_bytes(),
+                "mode": target.stat().st_mode & 0o7777,
+            }
+            if target is not None
+            else None
+        )
+        parent = Path(relative).parent
+        while parent != Path("."):
+            extra_parent_state[parent.as_posix()] = (workspace / parent).is_dir()
+            parent = parent.parent
+    had_git, _staged, _tracked = _workspace_git_changes(workspace)
+    provider_environment_names = set(provider_config_module.ALLOWED_ENV_NAMES) | {
+        "AI_SCIENTIST_ACTIVE_PROVIDER",
+        "AI_SCIENTIST_DEFAULT_MODEL",
+        "ZHIPU_DEFAULT_MODEL",
+        *provider_config_module._MANAGED_ENV_VALUES,
+    }
+    process_environment = {
+        name: os.environ.get(name) for name in provider_environment_names
+    }
+    managed_environment = dict(provider_config_module._MANAGED_ENV_VALUES)
+    head = None
+    symbolic_ref = None
+    git_identity: dict[str, dict[str, object]] = {}
+    if had_git:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        head = completed.stdout.strip() if completed.returncode == 0 else None
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), "symbolic-ref", "-q", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        symbolic_ref = completed.stdout.strip() if completed.returncode == 0 else None
+        for key in ("user.name", "user.email"):
+            completed = subprocess.run(
+                ["git", "-C", str(workspace), "config", "--local", "--get", key],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            git_identity[key] = {
+                "present": completed.returncode == 0,
+                "value": (
+                    completed.stdout.rstrip("\n") if completed.returncode == 0 else ""
+                ),
+            }
+    return {
+        "workspace_existed": workspace_existed,
+        "files": files,
+        "directories": directories,
+        "checkpoint_entries": checkpoint_entries,
+        "extra_files": extra_file_state,
+        "extra_parents": extra_parent_state,
+        "had_git": had_git,
+        "head": head,
+        "symbolic_ref": symbolic_ref,
+        "git_identity": git_identity,
+        "process_environment": process_environment,
+        "managed_environment": managed_environment,
+        "post_process_environment": dict(process_environment),
+        "post_managed_environment": dict(managed_environment),
+        "post_files": {},
+    }
+
+
+def _record_setup_post_state(workspace: Path, snapshot: dict[str, object]) -> None:
+    """Record exact transaction-owned leaf states before calling external checks."""
+
+    import os
+
+    from . import provider_config as provider_config_module
+
+    selected = set(_SETUP_TRANSACTION_FILES)
+    extra_files = snapshot.get("extra_files")
+    if isinstance(extra_files, dict):
+        selected.update(str(path) for path in extra_files)
+    post_files: dict[str, dict[str, object]] = {}
+    for relative in sorted(selected):
+        try:
+            target = _validated_workspace_file(workspace, relative)
+        except ValueError as exc:
+            raise OSError("managed transaction path changed identity") from exc
+        if target is None:
+            post_files[relative] = {"kind": "absent"}
+        else:
+            post_files[relative] = {
+                "kind": "file",
+                "content": target.read_bytes(),
+                "mode": target.stat().st_mode & 0o7777,
+            }
+    snapshot["post_files"] = post_files
+    checkpoint_root = workspace / "checkpoints"
+    snapshot["post_checkpoint_entries"] = (
+        {path.name for path in checkpoint_root.iterdir()}
+        if checkpoint_root.is_dir() and not checkpoint_root.is_symlink()
+        else set()
+    )
+    snapshot["post_git"] = _setup_git_control_state(
+        workspace,
+        complete=not bool(snapshot.get("had_git")),
+    )
+    original_process = snapshot.get("process_environment")
+    original_managed = snapshot.get("managed_environment")
+    environment_names = set(provider_config_module.ALLOWED_ENV_NAMES) | {
+        "AI_SCIENTIST_ACTIVE_PROVIDER",
+        "AI_SCIENTIST_DEFAULT_MODEL",
+        "ZHIPU_DEFAULT_MODEL",
+        *provider_config_module._MANAGED_ENV_VALUES,
+    }
+    if isinstance(original_process, dict):
+        environment_names.update(str(name) for name in original_process)
+    if isinstance(original_managed, dict):
+        environment_names.update(str(name) for name in original_managed)
+    snapshot["post_process_environment"] = {
+        name: os.environ.get(name) for name in environment_names
+    }
+    snapshot["post_managed_environment"] = dict(
+        provider_config_module._MANAGED_ENV_VALUES
+    )
+
+
+def _setup_git_control_state(
+    workspace: Path,
+    *,
+    complete: bool = False,
+) -> dict[str, object]:
+    """Fingerprint ref/index/reflog state without following a .git symlink."""
+
+    control = workspace / ".git"
+    if control.is_symlink():
+        return {"kind": "symlink"}
+    if not control.exists():
+        return {"kind": "absent"}
+    had_git, _staged, _tracked = _workspace_git_changes(workspace)
+    if not had_git:
+        return {"kind": "unrecognized"}
+
+    def command(*arguments: str) -> bytes:
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), *arguments],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode:
+            return b""
+        return completed.stdout
+
+    git_dir_raw = (
+        command("rev-parse", "--absolute-git-dir")
+        .decode("utf-8", errors="surrogateescape")
+        .strip()
+    )
+    git_dir = Path(git_dir_raw)
+    common_dir_raw = (
+        command("rev-parse", "--git-common-dir")
+        .decode("utf-8", errors="surrogateescape")
+        .strip()
+    )
+    common_dir = Path(common_dir_raw)
+    if not common_dir.is_absolute():
+        common_dir = (workspace / common_dir).resolve()
+
+    def digest_file(path: Path) -> str | None:
+        if path.is_symlink() or not path.is_file():
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    control_tree: dict[str, tuple[str, object, int]] | None = None
+    if complete:
+        import stat
+
+        control_tree = {}
+        for path in sorted(git_dir.rglob("*")):
+            relative = path.relative_to(git_dir).as_posix()
+            metadata = path.lstat()
+            mode = metadata.st_mode & 0o7777
+            if stat.S_ISREG(metadata.st_mode):
+                control_tree[relative] = (
+                    "file",
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    mode,
+                )
+            elif stat.S_ISDIR(metadata.st_mode):
+                control_tree[relative] = ("directory", "", mode)
+            elif stat.S_ISLNK(metadata.st_mode):
+                control_tree[relative] = ("symlink", path.readlink().as_posix(), mode)
+            else:
+                control_tree[relative] = ("special", metadata.st_rdev, mode)
+
+    log_digests: dict[str, str] = {}
+    logs_root = git_dir / "logs"
+    if logs_root.is_dir() and not logs_root.is_symlink():
+        for path in sorted(logs_root.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                log_digests[path.relative_to(logs_root).as_posix()] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+    return {
+        "kind": "repository",
+        "head": command("rev-parse", "--verify", "HEAD"),
+        "symbolic_head": command("symbolic-ref", "-q", "HEAD"),
+        "refs": command(
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)",
+            "refs",
+        ),
+        "index": digest_file(git_dir / "index"),
+        "config": digest_file(git_dir / "config"),
+        "common_config": digest_file(common_dir / "config"),
+        "worktree_config": digest_file(git_dir / "config.worktree"),
+        "logs": log_digests,
+        "control_tree": control_tree,
+    }
+
+
+def _setup_leaf_matches_post_state(
+    workspace: Path,
+    relative: str,
+    post_files: object,
+) -> bool:
+    if not isinstance(post_files, dict) or relative not in post_files:
+        return True
+    expected = post_files[relative]
+    if not isinstance(expected, dict):
+        return False
+    try:
+        target = _validated_workspace_file(workspace, relative)
+    except ValueError:
+        return False
+    if expected.get("kind") == "absent":
+        return target is None
+    return bool(
+        target is not None
+        and expected.get("kind") == "file"
+        and isinstance(expected.get("content"), bytes)
+        and target.read_bytes() == expected["content"]
+        and target.stat().st_mode & 0o7777 == int(expected.get("mode") or 0)
+    )
+
+
+def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> None:
+    """Undo only paths created or changed by one failed setup invocation."""
+
+    import os
+
+    from . import provider_config as provider_config_module
+
+    rollback_failed = False
+
+    process_environment = snapshot.get("process_environment")
+    post_process_environment = snapshot.get("post_process_environment")
+    if isinstance(process_environment, dict) and isinstance(
+        post_process_environment, dict
+    ):
+        for raw_name in set(process_environment) | set(post_process_environment):
+            name = str(raw_name)
+            original_value = process_environment.get(raw_name)
+            expected_value = post_process_environment.get(raw_name)
+            if os.environ.get(name) != expected_value:
+                rollback_failed = True
+                continue
+            if original_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = str(original_value)
+    elif isinstance(process_environment, dict):
+        rollback_failed = True
+
+    managed_environment = snapshot.get("managed_environment")
+    post_managed_environment = snapshot.get("post_managed_environment")
+    if isinstance(managed_environment, dict) and isinstance(
+        post_managed_environment, dict
+    ):
+        missing = object()
+        managed_values = provider_config_module._MANAGED_ENV_VALUES
+        managed_names = (
+            set(managed_environment)
+            | set(post_managed_environment)
+            | set(managed_values)
+        )
+        for name in managed_names:
+            current_value = managed_values.get(name, missing)
+            expected_value = post_managed_environment.get(name, missing)
+            if current_value != expected_value:
+                rollback_failed = True
+                continue
+            original_value = managed_environment.get(name, missing)
+            if original_value is missing:
+                managed_values.pop(name, None)
+            else:
+                managed_values[name] = original_value
+    elif isinstance(managed_environment, dict):
+        rollback_failed = True
+
+    post_git = snapshot.get("post_git")
+    git_control_owned = bool(
+        isinstance(post_git, dict)
+        and _setup_git_control_state(
+            workspace,
+            complete=not bool(snapshot.get("had_git")),
+        )
+        == post_git
+    )
+    if bool(snapshot["had_git"]) and not git_control_owned:
+        rollback_failed = True
+    elif bool(snapshot["had_git"]):
+        head = snapshot.get("head")
+        current = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        current_head = current.stdout.strip() if current.returncode == 0 else None
+        if head and current_head != head:
+            subprocess.run(
+                ["git", "-C", str(workspace), "reset", "--mixed", str(head)],
+                check=True,
+                capture_output=True,
+            )
+        elif not head and current_head:
+            symbolic_ref = snapshot.get("symbolic_ref")
+            if symbolic_ref:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(workspace),
+                        "update-ref",
+                        "-d",
+                        str(symbolic_ref),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+            subprocess.run(
+                ["git", "-C", str(workspace), "read-tree", "--empty"],
+                check=True,
+                capture_output=True,
+            )
+        git_identity = snapshot.get("git_identity")
+        current_git_state = _setup_git_control_state(workspace)
+        config_identity_unchanged = bool(
+            isinstance(post_git, dict)
+            and all(
+                current_git_state.get(key) == post_git.get(key)
+                for key in ("config", "common_config", "worktree_config")
+            )
+        )
+        if isinstance(git_identity, dict) and config_identity_unchanged:
+            for key, state in git_identity.items():
+                if not isinstance(state, dict):
+                    continue
+                if state.get("present"):
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(workspace),
+                            "config",
+                            "--local",
+                            str(key),
+                            str(state.get("value") or ""),
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                else:
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(workspace),
+                            "config",
+                            "--local",
+                            "--unset-all",
+                            str(key),
+                        ],
+                        check=False,
+                        capture_output=True,
+                    )
+        elif isinstance(git_identity, dict):
+            rollback_failed = True
+
+    files = snapshot["files"]
+    assert isinstance(files, dict)
+    post_files = snapshot.get("post_files")
+    for relative, original in files.items():
+        target = workspace / relative
+        if not _setup_leaf_matches_post_state(workspace, relative, post_files):
+            rollback_failed = True
+            continue
+        if original is None:
+            if target.is_file() and not target.is_symlink():
+                target.unlink(missing_ok=True)
+            continue
+        if not isinstance(original, dict) or not isinstance(
+            original.get("content"), bytes
+        ):  # pragma: no cover - invariant guard
+            raise OSError("invalid setup rollback snapshot")
+        if target.is_symlink():
+            rollback_failed = True
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(original["content"])
+        target.chmod(int(original.get("mode") or 0o600))
+
+    extra_files = snapshot.get("extra_files")
+    if isinstance(extra_files, dict):
+        for relative, original in extra_files.items():
+            target = workspace / relative
+            if not _setup_leaf_matches_post_state(workspace, relative, post_files):
+                rollback_failed = True
+                continue
+            if original is None:
+                if target.is_file() and not target.is_symlink():
+                    target.unlink(missing_ok=True)
+                continue
+            if not isinstance(original, dict) or not isinstance(
+                original.get("content"), bytes
+            ):
+                raise OSError("invalid setup environment rollback snapshot")
+            if target.is_symlink():
+                rollback_failed = True
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(original["content"])
+            target.chmod(int(original.get("mode") or 0o600))
+    extra_parents = snapshot.get("extra_parents")
+    if isinstance(extra_parents, dict):
+        for relative, existed in sorted(
+            extra_parents.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            target = workspace / relative
+            if (
+                not existed
+                and target.is_dir()
+                and not target.is_symlink()
+                and not any(target.iterdir())
+            ):
+                target.rmdir()
+
+    checkpoint_entries = snapshot["checkpoint_entries"]
+    assert isinstance(checkpoint_entries, set)
+    post_checkpoint_entries = snapshot.get("post_checkpoint_entries")
+    owned_checkpoint_entries = (
+        set(post_checkpoint_entries) - checkpoint_entries
+        if isinstance(post_checkpoint_entries, set)
+        else set()
+    )
+    checkpoint_root = workspace / "checkpoints"
+    if checkpoint_root.is_dir() and not checkpoint_root.is_symlink():
+        for path in checkpoint_root.iterdir():
+            if path.name in checkpoint_entries:
+                continue
+            if path.name not in owned_checkpoint_entries:
+                rollback_failed = True
+                continue
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+            else:
+                rollback_failed = True
+
+    directories = snapshot["directories"]
+    assert isinstance(directories, dict)
+    for relative in sorted(_SETUP_TRANSACTION_DIRS, key=len, reverse=True):
+        target = workspace / relative
+        state = directories[relative]
+        if not isinstance(state, dict):  # pragma: no cover - invariant guard
+            raise OSError("invalid setup directory rollback snapshot")
+        kind = state.get("kind")
+        if kind == "absent" and (target.exists() or target.is_symlink()):
+            if (
+                relative == ".git"
+                and git_control_owned
+                and target.is_dir()
+                and not target.is_symlink()
+            ):
+                shutil.rmtree(target)
+            elif (
+                target.is_dir()
+                and not target.is_symlink()
+                and not any(target.iterdir())
+            ):
+                target.rmdir()
+            else:
+                rollback_failed = True
+        elif kind == "file":
+            content = state.get("content")
+            if not isinstance(content, bytes):
+                raise OSError("invalid setup gitfile rollback snapshot")
+            if target.is_symlink():
+                target.unlink()
+            elif target.is_dir():
+                raise OSError(
+                    "setup replaced a pre-existing managed file with a directory"
+                )
+            target.write_bytes(content)
+            target.chmod(int(state.get("mode") or 0o600))
+
+    if not bool(snapshot["workspace_existed"]):
+        if (
+            workspace.is_dir()
+            and not workspace.is_symlink()
+            and not any(workspace.iterdir())
+        ):
+            workspace.rmdir()
+        elif workspace.exists() or workspace.is_symlink():
+            rollback_failed = True
+    if rollback_failed:
+        raise OSError(
+            "setup rollback preserved paths whose identity changed concurrently"
+        )
+
+
+def _setup_env_file_relative(workspace: Path) -> str:
+    """Resolve the provider env file as a safe workspace-relative regular path."""
+
+    from .provider_config import resolve_env_file
+
+    config_path = _validated_workspace_file(
+        workspace,
+        ".xscientist/providers.json",
+    )
+    if config_path is None:
+        relative = Path(".env")
+    else:
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("existing provider configuration is unreadable") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("existing provider configuration must be an object")
+        raw_env_file = payload.get("env_file") or ".env"
+        if not isinstance(raw_env_file, str) or not raw_env_file.strip():
+            raise ValueError("existing provider configuration has invalid env_file")
+        relative = Path(raw_env_file.strip())
+    resolved = resolve_env_file(workspace, relative.as_posix())
+    return resolved.relative_to(workspace.resolve()).as_posix()
+
+
+def _initialize_cli_research_repository(
+    workspace: Path,
+    *,
+    name: str,
+    question: str,
+    actor: str = "xscientist",
+    commit: bool = True,
+) -> object:
+    """Initialize Research VCS while committing only CLI-confirmed source files."""
+
+    from .research_git import ResearchGitError, init_repository
+    from .research_vcs import ResearchRepository
+
+    init_repository(
+        workspace,
+        name=name,
+        question=question,
+        policy="milestone",
+        actor=actor,
+        commit=False,
+    )
+    repository = ResearchRepository(workspace)
+    if not commit:
+        return repository
+    initial_candidates = {
+        ".gitignore",
+        "research.yaml",
+        "question.md",
+        ".xscientist/README.md",
+    }
+    initial_paths = sorted(
+        initial_candidates & set(repository.status().get("eligible_changes") or [])
+    )
+    if not initial_paths:
+        raise ResearchGitError("Research VCS initialization produced no source changes")
+    repository.stage(initial_paths)
+    checkpoint = repository.commit(
+        stage="init",
+        subject=f"initialize {name}",
+        summary="Initialize only the confirmed local research source files.",
+        status="completed",
+        actor=actor,
+        staged_only=True,
+    )
+    if not checkpoint.committed:
+        raise ResearchGitError("Research VCS initialization was not checkpointed")
+    return repository
+
+
 def _start_input_error(
     parsed: argparse.Namespace,
     message: str,
@@ -2400,15 +3355,13 @@ def _start_input_error(
     if parsed.as_json:
         print(
             json.dumps(
-                {
-                    "schema": "xscientist.start.v1",
-                    "ok": False,
-                    "phase": phase,
-                    "workspace": Path(parsed.directory).name or ".",
-                    "returncode": returncode,
-                    "error": str(message),
-                    "next_actions": list(next_actions),
-                },
+                _safe_json_error_payload(
+                    message,
+                    schema="xscientist.start.v1",
+                    phase=phase,
+                    returncode=returncode,
+                    next_actions=list(next_actions),
+                ),
                 indent=2,
                 ensure_ascii=False,
             )
@@ -2421,6 +3374,11 @@ def _start_input_error(
 def _run_start(parsed: argparse.Namespace) -> int:
     """Orchestrate the safe first-run path without hiding scientific gates."""
 
+    # Machine-readable mode is also machine-input mode. This single assignment
+    # covers question/model selection, local identity, and hidden credential
+    # prompts throughout the shared preparation path.
+    parsed.non_interactive = bool(parsed.non_interactive or parsed.as_json)
+
     import contextlib
     import io
     import os
@@ -2431,7 +3389,13 @@ def _run_start(parsed: argparse.Namespace) -> int:
     from ai_scientist.utils.auth_session import create_session, validate_session
     from ai_scientist.utils.llm_budget import resolve_model_price
     from .diagnostics import diagnose
-    from .onboarding import WorkspaceInitError, create_workspace
+    from .onboarding import (
+        WORKSPACE_FILES,
+        WorkspaceInitError,
+        _render_topic,
+        create_workspace,
+        ensure_workspace_gitignore,
+    )
     from .dependency_profiles import TASK_PROFILES
     from .provider_config import (
         DEFAULT_MODELS,
@@ -2441,22 +3405,66 @@ def _run_start(parsed: argparse.Namespace) -> int:
         normalize_provider_name,
         validate_provider_model,
     )
-    from .research_git import ResearchGitError, repository_status
+    from .research_git import ResearchGitError, create_checkpoint, repository_status
     from .research_vcs import ResearchRepository
 
     workspace = Path(parsed.directory).expanduser().resolve()
-    new_workspace = not (workspace / ".xscientist" / "providers.json").is_file()
-    existing_research = (workspace / "research.yaml").is_file()
-    if not str(parsed.question or "").strip() and existing_research:
+    try:
+        provider_config_path = _validated_workspace_file(
+            workspace,
+            ".xscientist/providers.json",
+        )
+        _validated_workspace_file(workspace, "bfts_config.yaml")
+        research_config_path = _validated_workspace_file(workspace, "research.yaml")
+        existing_topic_path = _validated_workspace_file(workspace, "topic.md")
+        existing_question_path = _validated_workspace_file(workspace, "question.md")
+    except ValueError as exc:
+        return _start_input_error(parsed, str(exc))
+    new_workspace = provider_config_path is None
+    existing_research = research_config_path is not None
+    existing_topic_was_present = existing_topic_path is not None
+    establish_packaged_question = False
+    if existing_research:
         try:
-            from .research_journey import inspect_idea_research
-
-            parsed.question = inspect_idea_research(workspace)["idea"]
-        except (OSError, ResearchGitError):
-            # A repository created through another workflow may not have the
-            # idea-exploration object. The normal prompt/validation below still
-            # handles it without weakening startup checks.
-            pass
+            had_research_git, _git_stage, _git_changes = _workspace_git_changes(
+                workspace,
+                required=True,
+            )
+            if not had_research_git or not _workspace_git_head_contains(
+                workspace, "research.yaml"
+            ):
+                raise ValueError(
+                    "research.yaml is not owned by the exact-root Git HEAD; "
+                    "refusing to treat it as Research VCS provenance"
+                )
+            existing_status = repository_status(workspace)
+            if not existing_status.get("head") or not existing_status.get(
+                "last_checkpoint"
+            ):
+                raise ValueError(
+                    "research.yaml has no verifiable Research VCS checkpoint lineage"
+                )
+            pending_native_stage = (existing_status.get("research_stage") or {}).get(
+                "paths"
+            ) or []
+            if pending_native_stage:
+                raise ValueError(
+                    "start refused because the native Research VCS stage contains "
+                    "pending work: "
+                    + ", ".join(sorted(str(path) for path in pending_native_stage))
+                )
+            if existing_status.get("staged_paths"):
+                raise ValueError(
+                    "start refused because the Git index contains staged work"
+                )
+            parsed.question, establish_packaged_question = (
+                _validated_existing_research_question(
+                    workspace,
+                    parsed.question,
+                )
+            )
+        except (OSError, ResearchGitError, UnicodeError, ValueError) as exc:
+            return _start_input_error(parsed, str(exc))
     try:
         _interactive_start_inputs(
             parsed,
@@ -2505,6 +3513,43 @@ def _run_start(parsed: argparse.Namespace) -> int:
             parsed, "input and output prices must be supplied together"
         )
 
+    target_topic = f"# Research question\n\n{question}\n"
+    from ai_scientist.utils.privacy import redact_sensitive_text
+
+    if redact_sensitive_text(question) != question:
+        return _start_input_error(
+            parsed,
+            "research questions must not contain credentials, host-local paths, "
+            "email addresses, or other private literals",
+        )
+    start_protected_paths: set[str] = set()
+    if not existing_research:
+        if existing_topic_path is not None:
+            existing_topic = existing_topic_path.read_text(encoding="utf-8")
+            if existing_topic not in {target_topic, _render_topic()}:
+                return _start_input_error(
+                    parsed,
+                    "existing topic.md is neither the requested research question "
+                    "nor the pristine packaged placeholder; refusing to overwrite it",
+                )
+        if existing_question_path is not None:
+            existing_question = existing_question_path.read_text(encoding="utf-8")
+            if existing_question != target_topic:
+                return _start_input_error(
+                    parsed,
+                    "question.md exists without Research VCS provenance and does "
+                    "not exactly match --question; refusing to overwrite it",
+                )
+        try:
+            start_protected_paths = {
+                relative
+                for relative in WORKSPACE_FILES
+                if _validated_workspace_file(workspace, relative) is not None
+            }
+        except ValueError as exc:
+            return _start_input_error(parsed, str(exc))
+    start_checkpoint_protected_paths = start_protected_paths - {".gitignore"}
+
     requested_user = str(parsed.user or "").strip()
     authenticated, auth_status, session = validate_session()
     active_user = (
@@ -2527,9 +3572,67 @@ def _run_start(parsed: argparse.Namespace) -> int:
             next_actions=["xscientist provider list", "xscientist start --help"],
         )
 
-    phases: dict[str, object] = {}
     try:
-        config_exists = (workspace / ".xscientist" / "providers.json").is_file()
+        if (workspace / ".git").is_symlink():
+            raise WorkspaceInitError("start refuses a symlinked .git control path")
+        unsafe_managed_directories = [
+            relative
+            for relative in _SETUP_TRANSACTION_DIRS
+            if relative != ".git"
+            and (
+                (workspace / relative).is_symlink()
+                or (
+                    (workspace / relative).exists()
+                    and not (workspace / relative).is_dir()
+                )
+            )
+        ]
+        if unsafe_managed_directories:
+            raise WorkspaceInitError(
+                "start refused unsafe managed directories: "
+                + ", ".join(sorted(unsafe_managed_directories))
+            )
+        _had_git, start_staged, _tracked = _workspace_git_changes(
+            workspace,
+            required=True,
+        )
+        git_control_path = workspace / ".git"
+        if (
+            git_control_path.exists() or git_control_path.is_symlink()
+        ) and not _had_git:
+            raise WorkspaceInitError(
+                "start refused an existing .git control path that is not an "
+                "exact-root Git worktree"
+            )
+        if start_staged:
+            raise WorkspaceInitError(
+                "start refused because the existing Git index contains staged work"
+            )
+        start_env_file = _setup_env_file_relative(workspace)
+        start_snapshot = _setup_workspace_snapshot(
+            workspace,
+            extra_files=tuple(dict.fromkeys((start_env_file, ".env"))),
+        )
+    except (OSError, WorkspaceInitError, ValueError) as exc:
+        return _start_input_error(parsed, str(exc))
+
+    phases: dict[str, object] = {}
+    start_mutated = True
+
+    def rollback_preparation() -> None:
+        nonlocal start_mutated
+        if start_mutated:
+            _rollback_setup_workspace(workspace, start_snapshot)
+            start_mutated = False
+
+    try:
+        config_exists = (
+            _validated_workspace_file(
+                workspace,
+                ".xscientist/providers.json",
+            )
+            is not None
+        )
         existing_config = (
             load_provider_config(workspace, missing_ok=False) if config_exists else {}
         )
@@ -2577,6 +3680,16 @@ def _run_start(parsed: argparse.Namespace) -> int:
         selected_provider, selected_model = validate_provider_model(
             selected_provider, selected_model
         )
+        for label, value in (
+            ("provider", selected_provider),
+            ("model", selected_model),
+            ("task", selected_task),
+        ):
+            if redact_sensitive_text(value) != value:
+                raise ProviderConfigError(
+                    f"{label} contains a credential or private literal; refusing "
+                    "to persist it"
+                )
         model_contract = _research_model_contract(
             selected_model,
             source=model_source,
@@ -2588,12 +3701,33 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 profile=parsed.profile,
                 provider=selected_provider,
                 model=selected_model,
-                force=parsed.force,
                 task=selected_task,
                 capabilities=selected_capabilities,
                 provider_required=True,
                 preserve_existing=existing_research,
+                preserve_paths=start_protected_paths,
+                force=bool(parsed.force or start_protected_paths),
             )
+            if existing_research and not existing_topic_was_present:
+                # ``topic.md`` is an onboarding template, not permission to add a
+                # second scientific source to an existing Research VCS. Remove
+                # only the file created by this call and keep the original absence.
+                generated_topic = workspace / "topic.md"
+                if generated_topic.is_symlink() or (
+                    generated_topic.exists() and not generated_topic.is_file()
+                ):
+                    raise WorkspaceInitError(
+                        "runtime setup created an unsafe topic.md in the existing "
+                        "Research VCS workspace"
+                    )
+                if generated_topic.is_file():
+                    generated_topic.unlink()
+                workspace_creation["files"] = [
+                    path
+                    for path in workspace_creation.get("files", [])
+                    if path != "topic.md"
+                ]
+        _record_setup_post_state(workspace, start_snapshot)
         phases["workspace"] = {
             "ok": True,
             "created": not config_exists,
@@ -2618,37 +3752,51 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "session_created": bool(authenticated and not active_user),
         }
 
-        topic = f"# Research question\n\n{question}\n"
-        established_topic = workspace / "00_config" / "topic.md"
-        if (
-            established_topic.is_file()
-            and established_topic.read_text(encoding="utf-8") != topic
-        ):
-            raise WorkspaceInitError(
-                "this workspace already contains a different research question; "
-                "reuse the original question to resume or choose a new directory"
+        question_checkpoint_id: str | None = None
+        question_checkpoint_pending = False
+        repository_created = False
+        topic = target_topic
+        if establish_packaged_question:
+            repository_before = repository_status(workspace)
+            pending_stage = set(repository_before.get("staged_paths") or []) | set(
+                (repository_before.get("research_stage") or {}).get("paths") or []
             )
-        atomic_write_text(workspace / "topic.md", topic)
-        if not (workspace / "research.yaml").is_file():
-            repository = ResearchRepository.init(
+            if pending_stage:
+                raise WorkspaceInitError(
+                    "cannot establish the packaged research question while the "
+                    "repository has staged work"
+                )
+            question_path = workspace / "question.md"
+            topic_path = workspace / "topic.md"
+            atomic_write_text(question_path, topic)
+            atomic_write_text(topic_path, topic)
+            question_checkpoint_pending = True
+            status = repository_status(workspace)
+            vcs_created = False
+        elif not existing_research:
+            atomic_write_text(workspace / "topic.md", topic)
+            repository = _initialize_cli_research_repository(
                 workspace,
                 name=workspace.name,
                 question=topic,
-                policy="milestone",
                 actor=resolved_actor or "xscientist",
+                commit=False,
             )
             status = repository.status()
+            repository_created = True
             vcs_created = True
         else:
-            atomic_write_text(workspace / "question.md", topic)
             status = repository_status(workspace)
             vcs_created = False
         phases["research_vcs"] = {
             "ok": True,
             "created": vcs_created,
+            "question_established": question_checkpoint_pending,
             "branch": status.get("branch"),
             "checkpoint_id": (status.get("last_checkpoint") or {}).get("checkpoint_id"),
         }
+        if workspace_creation is not None:
+            ensure_workspace_gitignore(workspace)
 
         if parsed.skip_credentials:
             provider_result: dict[str, object] = {
@@ -2671,12 +3819,16 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "model_contract": model_contract,
             "reason": provider_result.get("reason"),
         }
+        _record_setup_post_state(workspace, start_snapshot)
 
         load_result = load_workspace_environment(workspace)
         if load_result.get("error"):
             raise ProviderConfigError(str(load_result["error"]))
+        _record_setup_post_state(workspace, start_snapshot)
 
-        budget_path = workspace / "bfts_config.yaml"
+        budget_path = _validated_workspace_file(workspace, "bfts_config.yaml")
+        if budget_path is None:
+            raise ProviderConfigError("workspace is missing bfts_config.yaml")
         budget_original = budget_path.read_text(encoding="utf-8")
         budget_payload = yaml.safe_load(budget_original)
         if not isinstance(budget_payload, dict):
@@ -2722,28 +3874,18 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 else ("bundled" if price is not None else None)
             ),
         }
-        if existing_research and workspace_creation is not None:
+        pending_runtime_paths: list[str] = []
+        if workspace_creation is not None:
             repository = ResearchRepository(workspace)
-            generated_paths = set(workspace_creation["files"]) - set(
-                workspace_creation.get("preserved_files") or []
+            generated_paths = (
+                set(workspace_creation["files"]) - start_checkpoint_protected_paths
             )
-            changed_runtime_paths = [
+            pending_runtime_paths = [
                 path
                 for path in repository.status()["eligible_changes"]
                 if path in generated_paths
             ]
-            if changed_runtime_paths:
-                repository.stage(changed_runtime_paths)
-                setup_checkpoint = repository.commit(
-                    stage="setup",
-                    subject="add optional model-backed research runtime",
-                    status="draft",
-                    actor=resolved_actor or None,
-                    staged_only=True,
-                )
-                workspace_phase = phases.get("workspace")
-                if isinstance(workspace_phase, dict):
-                    workspace_phase["checkpoint_id"] = setup_checkpoint.checkpoint_id
+        _record_setup_post_state(workspace, start_snapshot)
         if parsed.max_cost_usd is not None and price is None:
             payload = {
                 "schema": "xscientist.start.v1",
@@ -2762,8 +3904,15 @@ def _run_start(parsed: argparse.Namespace) -> int:
                     "or edit llm_budget.prices_per_million in bfts_config.yaml",
                 ],
             }
+            rollback_preparation()
             if parsed.as_json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(payload),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
             else:
                 print("XScientist cannot enforce the requested cost limit yet.")
                 print(payload["error"])
@@ -2777,6 +3926,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             executor_status = prepare_executor(workspace)
             phases["executor_build"] = executor_status
 
+        _record_setup_post_state(workspace, start_snapshot)
         report = diagnose(
             workspace,
             task=selected_task,
@@ -2784,24 +3934,106 @@ def _run_start(parsed: argparse.Namespace) -> int:
             deep=True,
         )
         _persist_readiness_report(workspace, report)
+        _record_setup_post_state(workspace, start_snapshot)
         phases["doctor"] = report
-    except (
-        OSError,
-        ResearchGitError,
-        ProviderConfigError,
-        WorkspaceInitError,
-        ValueError,
-    ) as exc:
-        payload = {
-            "schema": "xscientist.start.v1",
-            "ok": False,
-            "phase": "prepare",
-            "error": str(exc),
-            "workspace": ".",
-            "phases": phases,
-        }
+        committed_checkpoint = None
+        readiness_status = "completed" if report["ok"] else "blocked"
+        persist_preparation = bool(report["ok"] or existing_research)
+        if persist_preparation:
+            repository = ResearchRepository(workspace)
+        if persist_preparation and repository_created:
+            initial_candidates = {
+                ".gitignore",
+                ".xscientist/README.md",
+                "question.md",
+                "research.yaml",
+            }
+            runtime_candidates = initial_candidates | set(pending_runtime_paths)
+            eligible_paths = set(repository.status().get("eligible_changes") or [])
+            initial_paths = sorted(runtime_candidates & eligible_paths)
+            if not initial_paths:
+                raise ResearchGitError(
+                    "Research VCS initialization produced no source changes"
+                )
+            repository.stage(initial_paths)
+            committed_checkpoint = repository.commit(
+                stage="init",
+                subject=f"initialize {workspace.name}",
+                summary=(
+                    "Initialize only confirmed local research sources and runtime "
+                    "files after readiness checks completed."
+                ),
+                status=readiness_status,
+                actor=resolved_actor or None,
+                staged_only=True,
+            )
+            phases["research_vcs"]["question_established"] = True
+        elif persist_preparation:
+            runtime_paths = sorted(
+                set(pending_runtime_paths)
+                & set(repository.status().get("eligible_changes") or [])
+            )
+            if question_checkpoint_pending:
+                committed_checkpoint = create_checkpoint(
+                    workspace,
+                    stage="ideation",
+                    subject="establish the research question",
+                    summary=(
+                        "Replace the pristine packaged placeholder and checkpoint "
+                        "only runtime files prepared by this start invocation."
+                    ),
+                    status=readiness_status,
+                    actor=resolved_actor or None,
+                    only_paths=["question.md", "topic.md", *runtime_paths],
+                )
+                phases["research_vcs"]["question_established"] = True
+            elif runtime_paths:
+                repository.stage(runtime_paths)
+                committed_checkpoint = repository.commit(
+                    stage="setup",
+                    subject="refresh the generated research runtime",
+                    summary=(
+                        "Checkpoint only runtime files prepared by this start "
+                        "invocation after readiness checks completed."
+                    ),
+                    status=readiness_status,
+                    actor=resolved_actor or None,
+                    staged_only=True,
+                )
+        if committed_checkpoint is not None:
+            if not committed_checkpoint.committed:
+                raise ResearchGitError(
+                    "prepared research sources were not checkpointed"
+                )
+            question_checkpoint_id = committed_checkpoint.checkpoint_id
+            phases["research_vcs"]["checkpoint_id"] = question_checkpoint_id
+            research_check = (report.get("checks") or {}).get("research_vcs")
+            if isinstance(research_check, dict):
+                research_check["head"] = committed_checkpoint.commit
+                research_check["checkpoint_id"] = question_checkpoint_id
+    except BaseException as exc:
+        try:
+            rollback_preparation()
+        except Exception:
+            exc = WorkspaceInitError(
+                "start preparation failed and managed rollback was incomplete"
+            )
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        payload = _safe_json_error_payload(
+            exc,
+            schema="xscientist.start.v1",
+            phase="prepare",
+            phases=phases,
+        )
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(
                 f"xscientist start stopped during preparation: {exc}", file=sys.stderr
@@ -2809,6 +4041,17 @@ def _run_start(parsed: argparse.Namespace) -> int:
         return 2
 
     if not report["ok"]:
+        if existing_research:
+            start_mutated = False
+        else:
+            try:
+                rollback_preparation()
+            except (OSError, subprocess.SubprocessError):
+                return _start_input_error(
+                    parsed,
+                    "start preparation failed and managed rollback was incomplete",
+                    phase="prepare",
+                )
         payload = {
             "schema": "xscientist.start.v1",
             "ok": False,
@@ -2818,7 +4061,13 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "next_actions": report["next_actions"],
         }
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print("XScientist is configured, but the automated run is not ready.")
             if resolved_actor:
@@ -2832,6 +4081,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             )
         return 1
 
+    start_mutated = False
     if parsed.prepare_only:
         payload = {
             "schema": "xscientist.start.v1",
@@ -2841,7 +4091,13 @@ def _run_start(parsed: argparse.Namespace) -> int:
             "phases": phases,
         }
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print("Workspace is ready for automated research.")
             if resolved_actor:
@@ -2906,14 +4162,15 @@ def _run_start(parsed: argparse.Namespace) -> int:
         "project": ".",
         "returncode": returncode,
         "model_contract": model_contract,
-        "research_dag": "outputs/views/"
-        + workspace.name
-        + "/research-dag/research-dag.html",
+        "research_dag": ("outputs/views/{workspace}/research-dag/research-dag.html"),
         "phases": phases,
     }
     if parsed.as_json:
         if returncode:
             payload["error"] = captured_err.getvalue().strip().splitlines()[-1:]
+        from ai_scientist.utils.privacy import redact_sensitive_payload
+
+        payload = redact_sensitive_payload(payload)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     elif returncode == 0:
         print("Automated research completed with a local Research VCS history.")
@@ -2927,8 +4184,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_curated_help()
         return 0
     if raw_argv and raw_argv[0] == "help":
-        if raw_argv[1:] in ([], ["--all"]):
-            _print_curated_help(include_advanced=raw_argv[1:] == ["--all"])
+        advanced_help = list(_SPECIAL_COMMAND_OPTIONS["help"])
+        if raw_argv[1:] in ([], advanced_help):
+            _print_curated_help(include_advanced=raw_argv[1:] == advanced_help)
             return 0
         print("xscientist help: use `xscientist COMMAND --help`", file=sys.stderr)
         return 2
@@ -2986,12 +4244,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         "capability": _build_capability_parser,
     }
     lazy_builder = lazy_parser_builders.get(raw_argv[0]) if raw_argv else None
-    if lazy_builder is not None:
-        parsed = lazy_builder().parse_args(raw_argv[1:])
-        parsed.command = raw_argv[0]
-    else:
-        parser = _build_parser()
-        parsed = parser.parse_args(raw_argv)
+    try:
+        if lazy_builder is not None:
+            parsed = lazy_builder().parse_args(raw_argv[1:])
+            parsed.command = raw_argv[0]
+        else:
+            parser = _build_parser()
+            parsed = parser.parse_args(raw_argv)
+    except _ArgumentParseFailure as exc:
+        from ai_scientist.utils.privacy import redact_sensitive_text
+
+        command = raw_argv[0] if raw_argv else "command"
+        safe_error = redact_sensitive_text(str(exc))
+        if "--json" in raw_argv and command in {"init", "setup", "start"}:
+            print(
+                json.dumps(
+                    _safe_json_error_payload(
+                        safe_error,
+                        schema=f"xscientist.{command}.v1",
+                        phase="input",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"xscientist {command}: {safe_error}", file=sys.stderr)
+        return 2
     if parsed.command == "serve":
         from .service import run_server
 
@@ -3019,6 +4297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             begin_active_run,
             finish_active_run,
             launch_detached_run,
+            public_run_view,
             read_run_logs,
         )
 
@@ -3027,6 +4306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload = launch_detached_run(parsed.directory, raw_argv)
             except (OSError, RunControlError, ValueError) as exc:
                 return _start_input_error(parsed, str(exc), phase="launch")
+            payload = public_run_view(payload)
             detached_status = str(payload.get("status") or "unknown")
             startup_failed = detached_status in {
                 "failed",
@@ -3045,7 +4325,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     logs = {}
                 payload["failure_summary"] = _run_failure_summary(logs)
             if parsed.as_json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
+                from ai_scientist.utils.privacy import redact_sensitive_payload
+
+                safe_payload = redact_sensitive_payload(payload)
+                print(json.dumps(safe_payload, indent=2, ensure_ascii=False))
             elif startup_failed:
                 print(
                     f"Detached research run stopped during startup: {payload['id']} "
@@ -4127,11 +5410,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return run_history_cli(parsed)
     if parsed.command == "status":
-        from .workspace_status import build_workspace_status
+        from .workspace_status import (
+            build_workspace_status,
+            public_workspace_status_payload,
+        )
 
         payload = build_workspace_status(parsed.workspace, language=parsed.lang)
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    public_workspace_status_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             language = _selected_language(parsed.lang)
             research = payload["research"]
@@ -4436,6 +5728,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .onboarding import WorkspaceInitError, create_workspace
 
         try:
+            workspace = Path(parsed.directory).expanduser().resolve()
+            if _validated_workspace_file(workspace, "research.yaml") is not None:
+                raise WorkspaceInitError(
+                    "refusing to refresh an existing Research VCS workspace; "
+                    "use `xscientist setup --force` to refresh managed runtime files"
+                )
             payload = create_workspace(
                 parsed.directory,
                 profile=parsed.profile,
@@ -4443,17 +5741,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 model=parsed.model,
                 force=parsed.force,
             )
-        except (OSError, WorkspaceInitError) as exc:
+        except (OSError, ValueError, WorkspaceInitError) as exc:
             if parsed.as_json:
                 print(
-                    json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
-                    file=sys.stderr,
+                    json.dumps(
+                        _safe_json_error_payload(
+                            exc,
+                            schema="xscientist.init.v1",
+                        ),
+                        ensure_ascii=False,
+                    )
                 )
             else:
                 print(f"xscientist init: {exc}", file=sys.stderr)
             return 2
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(
+                        {"schema": "xscientist.init.v1", **payload}
+                    ),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
             print(f"Created XScientist workspace: {payload['workspace']}")
             print("No secrets were written.")
@@ -4464,13 +5775,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if parsed.command == "setup":
         from .diagnostics import diagnose
         from .dependency_profiles import TASK_PROFILES
-        from .onboarding import WorkspaceInitError, create_workspace
+        from .onboarding import (
+            WORKSPACE_FILES,
+            WorkspaceInitError,
+            create_workspace,
+            ensure_workspace_gitignore,
+            refresh_generated_bfts_profile,
+        )
         from .provider_config import (
             DEFAULT_MODELS,
             ProviderConfigError,
             normalize_provider_name,
         )
 
+        # JSON is both the output and input contract for automation. It must not
+        # depend on TTY state or fall through to visible/hidden prompts.
+        parsed.non_interactive = bool(parsed.non_interactive or parsed.as_json)
+        setup_snapshot: dict[str, object] | None = None
+        setup_mutated = False
         try:
             task_profile = TASK_PROFILES[parsed.task]
             selected_provider = (
@@ -4496,6 +5818,137 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "in non-interactive mode"
                     )
                 selected_model = _prompt_provider_model(workspace_template_provider)
+            workspace = Path(parsed.directory).expanduser().resolve()
+            workspace_was_present = workspace.exists()
+            if (workspace / ".git").is_symlink():
+                raise WorkspaceInitError("setup refuses a symlinked .git control path")
+            unsafe_managed_directories = [
+                relative
+                for relative in _SETUP_TRANSACTION_DIRS
+                if relative != ".git"
+                and (
+                    (workspace / relative).is_symlink()
+                    or (
+                        (workspace / relative).exists()
+                        and not (workspace / relative).is_dir()
+                    )
+                )
+            ]
+            if unsafe_managed_directories:
+                raise WorkspaceInitError(
+                    "setup refused unsafe managed directories: "
+                    + ", ".join(sorted(unsafe_managed_directories))
+                )
+            research_config_present = (
+                _validated_workspace_file(workspace, "research.yaml") is not None
+            )
+            existing_research_config = False
+            existing_status: dict[str, object] | None = None
+            existing_managed_paths = {
+                relative
+                for relative in WORKSPACE_FILES
+                if (workspace / relative).exists()
+                or (workspace / relative).is_symlink()
+            }
+            vcs_enabled = parsed.task != "service" and not parsed.no_research_vcs
+            _had_existing_git, staged_paths, tracked_changes = _workspace_git_changes(
+                workspace,
+                required=vcs_enabled,
+            )
+            git_control_path = workspace / ".git"
+            if (
+                git_control_path.exists() or git_control_path.is_symlink()
+            ) and not _had_existing_git:
+                raise WorkspaceInitError(
+                    "setup refused an existing .git control path that is not an "
+                    "exact-root Git worktree"
+                )
+            if staged_paths:
+                raise WorkspaceInitError(
+                    "setup refused because the existing Git index contains staged "
+                    "work: " + ", ".join(sorted(staged_paths))
+                )
+            tracked_managed_changes = sorted(
+                tracked_changes
+                & (
+                    set(WORKSPACE_FILES)
+                    | {"question.md", "research.yaml", ".xscientist/README.md"}
+                )
+            )
+            if tracked_managed_changes:
+                raise WorkspaceInitError(
+                    "setup refused to absorb existing edits to managed files: "
+                    + ", ".join(tracked_managed_changes)
+                )
+            if research_config_present:
+                from .research_git import ResearchGitError, repository_status
+
+                if not _had_existing_git or not _workspace_git_head_contains(
+                    workspace, "research.yaml"
+                ):
+                    raise WorkspaceInitError(
+                        "research.yaml is not owned by the exact-root Git HEAD; "
+                        "refusing Research VCS refresh privileges"
+                    )
+                try:
+                    existing_status = repository_status(workspace)
+                except (OSError, ResearchGitError, ValueError) as exc:
+                    raise WorkspaceInitError(
+                        f"existing Research VCS preflight failed: {exc}"
+                    ) from exc
+                if not existing_status.get("head") or not existing_status.get(
+                    "last_checkpoint"
+                ):
+                    raise WorkspaceInitError(
+                        "research.yaml has no verifiable Research VCS checkpoint lineage"
+                    )
+                existing_research_config = True
+            if existing_research_config and not vcs_enabled:
+                raise WorkspaceInitError(
+                    "setup cannot refresh an existing Research VCS workspace while "
+                    "local research checkpoints are disabled"
+                )
+            if existing_research_config:
+                assert existing_status is not None
+                native_stage = (existing_status.get("research_stage") or {}).get(
+                    "paths"
+                ) or []
+                if native_stage:
+                    raise WorkspaceInitError(
+                        "setup refused because the native Research VCS stage "
+                        "contains pending work: "
+                        + ", ".join(sorted(str(path) for path in native_stage))
+                    )
+            existing_question = _validated_workspace_file(workspace, "question.md")
+            if existing_question is not None and not existing_research_config:
+                raise WorkspaceInitError(
+                    "setup found question.md without Research VCS provenance; "
+                    "initialize or move that scientific source explicitly before "
+                    "retrying"
+                )
+            # A Research VCS config is provenance for generated runtime files.
+            # Before that exists, --force must preserve every pre-existing name:
+            # it is unknown project data, not an XScientist template to replace.
+            protected_paths = set(existing_managed_paths)
+            if existing_research_config:
+                protected_paths.add("topic.md")
+            checkpoint_protected_paths = protected_paths - {".gitignore"}
+            if (
+                not existing_research_config
+                and not parsed.skip_credentials
+                and task_profile["provider_required"]
+                and protected_paths & {".xscientist/providers.json", "bfts_config.yaml"}
+            ):
+                raise WorkspaceInitError(
+                    "setup refuses to reconfigure pre-existing provider runtime "
+                    "files without Research VCS provenance"
+                )
+            env_file_relative = _setup_env_file_relative(workspace)
+            setup_snapshot = _setup_workspace_snapshot(
+                workspace,
+                extra_files=tuple(dict.fromkeys((env_file_relative, ".env"))),
+            )
+            setup_mutated = True
             onboarding = create_workspace(
                 parsed.directory,
                 profile=parsed.profile,
@@ -4505,8 +5958,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 task=parsed.task,
                 capabilities=task_profile["capabilities"],
                 provider_required=bool(task_profile["provider_required"]),
+                preserve_paths=protected_paths,
             )
-            workspace = Path(parsed.directory).expanduser().resolve()
+            bfts_profile_refreshed = False
+            profile_explicit = any(
+                argument == "--profile" or argument.startswith("--profile=")
+                for argument in raw_argv
+            )
+            if existing_research_config and profile_explicit:
+                bfts_profile_refreshed = refresh_generated_bfts_profile(
+                    workspace,
+                    parsed.profile,
+                )
+                if bfts_profile_refreshed:
+                    checkpoint_protected_paths.discard("bfts_config.yaml")
+            _record_setup_post_state(workspace, setup_snapshot)
+            repository = None
+            repository_created = False
             research_vcs: dict[str, object] = {
                 "required": parsed.task != "service",
                 "initialized": False,
@@ -4519,35 +5987,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
                 try:
                     if (workspace / "research.yaml").is_file():
-                        status = repository_status(workspace)
+                        repository = ResearchRepository(workspace)
                         research_vcs = {
                             "required": True,
                             "initialized": True,
                             "checkpoint_id": (
-                                (status.get("last_checkpoint") or {}).get(
-                                    "checkpoint_id"
-                                )
-                            ),
+                                (existing_status or {}).get("last_checkpoint") or {}
+                            ).get("checkpoint_id"),
                             "reason": "existing local research repository reused",
                         }
                     else:
                         question = (workspace / "topic.md").read_text(encoding="utf-8")
-                        repository = ResearchRepository.init(
+                        repository = _initialize_cli_research_repository(
                             workspace,
                             name=workspace.name,
                             question=question,
-                            policy="milestone",
+                            commit=False,
                         )
-                        status = repository.status()
+                        repository_created = True
                         research_vcs = {
                             "required": True,
                             "initialized": True,
-                            "checkpoint_id": (
-                                (status.get("last_checkpoint") or {}).get(
-                                    "checkpoint_id"
-                                )
-                            ),
-                            "reason": "local research repository initialized",
+                            "checkpoint_id": None,
+                            "reason": "local research repository prepared",
                         }
                 except (OSError, ResearchGitError, ValueError) as exc:
                     raise WorkspaceInitError(
@@ -4560,6 +6022,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "checkpoint_id": None,
                     "reason": "disabled by --no-research-vcs",
                 }
+            ensure_workspace_gitignore(workspace)
+            _record_setup_post_state(workspace, setup_snapshot)
             provider_setup: dict[str, object] = {
                 "ok": False,
                 "skipped": True,
@@ -4580,12 +6044,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "skipped": True,
                         "reason": str(exc),
                     }
+                if provider_setup.get("ok"):
+                    checkpoint_protected_paths.discard(".xscientist/providers.json")
+                    checkpoint_protected_paths.discard("bfts_config.yaml")
             elif not task_profile["provider_required"]:
                 provider_setup = {
                     "ok": True,
                     "skipped": True,
                     "reason": "provider is not required for the selected task",
                 }
+            _record_setup_post_state(workspace, setup_snapshot)
             report = diagnose(
                 workspace,
                 task=parsed.task,
@@ -4597,15 +6065,110 @@ def main(argv: Sequence[str] | None = None) -> int:
                 deep=parsed.deep,
             )
             _persist_readiness_report(workspace, report)
-        except (OSError, WorkspaceInitError, ProviderConfigError, ValueError) as exc:
+            _record_setup_post_state(workspace, setup_snapshot)
+            if repository is not None:
+                from .research_git import ResearchGitError
+
+                try:
+                    runtime_candidates = (
+                        set(str(path) for path in onboarding.get("files", []))
+                        - checkpoint_protected_paths
+                    )
+                    if repository_created:
+                        runtime_candidates.update(
+                            {
+                                ".gitignore",
+                                ".xscientist/README.md",
+                                "question.md",
+                                "research.yaml",
+                            }
+                        )
+                    eligible_paths = set(
+                        repository.status().get("eligible_changes") or []
+                    )
+                    generated_runtime_paths = sorted(
+                        runtime_candidates & eligible_paths
+                    )
+                    if not generated_runtime_paths and repository_created:
+                        raise ResearchGitError(
+                            "Research VCS initialization produced no source changes"
+                        )
+                    if generated_runtime_paths:
+                        repository.stage(generated_runtime_paths)
+                        setup_checkpoint = repository.commit(
+                            stage="init" if repository_created else "setup",
+                            subject=(
+                                f"initialize {workspace.name}"
+                                if repository_created
+                                else "refresh the generated research runtime"
+                            ),
+                            summary=(
+                                "Initialize only confirmed local research sources and "
+                                "runtime files."
+                                if repository_created
+                                else "Checkpoint only runtime files generated or "
+                                "refreshed by this setup invocation."
+                            ),
+                            status="completed",
+                            staged_only=True,
+                        )
+                        if not setup_checkpoint.committed:
+                            raise ResearchGitError(
+                                "generated runtime files were not checkpointed"
+                            )
+                        research_vcs["checkpoint_id"] = setup_checkpoint.checkpoint_id
+                        research_vcs["setup_checkpoint_id"] = (
+                            setup_checkpoint.checkpoint_id
+                        )
+                        research_vcs["reason"] = (
+                            "local research repository initialized"
+                            if repository_created
+                            else "existing local research repository refreshed"
+                        )
+                        research_check = (report.get("checks") or {}).get(
+                            "research_vcs"
+                        )
+                        if isinstance(research_check, dict):
+                            research_check["head"] = setup_checkpoint.commit
+                            research_check["checkpoint_id"] = (
+                                setup_checkpoint.checkpoint_id
+                            )
+                except (OSError, ResearchGitError, ValueError) as exc:
+                    raise WorkspaceInitError(
+                        f"managed runtime checkpoint failed: {exc}"
+                    ) from exc
+            setup_mutated = False
+        except BaseException as exc:
+            if setup_mutated and setup_snapshot is not None:
+                try:
+                    _rollback_setup_workspace(workspace, setup_snapshot)
+                except Exception:
+                    exc = WorkspaceInitError(
+                        "setup failed and could not fully restore its managed paths"
+                    )
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             if parsed.as_json:
-                print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+                print(
+                    json.dumps(
+                        _safe_json_error_payload(
+                            exc,
+                            schema="xscientist.setup.v1",
+                        )
+                    )
+                )
             else:
                 print(f"xscientist setup: {exc}", file=sys.stderr)
             return 2
         payload = {
+            "schema": "xscientist.setup.v1",
             "ok": report["ok"],
-            "workspace_created": True,
+            "workspace_created": not workspace_was_present,
+            "workspace_action": (
+                "refreshed"
+                if existing_research_config
+                else ("created" if not workspace_was_present else "initialized")
+            ),
             "workspace": onboarding["workspace"],
             "task": parsed.task,
             "provider_configuration": provider_setup,
@@ -4615,9 +6178,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             "host_paths_disclosed": False,
         }
         if parsed.as_json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
-            print(f"Created XScientist workspace: {payload['workspace']}")
+            action_label = {
+                "created": "Created",
+                "initialized": "Initialized",
+                "refreshed": "Refreshed",
+            }[str(payload["workspace_action"])]
+            print(f"{action_label} XScientist workspace: {payload['workspace']}")
             print(f"Task profile: {parsed.task}")
             print(
                 "Configuration: " f"{_readiness_state(report['configuration_ready'])}"

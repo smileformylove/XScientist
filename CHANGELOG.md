@@ -41,6 +41,59 @@ for its Python package; the ARA protocol has its own version in
 - Added fail-closed strict tool-swap eligibility, requiring a union evidence
   hash resolver and local trust store to audit both rollouts before comparing
   distinct tool signatures.
+- Made guided next actions rival-first: before selecting a study mode, the
+  guide asks for a falsifiable competitor and then a locked hypothesis
+  portfolio. Portable JSON actions carry exact object IDs, an explicit
+  `{workspace}` binding, and `input_binding`; unresolved human placeholders
+  remain non-executable.
+- Hardened checkpoint identity and direct saves. Checkpoint-sensitive reads,
+  reproduction, tags, bundles, exports, and semantic merges require the exact
+  selected commit to carry a valid checkpoint binding rather than inheriting
+  one from an ancestor. Commit-enabled one-command recorders require a clean
+  research worktree and checkpoint only their newly created paths.
+- Made initialization additive in existing projects: preserve and append to
+  `.gitignore` instead of overwriting it, reject conflicting managed files,
+  pre-existing staged work, or tracked managed-file dirt, and restrict an
+  existing repository's first checkpoint to XScientist-managed paths.
+- Made `init`/`setup`/`start` failure handling transaction-safe and
+  concurrency-preserving: privacy, provider, and diagnostic gates run before
+  publishing checkpoints; rollback removes only unchanged invocation-owned
+  outputs and preserves concurrent files, Git configuration, refs, index
+  intent, and history. Unsafe Git control paths, special managed files, and
+  credential-shaped model metadata fail before persistence, while JSON errors
+  stay redacted.
+- Hardened semantic merge against base-versus-branch support/refutation and
+  metric-definition conflicts, exact source/target tips, staged/worktree drift
+  around privacy scanning, and privacy findings. Preserved opposing evidence
+  still produces a hold; merge success does not imply scientific agreement.
+- Reproduction now replaces inherited environment variables, bounds retained
+  output, and applies a timeout without claiming an OS sandbox. Receipts state
+  `isolated=false`, `security_boundary=false`, `environment_scope=variables_only`,
+  `filesystem=host_visible`, and `network=host_unrestricted`; POSIX process-group
+  cleanup is best-effort, while Windows terminates only the parent process. The
+  boundary is persisted and hash-bound in v2 receipts; upgraded v1 receipts use
+  explicit `legacy_unknown` fields instead of inferred isolation claims.
+- Reproduction receipts now distinguish full retained tails from truncated
+  output by binding the capture mode, character limit, and stdout/stderr
+  truncation flags; legacy v1 upgrades keep output scope explicitly unknown.
+- Added reproduction receipt v2, binding the resolved source checkpoint, exact
+  reproduced objects, active claim closure at that same audit checkpoint, and
+  execution result. When a verified record is requested, the lifecycle
+  atomically upgrades a valid generated v1 receipt; historical v1 objects
+  remain readable but cannot satisfy `verify`.
+- Expanded research bundles to an `all-advertised-refs` closure, including
+  pointers and historical CAS objects reachable only from non-current branches
+  or tags. Verification imports the embedded Git bundle and locally recomputes
+  that closure before checking pointer and CAS hashes/sizes.
+- Strengthened verified-claim closure so one independent verified review must
+  itself cover all active evidence, reasoning, challenges, and recorded
+  resolutions; active refutation/challenge blocks verification, and split
+  partial reviews cannot be combined to bypass the rule.
+- Bound literature evidence as locked plan → retrieval receipt → uniquely
+  selected source. Retractions remain active until a later, same-provider,
+  notice-bearing reinstatement explicitly supersedes the active retraction;
+  historical `as_of` projections exclude future signals, lineage, and source
+  status events.
 
 ## [0.1.4] - 2026-08-23
 

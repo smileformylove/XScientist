@@ -35,7 +35,9 @@ from xscientist.provider_config import (
 
 
 class ProviderConfigTests(unittest.TestCase):
-    def test_loading_two_workspaces_does_not_reuse_managed_provider_values(self) -> None:
+    def test_loading_two_workspaces_does_not_reuse_managed_provider_values(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             first = Path(td) / "first"
             second = Path(td) / "second"
@@ -53,9 +55,7 @@ class ProviderConfigTests(unittest.TestCase):
                 env_file = workspace / ".env"
                 env_file.write_text(
                     "OPENAI_COMPAT_API_KEY={0}-key\n"
-                    "OPENAI_COMPAT_BASE_URL=https://{0}.example/v1\n".format(
-                        suffix
-                    ),
+                    "OPENAI_COMPAT_BASE_URL=https://{0}.example/v1\n".format(suffix),
                     encoding="utf-8",
                 )
                 env_file.chmod(0o600)
@@ -736,8 +736,9 @@ class ProviderConfigTests(unittest.TestCase):
             "https://gateway.example:bad/v1": "invalid port",
         }
         for value, message in invalid_urls.items():
-            with self.subTest(value=value), self.assertRaisesRegex(
-                ProviderConfigError, message
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ProviderConfigError, message),
             ):
                 validate_custom_base_url(value)
 
@@ -940,6 +941,62 @@ class ProviderConfigTests(unittest.TestCase):
                 resolve_env_file(workspace, "../outside.env")
             with self.assertRaisesRegex(ProviderConfigError, "relative"):
                 resolve_env_file(workspace, str(Path(td) / "outside.env"))
+
+    def test_env_file_cannot_overlap_scientific_or_managed_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            metadata_path = workspace / ".xscientist" / "providers.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["env_file"] = "question.md"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            question = workspace / "question.md"
+            question.write_text("IRREPLACEABLE SCIENTIFIC SOURCE\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ProviderConfigError, r"private \.env"):
+                load_provider_config(workspace)
+            self.assertEqual(
+                question.read_text(encoding="utf-8"),
+                "IRREPLACEABLE SCIENTIFIC SOURCE\n",
+            )
+
+    def test_provider_add_rejects_secret_shaped_model_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="ollama",
+                model="ollama/qwen2.5:7b",
+            )
+            metadata_path = workspace / ".xscientist" / "providers.json"
+            budget_path = workspace / "bfts_config.yaml"
+            before = (metadata_path.read_bytes(), budget_path.read_bytes())
+            secret = "sk-" + "Q" * 32
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = cli_main(
+                    [
+                        "provider",
+                        "add",
+                        "ollama",
+                        "--workspace",
+                        str(workspace),
+                        "--model",
+                        f"ollama/{secret}",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertNotIn(secret, stdout.getvalue() + stderr.getvalue())
+            self.assertEqual(
+                (metadata_path.read_bytes(), budget_path.read_bytes()),
+                before,
+            )
 
     def test_malformed_provider_metadata_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as td:

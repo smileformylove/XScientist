@@ -11,10 +11,47 @@ from pathlib import Path
 import yaml
 
 from xscientist.cli import _contextual_action, main as cli_main
+from xscientist.research_journey import workspace_action_contract
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
 class DemoStatusTests(unittest.TestCase):
+    def test_repository_neutral_template_declares_workspace_cwd(self) -> None:
+        action = workspace_action_contract(
+            "xscientist research discovery template --output discovery.json"
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action["workspace_binding"]["mode"], "cwd")
+        self.assertEqual(action["cwd_binding"]["mode"], "workspace_root")
+        self.assertEqual(action["cwd_binding"]["template"], "{workspace}")
+        self.assertNotIn(".", action["argv_template"])
+
+    def test_empty_workspace_demo_action_is_bound_to_the_workspace_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "empty-workspace"
+            workspace.mkdir()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--json"]),
+                    0,
+                )
+
+            payload = json.loads(output.getvalue())
+            step = payload["next_steps"][0]
+            action = step["action"]
+            self.assertEqual(step["code"], "start_research")
+            self.assertEqual(
+                action["argv_template"],
+                ["xscientist", "demo", "./xscientist-demo"],
+            )
+            self.assertEqual(action["workspace_binding"]["mode"], "cwd")
+            self.assertTrue(action["workspace_binding"]["required"])
+            self.assertEqual(action["cwd_binding"]["mode"], "workspace_root")
+            self.assertEqual(action["cwd_binding"]["template"], "{workspace}")
+
     def test_contextual_explore_action_stays_bound_to_inspected_workspace(self) -> None:
         """A copied next-step command must not mutate the caller's directory."""
 
@@ -67,7 +104,7 @@ class DemoStatusTests(unittest.TestCase):
                 step["code"]: step["command"] for step in payload["guide"]["next_steps"]
             }
             self.assertIn(
-                "program review --repo .",
+                "program review --repo {workspace}",
                 commands["strengthen_research_program"],
             )
 
@@ -147,6 +184,16 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(
                 payload["next_steps"][0]["code"], "resolve_contested_claim"
             )
+            action = payload["next_steps"][0]["action"]
+            self.assertEqual(action["schema_version"], "xscientist.workspace-action.v1")
+            self.assertEqual(action["workspace_binding"]["mode"], "argument")
+            self.assertIn("{workspace}", action["argv_template"])
+            self.assertNotIn("--repo .", payload["next_steps"][0]["command"])
+            self.assertEqual(
+                payload["workspace_context"]["workspace_source"],
+                "workspace argument supplied to this invocation",
+            )
+            self.assertNotIn(str(workspace), output.getvalue())
             self.assertEqual(payload["workspace"], "demo")
             self.assertIsNone(payload["background_run"])
             self.assertEqual(payload["operational_state"], "scientific_followup")

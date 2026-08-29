@@ -45,6 +45,15 @@ XScientist never creates a remote and never pushes automatically. Every backend
 mutation is scoped to the research repository and uses an explicit privacy and
 file policy; it never stages the whole working tree implicitly.
 
+Commit-enabled one-command recorders are stricter still. Before creating an
+object, they require an empty native research stage and no Git-staged, tracked,
+or research-eligible pending paths. Their checkpoint is then restricted with
+`only_paths` to the object files created by that call plus the generated
+checkpoint records. This prevents a convenient `research hypothesis`,
+`literature source`, or similar save from absorbing unrelated work. `--no-commit`
+is the explicit batch-building escape hatch: it leaves the new object pending
+for a later deliberate `stage` and `checkpoint`.
+
 ## Start a standalone research repository
 
 ```bash
@@ -62,6 +71,18 @@ Initialization creates `research.yaml`, `question.md`, a safety-oriented
 checkpoint commit. If Git has no configured identity, the repository receives
 the local-only fallback `XScientist <xscientist@localhost>`; pass
 `--git-user-name` and `--git-user-email` to choose an explicit identity.
+
+Initialization is additive when the destination is an existing project. It
+preserves the existing `.gitignore` text and order. If the complete safety
+policy is absent, it appends one canonical ordered XScientist block; this may
+repeat an individual pre-existing rule so negation order remains correct. It refuses unsafe managed
+files/directories, a different existing `question.md` or
+`.xscientist/README.md`, any pre-existing staged Git changes, and tracked edits
+to managed files. When the directory is already a Git repository, the initial
+checkpoint uses an exact path set containing only XScientist-managed files;
+unrelated uncommitted project files remain outside the commit. A failed
+initialization restores the managed files it touched instead of leaving a
+partial Research VCS takeover.
 
 ## Record typed scientific progress
 
@@ -111,6 +132,17 @@ read compatibility with older commit-bound checkpoints. ARA bindings carry
 forward across later checkpoints until that ARA is explicitly changed or
 passed with `--ara`; an unrelated checkpoint therefore cannot silently accept
 a graph that was edited through raw Git.
+
+Checkpoint-sensitive operations bind the exact selected commit; they never
+borrow the latest checkpoint from its first-parent ancestry. A valid commit
+must carry one unambiguous set of Research trailers, contain the matching
+checkpoint JSON, match its content hash/stage/state, name its actual first Git
+parent, change that checkpoint JSON in the same commit, and declare exactly the
+material paths in the commit diff. Consequently an ordinary raw Git descendant
+—even one with copied trailers—fails closed in `show`, repository verification,
+reproduction, tag creation, bundle/export, and semantic-merge tips. The raw
+commit remains ordinary Git history; it simply cannot masquerade as a Research
+VCS checkpoint.
 
 ## Inspect, compare, and reproduce
 
@@ -171,10 +203,57 @@ of supported dependency lock files. `warn` is the compatibility default;
 `strict` refuses runtime or lock drift; `ignore` records but does not gate it.
 Every inspection, materialization, and rerun produces a
 `reproduction_receipt.schema.json` receipt. It stores hashes of the command and
-stdout/stderr rather than duplicating their contents. A detached worktree gets
+retained stdout/stderr tails rather than duplicating their contents, and binds
+the output limit plus separate truncation flags. A detached worktree gets
 the receipt under `.xscientist/reproductions/`. An independent verifier may
 bind a passing receipt back to typed objects with `reproduce --record
 --verified --verifier ... --reproduces ...`.
+
+That verified path records receipt v2. Before writing the reproduction object,
+it binds the independently resolved source checkpoint, exact reproduced object
+hashes, each reproduced claim's active closure at that same checkpoint, and a
+hash of the execution-result fields. Audit resolves and recomputes every one of
+those bindings instead of trusting copied receipt fields. A valid generated v1
+receipt is upgraded atomically by the lifecycle; historical v1 records are
+readable but verification-ineligible. The binding proves local repository
+consistency only: verifier identity and independence remain declared provenance,
+not an external identity proof.
+
+Execution narrows several host-side risks without overstating isolation. The
+command is parsed into argv and run without a shell. Its environment variables
+are replaced by a small allowlist, provider/cloud credentials are not inherited,
+and HOME/config/cache point inside the detached worktree. These controls affect
+variables only: absolute host paths remain accessible. Retained output is
+bounded and a timeout is applied, but process cleanup is platform-limited. On
+POSIX it signals the process group on a best-effort basis and cannot stop a
+child that creates another session; on Windows it terminates only the parent
+process. The returned boundary is explicit (POSIX example shown):
+
+```json
+{
+  "execution_isolation": {
+    "isolated": false,
+    "security_boundary": false,
+    "environment": "sanitized",
+    "environment_scope": "variables_only",
+    "process_tree": "best_effort_process_group",
+    "process_control": "posix_process_group_best_effort",
+    "process_tree_termination_guaranteed": false,
+    "filesystem": "host_visible",
+    "network": "host_unrestricted"
+  }
+}
+```
+
+On Windows, `process_tree` is `parent_only_no_tree_guarantee` and
+`process_control` is `parent_process_only`. Research VCS reproduction does not
+create a filesystem sandbox, network namespace, or firewall rule. Use an
+external sandbox when host-file or network denial is required; the local
+receipt must not be read as an operating-system security boundary. These fields
+are persisted inside each new v2 receipt and covered by its hash. A valid
+historical v1 receipt is upgraded with `legacy_unknown` environment/process
+values and unknown output scope; audit does not invent controls or full-output
+coverage for an old run.
 
 `research audit` answers a different question from `fsck`. `fsck` verifies
 storage integrity; `audit` checks scientific sufficiency without disclosing
@@ -190,6 +269,17 @@ payloads:
 closure. It does not replace signatures, external custody, peer review, or a
 third-party scientific attestation.
 
+For a verified claim, “closure” means every active evidence and argument object,
+not only the IDs chosen by a favorable gate. It also includes active or
+explicitly resolved `refutes`, `qualified_refutes`, `contradicts`, and
+`challenges_inference` signals, the challenged closure nodes, and immutable
+resolution objects. At least one independent verified review must itself cover
+that complete active set; several partial reviews cannot be combined to satisfy
+the rule. An active challenge blocks verification while leaving trace/replay
+diagnostics usable. Superseding a challenge does not reuse the old authority:
+a fresh review and deterministic gate must cover both the challenge and its
+resolution. Superseded gates, reviews, and reproduction records are inactive.
+
 `research context` answers a third question: “which exact evidence and memory
 did this decision consume?” Its audit closure retains full object IDs and hashes
 for supporting and negative evidence, failed attempts, prior reviews/gates, and
@@ -202,9 +292,26 @@ reviews and gates bind this snapshot using a `decision_context` DAG edge and a
 matching `context_hash`; closure verification fails closed if a required
 snapshot is missing or changed. Historical `--ref` reads objects and resolves
 `@latest:<kind>` at that ref, so old decisions cannot accidentally see today's
-worktree memory. Use `research context ... --json` for the full auditable
+worktree memory. A separate logical-time cutoff is available as
+`research belief --as-of ...` or `research context --belief-as-of ...`.
+Evidence, invalidation/reinstatement events, and source-lineage roots created
+after that boundary are excluded; missing future lineage becomes an explicit
+action blocker rather than being replaced with a descendant actor identity.
+Use `research context ... --json` for the full auditable
 snapshot and `research context ... --prompt` for the bounded source-bound view
 that should be injected into an agent.
+
+Literature lineage is also recomputed rather than trusted from display fields.
+A retrieval receipt must point to exactly one locked search plan, use one of
+its declared providers, and exactly match one locked query. A source snapshot
+must point to exactly one receipt and match one uniquely selected receipt
+candidate by normalized persistent identifiers (with title fallback only when
+unambiguous); it stores hash bindings to the plan, receipt, candidate set, and
+selected candidate. A later positive `status_check` does not erase a prior
+retraction. Only a later `reinstatement` with a notice, the same provider, and
+an explicit `supersedes` edge to the latest active retraction can reactivate the
+source. Closure audit recomputes these bindings so forged relation-only rows
+remain blockers.
 
 For ecosystem exchange, export one committed ref without exposing payloads by
 default:
@@ -269,12 +376,24 @@ Profiles:
 | `reproduce` | Git history, pointers, and the complete referenced CAS closure |
 | `audit` | Currently the same durable closure as `reproduce`, reserved for future audit-only additions |
 
-Bundling refuses dirty repositories and missing objects by default. The
-archive includes `bundle.manifest.json` with hashes, sizes, HEAD, profile, and
-a completeness verdict. Verification rejects duplicate, hidden, non-regular,
-unsafe, missing, size-mismatched, or hash-mismatched members. Restore writes
-only declared regular members, removes the temporary bundle remote, restores
-the exact HEAD, and runs `fsck` before publishing the destination directory.
+Bundling refuses dirty repositories, an uncheckpointed `HEAD`, and missing
+objects by default. The embedded Git bundle captures all advertised refs, and
+the manifest declares an `all-advertised-refs` closure: every reachable commit,
+every historical `research-objects/*.json` pointer blob, and every referenced
+CAS hash/size. Thus `reproduce` and `audit` include objects reachable only from
+a non-current branch or tag, even when the pointer was later removed from
+`HEAD`; `index` intentionally records the closure without CAS payloads.
+
+Verification does not accept the manifest's closure on assertion. It imports
+the embedded Git bundle into a temporary local repository, recomputes the
+reachable pointer closure from the advertised refs, compares the exact pointer
+bytes, and then checks required/extra CAS members, hashes, sizes, and the
+completeness verdict. It also rejects duplicate, hidden, non-regular, unsafe,
+unlisted, missing, size-mismatched, or hash-mismatched members. Restore writes
+only declared regular members, restores the advertised refs and exact HEAD,
+removes the temporary bundle remote, and runs `fsck` before publishing the
+destination. This independent local recomputation is an integrity check, not an
+external signature, custody, or trust attestation.
 
 ## Integrate with an XScientist project run
 
@@ -331,11 +450,24 @@ compatibility. Checkpoint creation, object registration, and bundle snapshots
 share a repository lock; a failed Git commit removes only the new checkpoint
 files and this attempt's staged entries, preserving user research files.
 
-The native merge preflight blocks file conflicts, opposing support/refutation,
-incompatible locked preregistrations, differing metric definitions, and
-ungated agent candidates entering `main`/`stable`. A successful merge retains
-both scientific parents. Every conflict has a stable ID and resolution guidance.
-Opposing evidence alone may be explicitly retained with
+The native merge preflight first requires both source and target tips to be
+exact checkpoint-bound commits; a raw descendant cannot inherit an ancestor's
+authority. It then blocks backend file conflicts, incompatible locked
+preregistrations, differing metric definitions, and ungated agent candidates
+entering `main`/`stable`. Its opposing-evidence check is deliberately
+base-aware: it detects a source refutation against support already present at
+the merge base (and the converse), normalizes qualified support/refutation, and
+reports only newly introduced pairs with overlapping scientific scope. An
+already-contested base does not make an unrelated merge fail repeatedly.
+
+After the Git merge is prepared, checkpoint creation requires the complete
+backend index to match the declared paths exactly. Before scanning those
+working-tree paths for privacy findings, it requires their staged and
+working-tree content to agree; it repeats that comparison after scanning so a
+changing path cannot bypass the gate. The scanner is not claimed to read Git
+index blobs directly. Matched secret values are not echoed. A successful merge
+retains both scientific parents. Every conflict has a stable ID and resolution
+guidance. Opposing evidence alone may be explicitly retained with
 `--preserve-conflicts`; this writes a rejected deterministic `hold` gate that
 binds the target and both evidence sets. All other conflict classes remain
 blocked. No side is overwritten and no contested claim is promoted.
@@ -355,6 +487,22 @@ For a human-facing view of the complete scientific argument, use:
 xscientist research guide --lang en
 xscientist research dag --ara ./ara/<run> --output ./research-dag
 ```
+
+When one hypothesis exists and no plan is locked, the guide makes a falsifiable
+rival its first blocking action. Once competitors exist, locking a
+`hypothesis_portfolio` becomes the first action before exploratory,
+confirmatory, or method-discovery planning. This is deterministic guidance—not
+a claim that an automatically generated rival is scientifically adequate.
+
+`research guide --json` and the top-level JSON status surfaces make actions
+portable without embedding host paths. Each row contains a stable action
+`code`, an `argv_template` with exact `rso-...` IDs where known, a
+`{workspace}` argument/cwd binding, and an `input_binding` list. Commands with
+unresolved human placeholders declare `input_binding.required=true` and
+`executable_after_binding=false`; a consumer must bind both the invocation
+workspace and those human values before execution. Repository-neutral template
+generators declare a workspace-root cwd instead of pretending that a bare `.`
+is safe from an arbitrary caller directory.
 
 The unified DAG is distinct from the compact technology tree. It projects every
 Research VCS object, support/refutation relation, independent review, gate,

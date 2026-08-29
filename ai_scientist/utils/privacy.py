@@ -342,9 +342,35 @@ def scan_file(
         label = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         label = REDACTED_PATH
+    rules = _scan_text(text)
+    try:
+        workspace_literals = {
+            str(root.expanduser().absolute()),
+            str(root.expanduser().resolve()),
+        }
+    except OSError:
+        workspace_literals = set()
+    for literal in tuple(workspace_literals):
+        if literal.startswith("/private/"):
+            workspace_literals.add(literal.removeprefix("/private"))
+        elif literal.startswith(("/tmp/", "/var/")):
+            workspace_literals.add("/private" + literal)
+    if any(
+        literal and literal != "/" and literal in text for literal in workspace_literals
+    ):
+        rules.add("workspace_absolute_path")
+    semantic_path = label in {"question.md", "topic.md"} or label.startswith(
+        (
+            ".xscientist/objects/",
+            "claims/",
+            "hypotheses/",
+            "research-objects/",
+        )
+    )
+    if semantic_path and _POSIX_PATH_RE.search(text):
+        rules.add("absolute_path")
     return [
-        PrivacyFinding(scope=scope, rule=rule, path=label)
-        for rule in sorted(_scan_text(text))
+        PrivacyFinding(scope=scope, rule=rule, path=label) for rule in sorted(rules)
     ]
 
 

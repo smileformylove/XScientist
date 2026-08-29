@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,11 @@ from .research_closure import (
     summarize_closure_levels,
 )
 from .research_git import ResearchGitError, repository_status
-from .research_journey import build_research_guide
+from .research_journey import (
+    build_research_guide,
+    public_workspace_action,
+    workspace_action_context,
+)
 
 STATUS_SCHEMA = "xscientist.workspace-status.v1"
 RUN_SCHEMA = "xscientist.local-run.v1"
@@ -587,4 +592,31 @@ def build_workspace_status(
     return redact_sensitive_payload(payload)
 
 
-__all__ = ["STATUS_SCHEMA", "build_workspace_status"]
+def public_workspace_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return status JSON with explicit, host-path-free next-action bindings."""
+
+    safe = deepcopy(payload)
+    safe["workspace_context"] = workspace_action_context()
+    safe["next_steps"] = [
+        public_workspace_action(step)
+        for step in safe.get("next_steps") or []
+        if isinstance(step, dict)
+    ]
+    research = safe.get("research")
+    if isinstance(research, dict):
+        guide = research.get("guide")
+        if isinstance(guide, dict):
+            guide["workspace_context"] = workspace_action_context()
+            guide["next_steps"] = [
+                public_workspace_action(step)
+                for step in guide.get("next_steps") or []
+                if isinstance(step, dict)
+            ]
+    return redact_sensitive_payload(safe)
+
+
+__all__ = [
+    "STATUS_SCHEMA",
+    "build_workspace_status",
+    "public_workspace_status_payload",
+]

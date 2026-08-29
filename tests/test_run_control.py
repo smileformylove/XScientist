@@ -54,6 +54,58 @@ class LocalRunControlTests(unittest.TestCase):
             self.assertEqual(saved["schema"], RUN_SCHEMA)
             self.assertIn("private question", saved["resume_argv"])
             self.assertNotIn("--detach", saved["resume_argv"])
+            self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(state_path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(state_path.parent.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                (state_path.parent / saved["stdout"]).stat().st_mode & 0o777,
+                0o600,
+            )
+            self.assertEqual(
+                (state_path.parent / saved["stderr"]).stat().st_mode & 0o777,
+                0o600,
+            )
+
+    def test_public_detached_view_redacts_inline_values_paths_and_host(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch("xscientist.run_control.subprocess.Popen") as popen,
+            mock.patch(
+                "xscientist.run_control._process_identity",
+                return_value="launched-process",
+            ),
+        ):
+            popen.return_value.pid = 12345
+            workspace = Path(td) / "SENTINEL_PRIVATE_WORKSPACE"
+            data = Path(td) / "SENTINEL_PRIVATE_DATA"
+            secret = "sk-" + "A" * 32
+            payload = launch_detached_run(
+                workspace,
+                [
+                    "start",
+                    str(workspace),
+                    f"--question={secret}",
+                    f"--data-dir={data}",
+                    "--base-url=https://user:pass@example.invalid/v1",
+                    "--user=private@example.invalid",
+                    f"--model={secret}",
+                ],
+            )
+
+            rendered = json.dumps(payload)
+            self.assertEqual(payload["workspace"], ".")
+            self.assertNotIn("hostname", payload)
+            self.assertNotIn(str(workspace), rendered)
+            self.assertNotIn(str(data), rendered)
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn("user:pass", rendered)
+            self.assertIn("{workspace}", payload["command"])
+            self.assertIn("{data}", payload["command"])
+            self.assertEqual(payload["model"], "<redacted>")
+            state_path = workspace / "04_logs" / "runs" / f"{payload['id']}.json"
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn(str(workspace), saved["resume_argv"])
+            self.assertIn(f"--question={secret}", saved["resume_argv"])
 
     def test_cancel_signals_the_detached_process_group(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -432,6 +484,85 @@ class LocalRunControlTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["phase"], "launch")
         self.assertEqual(payload["error"], "cannot create run state")
+
+    def test_run_logs_reject_untrusted_paths_and_redact_public_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True)
+            run_id = "a1"
+            state_path = runs / f"{run_id}.json"
+            state = {
+                "schema": RUN_SCHEMA,
+                "id": run_id,
+                "status": "failed",
+                "workspace": workspace.name,
+                "stdout": f"{run_id}.out.log",
+                "stderr": f"{run_id}.err.log",
+                "resume_argv": ["start", str(workspace), "--question", "q"],
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            secret = "sk-" + "B" * 32
+            (runs / f"{run_id}.out.log").write_text(
+                f"provider failed with {secret} at {workspace / 'private.txt'}\n",
+                encoding="utf-8",
+            )
+            (runs / f"{run_id}.err.log").write_text("safe error\n", encoding="utf-8")
+
+            payload = read_run_logs(workspace, run_id)
+            rendered = json.dumps(payload)
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn(str(workspace), rendered)
+            self.assertIn("[REDACTED_API_KEY]", rendered)
+
+            state["stdout"] = "../../outside.txt"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            with self.assertRaisesRegex(RunControlError, "integrity validation"):
+                read_run_logs(workspace, run_id, stream="stdout")
+
+            state["stdout"] = f"{run_id}.out.log"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            (runs / f"{run_id}.out.log").unlink()
+            outside = workspace / "outside.txt"
+            outside.write_text("outside secret\n", encoding="utf-8")
+            try:
+                (runs / f"{run_id}.out.log").symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"file symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(RunControlError, "must not be a symlink"):
+                read_run_logs(workspace, run_id, stream="stdout")
+
+    def test_run_control_rejects_symlinked_control_and_state_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "study"
+            outside = root / "outside"
+            workspace.mkdir()
+            outside.mkdir()
+            try:
+                (workspace / "04_logs").symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(RunControlError, "must not be a symlink"):
+                launch_detached_run(
+                    workspace,
+                    ["start", str(workspace), "--question", "q"],
+                )
+            self.assertEqual(list(outside.iterdir()), [])
+
+            (workspace / "04_logs").unlink()
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True)
+            outside_state = outside / "state.json"
+            marker = '{"marker": "outside"}\n'
+            outside_state.write_text(marker, encoding="utf-8")
+            try:
+                (runs / "a1.json").symlink_to(outside_state)
+            except OSError as exc:
+                self.skipTest(f"file symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(RunControlError, "must not be a symlink"):
+                get_run(workspace, "a1")
+            self.assertEqual(outside_state.read_text(encoding="utf-8"), marker)
 
     def test_logs_warn_when_structured_tail_starts_mid_document(self) -> None:
         payload = {

@@ -27,6 +27,14 @@ obligations explicit:
 This improves the structure of exploration. It does not make an LLM, score, or
 green DAG node an authority on scientific truth.
 
+The guided next-action policy makes the first obligation concrete. If one
+hypothesis exists and no research plan is locked, its first blocking action is
+to record a falsifiable rival. If multiple hypotheses exist but no portfolio
+does, its first action is to lock their question, alternatives, and priors in a
+`hypothesis_portfolio`. Only then does it present exploratory, confirmatory, and
+method-discovery planning choices. This ordering is deterministic guidance; it
+does not certify that a proposed rival or prior is scientifically adequate.
+
 For the literature-to-opportunity part of a program, see the
 [FAR-inspired opportunity funnel](OPPORTUNITY_FUNNEL.md). It records a
 research direction, a complete candidate pool, explicit `known`/`new`/`fix`/
@@ -50,6 +58,36 @@ silently producing an unverifiable result. Independence receipts currently
 prove deterministic disjointness between declared actor IDs in the complete
 producer lineage; they explicitly do not claim authenticated real-world
 identity separation.
+
+## Literature evidence contract
+
+New literature records form a committed chain rather than a collection of
+loosely related URLs:
+
+```text
+locked search_plan
+  → hash-bound search_receipt for an exact query/candidate set
+  → uniquely selected source_snapshot
+  → exact passage_evidence
+```
+
+The receipt binds the locked plan's object/content/plan hashes, must use an
+exact locked query, and—when the plan declares a provider allowlist—must use one
+of those providers. The source recomputes the receipt commitment and candidate
+set hash, must match exactly one selected candidate by normalized identifiers
+or unambiguous title, and stores both receipt and candidate bindings. Closure
+audit recomputes the same constraints, so forged relation-only objects do not
+become trace-complete. Legacy records remain readable only when their relations
+and payloads satisfy the recomputed contract.
+
+Source status is monotonic and append-only. A retraction, withdrawal, or invalid
+status keeps invalidating the source; a later ordinary positive status check
+cannot erase it. Reinstatement must carry a notice, come from the same provider
+as the latest active retraction, have a later checked-at time, and explicitly
+`supersedes` that retraction. Historical belief/context decisions apply their
+explicit `as_of` cutoff to evidence, source updates, and source lineage. Future
+retraction or reinstatement events do not rewrite the past, while a lineage root
+that did not yet exist is excluded and surfaced as an action blocker.
 
 ## Immutable strategy objects
 
@@ -136,6 +174,33 @@ The lifecycle API and closure audit both enforce these conditions. A raw draft
 may record an ambitious proposition for later work, but it cannot be promoted
 as a verified deep claim until the qualification objects exist.
 
+### Complete active claim closure
+
+Verification cannot select only favorable evidence. The active closure contains
+all evidence and argument objects reachable from the current semantic claim
+identity, active and resolved challenge/refutation objects, the closure nodes
+they challenge, and immutable resolution records. At least one independent,
+verified review must by itself evaluate that entire set; split partial reviews
+cannot be unioned into authority. The deterministic gate must cover the same
+closure and bind that review. Its actor-disjointness receipt is a local declared
+provenance check, not proof of real-world identity independence.
+
+Any active `refutes`, `qualified_refutes`, `contradicts`, or
+`challenges_inference` signal blocks the `verify` level, while `trace` and
+`replay` may remain complete and useful. A bare `supersedes` edge cannot make a
+challenge disappear: the resolution must be an active immutable object, and a
+fresh independent review and gate must cover both records. Superseded reviews,
+gates, and reproductions cannot be reused.
+
+A verified reproduction uses receipt v2 to bind four independently recomputed
+surfaces: the source Git checkpoint, exact reproduced object hashes, the active
+claim closure at that same audit checkpoint, and the execution result. A stale
+closure or substituted target therefore remains invalid even if an outer
+receipt hash is recomputed. Valid locally generated v1 receipts can be upgraded
+before recording, while historical v1 objects remain readable but cannot close
+`verify`. These repository hashes do not prove that a declared verifier is a
+distinct real-world person or organization.
+
 ## Periodic review and anomaly handling
 
 `research program review` deterministically scans the current repository for:
@@ -187,11 +252,60 @@ xscientist research program boundary CLAIM boundaries.json
 xscientist research program claim CLAIM
 ```
 
-Every mutating command checkpoints atomically by default. Use `--no-commit`
-only when intentionally assembling several objects into one later checkpoint.
-JSON inputs can come from any platform or tool; the public Python functions and
+Every mutating one-command save checkpoints atomically by default. Commit mode
+requires an empty native stage and a clean staged/tracked/research-eligible
+worktree, then commits only the exact object paths created by that call plus the
+checkpoint records. Use `--no-commit` only when intentionally assembling
+several objects into one later explicitly staged checkpoint. JSON inputs can
+come from any platform or tool; the public Python functions and
 `ResearchRepository.review_program()` / `inspect_claim()` expose the same
 semantics without shell coupling.
+
+Portable JSON guidance also separates a recommendation from an executable
+command. Each `primary_action`/`next_steps[]` row has a stable action `code`, an
+`argv_template` using exact object IDs where available, explicit
+workspace/cwd binding, and `input_binding`. `{workspace}` must be bound to the
+workspace supplied to the invocation. If a human-input placeholder remains,
+`input_binding.required=true` and `executable_after_binding=false`; an agent
+must request that input rather than guessing it or executing the template.
+
+## Repository execution and portability boundary
+
+Research-sensitive operations require the exact selected commit to contain a
+valid checkpoint JSON/trailer/parent/diff binding. They do not fall back to an
+ancestor when a branch tip is an ordinary raw Git commit. Such a tip therefore
+blocks inspection as a checkpoint, reproduction, tag, bundle, export, and
+semantic merge; copied trailers do not confer authority.
+
+Semantic merge preflight detects backend conflicts, incompatible locked
+registrations, metric redefinitions, and newly introduced support/refutation
+pairs even when support or refutation already exists at the merge base. The
+prepared merge index must exactly match declared paths. The gate scans the
+corresponding working-tree paths only after verifying staged/worktree agreement,
+then repeats that agreement check after the scan; it does not claim to scan Git
+index blobs directly. Opposing evidence may be preserved only under an explicit
+hold; this is not conflict resolution or claim promotion.
+
+Reproduction uses an exact detached worktree, verified CAS hydration, a
+reduced variable environment/private HOME, no shell, bounded retained output,
+and a timeout. The environment control is variables-only and the host filesystem
+remains visible. POSIX process-group cleanup is best-effort; Windows terminates
+only the parent process, so neither platform provides a process-tree guarantee.
+The receipt explicitly reports `isolated=false`, `security_boundary=false`,
+`environment_scope=variables_only`, `filesystem=host_visible`, and
+`network=host_unrestricted`; it is not an OS security boundary. New v2 receipts
+persist this boundary under the receipt hash, and closure audit rejects stronger
+or internally mismatched isolation claims. Upgraded v1 receipts use
+`legacy_unknown` environment/process values because the old schema did not
+retain enough information to reconstruct those controls.
+Output hashes bind only the retained bounded tails. New receipts also bind the
+capture limit and stdout/stderr truncation flags; upgraded v1 receipts preserve
+the absent scope as `legacy_unknown`.
+Bundles cover all refs advertised by their embedded Git bundle and include the
+historical CAS closure for `reproduce`/`audit`, including old tags and
+non-current branches. Verification locally imports the Git bundle and
+recomputes that closure before checking pointer and CAS hashes/sizes. These are
+local integrity controls, not external custody, signature, or trust proof.
 
 ## DAG projection
 
@@ -208,7 +322,11 @@ The offline browser can filter these layers and inspect claim reasoning. The
 projection is recomputed from effective, non-superseded objects at the selected
 Git ref. A claim receives guidance only from portfolios containing a hypothesis
 in its evidence/mechanism lineage, so unrelated branches cannot leak a globally
-latest experiment into that claim.
+latest experiment into that claim. When a belief projection also declares a
+historical `as_of`, evidence, lineage roots, retractions, and reinstatements
+created after that logical time are excluded even if they exist at the selected
+ref. A future lineage root is reported as unavailable instead of being replaced
+with an actor-derived source family.
 
 ## v1 to v2 compatibility
 

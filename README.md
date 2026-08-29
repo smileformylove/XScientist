@@ -33,10 +33,10 @@
 
 XScientist is a local-first research system and an open scientific protocol. It
 can explore competing explanations, choose informative experiments, execute
-them behind an isolation boundary, criticize its own results, and preserve the
-whole path as typed, machine-readable research objects. A completed run is
-never presented as a verified scientific claim unless its evidence and review
-gates actually pass.
+them through a configured executor boundary, criticize its own results, and
+preserve the whole path as typed, machine-readable research objects. A
+completed run is never presented as a verified scientific claim unless its
+evidence and review gates actually pass.
 
 > **Important:** XScientist is alpha research software, not an oracle.
 > Autonomous runs may use
@@ -44,10 +44,12 @@ gates actually pass.
 > Machine-generated claims remain unverified until their evidence and
 > independent review gates are complete.
 
-This README describes the published `0.1.4` release. Version 0.1.4 adds a
-FAR-inspired, source-audited opportunity funnel while keeping the existing
-provenance, isolation, and scientific review gates. Pin the package version or
-a source commit when an experiment must remain exactly reproducible.
+PyPI currently serves the published `0.1.4` release; the `main` README also
+documents the changelog's explicitly Unreleased protocol hardening. Version
+0.1.4 added a FAR-inspired,
+source-audited opportunity funnel while keeping the existing provenance,
+isolation, and scientific review gates. Pin the package version or a source
+commit when an experiment must remain exactly reproducible.
 
 ## Choose the shortest path
 
@@ -79,6 +81,12 @@ The guided flow uses ordinary questions instead of provider or protocol terms:
 - What result would make you change your mind?
 - What fair comparison or test could you run first?
 
+Once one falsifiable hypothesis exists and no plan has been locked, the guided
+next action is deliberately rival-first: record a falsifiable competitor, then
+lock the competing hypotheses into a portfolio before choosing the study mode.
+The lower-level APIs remain available, but the beginner guide no longer makes
+“plan the favored idea” its primary recommendation.
+
 You may stop after the first answer and run the same command later. XScientist
 versions the exact state as `idea saved`, `falsifiable`, or `planned`; it never
 fills a blank with invented science. This path uses no provider, makes no model
@@ -102,6 +110,27 @@ The workspace is understandable without reading internal logs:
 - `.xscientist/objects/` and `checkpoints/` preserve typed decisions and history;
 - the local Git repository has no remote and never pushes itself.
 
+Initializing inside an existing project is non-destructive. Existing
+`.gitignore` rules keep their text and order; if the complete safety policy is
+not already present, one canonical ordered XScientist block is appended. A
+different pre-existing `question.md` or
+`.xscientist/README.md`, any staged Git work, or tracked dirt in managed files
+causes initialization to stop. In an existing Git repository, the first
+checkpoint contains only the XScientist-managed paths, leaving unrelated dirty
+project files uncommitted.
+
+`init`, `setup`, and `start` publish checkpoints only after their privacy,
+provider, and diagnostic checks complete without an execution error. A
+structured “runtime not ready” result may be retained as an explicit blocked
+preparation state so the user does not need to re-enter valid choices. If an
+exception or write fails, rollback removes
+only unchanged files created by that invocation; concurrent scientific files,
+Git configuration, refs, index intent, and history are preserved and an
+incomplete rollback is reported instead of silently deleting them. Unsafe Git
+control paths, special managed files, and credential-shaped model metadata are
+rejected before persistence, and structured errors pass through the same
+redaction boundary as successful JSON.
+
 Use `status` and `history` to inspect these records; new users should not need
 to edit the internal object store directly.
 
@@ -119,6 +148,15 @@ scientific outcome, not a software failure.
 
 Use `xscientist status ./first-study --verbose` only when you need branch,
 pipeline, token, or background-run details. Use `--json` for automation.
+
+Portable JSON never embeds the inspected host path. Each suggested
+`primary_action` or `next_steps[]` row includes an `action` contract with an
+`argv_template`, exact `rso-...` object IDs when those objects already exist,
+and explicit `workspace_binding`, `cwd_binding`, and `input_binding` metadata.
+Bind `{workspace}` to the workspace supplied to the invocation. If human
+placeholders remain, `input_binding.required=true` and
+`executable_after_binding=false`; automation must not execute that template
+until those values have been supplied by a person.
 
 ## Run an autonomous study
 
@@ -371,6 +409,41 @@ being replayable, and replayable without being independently verified. A
 blocked audit is an actionable scientific gap, not necessarily a software
 failure.
 
+Verification evaluates the complete active claim closure, not a hand-picked
+support subset. One independent verified review must itself cover every active
+evidence and reasoning object, plus any challenge/refutation and its immutable
+resolution; several partial reviews cannot be unioned into a passing review.
+An active `refutes`, `qualified_refutes`, `contradicts`, or
+`challenges_inference` signal blocks `verify` even when `trace` and `replay`
+remain complete. Superseding a challenge is not enough by itself: a fresh
+review and gate must cover both the challenge and the resolution.
+
+Literature evidence follows an equally explicit chain: a locked search plan
+constrains provider and exact query; its retrieval receipt commits the complete
+candidate set; a source snapshot must match exactly one selected candidate and
+bind that receipt. Retraction/withdrawal events are append-only and remain
+active through later positive status checks. Reinstatement requires a later
+notice from the same provider and explicitly supersedes the active retraction.
+For historical decisions, `--as-of` excludes evidence, source-lineage roots,
+retractions, and reinstatements created after the boundary rather than letting
+today's knowledge rewrite the earlier context.
+
+### Exact checkpoints and one-command saves
+
+Checkpoint-sensitive operations use the exact target commit. They do not walk
+back to an ancestor checkpoint when `HEAD` or a selected ref is an ordinary raw
+Git commit. `show`, `fsck`, reproduction, tags, bundles, exports, and semantic
+merge therefore fail closed for an unbound tip; copied trailers also fail when
+the checkpoint JSON, parent, hash, or exact `changed_paths` binding disagrees.
+Raw Git history is not deleted, but it is not granted Research VCS authority.
+
+Commit-enabled one-command recorders such as `research hypothesis` first
+require an empty native stage and a clean set of Git-staged, tracked, and
+research-eligible paths. The resulting checkpoint includes only the newly
+created object paths plus its checkpoint records, so an unrelated edit cannot
+be absorbed accidentally. `--no-commit` is an explicit batch-building mode;
+the caller must later stage and checkpoint those paths deliberately.
+
 ### Paper quality status
 
 The writing pass separates a readable manuscript from a verified result. A
@@ -421,6 +494,53 @@ xscientist research export --repo ./first-study --dest ./exchange
 A generated DAG is a disposable view, not scientific source data. Regenerating
 it does not dirty a research checkpoint or prevent a bundle. Eligible research
 changes, tracked edits, or staged changes still block bundling until reviewed.
+
+Reproduction materializes the exact checkpoint in a detached worktree, verifies
+and copies bound CAS objects, compares the recorded environment, and executes a
+single parsed command without a shell only after explicit `--execute`. The
+command receives a reduced variable set and a private HOME, but this control is
+variables-only: the host filesystem remains visible. Retained output is bounded
+and a timeout is applied. On POSIX, timeout cleanup signals the process group on
+a best-effort basis; children can escape it. On Windows, only the parent process
+is terminated, with no process-tree guarantee. A newly generated v2 receipt
+persists `isolated=false`, `security_boundary=false`,
+`environment_scope=variables_only`, `filesystem=host_visible`, and
+`network=host_unrestricted`; audit rejects stronger claims. A reproduction
+command can access host files and the host's available network unless an
+external runtime restricts them. An upgraded historical v1 receipt uses
+explicit `legacy_unknown` environment/process fields instead of inventing
+controls that the old format did not record. Output hashes cover the retained
+bounded tail, and the receipt records its limit plus separate stdout/stderr
+truncation flags; legacy v1 output scope remains `legacy_unknown`.
+
+When `--record --verified` is requested, the lifecycle stores a v2 receipt that
+binds the resolved source checkpoint, the exact reproduced objects, the active
+claim closure at that same audit checkpoint, and the execution-result fields. The
+auditor recomputes those bindings from Git and immutable research objects. A
+valid locally generated v1 receipt is upgraded before the reproduction object
+is written; historical v1 records remain readable but cannot satisfy `verify`.
+These hashes establish repository consistency, not the real-world identity or
+independence of the declared verifier.
+
+Semantic merge requires both source and target tips to be exact checkpoints.
+Its preflight detects file conflicts, incompatible locked registrations,
+redefined metrics, and newly introduced support/refutation pairs even when one
+side of the pair already existed at the merge base. The final staged merge set
+must exactly match the declared paths. Before scanning those working-tree
+paths, the checkpoint gate verifies that staged and working-tree content agree;
+it repeats that agreement check after the scan. This prevents drift without
+claiming that the scanner reads Git index blobs directly. `--preserve-conflicts`
+can retain only opposing evidence under a deterministic hold; it does not
+resolve or promote the contested claim.
+
+Research bundles capture all advertised refs in the embedded Git bundle and
+derive the reachable pointer closure across their full history. Consequently,
+`reproduce`/`audit` profiles include CAS objects reachable only from an old tag
+or non-current branch, even if the pointer disappeared from current `HEAD`
+(`index` intentionally omits CAS payloads). Verification imports the embedded
+Git bundle into a temporary local repository and independently recomputes that
+closure before checking pointer bytes and CAS hashes/sizes. This is local
+integrity recomputation, not an external signature, custody, or trust proof.
 
 ### Research-policy rollout audit (Faraday-inspired)
 
@@ -476,12 +596,14 @@ calibrated probability.
 The projection deduplicates evidence by root source family, preserves support
 and challenge together, and maps `claim -> depends_on -> evidence/passage` to a
 typed support binding without treating arbitrary lineage as support. An
-explicit historical `as_of` excludes evidence and invalidation events created
-later. Expired, malformed, retracted, invalidated, or superseded signals cannot
-provide active support, and incomplete endpoints, graph cycles, or hard
-node/relation limits fail closed. The projection is hash-bound into the v4
-research-context receipt; every ordinal state is non-probabilistic context and
-can never serve as a sufficient or sole promotion gate.
+explicit historical `as_of` excludes evidence, lineage roots, invalidation
+events, and reinstatements created later; an unavailable future lineage is
+reported instead of being replaced with a convenient actor identity. Expired,
+malformed, retracted, invalidated, or superseded signals cannot provide active
+support, and incomplete endpoints, graph cycles, or hard node/relation limits
+fail closed. The projection is hash-bound into the v4 research-context receipt;
+every ordinal state is non-probabilistic context and can never serve as a
+sufficient or sole promotion gate.
 
 ```bash
 xscientist research belief @latest:hypothesis \

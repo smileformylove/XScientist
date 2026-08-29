@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="#从自己的想法开始不需要-api-key">快速开始</a> ·
+  <a href="#api-key">快速开始</a> ·
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#far-启发的研究机会漏斗">研究机会漏斗</a> ·
   <a href="#信念上下文投影受-bcg-启发">信念上下文</a> ·
@@ -31,17 +31,17 @@
 </p>
 
 XScientist 既是本地优先的自主科研系统，也是一套开放科学协议。它可以比较竞争
-解释、选择更有信息量的实验、在隔离边界内执行、主动批判结果，并把整个过程保存
-为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；只有证据
-和评审门禁真正通过后，系统才会把它标记为已验证。
+解释、选择更有信息量的实验、通过配置好的执行器边界运行、主动批判结果，并把整个
+过程保存为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；
+只有证据和评审门禁真正通过后，系统才会把它标记为已验证。
 
 > **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
 > 生成代码必须经过配置好的隔离执行器；机器生成的结论只有补齐证据和独立评审
 > 门禁后，才能成为“已验证”。
 
-本文描述已经发布的 `0.1.4` 正式版。0.1.4 新增受 FAR 启发、按来源核对的研究机会
-漏斗，同时保留既有来源追踪、隔离和科研评审门禁。需要严格复现实验时，请固定软件
-版本或源码 commit。
+PyPI 当前提供已发布的 `0.1.4` 正式版；`main` README 同时明确记录 changelog 中
+`Unreleased` 的协议加固。0.1.4 新增受 FAR 启发、按来源核对的研究机会漏斗，同时保留既有来源追踪、隔离和
+科研评审门禁。需要严格复现实验时，请固定软件版本或源码 commit。
 
 ## 先选最短路径
 
@@ -71,6 +71,11 @@ xscientist explore ./my-study --lang zh
 - 什么结果会让你改变看法？
 - 先做哪一个公平比较或检验？
 
+当一个可证伪假设已经存在、但研究计划尚未锁定时，引导器会把“竞争解释先行”设为
+主动作：先记录一个可证伪的竞争假设，再把候选解释锁进 hypothesis portfolio，最后
+才选择研究模式。底层 API 仍然可用，但新手引导不再把“先规划自己偏好的解释”排在
+第一位。
+
 只回答第一个问题也可以，之后再次运行同一命令继续。XScientist 会把真实状态明确
 保存为“想法已保存”“可证伪”或“已有计划”，绝不会为了显得完整而替用户编造答案。
 这条路径不使用 Provider，不调用模型，不执行生成代码，也不会伪造证据或结论。
@@ -93,6 +98,20 @@ xscientist explore ./my-study \
 - `.xscientist/objects/` 和 `checkpoints/` 保存有类型的决策与历史；
 - 本地 Git 仓库没有远端，也不会自行推送。
 
+在已有项目中初始化也保持非破坏性。已有 `.gitignore` 的文本和顺序会保留；若完整
+安全策略尚未出现，则在末尾追加一份顺序固定的 XScientist 规范块。若已经存在内容不同的 `question.md` 或
+`.xscientist/README.md`、Git index 中已有 staged work，或受管文件存在 tracked
+修改，初始化会停止。若目录已经是 Git 仓库，首个 checkpoint 只包含 XScientist
+管理的路径，其他未提交项目文件仍留在 commit 之外。
+
+`init`、`setup` 与 `start` 只有在 privacy、Provider 和诊断检查正常完成、没有执行
+异常后才发布 checkpoint。结构化的“运行时尚未就绪”可以保留为显式 blocked
+准备状态，用户修复环境后无需重新输入已经验证的选择。出现异常或写入失败时，回滚
+只移除仍与本次调用写入完全一致的文件；并发产生的
+科研文件、Git 配置、ref、index intent 和历史都会保留，无法完整回滚时会明确报告，
+不会静默删除。危险的 Git 控制路径、特殊受管文件和形似凭据的模型元数据会在持久化
+之前被拒绝；结构化错误与成功 JSON 共用同一脱敏边界。
+
 日常使用 `status` 和 `history` 查看即可；新用户无需直接修改内部对象仓库。
 
 如果想先看一条完整但存在争议的证据历史，可运行内置 `$0.00` 样例：
@@ -107,6 +126,13 @@ xscientist status ./first-study --lang zh
 
 日常只看 `status` 即可。需要分支、流水线、Token 或后台任务细节时再加
 `--verbose`；自动化程序使用 `--json`。
+
+可移植 JSON 不会嵌入被检查工作区的宿主机路径。每个 `primary_action` 或
+`next_steps[]` 行都包含 `action` 契约：已有对象使用精确的 `rso-...` ID，并明确
+给出 `argv_template`、`workspace_binding`、`cwd_binding` 与 `input_binding`。
+调用方必须把 `{workspace}` 绑定到本次命令收到的工作区。若仍有待填写的人类输入，
+则 `input_binding.required=true` 且 `executable_after_binding=false`；自动化程序
+在这些值由人提供之前不得执行该模板。
 
 ## 运行自主研究
 
@@ -266,7 +292,7 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 
 CLI 使用同一套带类型的协议（默认只写入本地历史，不会自行推送远端）：
 
-如果 `./first-study` 还不存在，请先按[快速开始](#从自己的想法开始不需要-api-key)
+如果 `./first-study` 还不存在，请先按[快速开始](#api-key)
 创建工作区，再运行下面的命令。
 
 ```bash
@@ -332,6 +358,34 @@ xscientist audit ./first-study --level verify
 三个层级只能逐级增强：已记录的结论可能可追踪但不可重放，也可能可重放但尚未经过
 独立验证。审计显示阻塞，通常意味着存在明确的科研缺口，不一定是软件运行失败。
 
+`verify` 检查的是完整的 active claim closure，不是人工挑选的支持子集。至少要有
+一份独立、已验证的 review 单独覆盖全部 active evidence、reasoning、challenge/
+refutation 及其不可变 resolution；不能把多份各自不完整的 review 拼起来绕过门禁。
+只要仍有 active `refutes`、`qualified_refutes`、`contradicts` 或
+`challenges_inference`，即使 `trace` 与 `replay` 完整，`verify` 仍会被阻止。单纯
+supersede challenge 也不够；新的 review 与 gate 必须同时覆盖 challenge 和
+resolution。
+
+文献证据也遵循显式链条：locked search plan 限定 provider 与精确 query；retrieval
+receipt 承诺完整 candidate set；source snapshot 必须唯一匹配一个已选 candidate，
+并绑定该 receipt。retraction/withdrawal 是追加事件，后续普通 positive status check
+不会将其抹掉。reinstatement 必须来自同一 provider、时间更晚、带 notice，并显式
+supersede 当前 active retraction。历史决策使用 `--as-of` 时，会排除边界之后才出现
+的证据、来源血缘根、retraction 和 reinstatement，不能让今天的信息改写过去上下文。
+
+### 精确 checkpoint 与单命令保存
+
+所有 checkpoint-sensitive 操作都使用目标 commit 本身，不会在 `HEAD` 或所选 ref
+只是普通 raw Git commit 时回退到祖先 checkpoint。`show`、`fsck`、复现、tag、
+bundle、export 和语义 merge 都会对未绑定 tip fail-closed；即使复制了 trailer，
+只要 checkpoint JSON、父提交、hash 或精确 `changed_paths` 不一致，仍会失败。raw
+Git 历史不会被删除，但不会获得 Research VCS 权限。
+
+启用 commit 的单命令 recorder（如 `research hypothesis`）会先要求 native stage
+为空，并要求 Git staged、tracked 与 research-eligible 路径均干净。生成的 checkpoint
+只包含本次新建的对象路径和 checkpoint 记录，不会顺带吸收无关改动。`--no-commit`
+是明确的批量组装模式；之后必须由调用方有意 stage 并 checkpoint 这些路径。
+
 ### 论文质量状态
 
 写作通过不等于科学结果已经验证。`quality_gate_passed` 只有在锁定的预注册、每个
@@ -371,6 +425,40 @@ xscientist research export --repo ./first-study --dest ./exchange
 
 生成的 DAG 是可随时重建的视图，不是科学源数据；重建它不会污染 checkpoint，也
 不会阻止打包。真正的科研改动、已跟踪编辑或暂存内容仍必须先审查。
+
+复现会在 detached worktree 中物化精确 checkpoint，校验并复制绑定的 CAS 对象，
+比较已记录环境；只有显式传入 `--execute` 后，才会无 shell 地执行一条解析后的命令。
+命令只收到精简后的环境变量并使用独立 HOME，但这个控制仅限变量层；宿主文件系统
+仍然可见。保留输出有上限，并设置 timeout。POSIX 上 timeout 清理只会尽力向进程组
+发信号，子进程仍可能逃逸；Windows 上只终止父进程，不保证终止整棵进程树。因此
+新生成的 v2 receipt 会持久写出 `isolated=false`、`security_boundary=false`、
+`environment_scope=variables_only`、`filesystem=host_visible` 和
+`network=host_unrestricted`，审计会拒绝更强的声明。除非外部 runtime 另行限制，
+复现命令仍可访问宿主文件和宿主机可用网络。历史 v1 自动升级时使用明确的
+`legacy_unknown` 环境/进程字段，不虚构旧格式未记录的控制。输出 hash 只覆盖保留的
+有界尾部；receipt 同时记录长度上限和 stdout/stderr 截断标记，旧 v1 的输出范围保持
+`legacy_unknown`。
+
+使用 `--record --verified` 时，生命周期会保存 v2 receipt，并绑定解析后的源
+checkpoint、该同一 checkpoint 上被复现的精确对象和当前 claim 全闭包，以及执行结果
+字段；审计器会从 Git 与不可变科研对象中独立重算这些绑定。合法的本地 v1 receipt 会
+在 reproduction 对象写入前自动升级，历史 v1 仍可读取，但不能满足 `verify`。这些 hash
+证明的是仓库内一致性，不证明声明 verifier 的现实身份或真实独立性。
+
+语义 merge 要求 source 与 target tip 都是精确 checkpoint。preflight 会检查文件
+冲突、不兼容 locked registration、metric 重定义，以及新引入的 support/refutation
+对；即使其中一侧早已存在于 merge base，也不会漏检。最终 staged merge set 必须与
+声明路径完全一致。privacy scan 读取这些 worktree 路径；门禁会在扫描前后分别确认
+staged 与 worktree 内容一致，以此阻止漂移，而不声称 scanner 直接读取 Git index
+blob。`--preserve-conflicts` 只能把 opposing evidence 保留在确定性 hold 下，不会
+解决或晋级争议 claim。
+
+Research bundle 会捕获内嵌 Git bundle 的全部 advertised refs，并从其完整历史派生
+reachable pointer closure。因此 `reproduce`/`audit` profile 会包含只在旧 tag 或
+非当前 branch 可达的 CAS，即使该 pointer 已从当前 `HEAD` 删除；`index` profile
+则有意不包含 CAS payload。校验器会把内嵌 Git bundle 导入临时本地仓库，独立重算
+闭包，再核对 pointer bytes 与 CAS hash/size。这是本地完整性重算，不是外部签名、
+托管链或可信证明。
 
 ### 研究策略 Rollout 审计（受 Faraday 启发）
 
@@ -417,11 +505,12 @@ truth，也始终关闭 quality 与 causal claim。
 
 投影会按根来源族去重证据，同时保留支持与质疑，并把
 `claim -> depends_on -> evidence/passage` 映射为有类型约束的支持绑定，而不会把
-任意血缘都当成支持。显式历史 `as_of` 会排除之后才创建的证据和失效事件；过期、
-时效格式错误、撤稿、失效或被取代的信号也不能继续提供有效支持。关系端点不完整、
-graph cycle、节点或关系硬上限都会 fail-closed。投影会 hash 绑定到 v4
-research-context receipt；所有序数状态都只是非概率上下文，不能单独作为充分条件
-或唯一晋级门。
+任意血缘都当成支持。显式历史 `as_of` 会排除之后才创建的证据、来源血缘根、失效
+事件和 reinstatement；未来血缘不可用时会明确报告，不能用方便的 actor identity
+代替。过期、时效格式错误、撤稿、失效或被取代的信号也不能继续提供有效支持。关系
+端点不完整、graph cycle、节点或关系硬上限都会 fail-closed。投影会 hash 绑定到
+v4 research-context receipt；所有序数状态都只是非概率上下文，不能单独作为充分
+条件或唯一晋级门。
 
 ```bash
 xscientist research belief @latest:hypothesis \

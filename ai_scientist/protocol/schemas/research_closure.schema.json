@@ -37,6 +37,7 @@
           "preregistration_ids": {"$ref": "#/$defs/objectIds"},
           "gate_ids": {"$ref": "#/$defs/objectIds"},
           "reproduction_ids": {"$ref": "#/$defs/objectIds"},
+          "reproduction_closure_ids": {"$ref": "#/$defs/objectIds"},
           "trace_complete": {"type": "boolean"},
           "replay_ready": {"type": "boolean"},
           "verified": {"type": "boolean"},

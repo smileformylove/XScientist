@@ -125,7 +125,11 @@ class IntegritySummaryReportingTests(unittest.TestCase):
             )
             shortlist = Path(shortlist_file).read_text(encoding="utf-8")
             self.assertIn("Integrity Forensics: HARD_FLAGS", shortlist)
-            self.assertIn(str(report_path), shortlist)
+            self.assertIn(
+                "paper0/integrity_forensics/report.json",
+                shortlist,
+            )
+            self.assertNotIn(str(project_dir.resolve()), shortlist)
 
     def test_continuous_summary_reports_integrity_forensics_counts(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -179,7 +183,7 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                             "finding_count": 1,
                             "files": {"report": "/tmp/nested-hard.json"},
                         },
-                    }
+                    },
                 ],
             }
 
@@ -230,10 +234,13 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                     "pdf_path": "/tmp/paper.pdf",
                 }
 
-            with mock.patch(
-                "ai_scientist.apps.batch._process_single_paper",
-                side_effect=fake_process,
-            ), mock.patch("builtins.print"):
+            with (
+                mock.patch(
+                    "ai_scientist.apps.batch._process_single_paper",
+                    side_effect=fake_process,
+                ),
+                mock.patch("builtins.print"),
+            ):
                 results = generator.generate_paper_batch(
                     str(ideas_file),
                     paper_type="journal",
@@ -247,7 +254,9 @@ class IntegritySummaryReportingTests(unittest.TestCase):
             self.assertEqual(results[0]["status"], "success")
             self.assertEqual(len(generator.progress["papers_completed"]), 1)
 
-    def test_continuous_batch_defaults_integrity_forensics_for_high_quality(self) -> None:
+    def test_continuous_batch_defaults_integrity_forensics_for_high_quality(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             ideas_file = Path(td) / "ideas.json"
             ideas_file.write_text(
@@ -278,10 +287,13 @@ class IntegritySummaryReportingTests(unittest.TestCase):
                     "pdf_path": "/tmp/paper.pdf",
                 }
 
-            with mock.patch(
-                "ai_scientist.apps.batch._process_single_paper",
-                side_effect=fake_process,
-            ), mock.patch("builtins.print"):
+            with (
+                mock.patch(
+                    "ai_scientist.apps.batch._process_single_paper",
+                    side_effect=fake_process,
+                ),
+                mock.patch("builtins.print"),
+            ):
                 generator.generate_paper_batch(
                     str(ideas_file),
                     paper_type="journal",

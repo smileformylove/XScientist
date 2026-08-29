@@ -134,13 +134,15 @@ def _source_roots(
     objects: Mapping[str, Mapping[str, Any]],
     relations: Mapping[str, Sequence[Mapping[str, str]]],
     max_depth: int,
-) -> tuple[list[str], bool]:
+    as_of: datetime | None,
+) -> tuple[list[str], bool, bool]:
     """Resolve source-family fingerprints without double-counting descendants."""
 
     roots: set[str] = set()
     visited: set[str] = set()
     queue: deque[tuple[str, int]] = deque([(object_id, 0)])
     truncated = False
+    future_lineage_excluded = False
     while queue:
         current_id, depth = queue.popleft()
         if current_id in visited:
@@ -149,27 +151,38 @@ def _source_roots(
         item = objects.get(current_id)
         if item is None:
             continue
+        if not _exists_by(item, as_of=as_of):
+            future_lineage_excluded = True
+            continue
         identity = _canonical_source_identity(item)
         if str(item.get("kind") or "") == "source_snapshot" and identity:
             roots.add(identity)
             continue
-        lineage = [
+        raw_lineage = [
             row["target"]
             for row in relations.get(current_id, ())
             if row["type"] in LINEAGE_RELATIONS and row["target"] in objects
         ]
+        lineage = [
+            target for target in raw_lineage if _exists_by(objects[target], as_of=as_of)
+        ]
+        if len(lineage) != len(raw_lineage):
+            future_lineage_excluded = True
         if lineage and depth >= max_depth:
             truncated = True
             continue
         for target in sorted(set(lineage)):
             queue.append((target, depth + 1))
-        if not lineage and identity:
+        # An explicit but not-yet-observed lineage cannot be replaced with the
+        # descendant actor identity; doing so would manufacture an independent
+        # source family in a historical projection.
+        if not raw_lineage and identity:
             roots.add(identity)
     ordered_roots = sorted(roots)
     if len(ordered_roots) > 128:
         truncated = True
         ordered_roots = ordered_roots[:128]
-    return ordered_roots, truncated
+    return ordered_roots, truncated, future_lineage_excluded
 
 
 def _valid_until(item: Mapping[str, Any]) -> str | None:
@@ -185,6 +198,7 @@ def _source_invalidated(
     objects: Mapping[str, Mapping[str, Any]],
     relations: Mapping[str, Sequence[Mapping[str, str]]],
     invalidated_ids: set[str],
+    as_of: datetime | None,
 ) -> bool:
     if object_id in invalidated_ids:
         return True
@@ -205,6 +219,8 @@ def _source_invalidated(
         if current_id in visited or depth > _MAX_LINEAGE_DEPTH:
             continue
         visited.add(current_id)
+        if current_id in objects and not _exists_by(objects[current_id], as_of=as_of):
+            continue
         if current_id in invalidated_ids:
             return True
         current = objects.get(current_id) or {}
@@ -220,7 +236,11 @@ def _source_invalidated(
         ):
             return True
         for row in relations.get(current_id, ()):
-            if row["type"] in LINEAGE_RELATIONS and row["target"] in objects:
+            if (
+                row["type"] in LINEAGE_RELATIONS
+                and row["target"] in objects
+                and _exists_by(objects[row["target"]], as_of=as_of)
+            ):
                 queue.append((row["target"], depth + 1))
     return False
 
@@ -259,6 +279,112 @@ def _exists_by(item: Mapping[str, Any], *, as_of: datetime | None) -> bool:
         return _iso_datetime(item.get("created_at"), label="created_at") <= as_of
     except BeliefContextError:
         return False
+
+
+def _source_update_time(item: Mapping[str, Any]) -> datetime | None:
+    payload = item.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    try:
+        return _iso_datetime(payload.get("checked_at"), label="checked_at")
+    except BeliefContextError:
+        return None
+
+
+def _is_retraction_update(item: Mapping[str, Any]) -> bool:
+    payload = item.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    return str(
+        payload.get("status") or ""
+    ).strip().lower() in _INVALID_SOURCE_STATES or str(
+        payload.get("update_type") or ""
+    ).strip().lower() in {
+        "retraction",
+        "withdrawal",
+    }
+
+
+def _valid_source_update_supersessions(
+    objects: Mapping[str, Mapping[str, Any]],
+    relations: Mapping[str, Sequence[Mapping[str, str]]],
+    *,
+    as_of: datetime | None,
+) -> set[str]:
+    """Resolve retraction supersession without letting status checks erase it."""
+
+    valid: set[str] = set()
+    for successor_id, successor in objects.items():
+        if (
+            successor.get("kind") != "source_update"
+            or str(successor.get("state") or "").strip().lower()
+            not in _ACTIVE_SIGNAL_STATES
+            or not _exists_by(successor, as_of=as_of)
+        ):
+            continue
+        payload = successor.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        if (
+            str(payload.get("update_type") or "").strip().lower() != "reinstatement"
+            or str(payload.get("status") or "").strip().lower()
+            in _INVALID_SOURCE_STATES
+            or not str(payload.get("notice_id") or "").strip()
+        ):
+            continue
+        successor_sources = sorted(
+            {
+                row["target"]
+                for row in relations.get(successor_id, ())
+                if row["type"] == "updates"
+            }
+        )
+        if successor_sources != [str(payload.get("source_id") or "")]:
+            continue
+        successor_time = _source_update_time(successor)
+        if successor_time is None:
+            continue
+        superseded_rows = [
+            row
+            for row in relations.get(successor_id, ())
+            if row["type"] == "supersedes"
+        ]
+        if len(superseded_rows) != 1:
+            continue
+        for row in superseded_rows:
+            target = objects.get(row["target"])
+            if target is None or not _exists_by(target, as_of=as_of):
+                continue
+            target_payload = target.get("payload")
+            target_payload = (
+                target_payload if isinstance(target_payload, Mapping) else {}
+            )
+            target_sources = sorted(
+                {
+                    target_row["target"]
+                    for target_row in relations.get(row["target"], ())
+                    if target_row["type"] == "updates"
+                }
+            )
+            target_invalidates = {
+                target_row["target"]
+                for target_row in relations.get(row["target"], ())
+                if target_row["type"] == "invalidates"
+            }
+            target_time = _source_update_time(target)
+            if (
+                target.get("kind") == "source_update"
+                and str(target.get("state") or "").strip().lower()
+                in _ACTIVE_SIGNAL_STATES
+                and _is_retraction_update(target)
+                and target_sources == successor_sources
+                and target_sources
+                and target_sources == [str(target_payload.get("source_id") or "")]
+                and target_invalidates == set(target_sources)
+                and str(payload.get("provider") or "")
+                == str(target_payload.get("provider") or "")
+                and target_time is not None
+                and successor_time > target_time
+            ):
+                valid.add(row["target"])
+    return valid
 
 
 def _selector_bound(item: Mapping[str, Any]) -> bool:
@@ -314,11 +440,12 @@ def _signal_row(
     actor = item.get("actor")
     actor = actor if isinstance(actor, Mapping) else {}
     authority = str(actor.get("authority") or "unknown").strip() or "unknown"
-    roots, lineage_truncated = _source_roots(
+    roots, lineage_truncated, future_lineage_excluded = _source_roots(
         object_id,
         objects=objects,
         relations=relations,
         max_depth=_MAX_LINEAGE_DEPTH,
+        as_of=as_of,
     )
     temporal_status, valid_until = _temporal_state(item, as_of=as_of)
     invalidated = _source_invalidated(
@@ -326,6 +453,7 @@ def _signal_row(
         objects=objects,
         relations=relations,
         invalidated_ids=invalidated_ids,
+        as_of=as_of,
     )
     # Malformed temporal metadata is not evidence of freshness.  Keep the
     # signal visible for audit, but fail closed so it cannot support a belief.
@@ -333,6 +461,7 @@ def _signal_row(
     active = (
         temporal_status in {"not_declared", "current"}
         and not invalidated
+        and not future_lineage_excluded
         # Only terminal positive lifecycle states may influence the projection.
         # Draft/locked/running and unknown states remain visible but inactive.
         and state in _ACTIVE_SIGNAL_STATES
@@ -351,6 +480,7 @@ def _signal_row(
         "invalidated": invalidated,
         "active": active,
         "lineage_truncated": lineage_truncated,
+        "lineage_not_observed_as_of": future_lineage_excluded,
     }
 
 
@@ -466,12 +596,18 @@ def build_belief_context_projection(
     if relation_truncated:
         structural_blockers.append("relation_limit_exceeded")
 
+    valid_source_update_supersessions = _valid_source_update_supersessions(
+        by_id,
+        relation_rows_by_id,
+        as_of=as_of_datetime,
+    )
     invalidated_ids = {
         row["target"]
         for object_id in by_id
         for row in relation_rows_by_id[object_id]
         if row["type"] in INVALIDATION_RELATIONS
         and row["target"] in by_id
+        and object_id not in valid_source_update_supersessions
         and _exists_by(by_id[object_id], as_of=as_of_datetime)
         and str(by_id[object_id].get("state") or "").strip().lower()
         in _ACTIVE_SIGNAL_STATES
@@ -599,6 +735,11 @@ def build_belief_context_projection(
             action_blockers.append("independent_evaluator_not_observed")
         if any(row["lineage_truncated"] for row in support_rows + challenge_rows):
             action_blockers.append("source_lineage_truncated")
+        if any(
+            row.get("lineage_not_observed_as_of")
+            for row in support_rows + challenge_rows
+        ):
+            action_blockers.append("source_lineage_not_observed_as_of")
         if structural_blockers:
             action_blockers.append("projection_incomplete")
         if belief_state == "contested":
@@ -660,6 +801,14 @@ def build_belief_context_projection(
         warnings.append("stale_target_evidence")
     if any(item["independent_support_source_count"] < 2 for item in assessments):
         warnings.append("limited_independent_support")
+    if any(
+        row.get("lineage_not_observed_as_of")
+        for assessment in assessments
+        for row in (
+            assessment["supporting_signals"] + assessment["challenging_signals"]
+        )
+    ):
+        warnings.append("future_lineage_excluded")
     core = {
         "policy": BELIEF_CONTEXT_POLICY,
         "confidence_semantics": BELIEF_CONTEXT_SEMANTICS,
@@ -860,6 +1009,7 @@ def _visible_projection_issues(payload: Mapping[str, Any]) -> list[str]:
                     signal.get("state") in _ACTIVE_SIGNAL_STATES
                     and signal.get("temporal_status") in {"not_declared", "current"}
                     and signal.get("invalidated") is False
+                    and signal.get("lineage_not_observed_as_of") is not True
                 )
                 if signal.get("active") is not expected_active:
                     issues.add("signal_activity_inconsistent")
@@ -971,6 +1121,11 @@ def _visible_projection_issues(payload: Mapping[str, Any]) -> list[str]:
             for row in support_rows + challenge_rows
         ):
             expected_blockers.add("source_lineage_truncated")
+        if any(
+            row.get("lineage_not_observed_as_of") is True
+            for row in support_rows + challenge_rows
+        ):
+            expected_blockers.add("source_lineage_not_observed_as_of")
         if payload.get("complete") is not True:
             expected_blockers.add("projection_incomplete")
         if assessment.get("action_blockers") != sorted(expected_blockers):
@@ -1015,6 +1170,16 @@ def _visible_projection_issues(payload: Mapping[str, Any]) -> list[str]:
         for item in assessments
     ):
         expected_warnings.add("limited_independent_support")
+    if any(
+        isinstance(row, Mapping) and row.get("lineage_not_observed_as_of") is True
+        for assessment in assessments
+        if isinstance(assessment, Mapping)
+        for field in ("supporting_signals", "challenging_signals")
+        for row in (
+            assessment.get(field) if isinstance(assessment.get(field), list) else []
+        )
+    ):
+        expected_warnings.add("future_lineage_excluded")
     if payload.get("warnings") != sorted(expected_warnings):
         issues.add("projection_warnings_inconsistent")
     return sorted(issues)
