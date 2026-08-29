@@ -19,6 +19,15 @@ if TYPE_CHECKING:
         persist_benchmark_report,
         verify_benchmark_report,
     )
+    from .research_agent_benchmark import (
+        ResearchAgentBenchmarkError,
+        benchmark_research_agent,
+        execute_research_benchmark_tool,
+        research_agent_task_contract,
+        run_research_agent_episode,
+        score_research_agent_episode,
+        verify_research_agent_benchmark,
+    )
     from ai_scientist.utils.arft_coverage import build_arft_coverage, save_arft_coverage
     from .research_dag import build_research_dag, export_research_dag
     from .research_discovery import (
@@ -103,6 +112,15 @@ if TYPE_CHECKING:
     )
 
 _MODEL_EXPORTS = {"CommandResult", "ProjectRequest", "ServiceSettings"}
+_RESEARCH_AGENT_BENCHMARK_EXPORTS = {
+    "ResearchAgentBenchmarkError",
+    "benchmark_research_agent",
+    "execute_research_benchmark_tool",
+    "research_agent_task_contract",
+    "run_research_agent_episode",
+    "score_research_agent_episode",
+    "verify_research_agent_benchmark",
+}
 _DISCOVERY_EXPORTS = {
     "assess_generalization",
     "build_discovery_contract",
@@ -229,6 +247,10 @@ def __getattr__(name: str) -> Any:
         from . import benchmark
 
         value = getattr(benchmark, name)
+    elif name in _RESEARCH_AGENT_BENCHMARK_EXPORTS:
+        from . import research_agent_benchmark
+
+        value = getattr(research_agent_benchmark, name)
     elif name in {"build_research_dag", "export_research_dag"}:
         from . import research_dag
 
@@ -314,6 +336,7 @@ __all__ = [
     "build_system_comparison",
     "benchmark_autoresearch_pilot",
     "benchmark_first_run",
+    "benchmark_research_agent",
     "closure_level_summary",
     "assess_generalization",
     "build_discovery_contract",
@@ -322,6 +345,7 @@ __all__ = [
     "build_research_guide",
     "compare_workspace_history",
     "discovery_contract_template",
+    "execute_research_benchmark_tool",
     "export_research_dag",
     "render_research_context_for_prompt",
     "BELIEF_CONTEXT_POLICY",
@@ -350,7 +374,11 @@ __all__ = [
     "save_workspace_checkpoint",
     "save_arft_coverage",
     "persist_benchmark_report",
+    "research_agent_task_contract",
+    "run_research_agent_episode",
+    "score_research_agent_episode",
     "verify_benchmark_report",
+    "verify_research_agent_benchmark",
     "scan_research_anomalies",
     "build_opportunity_attempt",
     "build_opportunity_funnel_summary",
@@ -368,6 +396,7 @@ __all__ = [
     "save_opportunity_pool",
     "save_research_direction",
     "ResearchRolloutError",
+    "ResearchAgentBenchmarkError",
     "COMPARISON_BOUNDARY_POLICY",
     "INDEPENDENCE_ASSURANCE",
     "INDEPENDENCE_ATTESTATION_PURPOSE",

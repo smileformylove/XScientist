@@ -8,6 +8,12 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Added a bounded GLM-5.3 research-policy benchmark with a fixed Simpson's
+  paradox task, four deterministic statistical tools, strict JSON actions,
+  per-turn model identity checks, redacted traces, an offline verifier, and
+  non-compensable gates for evidence grounding, causal restraint, and negative
+  result preservation. Passing the synthetic contract never enables quality,
+  generalization, real-world truth, or cross-model comparison claims.
 - Upgraded scientific closure audits to `research-closure.v2`: every claim now
   discloses its direct and same-study attempts, evidence, states, plans,
   preregistrations, and selected experiment priorities. Failed or unfinished

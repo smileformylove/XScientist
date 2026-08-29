@@ -1,0 +1,709 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-agent-benchmark.v1/research_agent_benchmark.schema.json",
+  "title": "XScientist bounded research-agent benchmark",
+  "description": "A redacted, deterministic evaluation of one research-policy agent on a fixed synthetic task. Passing does not establish real-world scientific quality or generalization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "generated_at",
+    "runtime",
+    "ok",
+    "task",
+    "episode",
+    "score",
+    "claims",
+    "comparison_boundary",
+    "reproducibility"
+  ],
+  "properties": {
+    "schema": {"const": "xscientist.research-agent-benchmark.v1"},
+    "version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "generated_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "system"],
+      "properties": {
+        "python": {"type": "string", "minLength": 1, "maxLength": 64},
+        "system": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "ok": {"type": "boolean"},
+    "task": {"$ref": "#/$defs/task"},
+    "episode": {"$ref": "#/$defs/episode"},
+    "score": {"$ref": "#/$defs/score"},
+    "claims": {"$ref": "#/$defs/claims"},
+    "comparison_boundary": {"$ref": "#/$defs/comparisonBoundary"},
+    "reproducibility": {"$ref": "#/$defs/reproducibility"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+      "properties": {
+        "prompt_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "completion_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "total_tokens": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "task_kind",
+        "split",
+        "outcome",
+        "treatment_variable",
+        "pre_specified_stratifier",
+        "tool_set",
+        "reference_visibility",
+        "real_world_data",
+        "task_sha256"
+      ],
+      "properties": {
+        "task_id": {"const": "stratified-treatment-association-v1"},
+        "task_kind": {"const": "synthetic_observational_confounding"},
+        "split": {"const": "public_smoke_test"},
+        "outcome": {"const": "binary_success"},
+        "treatment_variable": {"const": "treatment_assignment"},
+        "pre_specified_stratifier": {"const": "difficulty"},
+        "tool_set": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "inspect_design",
+              "pooled_effect",
+              "stratified_effect",
+              "standardized_effect"
+            ]
+          }
+        },
+        "reference_visibility": {"const": "deterministic_evaluator_only"},
+        "real_world_data": {"const": false},
+        "task_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "policyContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_owner",
+        "execution_owner",
+        "evaluation_owner",
+        "model_requested",
+        "provider",
+        "expected_reported_model",
+        "configuration_observation",
+        "configuration_observation_source",
+        "configuration_verified"
+      ],
+      "properties": {
+        "decision_owner": {"const": "research_policy"},
+        "execution_owner": {"const": "deterministic_statistical_executor"},
+        "evaluation_owner": {"const": "deterministic_rubric"},
+        "model_requested": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "expected_reported_model": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$"
+        },
+        "configuration_observation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "requested_model",
+            "client_model",
+            "request_style",
+            "endpoint_fingerprint",
+            "endpoint_configured",
+            "endpoint_env",
+            "api_key_env",
+            "configuration_fingerprint"
+          ],
+          "properties": {
+            "provider": {"type": "string", "minLength": 1, "maxLength": 64},
+            "requested_model": {"type": "string", "minLength": 1, "maxLength": 128},
+            "client_model": {"type": "string", "minLength": 1, "maxLength": 128},
+            "request_style": {"type": "string", "minLength": 1, "maxLength": 64},
+            "endpoint_fingerprint": {
+              "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+            },
+            "endpoint_configured": {"type": "boolean"},
+            "endpoint_env": {"type": ["string", "null"], "maxLength": 64},
+            "api_key_env": {"type": ["string", "null"], "maxLength": 64},
+            "configuration_fingerprint": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "configuration_observation_source": {"enum": ["none", "runner_supplied_environment"]},
+        "configuration_verified": {"const": false}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_turns",
+        "max_tool_calls",
+        "max_seconds",
+        "max_output_tokens_per_turn",
+        "max_total_output_tokens",
+        "max_total_tokens",
+        "max_response_bytes_per_turn",
+        "max_invalid_actions"
+      ],
+      "properties": {
+        "max_turns": {"type": "integer", "minimum": 1, "maximum": 12},
+        "max_tool_calls": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_seconds": {"type": "number", "minimum": 1, "maximum": 600},
+        "max_output_tokens_per_turn": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 4096
+        },
+        "max_total_output_tokens": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 49152
+        },
+        "max_total_tokens": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1000000
+        },
+        "max_response_bytes_per_turn": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 65536
+        },
+        "max_invalid_actions": {"const": 1}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "network_used_declared",
+        "provider_used_declared",
+        "network_use_verified",
+        "provider_execution_verified",
+        "agent_execution_completed",
+        "termination_reason",
+        "turns_observed",
+        "tool_calls_executed",
+        "protocol_violations",
+        "budget_exceeded",
+        "duration_seconds",
+        "model_identity_exact",
+        "reported_models",
+        "usage",
+        "usage_complete",
+        "transport_error_code"
+      ],
+      "properties": {
+        "mode": {"enum": ["offline_test", "live_provider"]},
+        "network_used_declared": {"type": "boolean"},
+        "provider_used_declared": {"type": "boolean"},
+        "network_use_verified": {"const": false},
+        "provider_execution_verified": {"const": false},
+        "agent_execution_completed": {"type": "boolean"},
+        "termination_reason": {
+          "enum": [
+            "completed",
+            "turn_budget_exhausted",
+            "wall_time_exhausted",
+            "transport_failed",
+            "model_identity_unverified",
+            "protocol_violation_limit",
+            "tool_budget_exhausted",
+            "token_budget_exhausted"
+          ]
+        },
+        "turns_observed": {"type": "integer", "minimum": 0, "maximum": 12},
+        "tool_calls_executed": {"type": "integer", "minimum": 0, "maximum": 8},
+        "protocol_violations": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "invalid_action_schema",
+              "model_identity_not_exact",
+              "tool_budget_exceeded"
+            ]
+          }
+        },
+        "budget_exceeded": {"type": "boolean"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "model_identity_exact": {"type": "boolean"},
+        "reported_models": {
+          "type": "array",
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$"
+          }
+        },
+        "usage": {"$ref": "#/$defs/usage"},
+        "usage_complete": {"type": "boolean"},
+        "transport_error_code": {
+          "type": ["string", "null"],
+          "enum": ["invalid_transport_response", "transport_exception", null]
+        }
+      }
+    },
+    "traceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn",
+        "response_sha256",
+        "response_bytes",
+        "response_content_recorded",
+        "reported_model",
+        "reported_model_sha256",
+        "reported_model_recorded",
+        "identity_status",
+        "action_kind",
+        "action_sha256",
+        "tool",
+        "tool_call_id",
+        "observation_sha256",
+        "usage"
+      ],
+      "properties": {
+        "turn": {"type": "integer", "minimum": 1, "maximum": 12},
+        "response_sha256": {"$ref": "#/$defs/sha256"},
+        "response_bytes": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "response_content_recorded": {"const": false},
+        "reported_model": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$"
+        },
+        "reported_model_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "reported_model_recorded": {"type": "boolean"},
+        "identity_status": {
+          "enum": ["exact", "alias", "mismatch", "unavailable", "not_checked_after_timeout", "not_checked_after_budget"]
+        },
+        "action_kind": {"enum": ["tool", "final", "invalid", "identity_rejected", "tool_rejected", "discarded"]},
+        "action_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "tool": {
+          "type": ["string", "null"],
+          "enum": [
+            "inspect_design",
+            "pooled_effect",
+            "stratified_effect",
+            "standardized_effect",
+            null
+          ]
+        },
+        "tool_call_id": {
+          "type": ["string", "null"],
+          "pattern": "^tool-[0-9]{2}$"
+        },
+        "observation_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "usage": {"$ref": "#/$defs/usage"}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_call_id",
+        "tool",
+        "arguments_sha256",
+        "outcome",
+        "result",
+        "result_sha256"
+      ],
+      "properties": {
+        "tool_call_id": {"type": "string", "pattern": "^tool-[0-9]{2}$"},
+        "tool": {
+          "enum": [
+            "inspect_design",
+            "pooled_effect",
+            "stratified_effect",
+            "standardized_effect"
+          ]
+        },
+        "arguments_sha256": {"$ref": "#/$defs/sha256"},
+        "outcome": {"const": "success"},
+        "result": {"type": "object", "maxProperties": 16},
+        "result_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direction",
+        "adjusted_effect",
+        "analysis_basis",
+        "stratum_effects",
+        "pattern",
+        "confounding_detected",
+        "confounder",
+        "pooled_result_rejected",
+        "causal_status",
+        "recommendation",
+        "negative_result",
+        "uncertainty",
+        "limitations",
+        "next_experiment",
+        "evidence_tool_call_ids"
+      ],
+      "properties": {
+        "direction": {"enum": ["beneficial", "harmful", "inconclusive"]},
+        "adjusted_effect": {"type": "number", "minimum": -1, "maximum": 1},
+        "analysis_basis": {"enum": ["pooled", "stratified", "standardized", "inconclusive"]},
+        "stratum_effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["easy", "hard"],
+          "properties": {
+            "easy": {"type": "number", "minimum": -1, "maximum": 1},
+            "hard": {"type": "number", "minimum": -1, "maximum": 1}
+          }
+        },
+        "pattern": {"enum": ["simpson_reversal", "no_reversal", "uncertain"]},
+        "confounding_detected": {"type": "boolean"},
+        "confounder": {"enum": ["difficulty", "none", "unknown"]},
+        "pooled_result_rejected": {"type": "boolean"},
+        "causal_status": {"enum": ["not_identified", "identified", "uncertain"]},
+        "recommendation": {
+          "enum": [
+            "reject_pooled_benefit_claim",
+            "accept_pooled_benefit_claim",
+            "withhold_conclusion"
+          ]
+        },
+        "negative_result": {"enum": ["preserve_and_report", "discard", "not_applicable"]},
+        "uncertainty": {"enum": ["low", "moderate", "high"]},
+        "limitations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "aggregated_data",
+              "observational_assignment",
+              "no_causal_identification",
+              "small_hard_treatment_stratum"
+            ]
+          }
+        },
+        "next_experiment": {
+          "enum": [
+            "stratified_randomized_replication",
+            "collect_more_observational_data",
+            "none"
+          ]
+        },
+        "evidence_tool_call_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^tool-[0-9]{2}$"}
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_prompt_recorded",
+        "raw_response_recorded",
+        "response_content_recorded",
+        "tool_results_recorded",
+        "credentials_recorded",
+        "endpoint_url_recorded",
+        "exception_messages_recorded",
+        "structured_decision_recorded"
+      ],
+      "properties": {
+        "raw_prompt_recorded": {"const": false},
+        "raw_response_recorded": {"const": false},
+        "response_content_recorded": {"const": false},
+        "tool_results_recorded": {"const": true},
+        "credentials_recorded": {"const": false},
+        "endpoint_url_recorded": {"const": false},
+        "exception_messages_recorded": {"const": false},
+        "structured_decision_recorded": {"type": "boolean"}
+      }
+    },
+    "episode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "task_id",
+        "task_sha256",
+        "policy_contract",
+        "limits",
+        "execution",
+        "trace",
+        "observations",
+        "decision",
+        "retention"
+      ],
+      "properties": {
+        "schema": {"const": "xscientist.research-agent-episode.v1"},
+        "task_id": {"const": "stratified-treatment-association-v1"},
+        "task_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_contract": {"$ref": "#/$defs/policyContract"},
+        "limits": {"$ref": "#/$defs/limits"},
+        "execution": {"$ref": "#/$defs/execution"},
+        "trace": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {"$ref": "#/$defs/traceRow"}
+        },
+        "observations": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/observation"}
+        },
+        "decision": {"anyOf": [{"$ref": "#/$defs/decision"}, {"type": "null"}]},
+        "retention": {"$ref": "#/$defs/retention"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"decision": {"type": "null"}},
+            "required": ["decision"]
+          },
+          "then": {
+            "properties": {
+              "retention": {
+                "properties": {"structured_decision_recorded": {"const": false}}
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "retention": {
+                "properties": {"structured_decision_recorded": {"const": true}}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "research_strategy",
+        "evidence_grounding",
+        "scientific_inference",
+        "scientific_integrity",
+        "execution_discipline"
+      ],
+      "properties": {
+        "research_strategy": {"type": "integer", "minimum": 0, "maximum": 25},
+        "evidence_grounding": {"type": "integer", "minimum": 0, "maximum": 25},
+        "scientific_inference": {"type": "integer", "minimum": 0, "maximum": 25},
+        "scientific_integrity": {"type": "integer", "minimum": 0, "maximum": 20},
+        "execution_discipline": {"type": "integer", "minimum": 0, "maximum": 5}
+      }
+    },
+    "hardGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_completed",
+        "model_identity_exact",
+        "protocol_valid",
+        "design_inspected",
+        "pooled_analysis_executed",
+        "stratified_analysis_executed",
+        "standardized_analysis_executed",
+        "correct_adjusted_direction",
+        "effect_grounded",
+        "all_required_evidence_cited",
+        "reversal_identified",
+        "decision_coherent",
+        "confounding_recognized",
+        "causal_boundary_respected",
+        "limitations_complete",
+        "uncertainty_calibrated",
+        "follow_up_experiment_identified",
+        "negative_result_preserved",
+        "usage_accounting_complete",
+        "within_budgets"
+      ],
+      "properties": {
+        "agent_completed": {"type": "boolean"},
+        "model_identity_exact": {"type": "boolean"},
+        "protocol_valid": {"type": "boolean"},
+        "design_inspected": {"type": "boolean"},
+        "pooled_analysis_executed": {"type": "boolean"},
+        "stratified_analysis_executed": {"type": "boolean"},
+        "standardized_analysis_executed": {"type": "boolean"},
+        "correct_adjusted_direction": {"type": "boolean"},
+        "effect_grounded": {"type": "boolean"},
+        "all_required_evidence_cited": {"type": "boolean"},
+        "reversal_identified": {"type": "boolean"},
+        "decision_coherent": {"type": "boolean"},
+        "confounding_recognized": {"type": "boolean"},
+        "causal_boundary_respected": {"type": "boolean"},
+        "limitations_complete": {"type": "boolean"},
+        "uncertainty_calibrated": {"type": "boolean"},
+        "follow_up_experiment_identified": {"type": "boolean"},
+        "negative_result_preserved": {"type": "boolean"},
+        "usage_accounting_complete": {"type": "boolean"},
+        "within_budgets": {"type": "boolean"}
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "rubric_id",
+        "rubric_sha256",
+        "score",
+        "score_max",
+        "threshold",
+        "sections",
+        "hard_gates",
+        "benchmark_contract_passed",
+        "judge",
+        "llm_judge_used"
+      ],
+      "properties": {
+        "schema": {"const": "xscientist.research-agent-score.v1"},
+        "rubric_id": {"const": "research-policy-confounding-v1"},
+        "rubric_sha256": {"$ref": "#/$defs/sha256"},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "score_max": {"const": 100},
+        "threshold": {"const": 85},
+        "sections": {"$ref": "#/$defs/sections"},
+        "hard_gates": {"$ref": "#/$defs/hardGates"},
+        "benchmark_contract_passed": {"type": "boolean"},
+        "judge": {"const": "deterministic_local_rubric"},
+        "llm_judge_used": {"const": false}
+      }
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_execution_completed",
+        "benchmark_contract_passed",
+        "rollout_audit_complete",
+        "scientific_contract_verified",
+        "quality_claim_allowed",
+        "causal_claim_allowed",
+        "real_world_truth_claim_allowed",
+        "generalization_claim_allowed",
+        "cross_model_comparison_allowed",
+        "cross_system_comparison_allowed",
+        "production_promotion_allowed",
+        "report_authenticity_verified",
+        "live_rollout_verified",
+        "research_taste_claim_allowed",
+        "independent_scientific_review_completed"
+      ],
+      "properties": {
+        "agent_execution_completed": {"type": "boolean"},
+        "benchmark_contract_passed": {"type": "boolean"},
+        "rollout_audit_complete": {"const": true},
+        "scientific_contract_verified": {"const": false},
+        "quality_claim_allowed": {"const": false},
+        "causal_claim_allowed": {"const": false},
+        "real_world_truth_claim_allowed": {"const": false},
+        "generalization_claim_allowed": {"const": false},
+        "cross_model_comparison_allowed": {"const": false},
+        "cross_system_comparison_allowed": {"const": false},
+        "production_promotion_allowed": {"const": false},
+        "report_authenticity_verified": {"const": false},
+        "live_rollout_verified": {"const": false},
+        "research_taste_claim_allowed": {"const": false},
+        "independent_scientific_review_completed": {"const": false}
+      }
+    },
+    "comparisonBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "official_benchmark",
+        "external_scores_injected",
+        "matched_cross_model_conditions",
+        "real_scientific_result_evaluated",
+        "human_baseline_run"
+      ],
+      "properties": {
+        "scope": {"const": "single_fixed_synthetic_task"},
+        "official_benchmark": {"const": false},
+        "external_scores_injected": {"const": false},
+        "matched_cross_model_conditions": {"const": false},
+        "real_scientific_result_evaluated": {"const": false},
+        "human_baseline_run": {"const": false}
+      }
+    },
+    "reproducibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_sha256",
+        "rubric_sha256",
+        "implementation_sha256",
+        "trace_sha256",
+        "fingerprint",
+        "deterministic_fields",
+        "excluded_observations"
+      ],
+      "properties": {
+        "task_sha256": {"$ref": "#/$defs/sha256"},
+        "rubric_sha256": {"$ref": "#/$defs/sha256"},
+        "implementation_sha256": {"$ref": "#/$defs/sha256"},
+        "trace_sha256": {"$ref": "#/$defs/sha256"},
+        "fingerprint": {"$ref": "#/$defs/sha256"},
+        "deterministic_fields": {"const": true},
+        "excluded_observations": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "generated_at",
+              "runtime",
+              "episode.execution.duration_seconds"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
