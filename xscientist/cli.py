@@ -1764,9 +1764,10 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         PROVIDER_FIELDS,
         ProviderConfigError,
         activate_provider,
+        begin_managed_environment_transaction,
+        begin_provider_file_transaction,
         discover_workspace_root,
         load_provider_config,
-        load_workspace_environment,
         normalize_provider_name,
         provider_statuses,
         remove_provider,
@@ -1875,6 +1876,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         if parsed.provider_command == "test":
             from ai_scientist.utils.provider_registry import (
                 probe_live_model,
+                probe_openai_compatible_tool_call,
             )
 
             if parsed.timeout <= 0:
@@ -1889,16 +1891,21 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             entry = (config.get("providers") or {}).get(provider, {})
             if not isinstance(entry, dict) or not entry.get("model"):
                 raise ProviderConfigError(f"provider {provider!r} is not configured")
-            load_result = load_workspace_environment(workspace)
-            if load_result.get("error"):
-                raise ProviderConfigError(str(load_result["error"]))
             model = str(entry["model"])
+            provider_environment = workspace_environment(workspace)
             try:
-                probe = probe_live_model(
-                    model,
-                    timeout=float(parsed.timeout),
-                    env=workspace_environment(workspace),
-                )
+                if provider == "openai_compat":
+                    probe = probe_openai_compatible_tool_call(
+                        model,
+                        timeout=float(parsed.timeout),
+                        env=provider_environment,
+                    )
+                else:
+                    probe = probe_live_model(
+                        model,
+                        timeout=float(parsed.timeout),
+                        env=provider_environment,
+                    )
             except ValueError as exc:
                 raise ProviderConfigError(str(exc)) from exc
             payload = {
@@ -1910,6 +1917,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 "supported": probe.get("supported", True),
                 "identity_status": probe.get("identity_status", "unavailable"),
                 "billing": "one explicit minimal model request",
+                "capability": probe.get("capability", "text_completion"),
                 "probe": probe,
                 "response_content_recorded": False,
             }
@@ -1925,6 +1933,9 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"Provider test: {provider}")
                 print(f"Requested model: {probe.get('client_model') or model}")
                 print(f"Reported model: {probe.get('reported_model') or '-'}")
+                if provider == "openai_compat":
+                    state = "verified" if probe.get("tool_call_valid") else "failed"
+                    print(f"Forced function call: {state}")
                 if probe.get("error_code") == "live_probe_not_supported":
                     print(
                         "Live probe: not supported for this provider family; "
@@ -2022,9 +2033,6 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         "response_content_recorded": False,
                     }
                 else:
-                    load_result = load_workspace_environment(workspace)
-                    if load_result.get("error"):
-                        raise ProviderConfigError(str(load_result["error"]))
                     try:
                         live_probe = probe_live_model(
                             model,
@@ -2303,15 +2311,36 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"BFTS config updated: {bfts_updated}")
             return 0
 
-        payload = _configure_provider(
-            workspace,
-            name=parsed.name,
-            model_value=parsed.model,
-            base_url_value=parsed.base_url,
-            activate=not parsed.no_activate,
-            update_bfts=not parsed.no_update_bfts,
-            non_interactive=parsed.non_interactive,
-        )
+        environment_transaction = begin_managed_environment_transaction()
+        try:
+            file_transaction = begin_provider_file_transaction()
+        except BaseException:
+            environment_transaction.rollback()
+            raise
+        try:
+            payload = _configure_provider(
+                workspace,
+                name=parsed.name,
+                model_value=parsed.model,
+                base_url_value=parsed.base_url,
+                activate=not parsed.no_activate,
+                update_bfts=not parsed.no_update_bfts,
+                non_interactive=parsed.non_interactive,
+            )
+        except BaseException as exc:
+            try:
+                file_conflicts = file_transaction.rollback()
+            finally:
+                environment_conflicts = environment_transaction.rollback()
+            if file_conflicts or environment_conflicts:
+                raise ProviderConfigError(
+                    "provider configuration failed; rollback preserved "
+                    "concurrently changed state"
+                ) from exc
+            raise
+        else:
+            file_transaction.commit()
+            environment_transaction.commit()
         if parsed.as_json:
             print(
                 json.dumps(
@@ -2702,8 +2731,6 @@ def _setup_workspace_snapshot(
 ) -> dict[str, object]:
     """Capture only files and repository state setup is authorized to mutate."""
 
-    import os
-
     from . import provider_config as provider_config_module
 
     workspace_existed = workspace.exists()
@@ -2755,16 +2782,6 @@ def _setup_workspace_snapshot(
             extra_parent_state[parent.as_posix()] = (workspace / parent).is_dir()
             parent = parent.parent
     had_git, _staged, _tracked = _workspace_git_changes(workspace)
-    provider_environment_names = set(provider_config_module.ALLOWED_ENV_NAMES) | {
-        "AI_SCIENTIST_ACTIVE_PROVIDER",
-        "AI_SCIENTIST_DEFAULT_MODEL",
-        "ZHIPU_DEFAULT_MODEL",
-        *provider_config_module._MANAGED_ENV_VALUES,
-    }
-    process_environment = {
-        name: os.environ.get(name) for name in provider_environment_names
-    }
-    managed_environment = dict(provider_config_module._MANAGED_ENV_VALUES)
     head = None
     symbolic_ref = None
     git_identity: dict[str, dict[str, object]] = {}
@@ -2796,7 +2813,7 @@ def _setup_workspace_snapshot(
                     completed.stdout.rstrip("\n") if completed.returncode == 0 else ""
                 ),
             }
-    return {
+    snapshot = {
         "workspace_existed": workspace_existed,
         "files": files,
         "directories": directories,
@@ -2807,20 +2824,19 @@ def _setup_workspace_snapshot(
         "head": head,
         "symbolic_ref": symbolic_ref,
         "git_identity": git_identity,
-        "process_environment": process_environment,
-        "managed_environment": managed_environment,
-        "post_process_environment": dict(process_environment),
-        "post_managed_environment": dict(managed_environment),
         "post_files": {},
     }
+    # Begin attribution only after every fallible snapshot read completed.  All
+    # deeper calls in this thread (including diagnostics) inherit the context,
+    # while another thread receives an independent journal.
+    snapshot["environment_transaction"] = (
+        provider_config_module.begin_managed_environment_transaction()
+    )
+    return snapshot
 
 
 def _record_setup_post_state(workspace: Path, snapshot: dict[str, object]) -> None:
     """Record exact transaction-owned leaf states before calling external checks."""
-
-    import os
-
-    from . import provider_config as provider_config_module
 
     selected = set(_SETUP_TRANSACTION_FILES)
     extra_files = snapshot.get("extra_files")
@@ -2851,24 +2867,14 @@ def _record_setup_post_state(workspace: Path, snapshot: dict[str, object]) -> No
         workspace,
         complete=not bool(snapshot.get("had_git")),
     )
-    original_process = snapshot.get("process_environment")
-    original_managed = snapshot.get("managed_environment")
-    environment_names = set(provider_config_module.ALLOWED_ENV_NAMES) | {
-        "AI_SCIENTIST_ACTIVE_PROVIDER",
-        "AI_SCIENTIST_DEFAULT_MODEL",
-        "ZHIPU_DEFAULT_MODEL",
-        *provider_config_module._MANAGED_ENV_VALUES,
-    }
-    if isinstance(original_process, dict):
-        environment_names.update(str(name) for name in original_process)
-    if isinstance(original_managed, dict):
-        environment_names.update(str(name) for name in original_managed)
-    snapshot["post_process_environment"] = {
-        name: os.environ.get(name) for name in environment_names
-    }
-    snapshot["post_managed_environment"] = dict(
-        provider_config_module._MANAGED_ENV_VALUES
-    )
+
+
+def _commit_setup_environment(snapshot: dict[str, object]) -> None:
+    transaction = snapshot.get("environment_transaction")
+    commit = getattr(transaction, "commit", None)
+    if not callable(commit):  # pragma: no cover - internal invariant guard
+        raise OSError("managed environment transaction snapshot is invalid")
+    commit()
 
 
 def _setup_git_control_state(
@@ -2993,55 +2999,13 @@ def _setup_leaf_matches_post_state(
 def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> None:
     """Undo only paths created or changed by one failed setup invocation."""
 
-    import os
-
-    from . import provider_config as provider_config_module
-
     rollback_failed = False
 
-    process_environment = snapshot.get("process_environment")
-    post_process_environment = snapshot.get("post_process_environment")
-    if isinstance(process_environment, dict) and isinstance(
-        post_process_environment, dict
-    ):
-        for raw_name in set(process_environment) | set(post_process_environment):
-            name = str(raw_name)
-            original_value = process_environment.get(raw_name)
-            expected_value = post_process_environment.get(raw_name)
-            if os.environ.get(name) != expected_value:
-                rollback_failed = True
-                continue
-            if original_value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = str(original_value)
-    elif isinstance(process_environment, dict):
+    environment_transaction = snapshot.get("environment_transaction")
+    rollback_environment = getattr(environment_transaction, "rollback", None)
+    if not callable(rollback_environment):
         rollback_failed = True
-
-    managed_environment = snapshot.get("managed_environment")
-    post_managed_environment = snapshot.get("post_managed_environment")
-    if isinstance(managed_environment, dict) and isinstance(
-        post_managed_environment, dict
-    ):
-        missing = object()
-        managed_values = provider_config_module._MANAGED_ENV_VALUES
-        managed_names = (
-            set(managed_environment)
-            | set(post_managed_environment)
-            | set(managed_values)
-        )
-        for name in managed_names:
-            current_value = managed_values.get(name, missing)
-            expected_value = post_managed_environment.get(name, missing)
-            if current_value != expected_value:
-                rollback_failed = True
-                continue
-            original_value = managed_environment.get(name, missing)
-            if original_value is missing:
-                managed_values.pop(name, None)
-            else:
-                managed_values[name] = original_value
-    elif isinstance(managed_environment, dict):
+    elif rollback_environment():
         rollback_failed = True
 
     post_git = snapshot.get("post_git")
@@ -3395,6 +3359,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         _render_topic,
         create_workspace,
         ensure_workspace_gitignore,
+        resolve_workspace_root,
     )
     from .dependency_profiles import TASK_PROFILES
     from .provider_config import (
@@ -3408,8 +3373,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
     from .research_git import ResearchGitError, create_checkpoint, repository_status
     from .research_vcs import ResearchRepository
 
-    workspace = Path(parsed.directory).expanduser().resolve()
     try:
+        workspace = resolve_workspace_root(parsed.directory)
         provider_config_path = _validated_workspace_file(
             workspace,
             ".xscientist/providers.json",
@@ -4042,6 +4007,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
 
     if not report["ok"]:
         if existing_research:
+            _commit_setup_environment(start_snapshot)
             start_mutated = False
         else:
             try:
@@ -4081,6 +4047,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
             )
         return 1
 
+    _commit_setup_environment(start_snapshot)
     start_mutated = False
     if parsed.prepare_only:
         payload = {
@@ -5725,10 +5692,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Quick start: {payload['quickstart']}")
         return 0
     if parsed.command == "init":
-        from .onboarding import WorkspaceInitError, create_workspace
+        from .onboarding import (
+            WorkspaceInitError,
+            create_workspace,
+            resolve_workspace_root,
+        )
 
         try:
-            workspace = Path(parsed.directory).expanduser().resolve()
+            workspace = resolve_workspace_root(parsed.directory)
             if _validated_workspace_file(workspace, "research.yaml") is not None:
                 raise WorkspaceInitError(
                     "refusing to refresh an existing Research VCS workspace; "
@@ -5781,6 +5752,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             create_workspace,
             ensure_workspace_gitignore,
             refresh_generated_bfts_profile,
+            resolve_workspace_root,
         )
         from .provider_config import (
             DEFAULT_MODELS,
@@ -5818,7 +5790,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "in non-interactive mode"
                     )
                 selected_model = _prompt_provider_model(workspace_template_provider)
-            workspace = Path(parsed.directory).expanduser().resolve()
+            workspace = resolve_workspace_root(parsed.directory)
             workspace_was_present = workspace.exists()
             if (workspace / ".git").is_symlink():
                 raise WorkspaceInitError("setup refuses a symlinked .git control path")
@@ -6137,6 +6109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise WorkspaceInitError(
                         f"managed runtime checkpoint failed: {exc}"
                     ) from exc
+            _commit_setup_environment(setup_snapshot)
             setup_mutated = False
         except BaseException as exc:
             if setup_mutated and setup_snapshot is not None:

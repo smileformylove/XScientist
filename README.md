@@ -213,38 +213,57 @@ Available client extras are `openai`, `anthropic`, `zhipu`, `bedrock`,
 services such as DeepSeek, Gemini, OpenRouter, and custom endpoints.
 
 For any OpenAI-compatible service, configure the endpoint explicitly. `custom`
-is a friendly alias for the generic `openai_compat` provider; the URL and key
-stay in the workspace's permission-restricted, Git-ignored `.env` file:
+is a friendly alias for the generic `openai_compat` provider. In this
+non-interactive example the key remains only in the current process environment;
+the command never copies an exported secret into workspace files. The endpoint
+is stored in the workspace's permission-restricted, Git-ignored `.env` file:
 
 ```bash
 python -m pip install "xscientist[research,openai-compatible]"
 export OPENAI_COMPAT_API_KEY="..."
+xscientist init ./compatible-study \
+  --provider custom \
+  --model gpt-5.6-luna
 xscientist provider add custom \
+  --workspace ./compatible-study \
   --model gpt-5.6-luna \
   --base-url "https://your-compatible-service.example/v1" \
   --non-interactive
-xscientist provider test custom --json
+xscientist provider test custom \
+  --workspace ./compatible-study \
+  --json
 ```
 
+To persist a key in that protected `.env` file, do not export it and omit
+`--non-interactive`; XScientist requests it through a hidden prompt. A process
+environment value always takes precedence and is intentionally not duplicated.
+
 `provider test` makes one explicit minimal request and compares the model sent
-to the model reported by the endpoint. A mismatch (for example a gateway
-silently selecting a smaller model) is reported as unverified; the response
-content is never stored by the test.
+to the model reported by the endpoint. For `custom` routes it forces and
+validates one schema-constrained function call, because a text-only response
+does not qualify a research executor. A mismatch (for example a gateway
+silently selecting a smaller model) is reported as unverified; prompt,
+response, and tool-argument content are never stored by the test.
 
 ### GLM-5.3 as the research executor
 
-To use GLM-5.3 through a custom OpenAI-compatible route, keep transport values
-in the protected provider configuration and select the route-qualified model:
+To use GLM-5.3 through a custom OpenAI-compatible route, keep credentials in the
+process environment or protected `.env`, keep the endpoint in protected
+provider configuration, and select the route-qualified model:
 
 ```bash
+xscientist init ./glm53-study \
+  --provider custom \
+  --model glm-5.3
 xscientist provider add custom \
+  --workspace ./glm53-study \
   --model glm-5.3 \
   --base-url "https://your-compatible-service.example/v1" \
   --non-interactive
-xscientist provider test custom --json
-xscientist start ./glm53-study \
-  --provider custom \
-  --model openai_compat/glm-5.3
+xscientist provider test custom \
+  --workspace ./glm53-study \
+  --json
+xscientist start ./glm53-study
 ```
 
 The packaged `glm53` BFTS preset is also available to the Python SDK and
@@ -258,9 +277,9 @@ contains no endpoint, key, headers, or private transport data and applies a
 limit is required.
 
 For this route, the endpoint must report the exact model identity `glm-5.3`.
-A successful text probe does not prove image-input support. If the endpoint
-cannot accept images, VLM chart review fails closed instead of silently
-switching models.
+A successful function-call probe does not prove image-input support. If the
+endpoint cannot accept images, VLM chart review fails closed instead of
+silently switching models.
 
 For scripts and CI, make every consequential choice explicit:
 

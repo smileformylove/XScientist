@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import contextvars
+import itertools
 import json
 import os
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
 
-from ai_scientist.utils.atomic_io import atomic_write_text
+from ai_scientist.utils.atomic_io import atomic_write_bytes
 from ai_scientist.utils.privacy import redact_sensitive_text
 from ai_scientist.utils.provider_registry import resolve_model_provider
 from .dependency_profiles import (
@@ -36,6 +39,386 @@ PLACEHOLDER_VALUES = {"", "replace-me", "your-api-key", "your_api_key_here"}
 # do this routinely) from silently routing workspace B through workspace A's
 # endpoint or account.
 _MANAGED_ENV_VALUES: dict[str, tuple[str, str]] = {}
+
+# Process environment updates are shared by every in-process CLI invocation.
+# A plain before/after snapshot cannot identify who wrote a value: a later
+# snapshot can accidentally absorb another thread's update, and value-only
+# compare-and-swap cannot detect an ABA write of the same value.  Keep each
+# controlled mutation atomic and give it a unique provenance token instead.
+_ENVIRONMENT_LOCK = threading.RLock()
+_ENVIRONMENT_GENERATIONS: dict[str, int] = {}
+_ENVIRONMENT_GENERATION_COUNTER = itertools.count(1)
+_MISSING_ENVIRONMENT_VALUE = object()
+
+
+@dataclass(frozen=True)
+class _ManagedEnvironmentMutation:
+    name: str
+    before_process: object
+    before_managed: object
+    before_generation: object
+    after_process: object
+    after_managed: object
+    after_generation: int
+
+
+@dataclass
+class ManagedEnvironmentTransaction:
+    """Journal only environment writes made by the current execution context."""
+
+    _mutations: list[_ManagedEnvironmentMutation] = field(default_factory=list)
+    _active: bool = True
+    _context_token: contextvars.Token["ManagedEnvironmentTransaction | None"] | None = (
+        None
+    )
+    _conflicts: tuple[str, ...] = ()
+
+    def _record(self, mutation: _ManagedEnvironmentMutation) -> None:
+        if not self._active:  # pragma: no cover - internal invariant guard
+            raise RuntimeError("managed environment transaction is closed")
+        self._mutations.append(mutation)
+
+    def _leave_context(self) -> None:
+        token = self._context_token
+        if token is None:
+            return
+        self._context_token = None
+        if _ACTIVE_ENVIRONMENT_TRANSACTION.get() is self:
+            _ACTIVE_ENVIRONMENT_TRANSACTION.reset(token)
+
+    def commit(self) -> None:
+        """Keep the journaled state and stop attributing later writes to it."""
+
+        with _ENVIRONMENT_LOCK:
+            self._active = False
+        self._leave_context()
+
+    def rollback(self) -> tuple[str, ...]:
+        """Undo still-owned mutations while preserving every concurrent write."""
+
+        if not self._active:
+            return self._conflicts
+        conflicts: set[str] = set()
+        missing = _MISSING_ENVIRONMENT_VALUE
+        with _ENVIRONMENT_LOCK:
+            for mutation in reversed(self._mutations):
+                name = mutation.name
+                current_process = os.environ.get(name, missing)
+                current_managed = _MANAGED_ENV_VALUES.get(name, missing)
+                current_generation = _ENVIRONMENT_GENERATIONS.get(name, missing)
+                if not (
+                    _environment_values_equal(current_process, mutation.after_process)
+                    and _environment_values_equal(
+                        current_managed, mutation.after_managed
+                    )
+                    and _environment_values_equal(
+                        current_generation, mutation.after_generation
+                    )
+                ):
+                    conflicts.add(name)
+                    continue
+                _restore_process_environment(name, mutation.before_process)
+                _restore_managed_environment(name, mutation.before_managed)
+                if mutation.before_generation is missing:
+                    _ENVIRONMENT_GENERATIONS.pop(name, None)
+                else:
+                    _ENVIRONMENT_GENERATIONS[name] = int(mutation.before_generation)
+            self._active = False
+            self._conflicts = tuple(sorted(conflicts))
+        self._leave_context()
+        return self._conflicts
+
+
+_ACTIVE_ENVIRONMENT_TRANSACTION: contextvars.ContextVar[
+    ManagedEnvironmentTransaction | None
+] = contextvars.ContextVar("xscientist_managed_environment_transaction", default=None)
+
+
+def _environment_values_equal(left: object, right: object) -> bool:
+    missing = _MISSING_ENVIRONMENT_VALUE
+    if left is missing or right is missing:
+        return left is right
+    return left == right
+
+
+def _restore_process_environment(name: str, value: object) -> None:
+    if value is _MISSING_ENVIRONMENT_VALUE:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = str(value)
+
+
+def _restore_managed_environment(name: str, value: object) -> None:
+    if value is _MISSING_ENVIRONMENT_VALUE:
+        _MANAGED_ENV_VALUES.pop(name, None)
+    else:
+        owner, managed_value = value  # type: ignore[misc]
+        _MANAGED_ENV_VALUES[name] = (str(owner), str(managed_value))
+
+
+def begin_managed_environment_transaction() -> ManagedEnvironmentTransaction:
+    """Attribute controlled mutations in this context to a new transaction."""
+
+    if _ACTIVE_ENVIRONMENT_TRANSACTION.get() is not None:
+        raise RuntimeError("nested managed environment transactions are unsupported")
+    transaction = ManagedEnvironmentTransaction()
+    transaction._context_token = _ACTIVE_ENVIRONMENT_TRANSACTION.set(transaction)
+    return transaction
+
+
+def _replace_managed_environment(
+    name: str,
+    *,
+    process_value: str | None,
+    managed_value: tuple[str, str] | None,
+) -> None:
+    """Atomically replace one process value and its ownership attribution."""
+
+    name = str(name)
+    missing = _MISSING_ENVIRONMENT_VALUE
+    after_process: object = missing if process_value is None else str(process_value)
+    after_managed: object = missing if managed_value is None else managed_value
+    with _ENVIRONMENT_LOCK:
+        before_process = os.environ.get(name, missing)
+        before_managed = _MANAGED_ENV_VALUES.get(name, missing)
+        before_generation = _ENVIRONMENT_GENERATIONS.get(name, missing)
+        if _environment_values_equal(
+            before_process, after_process
+        ) and _environment_values_equal(before_managed, after_managed):
+            return
+        _restore_process_environment(name, after_process)
+        _restore_managed_environment(name, after_managed)
+        generation = next(_ENVIRONMENT_GENERATION_COUNTER)
+        _ENVIRONMENT_GENERATIONS[name] = generation
+        transaction = _ACTIVE_ENVIRONMENT_TRANSACTION.get()
+        if transaction is not None:
+            transaction._record(
+                _ManagedEnvironmentMutation(
+                    name=name,
+                    before_process=before_process,
+                    before_managed=before_managed,
+                    before_generation=before_generation,
+                    after_process=after_process,
+                    after_managed=after_managed,
+                    after_generation=generation,
+                )
+            )
+
+
+@dataclass(frozen=True)
+class _ProviderFileState:
+    kind: str
+    content: bytes | None = None
+    mode: int | None = None
+    device: int | None = None
+    inode: int | None = None
+
+
+@dataclass(frozen=True)
+class _ProviderFileMutation:
+    path: Path
+    before: _ProviderFileState
+    before_generation: object
+    after: _ProviderFileState
+    after_generation: int
+
+
+@dataclass
+class ProviderFileTransaction:
+    """CAS rollback for the exact provider files written by one command."""
+
+    _mutations: list[_ProviderFileMutation] = field(default_factory=list)
+    _active: bool = True
+    _context_token: contextvars.Token["ProviderFileTransaction | None"] | None = None
+    _conflicts: tuple[str, ...] = ()
+
+    def _record(self, mutation: _ProviderFileMutation) -> None:
+        if any(existing.path == mutation.path for existing in self._mutations):
+            raise RuntimeError("provider file transaction wrote one path twice")
+        self._mutations.append(mutation)
+
+    def _leave_context(self) -> None:
+        token = self._context_token
+        if token is None:
+            return
+        self._context_token = None
+        if _ACTIVE_PROVIDER_FILE_TRANSACTION.get() is self:
+            _ACTIVE_PROVIDER_FILE_TRANSACTION.reset(token)
+
+    def commit(self) -> None:
+        with _PROVIDER_FILE_LOCK:
+            self._active = False
+        self._leave_context()
+
+    def rollback(self) -> tuple[str, ...]:
+        if not self._active:
+            return self._conflicts
+        missing = _MISSING_ENVIRONMENT_VALUE
+        conflicts: set[str] = set()
+        with _PROVIDER_FILE_LOCK:
+            for mutation in reversed(self._mutations):
+                try:
+                    current = _capture_provider_file_state(mutation.path)
+                except (OSError, ProviderConfigError):
+                    conflicts.add(str(mutation.path))
+                    continue
+                generation = _PROVIDER_FILE_GENERATIONS.get(mutation.path, missing)
+                if current != mutation.after or not _environment_values_equal(
+                    generation, mutation.after_generation
+                ):
+                    conflicts.add(str(mutation.path))
+                    continue
+                try:
+                    _restore_provider_file_state(mutation.path, mutation.before)
+                except (OSError, ProviderConfigError):
+                    conflicts.add(str(mutation.path))
+                    continue
+                if mutation.before_generation is missing:
+                    _PROVIDER_FILE_GENERATIONS.pop(mutation.path, None)
+                else:
+                    _PROVIDER_FILE_GENERATIONS[mutation.path] = int(
+                        mutation.before_generation
+                    )
+            self._active = False
+            self._conflicts = tuple(sorted(conflicts))
+        self._leave_context()
+        return self._conflicts
+
+
+_PROVIDER_FILE_LOCK = threading.RLock()
+_PROVIDER_FILE_GENERATIONS: dict[Path, int] = {}
+_PROVIDER_FILE_GENERATION_COUNTER = itertools.count(1)
+_ACTIVE_PROVIDER_FILE_TRANSACTION: contextvars.ContextVar[
+    ProviderFileTransaction | None
+] = contextvars.ContextVar("xscientist_provider_file_transaction", default=None)
+
+
+def begin_provider_file_transaction() -> ProviderFileTransaction:
+    if _ACTIVE_PROVIDER_FILE_TRANSACTION.get() is not None:
+        raise RuntimeError("nested provider file transactions are unsupported")
+    transaction = ProviderFileTransaction()
+    transaction._context_token = _ACTIVE_PROVIDER_FILE_TRANSACTION.set(transaction)
+    return transaction
+
+
+def _capture_provider_file_state(path: Path) -> _ProviderFileState:
+    target = Path(path).expanduser().absolute()
+    try:
+        stat_result = target.lstat()
+    except FileNotFoundError:
+        return _ProviderFileState(kind="absent")
+    if target.is_symlink() or not target.is_file():
+        return _ProviderFileState(
+            kind="unsafe",
+            mode=stat_result.st_mode & 0o7777,
+            device=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
+    content = target.read_bytes()
+    confirmed = target.lstat()
+    if (confirmed.st_dev, confirmed.st_ino) != (
+        stat_result.st_dev,
+        stat_result.st_ino,
+    ):
+        raise ProviderConfigError("provider file changed while it was inspected")
+    return _ProviderFileState(
+        kind="file",
+        content=content,
+        mode=confirmed.st_mode & 0o7777,
+        device=confirmed.st_dev,
+        inode=confirmed.st_ino,
+    )
+
+
+def _restore_provider_file_state(path: Path, state: _ProviderFileState) -> None:
+    if state.kind == "absent":
+        path.unlink(missing_ok=True)
+        return
+    if state.kind != "file" or state.content is None or state.mode is None:
+        raise ProviderConfigError("provider file rollback snapshot is unsafe")
+    atomic_write_bytes(path, state.content)
+    path.chmod(state.mode)
+
+
+def _atomic_provider_text_replace(
+    path: Path,
+    content: str,
+    *,
+    mode: int,
+) -> tuple[int, int]:
+    """Replace a file and return the exact identity of our temporary inode."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(raw_temp)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            stat_result = os.fstat(handle.fileno())
+        temp.replace(path)
+        try:
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            directory_descriptor = None
+        if directory_descriptor is not None:
+            try:
+                os.fsync(directory_descriptor)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_descriptor)
+        return stat_result.st_dev, stat_result.st_ino
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _tracked_provider_file_write(
+    path: Path,
+    content: str,
+    *,
+    secure: bool = False,
+) -> None:
+    target = Path(path).expanduser().absolute()
+    encoded = content.encode("utf-8")
+    missing = _MISSING_ENVIRONMENT_VALUE
+    with _PROVIDER_FILE_LOCK:
+        before = _capture_provider_file_state(target)
+        if before.kind not in {"absent", "file"}:
+            raise ProviderConfigError("provider file must be a regular file")
+        before_generation = _PROVIDER_FILE_GENERATIONS.get(target, missing)
+        expected_identity = _atomic_provider_text_replace(
+            target,
+            content,
+            mode=(0o600 if secure else int(before.mode or 0o600)),
+        )
+        after = _capture_provider_file_state(target)
+        if (
+            after.kind != "file"
+            or after.content != encoded
+            or (after.device, after.inode) != expected_identity
+        ):
+            raise ProviderConfigError(
+                "provider file changed concurrently after atomic replacement"
+            )
+        generation = next(_PROVIDER_FILE_GENERATION_COUNTER)
+        _PROVIDER_FILE_GENERATIONS[target] = generation
+        transaction = _ACTIVE_PROVIDER_FILE_TRANSACTION.get()
+        if transaction is not None:
+            transaction._record(
+                _ProviderFileMutation(
+                    path=target,
+                    before=before,
+                    before_generation=before_generation,
+                    after=after,
+                    after_generation=generation,
+                )
+            )
 
 
 @dataclass(frozen=True)
@@ -556,14 +939,15 @@ def _process_environment_for_workspace(
     user's unrelated shell variable therefore keeps its normal precedence.
     """
 
-    source = dict(os.environ if environ is None else environ)
     if environ is not None:
+        return dict(environ)
+    with _ENVIRONMENT_LOCK:
+        source = dict(os.environ)
+        current = _workspace_key(workspace)
+        for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
+            if owner != current and source.get(name) == value:
+                source.pop(name, None)
         return source
-    current = _workspace_key(workspace)
-    for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
-        if owner != current and source.get(name) == value:
-            source.pop(name, None)
-    return source
 
 
 def _effective_workspace_environment(
@@ -586,8 +970,11 @@ def mark_managed_environment(
     cleaned = str(value or "").strip()
     if not cleaned:
         return
-    os.environ[str(name)] = cleaned
-    _MANAGED_ENV_VALUES[str(name)] = (_workspace_key(root), cleaned)
+    _replace_managed_environment(
+        str(name),
+        process_value=cleaned,
+        managed_value=(_workspace_key(root), cleaned),
+    )
 
 
 def workspace_environment(
@@ -606,6 +993,11 @@ def workspace_environment(
     env_file = resolve_env_file(
         workspace, str(config.get("env_file") or DEFAULT_ENV_FILE)
     )
+    if env_file.is_file() and not _env_file_is_private(env_file):
+        raise ProviderConfigError(
+            "refusing to read credentials with broad permissions: "
+            f"{env_file.relative_to(workspace).as_posix()}"
+        )
     stored = read_env_file(env_file) if env_file.is_file() else {}
     return _effective_workspace_environment(workspace, stored, environ)
 
@@ -640,40 +1032,48 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
         }
     stored = read_env_file(env_file)
     current_workspace_key = _workspace_key(workspace)
-    for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
-        if owner != current_workspace_key and os.environ.get(name) == value:
-            os.environ.pop(name, None)
-            _MANAGED_ENV_VALUES.pop(name, None)
-    process_environment = _process_environment_for_workspace(workspace)
     loaded_names: list[str] = []
     overridden_names: list[str] = []
-    for name, value in stored.items():
-        if not _is_configured_value(value):
-            continue
-        if name not in process_environment:
-            mark_managed_environment(workspace, name, value)
-            process_environment[name] = value
-            loaded_names.append(name)
-        elif process_environment[name] != value:
-            # A value explicitly present in the shell remains authoritative;
-            # report the distinction instead of silently claiming the file was
-            # used.  Stale XScientist-managed values were removed above.
-            owner_value = _MANAGED_ENV_VALUES.get(name)
-            if owner_value and owner_value[0] == _workspace_key(workspace):
+    # Selection, stale-value removal, and replacement form one short critical
+    # section.  This prevents another workspace load from observing an env/map
+    # pair half-written by this one.  The lock is re-entrant because the helpers
+    # below also protect standalone callers.
+    with _ENVIRONMENT_LOCK:
+        for name, (owner, value) in list(_MANAGED_ENV_VALUES.items()):
+            if owner != current_workspace_key and os.environ.get(name) == value:
+                _replace_managed_environment(
+                    name,
+                    process_value=None,
+                    managed_value=None,
+                )
+        process_environment = _process_environment_for_workspace(workspace)
+        for name, value in stored.items():
+            if not _is_configured_value(value):
+                continue
+            if name not in process_environment:
                 mark_managed_environment(workspace, name, value)
                 process_environment[name] = value
-                overridden_names.append(name)
-    active = str(config.get("active_provider") or "").strip()
-    entry = config.get("providers", {}).get(active, {}) if active else {}
-    model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
-    if active:
-        mark_managed_environment(workspace, "AI_SCIENTIST_ACTIVE_PROVIDER", active)
-    if model:
-        # The active workspace is an explicit local choice. It must replace a
-        # stale process-wide default left by another workspace or desktop run.
-        # Role-specific AI_SCIENTIST_MODEL_* values and CLI flags still win.
-        mark_managed_environment(workspace, "AI_SCIENTIST_DEFAULT_MODEL", model)
-        mark_managed_environment(workspace, "ZHIPU_DEFAULT_MODEL", model)
+                loaded_names.append(name)
+            elif process_environment[name] != value:
+                # A value explicitly present in the shell remains authoritative;
+                # report the distinction instead of silently claiming the file was
+                # used.  Stale XScientist-managed values were removed above.
+                owner_value = _MANAGED_ENV_VALUES.get(name)
+                if owner_value and owner_value[0] == current_workspace_key:
+                    mark_managed_environment(workspace, name, value)
+                    process_environment[name] = value
+                    overridden_names.append(name)
+        active = str(config.get("active_provider") or "").strip()
+        entry = config.get("providers", {}).get(active, {}) if active else {}
+        model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
+        if active:
+            mark_managed_environment(workspace, "AI_SCIENTIST_ACTIVE_PROVIDER", active)
+        if model:
+            # The active workspace is an explicit local choice. It must replace a
+            # stale process-wide default left by another workspace or desktop run.
+            # Role-specific AI_SCIENTIST_MODEL_* values and CLI flags still win.
+            mark_managed_environment(workspace, "AI_SCIENTIST_DEFAULT_MODEL", model)
+            mark_managed_environment(workspace, "ZHIPU_DEFAULT_MODEL", model)
     return {
         "loaded": True,
         "workspace": ".",
@@ -686,25 +1086,7 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
 
 
 def _secure_atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp = Path(raw_temp)
-    try:
-        try:
-            os.fchmod(descriptor, 0o600)
-        except (AttributeError, OSError):
-            pass
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp.replace(path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    finally:
-        temp.unlink(missing_ok=True)
+    _tracked_provider_file_write(path, content, secure=True)
 
 
 def update_env_file(path: str | Path, updates: Mapping[str, str]) -> None:
@@ -739,7 +1121,7 @@ def update_env_file(path: str | Path, updates: Mapping[str, str]) -> None:
 def _write_provider_config(workspace: Path, config: Mapping[str, Any]) -> None:
     """Match the generated canonical form to avoid formatting-only VCS dirt."""
 
-    atomic_write_text(
+    _tracked_provider_file_write(
         workspace_config_path(workspace),
         json.dumps(config, indent=2, ensure_ascii=False) + "\n",
     )
@@ -825,7 +1207,7 @@ def update_bfts_models(path: str | Path, model: str) -> bool:
         if original.startswith("# Generated by xscientist init ")
         else ""
     )
-    atomic_write_text(
+    _tracked_provider_file_write(
         target,
         generated_header + yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
     )
@@ -946,9 +1328,13 @@ __all__ = [
     "normalize_provider_model",
     "PROVIDER_FIELDS",
     "PROVIDER_NAMES",
+    "ManagedEnvironmentTransaction",
+    "ProviderFileTransaction",
     "ProviderConfigError",
     "ProviderField",
     "activate_provider",
+    "begin_managed_environment_transaction",
+    "begin_provider_file_transaction",
     "configured_field_value",
     "discover_workspace_root",
     "load_provider_config",

@@ -37,6 +37,48 @@ class WorkspaceInitError(ValueError):
     """Raised when a workspace cannot be created without surprising data loss."""
 
 
+def resolve_workspace_root(directory: str | Path) -> Path:
+    """Resolve one workspace root without following a symlinked leaf path."""
+
+    candidate = Path(directory).expanduser()
+    try:
+        before = candidate.lstat()
+    except FileNotFoundError:
+        before = None
+    except OSError as exc:
+        raise WorkspaceInitError("could not safely inspect workspace path") from exc
+    if before is not None and stat.S_ISLNK(before.st_mode):
+        raise WorkspaceInitError("refusing a symlinked workspace path")
+
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceInitError("could not safely resolve workspace path") from exc
+
+    try:
+        after = candidate.lstat()
+    except FileNotFoundError:
+        after = None
+    except OSError as exc:
+        raise WorkspaceInitError("could not safely recheck workspace path") from exc
+    if after is not None and stat.S_ISLNK(after.st_mode):
+        raise WorkspaceInitError("refusing a symlinked workspace path")
+    if before is None:
+        if after is not None:
+            raise WorkspaceInitError("workspace path changed concurrently")
+    elif after is None or (
+        before.st_dev,
+        before.st_ino,
+        stat.S_IFMT(before.st_mode),
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        stat.S_IFMT(after.st_mode),
+    ):
+        raise WorkspaceInitError("workspace path changed concurrently")
+    return resolved
+
+
 def _validate_persisted_config_value(label: str, value: object) -> str:
     """Reject private literals before rendering them into several managed files."""
 
@@ -501,7 +543,7 @@ def _merged_workspace_gitignore(existing: str, generated: str) -> str:
 def ensure_workspace_gitignore(directory: str | Path) -> bool:
     """Idempotently add the complete versioned safety block to .gitignore."""
 
-    root = Path(directory).expanduser().resolve()
+    root = resolve_workspace_root(directory)
     target = root / ".gitignore"
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise WorkspaceInitError("refusing an unsafe .gitignore")
@@ -525,7 +567,7 @@ def refresh_generated_bfts_profile(directory: str | Path, profile: str) -> bool:
     normalized_profile = _validate_persisted_config_value("profile", profile).lower()
     if normalized_profile not in {"default", "deep"}:
         raise WorkspaceInitError("unsupported generated BFTS profile")
-    root = Path(directory).expanduser().resolve()
+    root = resolve_workspace_root(directory)
     target = root / "bfts_config.yaml"
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise WorkspaceInitError("refusing an unsafe bfts_config.yaml")
@@ -649,7 +691,7 @@ def create_workspace(
             + ", ".join(sorted(unsupported_protected))
         )
 
-    root = Path(directory).expanduser().resolve()
+    root = resolve_workspace_root(directory)
     if root.exists() and not root.is_dir():
         raise WorkspaceInitError("workspace path is not a directory")
     metadata_root = root / ".xscientist"
@@ -877,4 +919,5 @@ __all__ = [
     "create_workspace",
     "ensure_workspace_gitignore",
     "refresh_generated_bfts_profile",
+    "resolve_workspace_root",
 ]

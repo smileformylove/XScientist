@@ -814,13 +814,20 @@ class ProviderConfigTests(unittest.TestCase):
                 "reported_model": "gpt-5.6-luna",
                 "model_identity_verified": True,
                 "exact_model_match": True,
+                "identity_status": "exact",
+                "capability": "forced_function_call",
+                "tool_call_valid": True,
+                "usage_valid": True,
                 "response_content_recorded": False,
+                "request_content_recorded": False,
+                "tool_arguments_recorded": False,
             }
             output = io.StringIO()
             with (
                 mock.patch.dict(os.environ, {}, clear=True),
                 mock.patch(
-                    "ai_scientist.utils.provider_registry.probe_openai_compatible_model",
+                    "ai_scientist.utils.provider_registry."
+                    "probe_openai_compatible_tool_call",
                     return_value=probe_result,
                 ) as probe,
                 contextlib.redirect_stdout(output),
@@ -840,6 +847,8 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertNotIn("probe-secret", output.getvalue())
             payload = json.loads(output.getvalue())
             self.assertTrue(payload["ok"])
+            self.assertEqual(payload["capability"], "forced_function_call")
+            self.assertTrue(payload["probe"]["tool_call_valid"])
             self.assertFalse(payload["response_content_recorded"])
             probe.assert_called_once()
             self.assertEqual(

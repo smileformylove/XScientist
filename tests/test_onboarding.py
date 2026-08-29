@@ -985,6 +985,133 @@ class OnboardingTests(unittest.TestCase):
 
             self.assertEqual(list(outside.iterdir()), [])
 
+    def test_workspace_creation_refuses_existing_and_dangling_root_symlinks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for target_exists in (True, False):
+                with self.subTest(target_exists=target_exists):
+                    target = root / f"outside-{target_exists}"
+                    sentinel = target / "bfts_config.yaml"
+                    if target_exists:
+                        target.mkdir()
+                        sentinel.write_text(
+                            "SENTINEL_EXTERNAL_CONFIG\n",
+                            encoding="utf-8",
+                        )
+                    workspace = root / f"study-{target_exists}"
+                    try:
+                        workspace.symlink_to(target, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+
+                    with self.assertRaisesRegex(
+                        WorkspaceInitError,
+                        "symlinked workspace path",
+                    ):
+                        create_workspace(workspace, force=True)
+
+                    self.assertTrue(workspace.is_symlink())
+                    if target_exists:
+                        self.assertEqual(
+                            sentinel.read_text(encoding="utf-8"),
+                            "SENTINEL_EXTERNAL_CONFIG\n",
+                        )
+                        self.assertEqual(list(target.iterdir()), [sentinel])
+                    else:
+                        self.assertFalse(target.exists())
+
+    def test_workspace_commands_reject_root_symlinks_with_stable_json(self) -> None:
+        commands = (
+            (
+                "init",
+                "xscientist.init.v1",
+                lambda workspace: [
+                    "init",
+                    str(workspace),
+                    "--force",
+                    "--json",
+                ],
+            ),
+            (
+                "setup",
+                "xscientist.setup.v1",
+                lambda workspace: [
+                    "setup",
+                    str(workspace),
+                    "--task",
+                    "protocol",
+                    "--skip-credentials",
+                    "--force",
+                    "--json",
+                ],
+            ),
+            (
+                "start",
+                "xscientist.start.v1",
+                lambda workspace: [
+                    "start",
+                    str(workspace),
+                    "--question",
+                    "Does X change Y?",
+                    "--provider",
+                    "ollama",
+                    "--model",
+                    "ollama/qwen2.5:7b",
+                    "--prepare-only",
+                    "--skip-credentials",
+                    "--force",
+                    "--json",
+                ],
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for target_exists in (True, False):
+                for command, schema, argv in commands:
+                    with self.subTest(
+                        command=command,
+                        target_exists=target_exists,
+                    ):
+                        suffix = f"{command}-{target_exists}"
+                        target = root / f"outside-{suffix}"
+                        sentinel = target / "bfts_config.yaml"
+                        if target_exists:
+                            target.mkdir()
+                            sentinel.write_text(
+                                "SENTINEL_EXTERNAL_CONFIG\n",
+                                encoding="utf-8",
+                            )
+                        workspace = root / f"study-{suffix}"
+                        try:
+                            workspace.symlink_to(target, target_is_directory=True)
+                        except OSError as exc:
+                            self.skipTest(f"directory symlinks unavailable: {exc}")
+
+                        stdout, stderr = io.StringIO(), io.StringIO()
+                        with (
+                            contextlib.redirect_stdout(stdout),
+                            contextlib.redirect_stderr(stderr),
+                        ):
+                            code = cli_main(argv(workspace))
+
+                        self.assertEqual(code, 2)
+                        payload = json.loads(stdout.getvalue())
+                        self.assertEqual(payload["schema"], schema)
+                        self.assertFalse(payload["ok"])
+                        self.assertIn("symlinked workspace path", payload["error"])
+                        self.assertEqual(stderr.getvalue(), "")
+                        self.assertTrue(workspace.is_symlink())
+                        if target_exists:
+                            self.assertEqual(
+                                sentinel.read_text(encoding="utf-8"),
+                                "SENTINEL_EXTERNAL_CONFIG\n",
+                            )
+                            self.assertEqual(list(target.iterdir()), [sentinel])
+                        else:
+                            self.assertFalse(target.exists())
+
     def test_workspace_creation_refuses_a_symlinked_managed_leaf(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

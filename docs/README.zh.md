@@ -185,36 +185,53 @@ xscientist start ./hosted-study
 自定义兼容端点。
 
 对于任意 OpenAI-compatible 服务，可以显式添加自定义端点。`custom` 是通用
-`openai_compat` Provider 的易用别名；地址和密钥会写入工作区中权限受限且被 Git
-忽略的 `.env`，不会进入 Provider 元数据：
+`openai_compat` Provider 的易用别名。下面的非交互示例只从当前进程环境读取密钥，
+不会把已 export 的密钥复制进工作区；端点地址会写入权限受限且被 Git 忽略的
+`.env`：
 
 ```bash
 python -m pip install "xscientist[research,openai-compatible]"
 export OPENAI_COMPAT_API_KEY="..."
+xscientist init ./compatible-study \
+  --provider custom \
+  --model gpt-5.6-luna
 xscientist provider add custom \
+  --workspace ./compatible-study \
   --model gpt-5.6-luna \
   --base-url "https://your-compatible-service.example/v1" \
   --non-interactive
-xscientist provider test custom --json
+xscientist provider test custom \
+  --workspace ./compatible-study \
+  --json
 ```
 
+如果需要把密钥持久保存在这个受保护的 `.env` 中，不要先 export，并去掉
+`--non-interactive`；XScientist 会通过隐藏输入读取。进程环境中的值始终优先，且
+不会被重复落盘。
+
 `provider test` 会发起一次明确的最小请求，并比较客户端发送的模型和端点返回的
-模型。如果网关静默切换到较小模型，会标记为未验证；测试不会保存响应正文。
+模型。对于 `custom` 路由，它会强制并校验一次受 schema 约束的函数调用，因为只会
+返回文本还不足以成为科研执行者。如果网关静默切换到较小模型，会标记为未验证；
+测试不会保存 prompt、响应正文或工具参数。
 
 ### 把 GLM-5.3 作为科研执行者
 
-通过自定义 OpenAI-compatible 路由使用 GLM-5.3 时，传输参数只放在权限受限的
-Provider 配置中，并显式选择带路由前缀的模型：
+通过自定义 OpenAI-compatible 路由使用 GLM-5.3 时，密钥只放在进程环境或受保护
+的 `.env`，端点放在受保护的 Provider 配置中，并显式选择带路由前缀的模型：
 
 ```bash
+xscientist init ./glm53-study \
+  --provider custom \
+  --model glm-5.3
 xscientist provider add custom \
+  --workspace ./glm53-study \
   --model glm-5.3 \
   --base-url "https://your-compatible-service.example/v1" \
   --non-interactive
-xscientist provider test custom --json
-xscientist start ./glm53-study \
-  --provider custom \
-  --model openai_compat/glm-5.3
+xscientist provider test custom \
+  --workspace ./glm53-study \
+  --json
+xscientist start ./glm53-study
 ```
 
 Python SDK 和底层 `--bfts-config glm53` 流程也可以直接使用内置的 `glm53` BFTS
@@ -224,8 +241,8 @@ Python SDK 和底层 `--bfts-config glm53` 流程也可以直接使用内置的 
 私有传输信息，并设置 500,000 token / 6 小时上限；如果需要成本上限，必须另行
 配置自定义模型价格。
 
-该路由要求端点返回的模型身份精确等于 `glm-5.3`。文本探针通过不代表图像输入
-一定可用；如果端点不能接收图像，VLM 图表审查会安全失败，不会静默切换模型。
+该路由要求端点返回的模型身份精确等于 `glm-5.3`。函数调用探针通过不代表图像
+输入一定可用；如果端点不能接收图像，VLM 图表审查会安全失败，不会静默切换模型。
 
 脚本和 CI 应显式写出所有重要选择：
 

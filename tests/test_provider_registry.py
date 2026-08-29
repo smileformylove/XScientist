@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from ai_scientist.utils.provider_registry import (
@@ -11,9 +12,48 @@ from ai_scientist.utils.provider_registry import (
     model_provenance,
     probe_live_model,
     probe_openai_compatible_model,
+    probe_openai_compatible_tool_call,
     provider_env_statuses,
     resolve_model_provider,
 )
+
+
+def _tool_probe_response(
+    *,
+    model: str = "gpt-5.6-luna",
+    finish_reason: object = "tool_calls",
+    function_name: object = "xscientist_capability_check",
+    arguments: object = '{"status":"ok"}',
+    prompt_tokens: object = 11,
+    completion_tokens: object = 5,
+    total_tokens: object = 16,
+    include_tool_call: bool = True,
+) -> SimpleNamespace:
+    tool_calls = []
+    if include_tool_call:
+        tool_calls.append(
+            SimpleNamespace(
+                type="function",
+                function=SimpleNamespace(
+                    name=function_name,
+                    arguments=arguments,
+                ),
+            )
+        )
+    return SimpleNamespace(
+        model=model,
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(tool_calls=tool_calls),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        ),
+    )
 
 
 class ProviderRegistryTests(unittest.TestCase):
@@ -63,6 +103,29 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertFalse(result["supported"])
         self.assertEqual(result["error_code"], "live_probe_not_supported")
         self.assertFalse(result["response_content_recorded"])
+
+    def test_public_live_probe_keeps_the_text_completion_contract(self) -> None:
+        expected = {"ok": True, "capability": "text_completion"}
+        environment = {
+            "OPENAI_COMPAT_API_KEY": "test-key",
+            "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+        }
+        with mock.patch(
+            "ai_scientist.utils.provider_registry.probe_openai_compatible_model",
+            return_value=expected,
+        ) as text_probe:
+            result = probe_live_model(
+                "openai_compat/gpt-5.6-luna",
+                timeout=4.0,
+                env=environment,
+            )
+
+        self.assertIs(result, expected)
+        text_probe.assert_called_once_with(
+            "openai_compat/gpt-5.6-luna",
+            timeout=4.0,
+            env=environment,
+        )
 
     def test_resolve_model_provider_should_normalize_prefixed_and_legacy_models(
         self,
@@ -264,6 +327,128 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIsNone(result["reported_model"])
         self.assertEqual(result["error_code"], "provider_metadata_invalid")
+
+    def test_tool_probe_forces_and_validates_one_function_call(self) -> None:
+        with mock.patch("openai.OpenAI") as client_type:
+            client = client_type.return_value
+            client.chat.completions.create.return_value = _tool_probe_response()
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["tool_call_valid"])
+        self.assertTrue(result["usage_valid"])
+        self.assertEqual(result["identity_status"], "exact")
+        self.assertFalse(result["response_content_recorded"])
+        self.assertFalse(result["request_content_recorded"])
+        self.assertFalse(result["tool_arguments_recorded"])
+        request = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["model"], "gpt-5.6-luna")
+        self.assertEqual(
+            request["tool_choice"],
+            {
+                "type": "function",
+                "function": {"name": "xscientist_capability_check"},
+            },
+        )
+        self.assertEqual(
+            request["tools"][0]["function"]["parameters"]["required"],
+            ["status"],
+        )
+
+    def test_tool_probe_fails_when_provider_returns_text_instead_of_tool_call(
+        self,
+    ) -> None:
+        response = _tool_probe_response(
+            finish_reason="stop",
+            include_tool_call=False,
+        )
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = response
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["tool_call_valid"])
+        self.assertEqual(result["error_code"], "tool_call_contract_failed")
+
+    def test_tool_probe_rejects_inconsistent_usage(self) -> None:
+        response = _tool_probe_response(total_tokens=99)
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = response
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["tool_call_valid"])
+        self.assertFalse(result["usage_valid"])
+        self.assertEqual(result["error_code"], "provider_usage_invalid")
+        self.assertEqual(
+            result["usage"],
+            {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            },
+        )
+
+    def test_tool_probe_rejects_endpoint_model_substitution(self) -> None:
+        response = _tool_probe_response(model="different-model")
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = response
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["tool_call_valid"])
+        self.assertEqual(result["reported_model"], "different-model")
+        self.assertEqual(result["identity_status"], "mismatch")
+        self.assertEqual(result["error_code"], "model_identity_mismatch")
+
+    def test_tool_probe_never_publishes_sensitive_provider_metadata(self) -> None:
+        canary = "sk-" + "S" * 40
+        response = _tool_probe_response(
+            model=canary,
+            finish_reason=canary,
+            function_name=canary,
+            arguments=json.dumps({"status": "ok", "secret": canary}),
+        )
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = response
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(canary, rendered)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["reported_model"])
+        self.assertIsNone(result["finish_reason"])
+        self.assertFalse(result["tool_arguments_recorded"])
 
     def test_huggingface_base_url_tracks_requested_model(self) -> None:
         spec = resolve_model_provider("huggingface/org/custom-model")

@@ -23,6 +23,12 @@ OPENAI_COMPATIBLE_PROVIDERS = {
     "openai_compat",
 }
 
+# Long-running research executors may need substantially more than a short
+# interactive-chat timeout.  Keep the ceiling centralized so the text, VLM,
+# and tree-search transports enforce the same bounded policy.  A shorter
+# caller or remaining-budget timeout always takes precedence.
+OPENAI_COMPAT_CALL_TIMEOUT_SECONDS = 300.0
+
 LOCAL_PROVIDER_NAMES = {"ollama", "vertex_ai"}
 
 
@@ -746,10 +752,229 @@ def probe_openai_compatible_model(
         "error_code": None if envelope_valid else "provider_metadata_invalid",
         "latency_ms": round((time.monotonic() - started) * 1000, 1),
         "usage": {
-            key: value if usage_valid else None
-            for key, value in usage_values.items()
+            key: value if usage_valid else None for key, value in usage_values.items()
         },
         "response_content_recorded": False,
+        "provenance": provenance,
+    }
+
+
+def probe_openai_compatible_tool_call(
+    model: str,
+    *,
+    timeout: float = 30.0,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Verify one forced function call without retaining its content.
+
+    This is intentionally stricter than :func:`probe_openai_compatible_model`:
+    research executors need a usable tool-call transport, not merely a text
+    completion.  The returned record contains only bounded provider metadata,
+    aggregate usage, and validation booleans.  Prompt text, response content,
+    and function arguments are never copied into the result.
+    """
+
+    source = dict(os.environ if env is None else env)
+    spec = resolve_model_provider(model)
+    if spec.client_family != "openai_compatible":
+        raise ValueError(
+            "tool-call probing currently supports OpenAI-compatible providers, "
+            f"not {spec.provider!r}"
+        )
+    missing = _missing_requirements(spec, source)
+    if missing:
+        raise ValueError("missing provider configuration: " + ", ".join(missing))
+
+    provenance = model_provenance(model, env=source)
+
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise ValueError(
+            "the OpenAI-compatible client is not installed; install the selected "
+            "provider extra first"
+        ) from exc
+
+    kwargs, client_model = build_openai_compatible_client_kwargs(
+        model,
+        env=source,
+        max_retries=0,
+    )
+    if spec.provider == "openai":
+        _key_name, api_key = _pick_first_env(spec.api_key_env_vars, source)
+        if api_key:
+            kwargs["api_key"] = api_key
+
+    function_name = "xscientist_capability_check"
+    started = time.monotonic()
+    client = None
+    try:
+        kwargs["timeout"] = float(timeout)
+        client = OpenAI(**kwargs)
+        response = client.chat.completions.create(
+            model=client_model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Call the required capability-check function exactly once "
+                        "with status set to ok."
+                    ),
+                }
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": function_name,
+                        "description": "Return the fixed capability-check status.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "status": {"type": "string", "enum": ["ok"]}
+                            },
+                            "required": ["status"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            tool_choice={
+                "type": "function",
+                "function": {"name": function_name},
+            },
+            max_tokens=64,
+        )
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        if (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 100 <= status_code <= 599
+        ):
+            status_code = None
+        error_type = safe_provider_metadata_text(type(exc).__name__)
+        return {
+            "ok": False,
+            "supported": True,
+            "transport_ok": False,
+            "provider": spec.provider,
+            "requested_model": model,
+            "client_model": client_model,
+            "reported_model": None,
+            "model_identity_verified": False,
+            "exact_model_match": False,
+            "identity_status": "unavailable",
+            "capability": "forced_function_call",
+            "tool_call_valid": False,
+            "usage_valid": False,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "error_code": "live_request_failed",
+            "error_type": error_type or "ProviderError",
+            "http_status": status_code,
+            "response_content_recorded": False,
+            "request_content_recorded": False,
+            "tool_arguments_recorded": False,
+            "provenance": provenance,
+        }
+    finally:
+        close = getattr(client, "close", None) if client is not None else None
+        if callable(close):
+            close()
+
+    reported_model = safe_provider_metadata_text(getattr(response, "model", None))
+    choices_value = getattr(response, "choices", None)
+    choices = choices_value if isinstance(choices_value, list) else []
+    choice = choices[0] if len(choices) == 1 else None
+    finish_reason = safe_provider_metadata_text(
+        getattr(choice, "finish_reason", None),
+        allowed=frozenset({"tool_calls"}),
+    )
+    message = getattr(choice, "message", None)
+    tool_calls_value = getattr(message, "tool_calls", None)
+    tool_calls = tool_calls_value if isinstance(tool_calls_value, list) else []
+    tool_call = tool_calls[0] if len(tool_calls) == 1 else None
+    tool_type = safe_provider_metadata_text(
+        getattr(tool_call, "type", None),
+        allowed=frozenset({"function"}),
+    )
+    function = getattr(tool_call, "function", None)
+    returned_function_name = safe_provider_metadata_text(
+        getattr(function, "name", None),
+        allowed=frozenset({function_name}),
+    )
+    arguments = getattr(function, "arguments", None)
+    arguments_valid = False
+    if isinstance(arguments, str):
+        try:
+            parsed_arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            parsed_arguments = None
+        arguments_valid = parsed_arguments == {"status": "ok"}
+    tool_call_valid = bool(
+        finish_reason == "tool_calls"
+        and tool_type == "function"
+        and returned_function_name == function_name
+        and arguments_valid
+    )
+
+    usage = getattr(response, "usage", None)
+    usage_values = {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+    usage_integers_valid = all(
+        not isinstance(value, bool) and isinstance(value, int) and value > 0
+        for value in usage_values.values()
+    )
+    usage_valid = bool(
+        usage_integers_valid
+        and usage_values["total_tokens"]
+        == usage_values["prompt_tokens"] + usage_values["completion_tokens"]
+    )
+    identity_status = model_identity_status(client_model, reported_model)
+    identity_verified = identity_status != "unavailable"
+    exact_match = identity_status == "exact"
+    envelope_valid = bool(
+        reported_model is not None and tool_call_valid and usage_valid
+    )
+    if not exact_match:
+        error_code = (
+            "model_identity_mismatch"
+            if identity_status in {"alias", "mismatch"}
+            else "provider_metadata_invalid"
+        )
+    elif not tool_call_valid:
+        error_code = "tool_call_contract_failed"
+    elif not usage_valid:
+        error_code = "provider_usage_invalid"
+    else:
+        error_code = None
+    return {
+        "ok": bool(exact_match and envelope_valid),
+        "supported": True,
+        "transport_ok": True,
+        "provider": spec.provider,
+        "requested_model": model,
+        "client_model": client_model,
+        "reported_model": reported_model,
+        "model_identity_verified": identity_verified,
+        "exact_model_match": exact_match,
+        "identity_status": identity_status,
+        "capability": "forced_function_call",
+        "finish_reason": finish_reason,
+        "response_envelope_valid": envelope_valid,
+        "tool_call_valid": tool_call_valid,
+        "usage_valid": usage_valid,
+        "error_code": error_code,
+        "latency_ms": round((time.monotonic() - started) * 1000, 1),
+        "usage": {
+            key: value if usage_valid else None for key, value in usage_values.items()
+        },
+        "response_content_recorded": False,
+        "request_content_recorded": False,
+        "tool_arguments_recorded": False,
         "provenance": provenance,
     }
 
