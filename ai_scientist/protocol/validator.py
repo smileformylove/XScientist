@@ -8,6 +8,9 @@ when an artifact crosses an implementation boundary.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
 import json
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -69,6 +72,8 @@ class ValidationReport:
 
 PORTABILITY_PROFILE = "ara.portable.v1"
 ARA_CONFORMANCE_LEVELS = ("index", "trace", "replay", "verify")
+_MAX_LLM_TRACE_LINE_BYTES = 1024 * 1024
+_MAX_LLM_TRACE_OBJECT_BYTES = 1024 * 1024
 
 
 def _is_absolute_portable_path(value: Any) -> bool:
@@ -206,6 +211,194 @@ def _iter_json_files(directory: Path) -> list[Path]:
     return sorted(directory.glob("*.json"))
 
 
+def _read_llm_trace_object(
+    ara_root: Path,
+    ref: Any,
+    *,
+    path: str,
+    report: ValidationReport,
+) -> Any | None:
+    """Read one small CAS object without mutating the artifact under review."""
+
+    if not isinstance(ref, dict):
+        report.add_error(path, "object reference must be an object")
+        return None
+    digest_ref = ref.get("hash")
+    if not isinstance(digest_ref, str) or not digest_ref.startswith("sha256:"):
+        report.add_error(path, "object reference must use sha256")
+        return None
+    digest = digest_ref.removeprefix("sha256:")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        report.add_error(path, "object reference has an invalid sha256 digest")
+        return None
+    target = ara_root / "objects" / "sha256" / digest[:2] / digest[2:]
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        report.add_error(path, "referenced object is missing")
+        return None
+    except OSError as exc:
+        report.add_error(path, f"referenced object is unreadable: {type(exc).__name__}")
+        return None
+
+    is_gzip = raw[:2] == b"\x1f\x8b"
+    if ref.get("gzip") is not is_gzip:
+        report.add_error(path, "object reference gzip flag does not match storage")
+        return None
+    try:
+        if is_gzip:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+                payload = stream.read(_MAX_LLM_TRACE_OBJECT_BYTES + 1)
+        else:
+            payload = raw
+    except (OSError, EOFError):
+        report.add_error(path, "referenced object has invalid compression")
+        return None
+    if len(payload) > _MAX_LLM_TRACE_OBJECT_BYTES:
+        report.add_error(path, "referenced trace object exceeds the size limit")
+        return None
+    if ref.get("size") != len(payload):
+        report.add_error(path, "object reference size does not match content")
+        return None
+    if hashlib.sha256(payload).hexdigest() != digest:
+        report.add_error(path, "referenced object content hash does not match")
+        return None
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        report.add_error(path, "referenced trace object is not valid UTF-8 JSON")
+        return None
+
+
+def _validate_digest_receipt_row(
+    ara_root: Path,
+    row: dict[str, Any],
+    *,
+    path: str,
+    report: ValidationReport,
+) -> None:
+    """Cross-check a digest-only call row and all three referenced objects."""
+
+    messages_path = f"{path}.messages_ref"
+    response_path = f"{path}.response_ref"
+    receipt_path = f"{path}.call_receipt_ref"
+    messages = _read_llm_trace_object(
+        ara_root,
+        row.get("messages_ref"),
+        path=messages_path,
+        report=report,
+    )
+    response = _read_llm_trace_object(
+        ara_root,
+        row.get("response_ref"),
+        path=response_path,
+        report=report,
+    )
+    receipt = _read_llm_trace_object(
+        ara_root,
+        row.get("call_receipt_ref"),
+        path=receipt_path,
+        report=report,
+    )
+    if messages is not None:
+        _validate_against_schema(
+            messages,
+            load_schema("llm_payload_digest"),
+            messages_path,
+            report,
+        )
+        if isinstance(messages, dict) and messages.get("kind") != "messages":
+            report.add_error(messages_path, "messages_ref must identify messages")
+    if response is not None:
+        _validate_against_schema(
+            response,
+            load_schema("llm_payload_digest"),
+            response_path,
+            report,
+        )
+        if isinstance(response, dict) and response.get("kind") != "response":
+            report.add_error(response_path, "response_ref must identify a response")
+    if receipt is not None:
+        _validate_against_schema(
+            receipt,
+            load_schema("llm_call_receipt"),
+            receipt_path,
+            report,
+        )
+    if not all(isinstance(item, dict) for item in (messages, response, receipt)):
+        return
+
+    exact_fields = (
+        "provider",
+        "model",
+        "request_style",
+        "model_provenance",
+        "params",
+    )
+    for field_name in exact_fields:
+        if receipt.get(field_name) != row.get(field_name):
+            report.add_error(
+                f"{receipt_path}.{field_name}",
+                f"receipt {field_name} does not match the call row",
+            )
+    bindings = (
+        ("messages_sha256", messages.get("sha256")),
+        ("response_sha256", response.get("sha256")),
+        ("messages_ref_hash", (row.get("messages_ref") or {}).get("hash")),
+        ("response_ref_hash", (row.get("response_ref") or {}).get("hash")),
+    )
+    for field_name, expected in bindings:
+        if receipt.get(field_name) != expected:
+            report.add_error(
+                f"{receipt_path}.{field_name}",
+                f"receipt {field_name} does not match its referenced object",
+            )
+
+
+def _validate_llm_calls(ara_root: Path) -> ValidationReport:
+    """Validate every optional LLM call row and its new-format object graph."""
+
+    report = ValidationReport()
+    calls_path = ara_root / "llm" / "calls.jsonl"
+    if not calls_path.exists():
+        return report
+    report.checked.append("llm_call:llm/calls.jsonl")
+    try:
+        with calls_path.open("rb") as stream:
+            for index, raw_line in enumerate(stream, start=1):
+                path = f"llm/calls.jsonl[{index}]"
+                if len(raw_line) > _MAX_LLM_TRACE_LINE_BYTES:
+                    report.add_error(path, "LLM trace row exceeds the size limit")
+                    continue
+                try:
+                    row = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    report.add_error(path, "row is not valid UTF-8 JSON")
+                    continue
+                if not isinstance(row, dict):
+                    report.add_error(path, "row must be a JSON object")
+                    continue
+                _validate_against_schema(
+                    row,
+                    load_schema("llm_call"),
+                    path,
+                    report,
+                )
+                if row.get("trace_format") == "digest_receipt_v1":
+                    _validate_digest_receipt_row(
+                        ara_root,
+                        row,
+                        path=path,
+                        report=report,
+                    )
+    except OSError as exc:
+        report.add_error(
+            "llm/calls.jsonl",
+            f"call log is unreadable: {type(exc).__name__}",
+        )
+    return report
+
+
 def validate_ara(
     ara_root: str | Path,
     *,
@@ -338,6 +531,8 @@ def validate_ara(
             else Kind.VERIFY_REPORT
         )
         report.merge(_validate_kind(payload, kind, f"verify/{verify_file.name}"))
+
+    report.merge(_validate_llm_calls(ara_root))
 
     report.conformance = _assess_conformance(ara_root, manifest, graph_payload)
     requested_index = ARA_CONFORMANCE_LEVELS.index(level)

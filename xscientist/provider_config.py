@@ -69,10 +69,8 @@ PROVIDER_FIELDS: dict[str, tuple[ProviderField, ...]] = {
         ProviderField("OLLAMA_API_KEY", required=False),
     ),
     "openai_compat": (
-        ProviderField("OPENAI_COMPAT_API_KEY", aliases=("OPENAI_API_KEY",)),
-        ProviderField(
-            "OPENAI_COMPAT_BASE_URL", secret=False, aliases=("OPENAI_BASE_URL",)
-        ),
+        ProviderField("OPENAI_COMPAT_API_KEY"),
+        ProviderField("OPENAI_COMPAT_BASE_URL", secret=False),
     ),
     "bedrock": (
         ProviderField("AWS_ACCESS_KEY_ID"),

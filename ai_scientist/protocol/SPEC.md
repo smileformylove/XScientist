@@ -382,29 +382,45 @@ Every model invocation is logged as one JSON line under
 {
   "schema_version": "ara.v1",
   "protocol_kind": "llm_call",
+  "trace_format": "digest_receipt_v1",
   "call_id": "<uuid>",
   "ts": "2026-07-10T12:00:00Z",
   "provider": "anthropic",
   "model": "anthropic/glm-5.1",
   "params": {"temperature": 0.7, "max_tokens": 4096},
-  "messages_ref": {"hash": "sha256:...", "size": 12345, "gzip": true},
-  "response_ref": {"hash": "sha256:...", "size":   234, "gzip": false},
+  "messages_ref": {"hash": "sha256:...", "size": 180, "gzip": false},
+  "response_ref": {"hash": "sha256:...", "size": 180, "gzip": false},
+  "call_receipt_ref": {"hash": "sha256:...", "size": 512, "gzip": false},
   "tokens": {"input": 300, "output": 42},
   "latency_ms": 815
 }
 ```
 
-Message and response blobs live in `objects/` (§10) and are referenced by
-`messages_ref` / `response_ref`. Rows MUST NOT inline prompt or response
-text. Schema file: `schemas/llm_call.schema.json`.
+`messages_ref` and `response_ref` point to payload-free digest envelopes in
+`objects/` (§10); they never contain prompt, response, code, chain-of-thought,
+endpoint, or credential text. `call_receipt_ref` points to a semantic receipt
+that binds both envelope object hashes and their inner payload digests to the
+requested/reported model and stable request parameters. Validators MUST verify
+the CAS hash and size, the envelope kind and `payload_recorded=false`, and exact
+agreement between the row, receipt, and both envelopes. Rows MUST NOT inline
+prompt or response text. Legacy ARAs may still contain redacted payload blobs.
+Schema files: `schemas/llm_call.schema.json`,
+`schemas/llm_payload_digest.schema.json`, and
+`schemas/llm_call_receipt.schema.json`.
+
+Legacy `ara.v1` rows without `trace_format` remain readable. Writers emitting
+`trace_format=digest_receipt_v1` must include `call_receipt_ref`; consumers
+must not interpret those rows' `messages_ref` or `response_ref` objects as
+recoverable model content.
 
 ### 11.1 Binding LLM calls into `content_hash`
 
 Two additive node-level fields make LLM provenance first-class:
 
 - **`llm_call_refs`** on `exploration_graph.nodes[]` — array of
-  `messages_ref.hash` strings pointing back into `llm/calls.jsonl`. Purely
-  informational; not required by the validator.
+  `call_receipt_ref.hash` strings pointing back into `llm/calls.jsonl`. Legacy
+  graphs may contain `messages_ref.hash` values. Purely informational; not
+  required by the validator.
 - **`content_hash_inputs`** on both `exploration_graph.nodes[]` and
   `nodes/<id>/metrics.json` — array declaring which categories fed the
   hash. Older ARAs omit this and are treated as `["code","metric"]`. Add

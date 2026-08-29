@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
@@ -16,13 +17,26 @@ from ai_scientist.utils.provider_registry import (
 
 
 class ProviderRegistryTests(unittest.TestCase):
-    def test_model_identity_status_distinguishes_route_alias_from_substitution(self) -> None:
+    def test_model_identity_status_distinguishes_route_alias_from_substitution(
+        self,
+    ) -> None:
         self.assertEqual(
             model_identity_status("gpt-5.6-luna", "openai_compat/gpt-5.6-luna"),
             "alias",
         )
         self.assertEqual(model_identity_status("gpt-5.6-luna", "gpt-5.4"), "mismatch")
         self.assertEqual(model_identity_status("gpt-5.6-luna", None), "unavailable")
+
+    def test_custom_route_rejects_empty_or_sensitive_model_suffix(self) -> None:
+        for model in (
+            "openai_compat/",
+            "openai_compat/   ",
+            "custom/",
+            "openai_compat/" + "sk-" + "R" * 40,
+        ):
+            with self.subTest(model_type=len(model)):
+                with self.assertRaisesRegex(ValueError, "model name is invalid"):
+                    resolve_model_provider(model)
 
     def test_model_provenance_is_secret_free_and_endpoint_stable(self) -> None:
         provenance = model_provenance(
@@ -96,7 +110,42 @@ class ProviderRegistryTests(unittest.TestCase):
             env={"OPENAI_COMPAT_API_KEY": "compat-key"},
         )
         self.assertEqual(len(missing), 1)
-        self.assertIn("OPENAI_COMPAT_BASE_URL | OPENAI_BASE_URL", missing[0]["missing"])
+        self.assertIn("OPENAI_COMPAT_BASE_URL", missing[0]["missing"])
+
+    def test_openai_compat_requires_dedicated_key_and_base_url(self) -> None:
+        invalid_environments = (
+            {
+                "OPENAI_API_KEY": "generic-key",
+                "OPENAI_BASE_URL": "https://generic.example/v1",
+            },
+            {"OPENAI_COMPAT_API_KEY": "compat-key"},
+            {"OPENAI_COMPAT_BASE_URL": "https://compat.example/v1"},
+        )
+        for environment in invalid_environments:
+            with self.subTest(environment=sorted(environment)):
+                with self.assertRaises(ValueError):
+                    build_openai_compatible_client_kwargs(
+                        "openai_compat/research-model", env=environment
+                    )
+
+    def test_openai_compat_rejects_unsafe_endpoint_and_header(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            build_openai_compatible_client_kwargs(
+                "openai_compat/research-model",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "compat-key",
+                    "OPENAI_COMPAT_BASE_URL": "http://remote.example/v1",
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "USER_AGENT"):
+            build_openai_compatible_client_kwargs(
+                "openai_compat/research-model",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "compat-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://remote.example/v1",
+                    "OPENAI_COMPAT_USER_AGENT": "unsafe\r\nheader",
+                },
+            )
 
     def test_openai_compat_uses_configurable_neutral_user_agent(self) -> None:
         kwargs, model = build_openai_compatible_client_kwargs(
@@ -178,6 +227,44 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(result["reported_model"], "gpt-5.4-mini")
         self.assertEqual(result["identity_status"], "mismatch")
 
+    def test_live_probe_never_publishes_untrusted_provider_metadata(self) -> None:
+        canary = "sk-" + "P" * 40
+
+        class SensitiveValue:
+            def __str__(self) -> str:
+                return canary
+
+            __repr__ = __str__
+
+        class Usage:
+            prompt_tokens = 1
+            completion_tokens = 1
+            total_tokens = 2
+
+        class Choice:
+            finish_reason = SensitiveValue()
+
+        class Response:
+            model = canary
+            choices = [Choice()]
+            usage = Usage()
+
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = Response()
+            result = probe_openai_compatible_model(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(canary, rendered)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["reported_model"])
+        self.assertEqual(result["error_code"], "provider_metadata_invalid")
+
     def test_huggingface_base_url_tracks_requested_model(self) -> None:
         spec = resolve_model_provider("huggingface/org/custom-model")
 
@@ -201,6 +288,20 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertTrue(by_provider["zhipu"].configured)
         self.assertTrue(by_provider["openai_compat"].configured)
         self.assertFalse(by_provider["deepseek"].configured)
+
+    def test_provider_status_does_not_route_generic_openai_credentials_to_custom(
+        self,
+    ) -> None:
+        statuses = provider_env_statuses(
+            {
+                "OPENAI_API_KEY": "generic-key",
+                "OPENAI_BASE_URL": "https://generic.example/v1",
+            }
+        )
+        by_provider = {row.provider: row for row in statuses}
+        self.assertFalse(by_provider["openai_compat"].configured)
+        self.assertIn("OPENAI_COMPAT_API_KEY", by_provider["openai_compat"].detail)
+        self.assertIn("OPENAI_COMPAT_BASE_URL", by_provider["openai_compat"].detail)
 
 
 if __name__ == "__main__":

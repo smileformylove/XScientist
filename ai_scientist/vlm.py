@@ -15,7 +15,15 @@ from ai_scientist.utils.optional_dependencies import (
 )
 from ai_scientist.utils.provider_registry import (
     build_openai_compatible_client_kwargs,
+    model_provenance as build_model_provenance,
     resolve_model_provider,
+)
+from ai_scientist.llm import (
+    MAX_BATCH_RESPONSES,
+    MAX_RESEARCH_PROVIDER_RETRIES,
+    OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+    _record_llm_call_safe,
+    _validate_openai_compat_response,
 )
 
 backoff = import_backoff()
@@ -41,18 +49,13 @@ AVAILABLE_VLMS = [
     "gpt-4o-2024-11-20",
     "gpt-4o-mini-2024-07-18",
     "o3-mini",
-
     # Ollama models
-
     # llama4
     "ollama/llama4:16x17b",
-
     # mistral
     "ollama/mistral-small3.2:24b",
-
     # qwen
     "ollama/qwen2.5vl:32b",
-
     "ollama/z-uo/qwen2.5vl_tools:32b",
     "openai/gpt-4o-2024-11-20",
     "gemini/gemini-2.0-flash",
@@ -101,8 +104,14 @@ def budgeted_vlm_provider_call(
         system_message=system_message,
         max_output_tokens=max_output_tokens,
     )
+    timeout_seconds = reservation.timeout_seconds
+    if resolve_model_provider(model).provider == "openai_compat":
+        timeout_seconds = min(
+            float(timeout_seconds or OPENAI_COMPAT_CALL_TIMEOUT_SECONDS),
+            OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+        )
     with reservation:
-        response = create(reservation.timeout_seconds)
+        response = create(timeout_seconds)
         reservation.settle(response=response)
         return response
 
@@ -242,6 +251,7 @@ def prepare_vlm_prompt(
 @backoff.on_exception(
     backoff.expo,
     _VLM_RETRY_EXCEPTIONS,
+    max_tries=MAX_RESEARCH_PROVIDER_RETRIES,
 )
 def get_response_from_vlm(
     msg: str,
@@ -263,15 +273,17 @@ def get_response_from_vlm(
         content = prepare_vlm_prompt(msg, image_paths, max_images)
         # Construct message with all images
         new_msg_history = msg_history + [{"role": "user", "content": content}]
+        request_history = list(new_msg_history)
 
         response = make_vlm_call(
             client,
-            spec.client_model,
+            model,
             temperature,
             system_message=system_message,
             prompt=new_msg_history,
         )
 
+        _validate_openai_compat_response(spec, response)
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
@@ -286,6 +298,19 @@ def get_response_from_vlm(
         print("*" * 21 + " VLM END " + "*" * 21)
         print()
 
+    _record_llm_call_safe(
+        spec=spec,
+        model=model,
+        system_message=system_message,
+        messages=request_history,
+        response_text=content,
+        params={
+            "temperature": temperature,
+            "max_tokens": MAX_NUM_TOKENS,
+        },
+        response=response,
+        client=client,
+    )
     return content, new_msg_history
 
 
@@ -294,11 +319,20 @@ def create_client(model: str) -> tuple[Any, str]:
     if not _is_supported_vlm_model(model):
         raise ValueError(f"Model {model} not supported by VLM client.")
     spec = resolve_model_provider(model)
+    provider_env = dict(os.environ)
     kwargs, client_model = build_openai_compatible_client_kwargs(
-        model, env=os.environ, max_retries=0
+        model, env=provider_env, max_retries=0
     )
-    print(f"Using {spec.display_name} API with model {client_model}.")
-    return openai.OpenAI(**kwargs), client_model
+    print(f"Using {spec.display_name} API.")
+    client = openai.OpenAI(**kwargs)
+    try:
+        client._xscientist_model_provenance = build_model_provenance(
+            model,
+            env=provider_env,
+        )
+    except (AttributeError, TypeError):
+        pass
+    return client, model
 
 
 def extract_json_between_markers(llm_output: str) -> dict | None:
@@ -332,6 +366,7 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 @backoff.on_exception(
     backoff.expo,
     _VLM_RETRY_EXCEPTIONS,
+    max_tries=MAX_RESEARCH_PROVIDER_RETRIES,
 )
 def get_batch_responses_from_vlm(
     msg: str,
@@ -366,8 +401,12 @@ def get_batch_responses_from_vlm(
     spec = resolve_model_provider(model)
 
     if _is_supported_vlm_model(model):
-        if n_responses < 1:
-            raise ValueError("n_responses must be >= 1")
+        if (
+            isinstance(n_responses, bool)
+            or not isinstance(n_responses, int)
+            or not 1 <= n_responses <= MAX_BATCH_RESPONSES
+        ):
+            raise ValueError("n_responses must be an integer between 1 and 8")
 
         content = prepare_vlm_prompt(msg, image_paths, max_images)
 
@@ -381,6 +420,12 @@ def get_batch_responses_from_vlm(
             max_output_tokens=MAX_NUM_TOKENS,
             output_multiplier=n_responses,
         )
+        timeout_seconds = reservation.timeout_seconds
+        if spec.provider == "openai_compat":
+            timeout_seconds = min(
+                float(timeout_seconds or OPENAI_COMPAT_CALL_TIMEOUT_SECONDS),
+                OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+            )
         with reservation:
             response = client.chat.completions.create(
                 model=spec.client_model,
@@ -392,15 +437,16 @@ def get_batch_responses_from_vlm(
                 max_tokens=MAX_NUM_TOKENS,
                 n=n_responses,
                 seed=0,
-                **(
-                    {"timeout": reservation.timeout_seconds}
-                    if reservation.timeout_seconds is not None
-                    else {}
-                ),
+                **({"timeout": timeout_seconds} if timeout_seconds is not None else {}),
             )
             reservation.settle(response=response)
 
         # Extract content from all responses
+        _validate_openai_compat_response(
+            spec,
+            response,
+            expected_choices=n_responses,
+        )
         contents = [r.message.content for r in response.choices]
         new_msg_histories = [
             new_msg_history + [{"role": "assistant", "content": c}] for c in contents
@@ -418,4 +464,18 @@ def get_batch_responses_from_vlm(
         print("*" * 21 + " VLM END " + "*" * 21)
         print()
 
+    _record_llm_call_safe(
+        spec=spec,
+        model=model,
+        system_message=system_message,
+        messages=new_msg_history,
+        response_text=json.dumps(contents, ensure_ascii=False),
+        params={
+            "temperature": temperature,
+            "max_tokens": MAX_NUM_TOKENS,
+            "n": n_responses,
+        },
+        response=response,
+        client=client,
+    )
     return contents, new_msg_histories

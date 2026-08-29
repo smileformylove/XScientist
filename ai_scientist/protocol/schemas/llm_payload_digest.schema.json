@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/llm_payload_digest.schema.json",
+  "title": "ARA LLM Payload Digest",
+  "description": "Payload-free commitment to one redacted LLM request or response.",
+  "type": "object",
+  "required": ["schema", "kind", "sha256", "byte_count", "payload_recorded"],
+  "properties": {
+    "schema": {"const": "ara.llm-payload-digest.v1"},
+    "kind": {"enum": ["messages", "response"]},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "byte_count": {"type": "integer", "minimum": 0},
+    "payload_recorded": {"const": false},
+    "item_count": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

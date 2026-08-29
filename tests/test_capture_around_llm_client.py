@@ -30,6 +30,7 @@ class _Msg:
 class _Choice:
     def __init__(self, content: str) -> None:
         self.message = _Msg(content)
+        self.finish_reason = "stop"
 
 
 class _Usage:
@@ -39,21 +40,25 @@ class _Usage:
 
 
 class _Resp:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, model: str | None = None) -> None:
         self.choices = [_Choice(content)]
         self.usage = _Usage()
+        self.model = model
 
 
 class _FakeChatCompletions:
     def __init__(self, response: _Resp) -> None:
         self._response = response
+
     def create(self, **kwargs):
         return self._response
 
 
 class _FakeClient:
     def __init__(self, response: _Resp) -> None:
-        class _Chat: pass
+        class _Chat:
+            pass
+
         self.chat = _Chat()
         self.chat.completions = _FakeChatCompletions(response)
 
@@ -63,8 +68,10 @@ class CaptureAroundGetResponseFromLLMTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self._snap = {k: os.environ.get(k) for k in
-                      (ENV_ACTIVE_ROOT, ENV_ENABLED, ENV_STAGE, ENV_REDACT)}
+        self._snap = {
+            k: os.environ.get(k)
+            for k in (ENV_ACTIVE_ROOT, ENV_ENABLED, ENV_STAGE, ENV_REDACT)
+        }
         for k in self._snap:
             os.environ.pop(k, None)
         os.environ[ENV_ACTIVE_ROOT] = str(self.root)
@@ -83,8 +90,11 @@ class CaptureAroundGetResponseFromLLMTests(unittest.TestCase):
         client = _FakeClient(_Resp("hi back"))
         with capture_llm_calls() as refs:
             llm_mod.get_response_from_llm(
-                prompt="ping", client=client, model="gpt-4o-mini",
-                system_message="s", temperature=0.5,
+                prompt="ping",
+                client=client,
+                model="gpt-4o-mini",
+                system_message="s",
+                temperature=0.5,
             )
         self.assertEqual(len(refs), 1)
         self.assertTrue(refs[0].startswith("sha256:"))
@@ -94,36 +104,50 @@ class CaptureAroundGetResponseFromLLMTests(unittest.TestCase):
         with capture_llm_calls() as refs:
             for i in range(3):
                 llm_mod.get_response_from_llm(
-                    prompt=f"prompt-{i}", client=client, model="gpt-4o-mini",
-                    system_message="s", temperature=0.5,
+                    prompt=f"prompt-{i}",
+                    client=client,
+                    model="gpt-4o-mini",
+                    system_message="s",
+                    temperature=0.5,
                 )
         self.assertEqual(len(refs), 3)
 
     def test_same_prompt_two_calls_returns_same_ref(self) -> None:
-        # This is what makes Node.llm_call_refs de-dupe cleanly across
-        # multiple identical draft attempts.
+        # Fully identical calls have the same semantic receipt.
         client = _FakeClient(_Resp("out"))
         with capture_llm_calls() as refs:
             llm_mod.get_response_from_llm(
-                prompt="dup", client=client, model="gpt-4o-mini",
-                system_message="s", temperature=0.5,
+                prompt="dup",
+                client=client,
+                model="gpt-4o-mini",
+                system_message="s",
+                temperature=0.5,
             )
             llm_mod.get_response_from_llm(
-                prompt="dup", client=client, model="gpt-4o-mini",
-                system_message="s", temperature=0.5,
+                prompt="dup",
+                client=client,
+                model="gpt-4o-mini",
+                system_message="s",
+                temperature=0.5,
             )
         self.assertEqual(len(refs), 2)  # two records
-        self.assertEqual(refs[0], refs[1])  # same messages_ref
+        self.assertEqual(refs[0], refs[1])  # same call receipt
 
     def test_no_capture_no_side_effect_on_calls_jsonl(self) -> None:
         # Confirms capture is orthogonal to the on-disk journaling.
         client = _FakeClient(_Resp("outside"))
         llm_mod.get_response_from_llm(
-            prompt="q", client=client, model="gpt-4o-mini",
-            system_message="s", temperature=0.5,
+            prompt="q",
+            client=client,
+            model="gpt-4o-mini",
+            system_message="s",
+            temperature=0.5,
         )
-        rows = [json.loads(l) for l in
-                (self.root / "llm" / "calls.jsonl").read_text().splitlines() if l]
+        rows = [
+            json.loads(l)
+            for l in (self.root / "llm" / "calls.jsonl").read_text().splitlines()
+            if l
+        ]
         self.assertEqual(len(rows), 1)
 
 

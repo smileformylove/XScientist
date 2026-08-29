@@ -42,7 +42,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Public data shapes
 # ---------------------------------------------------------------------------
@@ -51,6 +50,7 @@ from typing import Any
 @dataclass
 class NodeDelta:
     """One node's story across two ARAs."""
+
     id: str
     kind: str  # "added" | "removed" | "hash_changed" | "same"
     hash_a: str | None = None
@@ -136,6 +136,7 @@ def diff_ara(ara_a: str | Path, ara_b: str | Path) -> ARADiff:
 def _diff_manifest(a: dict, b: dict) -> ManifestDelta:
     # Use hash_manifest so signatures / manifest_hash don't perturb equality.
     from ai_scientist.protocol import hash_manifest
+
     ha = hash_manifest(a) if a else None
     hb = hash_manifest(b) if b else None
 
@@ -158,8 +159,8 @@ def _diff_manifest(a: dict, b: dict) -> ManifestDelta:
 
 
 def _diff_references(a: dict, b: dict) -> ReferencesDelta:
-    refs_a = (a.get("references") or {})
-    refs_b = (b.get("references") or {})
+    refs_a = a.get("references") or {}
+    refs_b = b.get("references") or {}
 
     seed_a = (refs_a.get("seed") or {}).get("content_hash")
     seed_b = (refs_b.get("seed") or {}).get("content_hash")
@@ -171,7 +172,9 @@ def _diff_references(a: dict, b: dict) -> ReferencesDelta:
     changed: list[dict[str, Any]] = []
     for kind in sorted(pipe_a.keys() & pipe_b.keys()):
         if pipe_a[kind] != pipe_b[kind]:
-            changed.append({"kind": kind, "hash_a": pipe_a[kind], "hash_b": pipe_b[kind]})
+            changed.append(
+                {"kind": kind, "hash_a": pipe_a[kind], "hash_b": pipe_b[kind]}
+            )
 
     return ReferencesDelta(
         seed_hash_a=seed_a,
@@ -210,11 +213,23 @@ def _diff_nodes(a: Path, b: Path) -> dict[str, Any]:
     changed: list[NodeDelta] = []
     unchanged = 0
     for nid in sorted(idx_b.keys() - idx_a.keys()):
-        added.append(NodeDelta(id=nid, kind="added", hash_b=idx_b[nid]["hash"],
-                               inputs_b=idx_b[nid]["inputs"]))
+        added.append(
+            NodeDelta(
+                id=nid,
+                kind="added",
+                hash_b=idx_b[nid]["hash"],
+                inputs_b=idx_b[nid]["inputs"],
+            )
+        )
     for nid in sorted(idx_a.keys() - idx_b.keys()):
-        removed.append(NodeDelta(id=nid, kind="removed", hash_a=idx_a[nid]["hash"],
-                                 inputs_a=idx_a[nid]["inputs"]))
+        removed.append(
+            NodeDelta(
+                id=nid,
+                kind="removed",
+                hash_a=idx_a[nid]["hash"],
+                inputs_a=idx_a[nid]["inputs"],
+            )
+        )
     for nid in sorted(idx_a.keys() & idx_b.keys()):
         ha, hb = idx_a[nid]["hash"], idx_b[nid]["hash"]
         if ha == hb:
@@ -226,12 +241,17 @@ def _diff_nodes(a: Path, b: Path) -> dict[str, Any]:
             idx_a[nid],
             idx_b[nid],
         )
-        changed.append(NodeDelta(
-            id=nid, kind="hash_changed",
-            hash_a=ha, hash_b=hb,
-            inputs_a=idx_a[nid]["inputs"], inputs_b=idx_b[nid]["inputs"],
-            changed_categories=cats,
-        ))
+        changed.append(
+            NodeDelta(
+                id=nid,
+                kind="hash_changed",
+                hash_a=ha,
+                hash_b=hb,
+                inputs_a=idx_a[nid]["inputs"],
+                inputs_b=idx_b[nid]["inputs"],
+                changed_categories=cats,
+            )
+        )
     return {
         "nodes_added": added,
         "nodes_removed": removed,
@@ -242,7 +262,7 @@ def _diff_nodes(a: Path, b: Path) -> dict[str, Any]:
 
 def _index_nodes(graph: dict) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    for n in (graph.get("nodes") or []):
+    for n in graph.get("nodes") or []:
         if not isinstance(n, dict):
             continue
         nid = n.get("id")
@@ -326,7 +346,11 @@ def _messages_refs(jsonl_path: Path) -> set[str]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            h = ((row.get("messages_ref") or {}).get("hash"))
+            # New traces compare semantic receipts (prompt + output + model +
+            # params). Fall back to prompt-only refs for legacy ARAs.
+            h = (row.get("call_receipt_ref") or {}).get("hash") or (
+                row.get("messages_ref") or {}
+            ).get("hash")
             if isinstance(h, str):
                 out.add(h)
     except (OSError, json.JSONDecodeError):

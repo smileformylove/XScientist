@@ -834,7 +834,7 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertNotIn("process-only-secret", stdout.getvalue())
             self.assertEqual(json.loads(stdout.getvalue())["credentials_written"], [])
 
-    def test_openai_compatible_alias_environment_is_accepted(self) -> None:
+    def test_openai_compatible_generic_alias_environment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
             create_workspace(
@@ -861,7 +861,7 @@ class ProviderConfigTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(exit_code, 0)
+            self.assertEqual(exit_code, 2)
             self.assertFalse((workspace / ".env").exists())
 
     def test_provider_remove_keeps_credentials(self) -> None:

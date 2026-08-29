@@ -47,7 +47,9 @@ class CaptureLLMCallsTests(unittest.TestCase):
 
     def _call(self, prompt: str, response: str = "r") -> None:
         record_llm_call(
-            provider="p", model="m", request_style="r",
+            provider="p",
+            model="m",
+            request_style="r",
             system_message="s",
             messages=[{"role": "user", "content": prompt}],
             response_text=response,
@@ -62,12 +64,19 @@ class CaptureLLMCallsTests(unittest.TestCase):
         for h in refs:
             self.assertTrue(h.startswith("sha256:"))
 
-    def test_identical_prompts_return_identical_ref(self) -> None:
+    def test_identical_calls_return_identical_receipt_ref(self) -> None:
         with capture_llm_calls() as refs:
             self._call("same")
             self._call("same")
         self.assertEqual(len(refs), 2)
         self.assertEqual(refs[0], refs[1])
+
+    def test_same_prompt_with_different_outputs_has_distinct_receipts(self) -> None:
+        with capture_llm_calls() as refs:
+            self._call("same", response="first")
+            self._call("same", response="second")
+        self.assertEqual(len(refs), 2)
+        self.assertNotEqual(refs[0], refs[1])
 
     def test_no_capture_outside_block(self) -> None:
         # calls before the block do NOT appear in the block's list
@@ -125,6 +134,7 @@ class CaptureLLMCallsTests(unittest.TestCase):
         # Callers who need per-thread capture must run the block inside
         # copy_context().run() — this test documents that contract.
         import contextvars
+
         barrier = threading.Barrier(2)
         results: dict[str, list[str]] = {}
 
@@ -140,7 +150,10 @@ class CaptureLLMCallsTests(unittest.TestCase):
 
         t1 = threading.Thread(target=run_in_own_context, args=("A",))
         t2 = threading.Thread(target=run_in_own_context, args=("B",))
-        t1.start(); t2.start(); t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
         self.assertEqual(len(results["A"]), 2)
         self.assertEqual(len(results["B"]), 2)

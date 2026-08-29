@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,7 +23,11 @@ from ai_scientist.protocol.llm_trace import (
     _redact_string,
     active_ara_root,
 )
-from ai_scientist.protocol.validator import _validate_against_schema, ValidationReport
+from ai_scientist.protocol.validator import (
+    ValidationReport,
+    _validate_against_schema,
+    _validate_llm_calls,
+)
 
 
 class _EnvGuard:
@@ -134,10 +139,15 @@ class LLMTraceTests(unittest.TestCase):
         store = ObjectStore(self.root)
         self.assertTrue(store.exists(row["messages_ref"]["hash"]))
         self.assertTrue(store.exists(row["response_ref"]["hash"]))
-        self.assertEqual(store.get_text(row["response_ref"]["hash"]), "pong")
-        msg = store.get_json(row["messages_ref"]["hash"])
-        self.assertEqual(msg["system"], "be terse")
-        self.assertEqual(msg["messages"], [{"role": "user", "content": "ping"}])
+        self.assertTrue(store.exists(row["call_receipt_ref"]["hash"]))
+        response_digest = store.get_json(row["response_ref"]["hash"])
+        message_digest = store.get_json(row["messages_ref"]["hash"])
+        receipt = store.get_json(row["call_receipt_ref"]["hash"])
+        self.assertFalse(response_digest["payload_recorded"])
+        self.assertFalse(message_digest["payload_recorded"])
+        self.assertEqual(receipt["response_sha256"], response_digest["sha256"])
+        self.assertNotIn("pong", json.dumps(response_digest))
+        self.assertNotIn("ping", json.dumps(message_digest))
 
     def test_identical_calls_dedup_message_blob(self) -> None:
         self._enable()
@@ -177,7 +187,9 @@ class LLMTraceTests(unittest.TestCase):
             },
         )
         [row] = self._read_rows()
-        self.assertEqual(row["model_provenance"]["api_key_env"], "OPENAI_COMPAT_API_KEY")
+        self.assertEqual(
+            row["model_provenance"]["api_key_env"], "OPENAI_COMPAT_API_KEY"
+        )
         self.assertNotIn("marker", json.dumps(row))
 
     def test_stage_override_beats_env(self) -> None:
@@ -209,6 +221,130 @@ class LLMTraceTests(unittest.TestCase):
         report = ValidationReport()
         _validate_against_schema(row, schema, path="", report=report)
         self.assertTrue(report.ok, msg=[e.format() for e in report.errors])
+        self.assertEqual(row["trace_format"], "digest_receipt_v1")
+
+        missing_receipt = dict(row)
+        missing_receipt.pop("call_receipt_ref")
+        missing_report = ValidationReport()
+        _validate_against_schema(
+            missing_receipt,
+            schema,
+            path="",
+            report=missing_report,
+        )
+        self.assertFalse(missing_report.ok)
+
+        legacy_row = dict(missing_receipt)
+        legacy_row.pop("trace_format")
+        legacy_report = ValidationReport()
+        _validate_against_schema(
+            legacy_row,
+            schema,
+            path="",
+            report=legacy_report,
+        )
+        self.assertTrue(
+            legacy_report.ok,
+            msg=[error.format() for error in legacy_report.errors],
+        )
+
+    def test_digest_receipt_object_graph_validates(self) -> None:
+        self._write_standard_call()
+        report = _validate_llm_calls(self.root)
+        self.assertTrue(report.ok, msg=[error.format() for error in report.errors])
+
+    def test_digest_receipt_validation_rejects_missing_object(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        self._object_path(row["response_ref"]["hash"]).unlink()
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(
+                "referenced object is missing" in item.message for item in report.errors
+            )
+        )
+
+    def test_digest_receipt_validation_rejects_wrong_envelope_kind(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        store = ObjectStore(self.root)
+        envelope = store.get_json(row["messages_ref"]["hash"])
+        envelope["kind"] = "response"
+        row["messages_ref"] = store.put_json(envelope).to_json()
+        receipt = store.get_json(row["call_receipt_ref"]["hash"])
+        receipt["messages_ref_hash"] = row["messages_ref"]["hash"]
+        row["call_receipt_ref"] = store.put_json(receipt).to_json()
+        self._write_rows([row])
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("must identify messages" in item.message for item in report.errors)
+        )
+
+    def test_digest_receipt_validation_rejects_payload_recording_claim(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        store = ObjectStore(self.root)
+        envelope = store.get_json(row["response_ref"]["hash"])
+        envelope["payload_recorded"] = True
+        row["response_ref"] = store.put_json(envelope).to_json()
+        receipt = store.get_json(row["call_receipt_ref"]["hash"])
+        receipt["response_ref_hash"] = row["response_ref"]["hash"]
+        row["call_receipt_ref"] = store.put_json(receipt).to_json()
+        self._write_rows([row])
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("False was expected" in item.message for item in report.errors)
+        )
+
+    def test_digest_receipt_validation_rejects_inner_digest_mismatch(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        store = ObjectStore(self.root)
+        receipt = store.get_json(row["call_receipt_ref"]["hash"])
+        receipt["messages_sha256"] = "sha256:" + "0" * 64
+        row["call_receipt_ref"] = store.put_json(receipt).to_json()
+        self._write_rows([row])
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(any("messages_sha256" in item.path for item in report.errors))
+
+    def test_digest_receipt_validation_rejects_row_receipt_mismatch(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        row["model"] = "openai_compat/substituted-model"
+        row["params"] = {"temperature": 0.9}
+        self._write_rows([row])
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertFalse(report.ok)
+        paths = {item.path for item in report.errors}
+        self.assertTrue(any(path.endswith(".model") for path in paths))
+        self.assertTrue(any(path.endswith(".params") for path in paths))
+
+    def test_legacy_row_keeps_schema_only_compatibility(self) -> None:
+        self._write_standard_call()
+        [row] = self._read_rows()
+        row.pop("trace_format")
+        row.pop("call_receipt_ref")
+        row["messages_ref"]["hash"] = "sha256:" + "1" * 64
+        row["response_ref"]["hash"] = "sha256:" + "2" * 64
+        self._write_rows([row])
+
+        report = _validate_llm_calls(self.root)
+
+        self.assertTrue(report.ok, msg=[error.format() for error in report.errors])
 
     # ------------------------------------------------------------------
     # Redaction
@@ -246,7 +382,7 @@ class LLMTraceTests(unittest.TestCase):
         [row] = self._read_rows()
         store = ObjectStore(self.root)
         msg_dump = json.dumps(store.get_json(row["messages_ref"]["hash"]))
-        resp_dump = store.get_text(row["response_ref"]["hash"])
+        resp_dump = json.dumps(store.get_json(row["response_ref"]["hash"]))
         self.assertNotIn("sk-supersecretvalue123", msg_dump)
         self.assertNotIn("alice@example.com", resp_dump)
 
@@ -281,9 +417,9 @@ class LLMTraceTests(unittest.TestCase):
         store = ObjectStore(self.root)
         persisted = json.dumps(row)
         persisted += json.dumps(store.get_json(row["messages_ref"]["hash"]))
-        persisted += store.get_text(row["response_ref"]["hash"])
+        persisted += json.dumps(store.get_json(row["response_ref"]["hash"]))
         self.assertNotIn("private-person", persisted)
-        self.assertIn("[REDACTED_PATH]", persisted)
+        self.assertNotIn(private_path, persisted)
 
     # ------------------------------------------------------------------
     # Robustness
@@ -302,6 +438,34 @@ class LLMTraceTests(unittest.TestCase):
         # Either it silently swallows (returns None) or it succeeds — both are fine.
         self.assertTrue(cid is None or isinstance(cid, str))
 
+    def test_foreign_param_objects_are_dropped_without_stringification(self) -> None:
+        self._enable()
+        canary = "foreign-object-secret-canary"
+
+        class SensitiveResponseFormat:
+            def __str__(self) -> str:
+                return canary
+
+            __repr__ = __str__
+
+        cid = record_llm_call(
+            provider="p",
+            model="m",
+            request_style="r",
+            system_message="s",
+            messages=[],
+            response_text="x",
+            params={"response_format": SensitiveResponseFormat()},
+        )
+
+        self.assertIsInstance(cid, str)
+        persisted = b"".join(
+            path.read_bytes() for path in self.root.rglob("*") if path.is_file()
+        )
+        self.assertNotIn(canary.encode("utf-8"), persisted)
+        [row] = self._read_rows()
+        self.assertNotIn("response_format", row["params"])
+
     def test_strict_mode_fails_when_trace_cannot_be_persisted(self) -> None:
         self._enable()
         os.environ[ENV_STRICT] = "1"
@@ -318,6 +482,52 @@ class LLMTraceTests(unittest.TestCase):
                     response_text="x",
                 )
 
+    def test_strict_failure_does_not_chain_sensitive_provider_errors(self) -> None:
+        self._enable()
+        os.environ[ENV_STRICT] = "1"
+        canary = "strict-trace-error-secret-canary"
+        caught: LLMTraceError | None = None
+        with mock.patch.object(
+            ObjectStore,
+            "put_json",
+            side_effect=OSError(canary),
+        ):
+            try:
+                record_llm_call(
+                    provider="p",
+                    model="m",
+                    request_style="r",
+                    system_message="s",
+                    messages=[],
+                    response_text="x",
+                )
+            except LLMTraceError as exc:
+                caught = exc
+                rendered = "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
+            else:  # pragma: no cover - assertion helper
+                self.fail("strict tracing unexpectedly succeeded")
+
+        self.assertNotIn(canary, rendered)
+        self.assertIsNotNone(caught)
+        self.assertIsNone(caught.__cause__)
+
+    def test_strict_mode_rejects_unserializable_semantic_parameters(self) -> None:
+        self._enable()
+        os.environ[ENV_STRICT] = "1"
+        with self.assertRaisesRegex(LLMTraceError, "TypeError"):
+            record_llm_call(
+                provider="p",
+                model="m",
+                request_style="r",
+                system_message="s",
+                messages=[],
+                response_text="x",
+                params={"response_format": object()},
+            )
+        self.assertFalse((self.root / CALLS_JSONL_RELPATH).exists())
+
     def test_strict_mode_requires_active_ara_root(self) -> None:
         os.environ[ENV_STRICT] = "1"
         with self.assertRaisesRegex(LLMTraceError, "active ARA root"):
@@ -333,6 +543,35 @@ class LLMTraceTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    def _write_standard_call(self) -> None:
+        self._enable(stage="planning")
+        call_id = record_llm_call(
+            provider="openai_compat",
+            model="openai_compat/glm-5.3",
+            request_style="openai_chat",
+            system_message="system",
+            messages=[{"role": "user", "content": "question"}],
+            response_text="answer",
+            params={"temperature": 0.2},
+            model_provenance={
+                "provider": "openai_compat",
+                "requested_model": "openai_compat/glm-5.3",
+                "client_model": "glm-5.3",
+            },
+        )
+        self.assertIsInstance(call_id, str)
+
+    def _object_path(self, digest_ref: str) -> Path:
+        digest = digest_ref.removeprefix("sha256:")
+        return self.root / "objects" / "sha256" / digest[:2] / digest[2:]
+
+    def _write_rows(self, rows: list[dict]) -> None:
+        path = self.root / CALLS_JSONL_RELPATH
+        path.write_text(
+            "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
     def _read_rows(self) -> list[dict]:
         p = self.root / CALLS_JSONL_RELPATH
         if not p.exists():

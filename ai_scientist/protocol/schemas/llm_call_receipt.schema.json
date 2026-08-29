@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/llm_call_receipt.schema.json",
+  "title": "ARA LLM Call Receipt",
+  "description": "Semantic commitment joining model identity and request parameters to payload-free input/output digests.",
+  "type": "object",
+  "required": [
+    "schema",
+    "provider",
+    "model",
+    "request_style",
+    "model_provenance",
+    "params",
+    "messages_sha256",
+    "response_sha256",
+    "messages_ref_hash",
+    "response_ref_hash"
+  ],
+  "properties": {
+    "schema": {"const": "ara.llm-call-receipt.v1"},
+    "provider": {"type": "string"},
+    "model": {"type": "string"},
+    "request_style": {"type": "string"},
+    "model_provenance": {"type": "object"},
+    "params": {"type": "object"},
+    "messages_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "response_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "messages_ref_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "response_ref_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

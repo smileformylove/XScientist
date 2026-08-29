@@ -6,8 +6,11 @@ import hashlib
 import json
 import os
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Iterable, Mapping
+
+from ai_scientist.utils.privacy import redact_sensitive_text
 
 OPENAI_COMPATIBLE_PROVIDERS = {
     "openai",
@@ -163,6 +166,26 @@ def model_identity_status(requested_model: str, reported_model: str | None) -> s
     return "mismatch"
 
 
+def safe_provider_metadata_text(
+    value: object,
+    *,
+    allowed: frozenset[str] | None = None,
+) -> str | None:
+    """Return a bounded provider metadata string without calling ``str``."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or redact_sensitive_text(value) != value
+        or (allowed is not None and value not in allowed)
+    ):
+        return None
+    return value
+
+
 def _fingerprint(value: str | None) -> str | None:
     normalized = str(value or "").strip()
     if not normalized:
@@ -237,6 +260,14 @@ def _build_spec(
 def resolve_model_provider(model: str) -> ModelProviderSpec:
     raw_model = _clean_model(model)
     prefix, suffix = _split_prefixed_model(raw_model)
+    if prefix is not None and (
+        not suffix
+        or suffix != suffix.strip()
+        or len(suffix) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in suffix)
+        or redact_sensitive_text(suffix) != suffix
+    ):
+        raise ValueError("Route-qualified model name is invalid")
 
     if prefix == "anthropic" or raw_model.startswith("claude-"):
         client_model = suffix if prefix == "anthropic" else raw_model
@@ -388,8 +419,8 @@ def resolve_model_provider(model: str) -> ModelProviderSpec:
             "openai_compatible",
             suffix,
             "openai_chat",
-            api_key_env_vars=("OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"),
-            base_url_env_vars=("OPENAI_COMPAT_BASE_URL", "OPENAI_BASE_URL"),
+            api_key_env_vars=("OPENAI_COMPAT_API_KEY",),
+            base_url_env_vars=("OPENAI_COMPAT_BASE_URL",),
         )
 
     if raw_model.startswith(("gpt-", "chatgpt-")) or raw_model.startswith(("o1", "o3")):
@@ -501,7 +532,7 @@ def build_openai_compatible_client_kwargs(
     env: Mapping[str, str] | None = None,
     max_retries: int | None = None,
 ) -> tuple[dict[str, object], str]:
-    source = env or {}
+    source = os.environ if env is None else env
     spec = resolve_model_provider(model)
     if spec.client_family != "openai_compatible":
         raise ValueError(
@@ -517,6 +548,47 @@ def build_openai_compatible_client_kwargs(
         if max_retries is not None:
             kwargs["max_retries"] = max_retries
     else:
+        if spec.provider == "openai_compat":
+            if not api_key:
+                raise ValueError(
+                    "OPENAI_COMPAT_API_KEY is required for openai_compat models"
+                )
+            if not resolved_base_url:
+                raise ValueError(
+                    "OPENAI_COMPAT_BASE_URL is required for openai_compat models"
+                )
+            if any(ord(char) < 32 or ord(char) == 127 for char in api_key):
+                raise ValueError("OPENAI_COMPAT_API_KEY contains control characters")
+            if api_key.strip().lower() in {
+                "changeme",
+                "replace-me",
+                "your-api-key",
+                "your_api_key_here",
+            }:
+                raise ValueError("OPENAI_COMPAT_API_KEY is a placeholder")
+            parsed = urllib.parse.urlsplit(str(resolved_base_url).strip())
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("OPENAI_COMPAT_BASE_URL is invalid")
+            try:
+                parsed.port
+            except ValueError:
+                raise ValueError("OPENAI_COMPAT_BASE_URL has an invalid port") from None
+            if parsed.scheme != "https" and parsed.hostname not in {
+                "localhost",
+                "127.0.0.1",
+                "::1",
+            }:
+                raise ValueError(
+                    "OPENAI_COMPAT_BASE_URL requires HTTPS for remote hosts"
+                )
+            resolved_base_url = str(resolved_base_url).strip().rstrip("/")
         kwargs["api_key"] = api_key or ""
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
@@ -525,12 +597,16 @@ def build_openai_compatible_client_kwargs(
             # ``OpenAI/Python`` user agent even when the request body is valid.
             # Keep the workaround scoped to the explicit compatibility route
             # and allow deployments to choose their own neutral identifier.
-            kwargs["default_headers"] = {
-                "User-Agent": str(
-                    source.get("OPENAI_COMPAT_USER_AGENT")
-                    or "xscientist-openai-compatible"
-                ).strip()
-            }
+            user_agent = str(
+                source.get("OPENAI_COMPAT_USER_AGENT") or "xscientist-openai-compatible"
+            ).strip()
+            if (
+                not user_agent
+                or len(user_agent) > 128
+                or any(ord(char) < 32 or ord(char) == 127 for char in user_agent)
+            ):
+                raise ValueError("OPENAI_COMPAT_USER_AGENT is invalid")
+            kwargs["default_headers"] = {"User-Agent": user_agent}
         if max_retries is not None:
             kwargs["max_retries"] = max_retries
     return kwargs, spec.client_model
@@ -596,6 +672,14 @@ def probe_openai_compatible_model(
             max_tokens=8,
         )
     except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        if (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 100 <= status_code <= 599
+        ):
+            status_code = None
+        error_type = safe_provider_metadata_text(type(exc).__name__)
         return {
             "ok": False,
             "supported": True,
@@ -609,8 +693,8 @@ def probe_openai_compatible_model(
             "identity_status": "unavailable",
             "latency_ms": round((time.monotonic() - started) * 1000, 1),
             "error_code": "live_request_failed",
-            "error_type": type(exc).__name__,
-            "http_status": getattr(exc, "status_code", None),
+            "error_type": error_type or "ProviderError",
+            "http_status": status_code,
             "response_content_recorded": False,
             "provenance": provenance,
         }
@@ -619,35 +703,51 @@ def probe_openai_compatible_model(
         if callable(close):
             close()
 
-    reported_model = str(getattr(response, "model", "") or "").strip()
-    choices = list(getattr(response, "choices", None) or [])
+    reported_model = safe_provider_metadata_text(getattr(response, "model", None))
+    choices_value = getattr(response, "choices", None)
+    choices = choices_value if isinstance(choices_value, list) else []
     finish_reason = (
-        str(getattr(choices[0], "finish_reason", "") or "") if choices else ""
+        safe_provider_metadata_text(
+            getattr(choices[0], "finish_reason", None),
+            allowed=frozenset({"stop"}),
+        )
+        if len(choices) == 1
+        else None
     )
     usage = getattr(response, "usage", None)
-    prompt_tokens = getattr(usage, "prompt_tokens", None)
-    completion_tokens = getattr(usage, "completion_tokens", None)
-    total_tokens = getattr(usage, "total_tokens", None)
+    usage_values = {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+    usage_valid = all(
+        not isinstance(value, bool) and isinstance(value, int) and value >= 0
+        for value in usage_values.values()
+    )
+    envelope_valid = bool(
+        reported_model is not None and finish_reason == "stop" and usage_valid
+    )
     identity_status = model_identity_status(client_model, reported_model)
     identity_verified = identity_status != "unavailable"
     exact_match = identity_status == "exact"
     return {
-        "ok": bool(exact_match),
+        "ok": bool(exact_match and envelope_valid),
         "supported": True,
         "transport_ok": True,
         "provider": spec.provider,
         "requested_model": model,
         "client_model": client_model,
-        "reported_model": reported_model or None,
+        "reported_model": reported_model,
         "model_identity_verified": identity_verified,
         "exact_model_match": exact_match,
         "identity_status": identity_status,
-        "finish_reason": finish_reason or None,
+        "finish_reason": finish_reason,
+        "response_envelope_valid": envelope_valid,
+        "error_code": None if envelope_valid else "provider_metadata_invalid",
         "latency_ms": round((time.monotonic() - started) * 1000, 1),
         "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
+            key: value if usage_valid else None
+            for key, value in usage_values.items()
         },
         "response_content_recorded": False,
         "provenance": provenance,
@@ -797,8 +897,8 @@ def provider_env_statuses(
             "openai_compatible",
             "custom-model",
             "openai_chat",
-            api_key_env_vars=("OPENAI_COMPAT_API_KEY", "OPENAI_API_KEY"),
-            base_url_env_vars=("OPENAI_COMPAT_BASE_URL", "OPENAI_BASE_URL"),
+            api_key_env_vars=("OPENAI_COMPAT_API_KEY",),
+            base_url_env_vars=("OPENAI_COMPAT_BASE_URL",),
         ),
     ]
 

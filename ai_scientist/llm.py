@@ -20,6 +20,7 @@ from ai_scientist.utils.provider_registry import (
     model_uses_anthropic_client,
     resolve_model_provider,
 )
+from ai_scientist.utils.privacy import redact_sensitive_text
 
 backoff = import_backoff()
 anthropic = import_optional_module(
@@ -46,6 +47,58 @@ _ANTHROPIC_RETRY_EXCEPTIONS = resolve_exception_types(
 )
 
 MAX_NUM_TOKENS = 4096
+MAX_RESEARCH_PROVIDER_RETRIES = 3
+OPENAI_COMPAT_CALL_TIMEOUT_SECONDS = 30.0
+MAX_BATCH_RESPONSES = 8
+
+
+class LLMResponseContractError(RuntimeError):
+    """A provider response cannot safely drive a research action."""
+
+
+def _safe_reported_model(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or redact_sensitive_text(value) != value
+    ):
+        return None
+    return value
+
+
+def _validate_openai_compat_response(
+    spec: Any,
+    response: Any,
+    *,
+    expected_choices: int = 1,
+) -> str | None:
+    """Fail closed on model substitution and truncated custom-provider output."""
+
+    reported_model = _safe_reported_model(getattr(response, "model", None))
+    if getattr(spec, "provider", None) != "openai_compat":
+        return reported_model
+    if reported_model != getattr(spec, "client_model", None):
+        raise LLMResponseContractError("Provider-reported model identity is not exact")
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or len(choices) != expected_choices:
+        raise LLMResponseContractError(
+            "Provider response contains an unexpected number of choices"
+        )
+    for choice in choices:
+        if getattr(choice, "finish_reason", None) != "stop":
+            raise LLMResponseContractError(
+                "Provider response did not terminate normally"
+            )
+        content = getattr(getattr(choice, "message", None), "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise LLMResponseContractError(
+                "Provider response content is not valid text"
+            )
+    return reported_model
 
 
 def _huggingface_http_fallback_url(client_model: str) -> str:
@@ -190,8 +243,14 @@ def _budgeted_provider_call(
         max_output_tokens=max_output_tokens,
         output_multiplier=output_multiplier,
     )
+    timeout_seconds = reservation.timeout_seconds
+    if resolve_model_provider(model).provider == "openai_compat":
+        timeout_seconds = min(
+            float(timeout_seconds or OPENAI_COMPAT_CALL_TIMEOUT_SECONDS),
+            OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+        )
     with reservation:
-        response = create(reservation.timeout_seconds)
+        response = create(timeout_seconds)
         reservation.settle(response=response)
         return response
 
@@ -200,6 +259,7 @@ def _budgeted_provider_call(
 @backoff.on_exception(
     backoff.expo,
     _OPENAI_RETRY_EXCEPTIONS + _ANTHROPIC_RETRY_EXCEPTIONS,
+    max_tries=MAX_RESEARCH_PROVIDER_RETRIES,
 )
 @track_token_usage
 def get_batch_responses_from_llm(
@@ -212,12 +272,21 @@ def get_batch_responses_from_llm(
     temperature=0.7,
     n_responses=1,
 ) -> tuple[list[str], list[list[dict[str, Any]]]]:
+    if (
+        isinstance(n_responses, bool)
+        or not isinstance(n_responses, int)
+        or not 1 <= n_responses <= MAX_BATCH_RESPONSES
+    ):
+        raise ValueError("n_responses must be an integer between 1 and 8")
     msg = prompt
     if msg_history is None:
         msg_history = []
     spec = resolve_model_provider(model)
+    direct_batch_call = False
+    request_history = msg_history + [{"role": "user", "content": msg}]
 
     if spec.provider == "ollama":
+        direct_batch_call = True
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = _budgeted_provider_call(
             model=model,
@@ -243,6 +312,7 @@ def get_batch_responses_from_llm(
             new_msg_history + [{"role": "assistant", "content": c}] for c in content
         ]
     elif spec.request_style == "openai_chat":
+        direct_batch_call = True
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = _budgeted_provider_call(
             model=model,
@@ -263,6 +333,11 @@ def get_batch_responses_from_llm(
                 seed=0,
                 **({"timeout": timeout} if timeout is not None else {}),
             ),
+        )
+        _validate_openai_compat_response(
+            spec,
+            response,
+            expected_choices=n_responses,
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
@@ -293,23 +368,25 @@ def get_batch_responses_from_llm(
         print("*" * 21 + " LLM END " + "*" * 21)
         print()
 
-    # Trace each response in the batch as an independent llm_call row.
-    # The messages history for choice i is new_msg_history[i], which already
-    # carries that choice's assistant reply.
-    for i, hist in enumerate(new_msg_history):
+    # One provider batch is one invocation. Persist one semantic receipt and
+    # one aggregate usage record rather than multiplying token accounting by
+    # the number of returned choices. The per-choice texts are bound together
+    # in the response-array digest.
+    if direct_batch_call:
         _record_llm_call_safe(
             spec=spec,
             model=model,
             system_message=system_message,
-            messages=hist,
-            response_text=content[i] if i < len(content) else "",
+            messages=request_history,
+            response_text=json.dumps(content, ensure_ascii=False),
             params={
                 "temperature": temperature,
                 "max_tokens": MAX_NUM_TOKENS,
                 "n": n_responses,
                 "seed": 0,
-                "batch_index": i,
             },
+            response=response,
+            client=client,
         )
 
     return content, new_msg_history
@@ -384,6 +461,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
 @backoff.on_exception(
     backoff.expo,
     _OPENAI_RETRY_EXCEPTIONS + _ANTHROPIC_RETRY_EXCEPTIONS,
+    max_tries=MAX_RESEARCH_PROVIDER_RETRIES,
 )
 def get_response_from_llm(
     prompt,
@@ -407,6 +485,7 @@ def get_response_from_llm(
         "max_tokens": MAX_NUM_TOKENS,
         "seed": 0,
     }
+    request_history: list[dict[str, Any]] = []
     _t0 = time.perf_counter()
 
     if model_uses_anthropic_client(model):
@@ -421,6 +500,7 @@ def get_response_from_llm(
                 ],
             }
         ]
+        request_history = list(new_msg_history)
         response = _budgeted_provider_call(
             model=model,
             prompt=new_msg_history,
@@ -450,6 +530,7 @@ def get_response_from_llm(
         ]
     elif spec.provider == "ollama":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        request_history = list(new_msg_history)
         response = _budgeted_provider_call(
             model=model,
             prompt=new_msg_history,
@@ -472,6 +553,7 @@ def get_response_from_llm(
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif spec.request_style == "openai_chat" and spec.provider != "huggingface":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        request_history = list(new_msg_history)
         response = make_llm_call(
             client,
             model,
@@ -479,10 +561,12 @@ def get_response_from_llm(
             system_message=system_message,
             prompt=new_msg_history,
         )
+        _validate_openai_compat_response(spec, response)
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif spec.request_style == "openai_reasoning":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        request_history = list(new_msg_history)
         response = make_llm_call(
             client,
             model,
@@ -490,10 +574,12 @@ def get_response_from_llm(
             system_message=system_message,
             prompt=new_msg_history,
         )
+        _validate_openai_compat_response(spec, response)
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif spec.provider == "huggingface":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        request_history = list(new_msg_history)
         try:
             response = _budgeted_provider_call(
                 model=model,
@@ -591,11 +677,12 @@ def get_response_from_llm(
         provider=trace_provider,
         request_style=trace_request_style,
         system_message=system_message,
-        messages=new_msg_history,
+        messages=request_history,
         response_text=content,
         params=trace_params,
         response=response,
         latency_ms=int((time.perf_counter() - _t0) * 1000),
+        client=client,
     )
 
     return content, new_msg_history
@@ -614,6 +701,7 @@ def _record_llm_call_safe(
     error: str | None = None,
     provider: str | None = None,
     request_style: str | None = None,
+    client: Any = None,
 ) -> None:
     """Wrap ``record_llm_call`` so a broken tracer never breaks the LLM call.
 
@@ -624,7 +712,19 @@ def _record_llm_call_safe(
     """
     try:
         tokens = _extract_tokens(response)
-        provenance = build_model_provenance(model, env=os.environ)
+        client_provenance = getattr(client, "_xscientist_model_provenance", None)
+        provenance = (
+            dict(client_provenance)
+            if isinstance(client_provenance, dict)
+            and client_provenance.get("requested_model") == model
+            else build_model_provenance(model, env=os.environ)
+        )
+        reported_model = _safe_reported_model(getattr(response, "model", None))
+        if reported_model is not None:
+            provenance["reported_model"] = reported_model
+            provenance["reported_model_exact"] = reported_model == getattr(
+                spec, "client_model", None
+            )
         record_llm_call(
             provider=provider or getattr(spec, "provider", "unknown"),
             model=model,
@@ -659,9 +759,17 @@ def _extract_tokens(response: Any) -> dict[str, int] | None:
         usage, "completion_tokens", None
     )
     out: dict[str, int] = {}
-    if isinstance(input_tokens, int):
+    if (
+        isinstance(input_tokens, int)
+        and not isinstance(input_tokens, bool)
+        and input_tokens >= 0
+    ):
         out["input"] = input_tokens
-    if isinstance(output_tokens, int):
+    if (
+        isinstance(output_tokens, int)
+        and not isinstance(output_tokens, bool)
+        and output_tokens >= 0
+    ):
         out["output"] = output_tokens
     return out or None
 
@@ -697,7 +805,7 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 def create_client(model) -> tuple[Any, str]:
     spec = resolve_model_provider(model)
     if spec.client_family == "anthropic":
-        print(f"Using {spec.display_name} API with model {spec.client_model}.")
+        print(f"Using {spec.display_name} API.")
         import httpx as _httpx
 
         _http_client = _httpx.Client(
@@ -717,15 +825,28 @@ def create_client(model) -> tuple[Any, str]:
             model,
         )
     if spec.client_family == "anthropic_bedrock":
-        print(f"Using {spec.display_name} with model {spec.client_model}.")
+        print(f"Using {spec.display_name}.")
         return anthropic.AnthropicBedrock(max_retries=0), model
     if spec.client_family == "anthropic_vertex":
-        print(f"Using {spec.display_name} with model {spec.client_model}.")
+        print(f"Using {spec.display_name}.")
         return anthropic.AnthropicVertex(max_retries=0), model
     if spec.client_family == "openai_compatible":
+        provider_env = dict(os.environ)
         kwargs, client_model = build_openai_compatible_client_kwargs(
-            model, env=os.environ, max_retries=0
+            model, env=provider_env, max_retries=0
         )
-        print(f"Using {spec.display_name} API with model {client_model}.")
-        return openai.OpenAI(**kwargs), client_model
+        print(f"Using {spec.display_name} API.")
+        # Keep the route-qualified identifier for every later call. Returning
+        # only the wire model would lose the provider/endpoint contract (for
+        # example openai_compat/glm-5.3 would be misclassified as native
+        # Zhipu), bypassing identity checks and corrupting provenance.
+        client = openai.OpenAI(**kwargs)
+        try:
+            client._xscientist_model_provenance = build_model_provenance(
+                model,
+                env=provider_env,
+            )
+        except (AttributeError, TypeError):
+            pass
+        return client, model
     raise ValueError(f"Model {model} not supported.")

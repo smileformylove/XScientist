@@ -43,7 +43,7 @@
           "llm_call_refs": {
             "type": "array",
             "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-            "description": "messages_ref.hash values from llm/calls.jsonl that produced this node."
+            "description": "Semantic call_receipt_ref.hash values from llm/calls.jsonl that produced this node; legacy graphs may contain messages_ref hashes."
           },
           "context_pack_refs": {
             "type": "array",

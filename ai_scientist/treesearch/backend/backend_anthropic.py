@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import json
 import time
 import logging
 
 from .utils import (
+    FunctionCallValidationError,
     FunctionSpec,
     OutputType,
+    ResearchDecisionError,
     backoff_create,
     opt_messages_to_list,
     summarize_request_kwargs_for_log,
+    validate_function_call_payload,
 )
 from ai_scientist.utils.optional_dependencies import (
     import_optional_module,
     resolve_exception_types,
 )
+from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 anthropic = import_optional_module(
     "anthropic",
@@ -44,11 +47,7 @@ ANTHROPIC_TIMEOUT_EXCEPTIONS = resolve_exception_types(
 
 
 def _select_values_notnone(payload: dict) -> dict:
-    return {
-        key: value
-        for key, value in payload.items()
-        if value is not None
-    }
+    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _func_spec_to_anthropic_tool(func_spec: FunctionSpec) -> dict:
@@ -59,9 +58,10 @@ def _func_spec_to_anthropic_tool(func_spec: FunctionSpec) -> dict:
     }
 
 
-def get_ai_client(model : str, max_retries=2):
+def get_ai_client(model: str, max_retries=2):
     client = anthropic.Anthropic(max_retries=max_retries)
     return client
+
 
 def query(
     system_message: str | None,
@@ -69,7 +69,13 @@ def query(
     func_spec: FunctionSpec | None = None,
     **model_kwargs,
 ) -> tuple[OutputType, float, int, int, dict]:
-    client = get_ai_client(model_kwargs.get("model"), max_retries=0)
+    try:
+        client = get_ai_client(model_kwargs.get("model"), max_retries=0)
+    except Exception as exc:
+        if isinstance(exc, ResearchDecisionError) or is_llm_budget_exception(exc):
+            raise
+        logger.error("Anthropic client initialization failed: %s", type(exc).__name__)
+        raise ResearchDecisionError("Provider client initialization failed") from None
 
     # Strip provider prefix from model name before sending to API
     raw_model = model_kwargs.get("model", "")
@@ -99,50 +105,103 @@ def query(
     messages = opt_messages_to_list(None, user_message)
 
     t0 = time.time()
-    message = backoff_create(
-        client.messages.create,
-        ANTHROPIC_TIMEOUT_EXCEPTIONS,
-        _budget_model=raw_model,
-        _budget_prompt={
-            "messages": messages,
-            "tools": filtered_kwargs.get("tools"),
-        },
-        _budget_system_message=system_message,
-        _budget_max_output_tokens=filtered_kwargs.get("max_tokens") or 8192,
-        messages=messages,
-        **filtered_kwargs,
-    )
+    try:
+        message = backoff_create(
+            client.messages.create,
+            ANTHROPIC_TIMEOUT_EXCEPTIONS,
+            _budget_model=raw_model,
+            _budget_prompt={
+                "messages": messages,
+                "tools": filtered_kwargs.get("tools"),
+            },
+            _budget_system_message=system_message,
+            _budget_max_output_tokens=filtered_kwargs.get("max_tokens") or 8192,
+            messages=messages,
+            **filtered_kwargs,
+        )
+    except Exception as exc:
+        if isinstance(exc, ResearchDecisionError) or is_llm_budget_exception(exc):
+            raise
+        logger.error("Anthropic request failed: %s", type(exc).__name__)
+        raise ResearchDecisionError("Provider request failed") from None
     req_time = time.time() - t0
+    if message is False:
+        raise ResearchDecisionError("Provider request failed after bounded retries")
     logger.debug(
         "Anthropic request kwargs summary: %s",
         summarize_request_kwargs_for_log(filtered_kwargs),
     )
 
-    if func_spec is not None:
-        tool_use_blocks = [b for b in message.content if b.type == "tool_use"]
-        assert tool_use_blocks, f"Expected tool_use response but got: {[b.type for b in message.content]}"
-        tool_block = tool_use_blocks[0]
-        try:
-            output = json.loads(tool_block.input) if isinstance(tool_block.input, str) else tool_block.input
-        except (json.JSONDecodeError, TypeError):
-            output = tool_block.input
-    elif "thinking" in filtered_kwargs:
-        assert (
-            len(message.content) == 2
-            and message.content[0].type == "thinking"
-            and message.content[1].type == "text"
-        )
-        output: str = message.content[1].text
-    else:
-        text_blocks = [b for b in message.content if b.type == "text"]
-        assert text_blocks, f"Expected text response but got: {[b.type for b in message.content]}"
-        output: str = text_blocks[0].text
+    try:
+        content = message.content
+        if not isinstance(content, list):
+            raise ResearchDecisionError("Provider response content is invalid")
+        expected_stop_reason = "tool_use" if func_spec is not None else "end_turn"
+        if getattr(message, "stop_reason", None) != expected_stop_reason:
+            raise ResearchDecisionError(
+                "Provider response did not terminate with the expected reason"
+            )
+        if func_spec is not None:
+            tool_use_blocks = [
+                block for block in content if getattr(block, "type", None) == "tool_use"
+            ]
+            if len(tool_use_blocks) != 1:
+                raise FunctionCallValidationError(
+                    "Provider response must contain exactly one tool_use block; "
+                    f"received {len(tool_use_blocks)}"
+                )
+            tool_block = tool_use_blocks[0]
+            output = validate_function_call_payload(
+                func_spec,
+                function_name=getattr(tool_block, "name", None),
+                arguments=getattr(tool_block, "input", None),
+            )
+        elif "thinking" in filtered_kwargs:
+            if (
+                len(content) != 2
+                or getattr(content[0], "type", None) != "thinking"
+                or getattr(content[1], "type", None) != "text"
+                or not isinstance(getattr(content[1], "text", None), str)
+            ):
+                raise ResearchDecisionError("Provider thinking response is invalid")
+            output = content[1].text
+            if not output.strip():
+                raise ResearchDecisionError("Provider response content is not text")
+        else:
+            text_blocks = [
+                block for block in content if getattr(block, "type", None) == "text"
+            ]
+            if len(text_blocks) != 1 or not isinstance(
+                getattr(text_blocks[0], "text", None), str
+            ):
+                raise ResearchDecisionError("Provider text response is invalid")
+            output = text_blocks[0].text
+            if not output.strip():
+                raise ResearchDecisionError("Provider response content is not text")
 
-    in_tokens = message.usage.input_tokens
-    out_tokens = message.usage.output_tokens
+        in_tokens = message.usage.input_tokens
+        out_tokens = message.usage.output_tokens
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (in_tokens, out_tokens)
+        ):
+            raise ResearchDecisionError("Provider token usage is invalid")
 
-    info = {
-        "stop_reason": message.stop_reason,
-    }
+        info = {
+            "stop_reason": getattr(message, "stop_reason", None),
+            "model": getattr(message, "model", None),
+            "_trace_system_message": system_message or "",
+            "_trace_messages": messages,
+            "_trace_params": {
+                key: value
+                for key, value in filtered_kwargs.items()
+                if key not in {"model", "tools"}
+            },
+        }
+    except Exception as exc:
+        if isinstance(exc, ResearchDecisionError):
+            raise
+        logger.error("Anthropic response validation failed: %s", type(exc).__name__)
+        raise ResearchDecisionError("Provider response envelope is invalid") from None
 
     return output, req_time, in_tokens, out_tokens, info
