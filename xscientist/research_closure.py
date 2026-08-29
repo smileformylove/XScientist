@@ -28,7 +28,7 @@ from .research_git import (
     verify_research_repository,
 )
 
-RESEARCH_CLOSURE_SCHEMA = "xscientist.research-closure.v1"
+RESEARCH_CLOSURE_SCHEMA = "xscientist.research-closure.v2"
 RESEARCH_CLOSURE_LEVELS = ("trace", "replay", "verify")
 REPRODUCTION_RECEIPT_V2 = "xscientist.reproduction-receipt.v2"
 REPRODUCTION_TARGET_POLICY_V2 = "xscientist.reproduction-target-binding.v2"
@@ -97,6 +97,34 @@ _SCIENTIFIC_LINEAGE_RELATIONS = _ARGUMENT_RELATIONS | {
     "uses_context",
 }
 _ACTIVE_CLOSURE_STATES = {"completed", "verified", "promoted"}
+_EVIDENCE_HASH_FIELDS = {
+    "ara_exploration_graph_hash",
+    "ara_manifest_hash",
+    "artifact_hash",
+    "evidence_hash",
+    "measurement_hash",
+    "output_hash",
+    "result_hash",
+}
+_EVIDENCE_HASH_COLLECTION_FIELDS = {
+    "artifact_hashes",
+    "evidence_hashes",
+    "measurement_hashes",
+    "output_hashes",
+    "result_hashes",
+}
+_DATA_HASH_FIELDS = {
+    "artifact_hash",
+    "dataset_hash",
+    "dataset_split_hash",
+    "split_hash",
+}
+_DATA_HASH_COLLECTION_FIELDS = {
+    "artifact_hashes",
+    "dataset_hashes",
+    "dataset_split_hashes",
+    "split_hashes",
+}
 _CLAIM_SUPPORT_RELATIONS = {"supports", "qualified_supports", "derived_from"}
 _CLAIM_CHALLENGE_RELATIONS = {
     "refutes",
@@ -137,23 +165,158 @@ def _kind_ids(
     )
 
 
-def _has_hash_anchor(payload: Mapping[str, Any]) -> bool:
+def _has_hash_anchor(
+    payload: Mapping[str, Any],
+    *,
+    scalar_fields: set[str],
+    collection_fields: set[str],
+) -> bool:
     for key, value in payload.items():
         if (
-            key.endswith("_hash")
+            key in scalar_fields
             and isinstance(value, str)
-            and value.startswith("sha256:")
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
         ):
             return True
-        if key.endswith("_hashes") and isinstance(value, list) and value:
+        if (
+            key in collection_fields
+            and isinstance(value, list)
+            and bool(value)
+            and all(
+                isinstance(item, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                for item in value
+            )
+        ):
             return True
-        if isinstance(value, Mapping) and _has_hash_anchor(value):
-            return True
-        if isinstance(value, list) and any(
-            isinstance(item, Mapping) and _has_hash_anchor(item) for item in value
+        if (
+            key in collection_fields
+            and isinstance(value, Mapping)
+            and bool(value)
+            and all(
+                isinstance(item, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                for item in value.values()
+            )
         ):
             return True
     return False
+
+
+def _has_data_hash_anchor(payload: Mapping[str, Any]) -> bool:
+    if _has_hash_anchor(
+        payload,
+        scalar_fields=_DATA_HASH_FIELDS,
+        collection_fields=_DATA_HASH_COLLECTION_FIELDS,
+    ):
+        return True
+    data_policy = payload.get("data_policy")
+    return isinstance(data_policy, Mapping) and _has_hash_anchor(
+        data_policy,
+        scalar_fields=_DATA_HASH_FIELDS,
+        collection_fields=_DATA_HASH_COLLECTION_FIELDS,
+    )
+
+
+def _has_evidence_hash_anchor(payload: Mapping[str, Any]) -> bool:
+    return _has_hash_anchor(
+        payload,
+        scalar_fields=_EVIDENCE_HASH_FIELDS,
+        collection_fields=_EVIDENCE_HASH_COLLECTION_FIELDS,
+    )
+
+
+def _attempt_binding_ids(
+    attempt: Mapping[str, Any],
+    objects: Mapping[str, Mapping[str, Any]],
+    kind: str,
+) -> set[str]:
+    return {
+        target
+        for target in _targets(
+            attempt,
+            relation_types=("depends_on", "consumes"),
+        )
+        if objects.get(target, {}).get("kind") == kind
+    }
+
+
+def _attempts_share_study(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    objects: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Match attempts without letting a missing specific binding hide a sibling."""
+
+    for kind in ("experiment_priority", "preregistration"):
+        if _attempt_binding_ids(left, objects, kind).intersection(
+            _attempt_binding_ids(right, objects, kind)
+        ):
+            return True
+    left_designs = _attempt_binding_ids(left, objects, "experiment_design")
+    right_designs = _attempt_binding_ids(right, objects, "experiment_design")
+    if left_designs and right_designs:
+        return bool(left_designs.intersection(right_designs))
+    return bool(
+        _attempt_binding_ids(left, objects, "research_plan").intersection(
+            _attempt_binding_ids(right, objects, "research_plan")
+        )
+    )
+
+
+def _has_scientific_disposition(
+    evidence_id: str,
+    objects: Mapping[str, Mapping[str, Any]],
+    superseded_ids: set[str],
+) -> bool:
+    evidence = objects[evidence_id]
+    scientific_target_kinds = {
+        "claim",
+        "hypothesis",
+        "research_plan",
+        "experiment_design",
+        "evidence",
+        "passage_evidence",
+        *_ARGUMENT_KINDS,
+    }
+    for relation in evidence.get("relations") or []:
+        relation_type = str(relation.get("type") or "")
+        target_id = str(relation.get("target") or "")
+        target = objects.get(target_id, {})
+        if (
+            relation_type == "supersedes"
+            and target.get("kind") in scientific_target_kinds
+        ):
+            return True
+        if (
+            relation_type
+            in {
+                *_CLAIM_SUPPORT_RELATIONS,
+                *_CLAIM_CHALLENGE_RELATIONS,
+                "qualifies",
+            }
+            and target.get("kind") in scientific_target_kinds
+            and _is_active_closure_object(target_id, objects, superseded_ids)
+        ):
+            return True
+    active_source_kinds = {
+        "claim",
+        "review",
+        "gate_decision",
+        "evidence",
+        *_ARGUMENT_KINDS,
+    }
+    allowed_incoming_relations = {
+        "depends_on",
+        "has_premise",
+        "evaluates",
+        "supersedes",
+    }
+    return any(
+        other_id != evidence_id
+        and other.get("kind") in active_source_kinds
+        and _is_active_closure_object(other_id, objects, superseded_ids)
+        and evidence_id in _targets(other, relation_types=allowed_incoming_relations)
+        for other_id, other in objects.items()
+    )
 
 
 def _blocker(code: str, object_id: str, message: str) -> dict[str, str]:
@@ -958,7 +1121,7 @@ def _claim_closure(
     experimental_evidence_ids = sorted(experimental_evidence_id_set)
     passage_ids = sorted(passage_id_set)
     evidence_ids = sorted({*experimental_evidence_ids, *passage_ids})
-    attempt_ids = sorted(
+    claim_attempt_ids = sorted(
         {
             target
             for evidence_id in experimental_evidence_ids
@@ -968,12 +1131,36 @@ def _claim_closure(
             if objects.get(target, {}).get("kind") == "experiment_attempt"
         }
     )
+    attempt_ids = sorted(
+        {
+            *claim_attempt_ids,
+            *(
+                object_id
+                for object_id, item in objects.items()
+                if item.get("kind") == "experiment_attempt"
+                and any(
+                    _attempts_share_study(objects[attempt_id], item, objects)
+                    for attempt_id in claim_attempt_ids
+                )
+            ),
+        }
+    )
+    attempt_id_set = set(attempt_ids)
+    study_evidence_ids = sorted(
+        object_id
+        for object_id, item in objects.items()
+        if item.get("kind") == "evidence"
+        and attempt_id_set.intersection(
+            _targets(item, relation_types=("derived_from",))
+        )
+    )
     plan_ids = sorted(
         {
             target
             for attempt_id in attempt_ids
             for target in _targets(objects[attempt_id], relation_types=("depends_on",))
-            if objects.get(target, {}).get("kind") == "research_plan"
+            if objects.get(target, {}).get("kind")
+            in {"research_plan", "experiment_design"}
         }
     )
     preregistration_ids = sorted(
@@ -982,6 +1169,14 @@ def _claim_closure(
             for attempt_id in attempt_ids
             for target in _targets(objects[attempt_id], relation_types=("depends_on",))
             if objects.get(target, {}).get("kind") == "preregistration"
+        }
+    )
+    priority_ids = sorted(
+        {
+            target
+            for attempt_id in attempt_ids
+            for target in _targets(objects[attempt_id], relation_types=("consumes",))
+            if objects.get(target, {}).get("kind") == "experiment_priority"
         }
     )
     source_ids = sorted(
@@ -1175,6 +1370,18 @@ def _claim_closure(
         blockers.append(
             _blocker("claim_without_evidence", claim_id, "claim has no evidence anchor")
         )
+    for evidence_id in evidence_ids:
+        if (
+            evidence_id not in superseded_challenge_ids
+            and not _is_active_closure_object(evidence_id, objects, superseded_ids)
+        ):
+            blockers.append(
+                _blocker(
+                    "claim_evidence_not_active",
+                    evidence_id,
+                    "claim evidence must be completed, verified, or promoted and not superseded",
+                )
+            )
     for inference_id in sorted(
         object_id
         for object_id in argument_ids
@@ -1207,10 +1414,229 @@ def _claim_closure(
                 "evidence is not derived from an experiment attempt",
             )
         )
-    if attempt_ids and not plan_ids:
-        blockers.append(
-            _blocker("attempt_without_plan", claim_id, "attempt has no research plan")
-        )
+    claim_attempt_id_set = set(claim_attempt_ids)
+    closure_evidence_id_set = set(experimental_evidence_ids)
+    attempt_states: dict[str, str] = {}
+    for attempt_id in attempt_ids:
+        attempt = objects[attempt_id]
+        payload = attempt.get("payload") or {}
+        state = str(attempt.get("state") or "")
+        attempt_states[attempt_id] = state
+        study_phase = str(payload.get("study_phase") or "").strip().lower()
+        if study_phase and study_phase not in {"exploratory", "confirmatory"}:
+            blockers.append(
+                _blocker(
+                    "invalid_study_phase",
+                    attempt_id,
+                    "attempt study phase must be exploratory or confirmatory",
+                )
+            )
+        bound_plan_ids = {
+            target
+            for target in _targets(attempt, relation_types=("depends_on",))
+            if objects.get(target, {}).get("kind")
+            in {"research_plan", "experiment_design"}
+        }
+        if not bound_plan_ids:
+            blockers.append(
+                _blocker(
+                    "attempt_without_plan",
+                    attempt_id,
+                    "attempt has no research plan or experiment design",
+                )
+            )
+        for plan_id in sorted(bound_plan_ids):
+            if objects[plan_id].get("state") not in {
+                "draft",
+                "locked",
+                "completed",
+                "verified",
+                "promoted",
+            }:
+                blockers.append(
+                    _blocker(
+                        "attempt_plan_not_active",
+                        plan_id,
+                        "attempt plan or design is in a failed, rejected, or superseded state",
+                    )
+                )
+        bound_design_ids = {
+            target
+            for target in _targets(attempt, relation_types=("depends_on",))
+            if objects.get(target, {}).get("kind") == "experiment_design"
+        }
+        bound_priority_ids = {
+            target
+            for target in _targets(attempt, relation_types=("consumes",))
+            if objects.get(target, {}).get("kind") == "experiment_priority"
+        }
+        for design_id in sorted(bound_design_ids):
+            design_payload = objects[design_id].get("payload") or {}
+            if (
+                design_payload.get("protocol_kind")
+                != "competitive_experiment_candidate"
+            ):
+                continue
+            valid_priorities = [
+                priority_id
+                for priority_id in bound_priority_ids
+                if objects[priority_id].get("state") == "locked"
+                and (objects[priority_id].get("payload") or {}).get(
+                    "selected_design_id"
+                )
+                == design_id
+            ]
+            if len(valid_priorities) != 1:
+                blockers.append(
+                    _blocker(
+                        "competitive_design_without_locked_priority",
+                        attempt_id,
+                        "competitive design attempt must consume exactly one locked priority selecting that design",
+                    )
+                )
+        for priority_id in sorted(bound_priority_ids):
+            if objects[priority_id].get("state") != "locked":
+                blockers.append(
+                    _blocker(
+                        "attempt_priority_not_locked",
+                        priority_id,
+                        "attempt can consume only a locked experiment priority",
+                    )
+                )
+            selected_design_id = str(
+                (objects[priority_id].get("payload") or {}).get("selected_design_id")
+                or ""
+            )
+            if selected_design_id and selected_design_id not in bound_design_ids:
+                blockers.append(
+                    _blocker(
+                        "attempt_priority_design_mismatch",
+                        attempt_id,
+                        "attempt priority selects a design that the attempt does not bind",
+                    )
+                )
+        raw_status = str(payload.get("status") or "").strip().lower()
+        expected_state = {
+            "success": "completed",
+            "completed": "completed",
+            "failed": "failed",
+            "error": "failed",
+            "timeout": "timed_out",
+            "timed_out": "timed_out",
+            "cancelled": "cancelled",
+            "canceled": "cancelled",
+            "running": "running",
+        }.get(raw_status)
+        if raw_status and expected_state is None:
+            blockers.append(
+                _blocker(
+                    "invalid_attempt_status",
+                    attempt_id,
+                    "attempt payload status is not a supported lifecycle status",
+                )
+            )
+        elif expected_state is not None and expected_state != state:
+            blockers.append(
+                _blocker(
+                    "attempt_status_state_mismatch",
+                    attempt_id,
+                    "attempt payload status disagrees with its immutable object state",
+                )
+            )
+        if state not in {
+            "draft",
+            "running",
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled",
+        }:
+            blockers.append(
+                _blocker(
+                    "invalid_attempt_state",
+                    attempt_id,
+                    "experiment attempt has a state outside its lifecycle contract",
+                )
+            )
+        if attempt_id in claim_attempt_id_set and state != "completed":
+            blockers.append(
+                _blocker(
+                    "claim_evidence_from_noncompleted_attempt",
+                    attempt_id,
+                    "scientific claim evidence derives from an attempt that did not complete",
+                )
+            )
+        if state in {"draft", "running"}:
+            blockers.append(
+                _blocker(
+                    "unfinished_study_attempt",
+                    attempt_id,
+                    "a study attempt is unfinished and cannot be omitted from closure",
+                )
+            )
+        if state in {"failed", "timed_out", "cancelled"} and not any(
+            str(payload.get(key) or "").strip()
+            for key in (
+                "failure_reason",
+                "timeout_reason",
+                "cancellation_reason",
+                "termination_reason",
+                "reason",
+            )
+        ):
+            blockers.append(
+                _blocker(
+                    "noncompleted_attempt_without_disposition",
+                    attempt_id,
+                    "failed, timed-out, and cancelled attempts require an explicit disposition",
+                )
+            )
+        all_derived_evidence_ids = {
+            evidence_id
+            for evidence_id in study_evidence_ids
+            if attempt_id
+            in _targets(objects[evidence_id], relation_types=("derived_from",))
+        }
+        derived_evidence_ids = {
+            evidence_id
+            for evidence_id in all_derived_evidence_ids
+            if _is_active_closure_object(evidence_id, objects, superseded_ids)
+        }
+        for evidence_id in sorted(
+            all_derived_evidence_ids - derived_evidence_ids - superseded_ids
+        ):
+            blockers.append(
+                _blocker(
+                    "study_evidence_not_active",
+                    evidence_id,
+                    "study evidence must be completed, verified, or promoted before it can satisfy closure",
+                )
+            )
+        if state == "completed" and not derived_evidence_ids:
+            blockers.append(
+                _blocker(
+                    "completed_study_attempt_without_evidence",
+                    attempt_id,
+                    "a completed attempt in the claim's study has no recorded evidence",
+                )
+            )
+        for evidence_id in sorted(derived_evidence_ids - closure_evidence_id_set):
+            if not _has_scientific_disposition(evidence_id, objects, superseded_ids):
+                blockers.append(
+                    _blocker(
+                        "study_evidence_without_disposition",
+                        evidence_id,
+                        "evidence from the same study is not linked to any scientific disposition",
+                    )
+                )
+            else:
+                warnings.append(
+                    _blocker(
+                        "study_evidence_outside_claim_closure",
+                        evidence_id,
+                        "related study evidence is disclosed but belongs to another scientific closure",
+                    )
+                )
     for passage_id in passage_ids:
         bound_sources = [
             target
@@ -1442,6 +1868,7 @@ def _claim_closure(
         *attempt_ids,
         *plan_ids,
         *preregistration_ids,
+        *priority_ids,
         *source_ids,
         *search_receipt_ids,
         *search_plan_ids,
@@ -1463,11 +1890,12 @@ def _claim_closure(
     for attempt_id in attempt_ids:
         attempt = objects[attempt_id]
         payload = attempt.get("payload") or {}
-        if payload.get("study_phase") == "confirmatory":
+        if str(payload.get("study_phase") or "").strip().lower() == "confirmatory":
             locked = [
-                object_id
-                for object_id in preregistration_ids
-                if objects[object_id].get("state") == "locked"
+                target
+                for target in _targets(attempt, relation_types=("depends_on",))
+                if objects.get(target, {}).get("kind") == "preregistration"
+                and objects[target].get("state") == "locked"
             ]
             if not locked:
                 blockers.append(
@@ -1503,7 +1931,10 @@ def _claim_closure(
         if not (
             provenance.get("code_hash")
             or provenance.get("code_commit")
-            or payload.get("code_ref")
+            or re.fullmatch(
+                r"(?:sha256:[0-9a-f]{64}|[0-9a-f]{40,64})",
+                str(payload.get("code_ref") or ""),
+            )
         ):
             replay_blockers.append(
                 _blocker(
@@ -1512,10 +1943,11 @@ def _claim_closure(
             )
         if not (
             provenance.get("dataset_hashes")
-            or payload.get("data_refs")
+            or _has_data_hash_anchor({"artifact_hashes": payload.get("data_refs")})
             or any(
-                _has_hash_anchor(objects[item].get("payload") or {})
-                for item in preregistration_ids
+                _has_data_hash_anchor(objects[item].get("payload") or {})
+                for item in _targets(attempt, relation_types=("depends_on",))
+                if objects.get(item, {}).get("kind") == "preregistration"
             )
         ):
             replay_blockers.append(
@@ -1534,7 +1966,10 @@ def _claim_closure(
                 )
             )
     for evidence_id in evidence_ids:
-        if not _has_hash_anchor(objects[evidence_id].get("payload") or {}):
+        if not (
+            _has_evidence_hash_anchor(objects[evidence_id].get("payload") or {})
+            or _has_evidence_hash_anchor(objects[evidence_id].get("provenance") or {})
+        ):
             replay_blockers.append(
                 _blocker(
                     "missing_evidence_hash_anchor",
@@ -1748,6 +2183,7 @@ def _claim_closure(
             *attempt_ids,
             *plan_ids,
             *preregistration_ids,
+            *priority_ids,
             *source_ids,
             *search_receipt_ids,
             *search_plan_ids,
@@ -1859,8 +2295,12 @@ def _claim_closure(
         "argument_ids": sorted(argument_ids),
         "source_update_ids": source_update_ids,
         "attempt_ids": attempt_ids,
+        "claim_attempt_ids": claim_attempt_ids,
+        "study_evidence_ids": study_evidence_ids,
+        "attempt_states": dict(sorted(attempt_states.items())),
         "plan_ids": plan_ids,
         "preregistration_ids": preregistration_ids,
+        "priority_ids": priority_ids,
         "gate_ids": gate_ids,
         "reproduction_ids": reproduction_ids,
         "reproduction_closure_ids": reproduction_closure_ids,

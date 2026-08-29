@@ -8,6 +8,12 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Upgraded scientific closure audits to `research-closure.v2`: every claim now
+  discloses its direct and same-study attempts, evidence, states, plans,
+  preregistrations, and selected experiment priorities. Failed or unfinished
+  attempts, inactive evidence, unbound negative results, invalid plan/priority
+  state, cross-attempt provenance borrowing, and non-protocol hash anchors fail
+  closed instead of permitting claim verification.
 - Added a Faraday-inspired, metadata-only rollout policy projection with
   contiguous budget accounting, decision ownership, failure/recovery signals,
   and deterministic strategy hashes. Completed rollouts now require complete,

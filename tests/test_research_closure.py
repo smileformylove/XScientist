@@ -296,6 +296,676 @@ class ResearchClosureTests(unittest.TestCase):
                 {item["code"] for item in audit["blockers"]},
             )
 
+    def test_experiment_design_is_a_valid_attempt_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            design = repository.record(
+                "experiment_design",
+                {"summary": "A locked discriminating design"},
+                state="locked",
+            )
+            attempt = repository.record(
+                "experiment_attempt",
+                {"status": "completed", "study_phase": "exploratory"},
+                state="completed",
+                relations=[
+                    {
+                        "type": "depends_on",
+                        "target": design.object_id,
+                        "role": "design",
+                    }
+                ],
+            )
+            evidence = repository.record(
+                "evidence",
+                {"result": "positive"},
+                state="completed",
+                relations=[{"type": "derived_from", "target": attempt.object_id}],
+            )
+            claim = repository.record(
+                "claim",
+                {"statement": "The design discriminates the rivals."},
+                relations=[{"type": "depends_on", "target": evidence.object_id}],
+            )
+            repository.commit(stage="evidence", subject="bind design lineage")
+
+            audit = repository.audit(level="trace")
+
+            self.assertTrue(audit["complete"], audit["blockers"])
+            row = next(
+                item for item in audit["claims"] if item["claim_id"] == claim.object_id
+            )
+            self.assertEqual(row["plan_ids"], [design.object_id])
+            self.assertNotIn("attempt_without_plan", row["missing"])
+
+    def test_failed_rejected_or_superseded_plan_cannot_anchor_attempt(self) -> None:
+        for plan_state in ("failed", "rejected", "superseded"):
+            with self.subTest(state=plan_state), tempfile.TemporaryDirectory() as td:
+                repository = self._repository(Path(td) / "research")
+                design = repository.record(
+                    "experiment_design",
+                    {"summary": "Invalid design"},
+                    state=plan_state,
+                )
+                attempt = repository.record(
+                    "experiment_attempt",
+                    {"status": "completed"},
+                    state="completed",
+                    relations=[{"type": "depends_on", "target": design.object_id}],
+                )
+                evidence = repository.record(
+                    "evidence",
+                    {"result": "positive"},
+                    state="completed",
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                repository.record(
+                    "claim",
+                    {"statement": "The invalid design supports this claim."},
+                    relations=[{"type": "depends_on", "target": evidence.object_id}],
+                )
+                repository.commit(stage="evidence", subject="bind invalid design")
+
+                audit = repository.audit(level="trace")
+
+                self.assertIn(
+                    "attempt_plan_not_active",
+                    {item["code"] for item in audit["blockers"]},
+                )
+
+    def test_noncompleted_attempt_cannot_supply_claim_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            attempt = repository.record(
+                "experiment_attempt",
+                {
+                    "status": "failed",
+                    "study_phase": "exploratory",
+                    "failure_reason": "executor crashed before measurement",
+                },
+                state="failed",
+                relations=[
+                    {"type": "depends_on", "target": plan.object_id, "role": "plan"}
+                ],
+            )
+            evidence = repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "derived_from", "target": attempt.object_id}],
+            )
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[{"type": "depends_on", "target": evidence.object_id}],
+            )
+            repository.commit(stage="evidence", subject="bind failed attempt")
+
+            audit = repository.audit(level="trace")
+
+            self.assertFalse(audit["complete"])
+            self.assertIn(
+                "claim_evidence_from_noncompleted_attempt",
+                {item["code"] for item in audit["blockers"]},
+            )
+            self.assertEqual(
+                audit["claims"][0]["attempt_states"],
+                {attempt.object_id: "failed"},
+            )
+
+    def test_nonactive_evidence_cannot_supply_a_claim(self) -> None:
+        for evidence_state in ("draft", "running", "failed", "rejected", "superseded"):
+            with (
+                self.subTest(state=evidence_state),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                repository = self._repository(Path(td) / "research")
+                plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+                attempt = repository.record(
+                    "experiment_attempt",
+                    {"status": "completed"},
+                    state="completed",
+                    relations=[{"type": "depends_on", "target": plan.object_id}],
+                )
+                evidence = repository.record(
+                    "evidence",
+                    {"result": "positive"},
+                    state=evidence_state,
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                repository.record(
+                    "claim",
+                    {"statement": "H1 improves the metric."},
+                    relations=[{"type": "depends_on", "target": evidence.object_id}],
+                )
+                repository.commit(stage="evidence", subject="bind inactive evidence")
+
+                audit = repository.audit(level="trace")
+
+                self.assertIn(
+                    "claim_evidence_not_active",
+                    {item["code"] for item in audit["blockers"]},
+                )
+
+    def test_each_claim_attempt_requires_its_own_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            planned = repository.record(
+                "experiment_attempt",
+                {"status": "completed"},
+                state="completed",
+                relations=[
+                    {"type": "depends_on", "target": plan.object_id, "role": "plan"}
+                ],
+            )
+            unplanned = repository.record(
+                "experiment_attempt",
+                {"status": "completed"},
+                state="completed",
+            )
+            evidences = [
+                repository.record(
+                    "evidence",
+                    {"result": result},
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                for result, attempt in (("positive", planned), ("null", unplanned))
+            ]
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[
+                    {"type": "depends_on", "target": evidence.object_id}
+                    for evidence in evidences
+                ],
+            )
+            repository.commit(stage="evidence", subject="bind mixed-plan attempts")
+
+            audit = repository.audit(level="trace")
+
+            self.assertFalse(audit["complete"])
+            plan_blockers = [
+                item
+                for item in audit["blockers"]
+                if item["code"] == "attempt_without_plan"
+            ]
+            self.assertEqual(
+                [item["object_id"] for item in plan_blockers], [unplanned.object_id]
+            )
+
+    def test_replay_data_identity_cannot_be_borrowed_from_sibling_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            preregistration = repository.record(
+                "preregistration",
+                {"status": "locked", "dataset_hash": "sha256:" + "8" * 64},
+                state="locked",
+            )
+            attempts = []
+            for with_preregistration in (True, False):
+                relations = [
+                    {"type": "depends_on", "target": plan.object_id, "role": "plan"}
+                ]
+                if with_preregistration:
+                    relations.append(
+                        {
+                            "type": "depends_on",
+                            "target": preregistration.object_id,
+                            "role": "protocol",
+                        }
+                    )
+                attempts.append(
+                    repository.record(
+                        "experiment_attempt",
+                        {
+                            "status": "completed",
+                            "deterministic": True,
+                            **(
+                                {}
+                                if with_preregistration
+                                else {"data_refs": ["mutable-dataset-name"]}
+                            ),
+                        },
+                        state="completed",
+                        relations=relations,
+                        provenance={
+                            "environment_hash": "sha256:" + "1" * 64,
+                            "code_hash": "sha256:" + "2" * 64,
+                            "dependency_lock_hashes": ["sha256:" + "4" * 64],
+                        },
+                    )
+                )
+            evidences = [
+                repository.record(
+                    "evidence",
+                    {
+                        "result": f"result-{index}",
+                        "measurement_hash": "sha256:" + str(index + 5) * 64,
+                    },
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                for index, attempt in enumerate(attempts)
+            ]
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[
+                    {"type": "depends_on", "target": evidence.object_id}
+                    for evidence in evidences
+                ],
+            )
+            repository.commit(stage="evidence", subject="bind sibling data identities")
+
+            audit = repository.audit(level="replay")
+
+            data_blockers = [
+                item
+                for item in audit["blockers"]
+                if item["code"] == "missing_data_identity"
+            ]
+            self.assertEqual(
+                [item["object_id"] for item in data_blockers],
+                [attempts[1].object_id],
+            )
+
+    def test_same_study_attempts_are_surfaced_and_require_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            _claim_id, _evidence_id, claim_attempt_id = self._record_lineage(repository)
+            claim_attempt = repository.get(claim_attempt_id)
+            plan_id = next(
+                str(relation["target"])
+                for relation in claim_attempt["relations"]
+                if relation.get("role") == "plan"
+            )
+            failed = repository.record(
+                "experiment_attempt",
+                {
+                    "status": "failed",
+                    "study_phase": "exploratory",
+                    "study_run_id": "agent-selected-hidden-run",
+                },
+                state="failed",
+                relations=[{"type": "depends_on", "target": plan_id, "role": "plan"}],
+            )
+            repository.commit(stage="failed", subject="record sibling failure")
+
+            audit = repository.audit(level="trace")
+
+            self.assertFalse(audit["complete"])
+            self.assertIn(failed.object_id, audit["claims"][0]["attempt_ids"])
+            self.assertEqual(
+                audit["claims"][0]["claim_attempt_ids"], [claim_attempt_id]
+            )
+            self.assertIn(
+                "noncompleted_attempt_without_disposition",
+                {item["code"] for item in audit["blockers"]},
+            )
+
+    def test_noncompleted_attempt_evidence_still_requires_disposition(self) -> None:
+        cases = (
+            ("failed", "failed", "failure_reason"),
+            ("timed_out", "timed_out", "timeout_reason"),
+            ("cancelled", "cancelled", "cancellation_reason"),
+        )
+        for state, status, reason_field in cases:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as td:
+                repository = self._repository(Path(td) / "research")
+                _claim_id, _evidence_id, claim_attempt_id = self._record_lineage(
+                    repository
+                )
+                claim_attempt = repository.get(claim_attempt_id)
+                plan_id = next(
+                    str(relation["target"])
+                    for relation in claim_attempt["relations"]
+                    if relation.get("role") == "plan"
+                )
+                sibling = repository.record(
+                    "experiment_attempt",
+                    {"status": status, reason_field: "executor did not complete"},
+                    state=state,
+                    relations=[{"type": "depends_on", "target": plan_id}],
+                )
+                repository.record(
+                    "evidence",
+                    {"result": "unlinked negative result"},
+                    state="completed",
+                    relations=[{"type": "derived_from", "target": sibling.object_id}],
+                )
+                repository.commit(stage="failed", subject="record unlinked evidence")
+
+                audit = repository.audit(level="trace")
+
+                self.assertIn(
+                    "study_evidence_without_disposition",
+                    {item["code"] for item in audit["blockers"]},
+                )
+
+    def test_specific_designs_do_not_merge_through_a_broad_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Broad program"})
+            claims: list[tuple[str, str]] = []
+            for index in range(2):
+                design = repository.record(
+                    "experiment_design", {"summary": f"Design {index}"}
+                )
+                attempt = repository.record(
+                    "experiment_attempt",
+                    {"status": "completed"},
+                    state="completed",
+                    relations=[
+                        {"type": "depends_on", "target": plan.object_id},
+                        {"type": "depends_on", "target": design.object_id},
+                    ],
+                )
+                evidence = repository.record(
+                    "evidence",
+                    {"result": f"result-{index}"},
+                    state="completed",
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                claim = repository.record(
+                    "claim",
+                    {"statement": f"Claim {index}"},
+                    relations=[{"type": "depends_on", "target": evidence.object_id}],
+                )
+                claims.append((claim.object_id, attempt.object_id))
+            repository.commit(stage="evidence", subject="bind distinct designs")
+
+            audit = repository.audit(level="trace")
+
+            self.assertTrue(audit["complete"], audit["blockers"])
+            rows = {item["claim_id"]: item for item in audit["claims"]}
+            for claim_id, attempt_id in claims:
+                self.assertEqual(rows[claim_id]["attempt_ids"], [attempt_id])
+
+    def test_one_attempt_can_feed_distinct_claim_closures(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate A and B"})
+            attempt = repository.record(
+                "experiment_attempt",
+                {"status": "completed"},
+                state="completed",
+                relations=[{"type": "depends_on", "target": plan.object_id}],
+            )
+            for index in range(2):
+                evidence = repository.record(
+                    "evidence",
+                    {"result": f"result-{index}"},
+                    state="completed",
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                repository.record(
+                    "claim",
+                    {"statement": f"Claim {index}"},
+                    state="completed",
+                    relations=[{"type": "depends_on", "target": evidence.object_id}],
+                )
+            repository.commit(stage="evidence", subject="bind two claim closures")
+
+            audit = repository.audit(level="trace")
+
+            self.assertTrue(audit["complete"], audit["blockers"])
+            self.assertTrue(
+                all(len(item["study_evidence_ids"]) == 2 for item in audit["claims"])
+            )
+            self.assertIn(
+                "study_evidence_outside_claim_closure",
+                {item["code"] for item in audit["warnings"]},
+            )
+
+    def test_inactive_review_cannot_dispose_hidden_study_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            attempt = repository.record(
+                "experiment_attempt",
+                {"status": "completed"},
+                state="completed",
+                relations=[{"type": "depends_on", "target": plan.object_id}],
+            )
+            primary = repository.record(
+                "evidence",
+                {"result": "positive"},
+                state="completed",
+                relations=[{"type": "derived_from", "target": attempt.object_id}],
+            )
+            inactive_hypothesis = repository.record(
+                "hypothesis",
+                {"statement": "Rejected diversion"},
+                state="rejected",
+            )
+            hidden = repository.record(
+                "evidence",
+                {"result": "negative"},
+                state="completed",
+                relations=[
+                    {"type": "derived_from", "target": attempt.object_id},
+                    {"type": "supports", "target": inactive_hypothesis.object_id},
+                ],
+            )
+            repository.record(
+                "review",
+                {"summary": "draft placeholder"},
+                state="draft",
+                relations=[{"type": "evaluates", "target": hidden.object_id}],
+            )
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[{"type": "depends_on", "target": primary.object_id}],
+            )
+            repository.commit(stage="evidence", subject="bind hidden evidence")
+
+            audit = repository.audit(level="trace")
+
+            self.assertIn(
+                "study_evidence_without_disposition",
+                {item["code"] for item in audit["blockers"]},
+            )
+
+    def test_priority_cannot_hide_a_sibling_from_the_same_design(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Shared plan"})
+            design = repository.record(
+                "experiment_design", {"summary": "Shared design"}
+            )
+            policy = {"version": "test-policy"}
+            candidate = {
+                "candidate_id": "candidate-1",
+                "design_object_id": design.object_id,
+                "predictions": {"h1": "up", "h2": "down"},
+                "prediction_ids": {
+                    "h1": "rso-1111111111111111",
+                    "h2": "rso-2222222222222222",
+                },
+                "rank": 1,
+                "selected": True,
+            }
+            priority_core = {
+                "protocol_kind": "information_value_experiment_priority",
+                "portfolio_id": "rso-3333333333333333",
+                "prior_source_id": "rso-3333333333333333",
+                "prior_weights": {"h1": 0.5, "h2": 0.5},
+                "policy": policy,
+                "policy_hash": content_hash(policy),
+                "candidate_set": [candidate],
+                "selected_candidate_id": "candidate-1",
+                "selected_design_id": design.object_id,
+            }
+            priority = repository.record(
+                "experiment_priority",
+                {
+                    **priority_core,
+                    "priority_hash": content_hash(priority_core),
+                },
+                state="locked",
+            )
+            good = repository.record(
+                "experiment_attempt",
+                {"status": "completed"},
+                state="completed",
+                relations=[
+                    {"type": "depends_on", "target": plan.object_id},
+                    {"type": "depends_on", "target": design.object_id},
+                    {"type": "consumes", "target": priority.object_id},
+                ],
+            )
+            failed = repository.record(
+                "experiment_attempt",
+                {"status": "failed"},
+                state="failed",
+                relations=[{"type": "depends_on", "target": plan.object_id}],
+            )
+            evidence = repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "derived_from", "target": good.object_id}],
+            )
+            repository.record(
+                "claim",
+                {"statement": "The design improves the metric."},
+                relations=[{"type": "depends_on", "target": evidence.object_id}],
+            )
+            repository.commit(stage="failed", subject="bind priority sibling")
+
+            audit = repository.audit(level="trace")
+
+            self.assertIn(failed.object_id, audit["claims"][0]["attempt_ids"])
+            self.assertIn(
+                "noncompleted_attempt_without_disposition",
+                {item["code"] for item in audit["blockers"]},
+            )
+
+    def test_confirmatory_phase_is_normalized_before_preregistration_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Confirm H1"})
+            attempt = repository.record(
+                "experiment_attempt",
+                {"status": "completed", "study_phase": "Confirmatory "},
+                state="completed",
+                relations=[{"type": "depends_on", "target": plan.object_id}],
+            )
+            evidence = repository.record(
+                "evidence",
+                {"result": "positive"},
+                relations=[{"type": "derived_from", "target": attempt.object_id}],
+            )
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[{"type": "depends_on", "target": evidence.object_id}],
+            )
+            repository.commit(stage="evidence", subject="bind confirmatory attempt")
+
+            audit = repository.audit(level="trace")
+
+            self.assertIn(
+                "confirmatory_without_locked_preregistration",
+                {item["code"] for item in audit["blockers"]},
+            )
+
+    def test_attempt_status_and_state_are_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            attempts = [
+                repository.record(
+                    "experiment_attempt",
+                    {"status": "failed "},
+                    state="completed",
+                    relations=[{"type": "depends_on", "target": plan.object_id}],
+                ),
+                repository.record(
+                    "experiment_attempt",
+                    {"status": "bogus"},
+                    state="rejected",
+                    relations=[{"type": "depends_on", "target": plan.object_id}],
+                ),
+            ]
+            evidences = [
+                repository.record(
+                    "evidence",
+                    {"result": f"result-{index}"},
+                    relations=[{"type": "derived_from", "target": attempt.object_id}],
+                )
+                for index, attempt in enumerate(attempts)
+            ]
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[
+                    {"type": "depends_on", "target": evidence.object_id}
+                    for evidence in evidences
+                ],
+            )
+            repository.commit(stage="evidence", subject="bind invalid attempts")
+
+            audit = repository.audit(level="trace")
+
+            codes = {item["code"] for item in audit["blockers"]}
+            self.assertIn("attempt_status_state_mismatch", codes)
+            self.assertIn("invalid_attempt_status", codes)
+            self.assertIn("invalid_attempt_state", codes)
+
+    def test_malformed_evidence_hash_does_not_make_replay_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            plan = repository.record("research_plan", {"summary": "Evaluate H1"})
+            attempt = repository.record(
+                "experiment_attempt",
+                {
+                    "status": "completed",
+                    "study_phase": "exploratory",
+                    "deterministic": True,
+                    "code_ref": "main",
+                },
+                state="completed",
+                relations=[
+                    {"type": "depends_on", "target": plan.object_id, "role": "plan"}
+                ],
+                provenance={
+                    "environment_hash": "sha256:" + "1" * 64,
+                    "dataset_hashes": ["sha256:" + "3" * 64],
+                    "dependency_lock_hashes": ["sha256:" + "4" * 64],
+                },
+            )
+            evidence = repository.record(
+                "evidence",
+                {
+                    "result": "positive",
+                    "measurement_hash": "sha256:not-a-digest",
+                    "debug_hash": "sha256:" + "9" * 64,
+                    "debug": {"measurement_hash": "sha256:" + "8" * 64},
+                },
+                provenance={"dataset_hashes": ["sha256:" + "7" * 64]},
+                relations=[{"type": "derived_from", "target": attempt.object_id}],
+            )
+            repository.record(
+                "claim",
+                {"statement": "H1 improves the metric."},
+                relations=[{"type": "depends_on", "target": evidence.object_id}],
+            )
+            repository.commit(stage="evidence", subject="bind malformed hash")
+
+            audit = repository.audit(level="replay")
+
+            self.assertFalse(audit["complete"])
+            self.assertIn(
+                "missing_evidence_hash_anchor",
+                {item["code"] for item in audit["blockers"]},
+            )
+            self.assertIn(
+                "missing_code_identity",
+                {item["code"] for item in audit["blockers"]},
+            )
+
     def test_verified_closure_requires_gate_and_reproduction_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repository = self._repository(Path(td) / "research")

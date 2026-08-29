@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_closure.schema.json",
+  "$id": "https://xscientist.io/protocol/research-closure.v2/research_closure.schema.json",
   "title": "XScientist Scientific Closure Audit",
   "description": "A payload-free audit view linking claims to evidence, attempts, plans, preregistrations, gates, and reproductions.",
   "type": "object",
-  "required": ["schema_version", "ref", "commit", "target_level", "status", "complete", "counts", "claims", "blockers", "warnings", "integrity", "payloads_disclosed", "content_hash"],
+  "required": ["schema_version", "ref", "commit", "target_level", "status", "complete", "counts", "superseded_claim_ids", "claims", "blockers", "warnings", "closure_levels", "integrity", "payloads_disclosed", "content_hash"],
   "properties": {
-    "schema_version": {"type": "string", "const": "xscientist.research-closure.v1"},
+    "schema_version": {"type": "string", "const": "xscientist.research-closure.v2"},
     "ref": {"type": "string", "minLength": 1},
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
     "target_level": {"type": "string", "enum": ["trace", "replay", "verify"]},
@@ -20,7 +20,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["claim_id", "state", "evidence_ids", "attempt_ids", "plan_ids", "preregistration_ids", "gate_ids", "reproduction_ids", "trace_complete", "replay_ready", "verified", "complete", "missing"],
+        "required": ["claim_id", "state", "evidence_ids", "experimental_evidence_ids", "passage_evidence_ids", "source_snapshot_ids", "search_receipt_ids", "search_plan_ids", "argument_ids", "source_update_ids", "attempt_ids", "claim_attempt_ids", "study_evidence_ids", "attempt_states", "plan_ids", "preregistration_ids", "priority_ids", "gate_ids", "reproduction_ids", "reproduction_closure_ids", "trace_complete", "replay_ready", "verified", "complete", "missing"],
         "properties": {
           "claim_id": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
           "state": {"type": "string"},
@@ -33,8 +33,21 @@
           "argument_ids": {"$ref": "#/$defs/objectIds"},
           "source_update_ids": {"$ref": "#/$defs/objectIds"},
           "attempt_ids": {"$ref": "#/$defs/objectIds"},
+          "claim_attempt_ids": {"$ref": "#/$defs/objectIds"},
+          "study_evidence_ids": {"$ref": "#/$defs/objectIds"},
+          "attempt_states": {
+            "type": "object",
+            "patternProperties": {
+              "^rso-[0-9a-f]{16}$": {
+                "type": "string",
+                "enum": ["draft", "locked", "running", "completed", "failed", "timed_out", "cancelled", "rejected", "superseded", "verified", "promoted"]
+              }
+            },
+            "additionalProperties": false
+          },
           "plan_ids": {"$ref": "#/$defs/objectIds"},
           "preregistration_ids": {"$ref": "#/$defs/objectIds"},
+          "priority_ids": {"$ref": "#/$defs/objectIds"},
           "gate_ids": {"$ref": "#/$defs/objectIds"},
           "reproduction_ids": {"$ref": "#/$defs/objectIds"},
           "reproduction_closure_ids": {"$ref": "#/$defs/objectIds"},

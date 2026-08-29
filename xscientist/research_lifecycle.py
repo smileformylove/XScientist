@@ -113,7 +113,15 @@ class ResearchLifecycle:
         """Record every attempt, including failure, timeout, and cancellation."""
 
         payload = dict(attempt)
-        raw_status = str(payload.get("status") or "completed").lower()
+        study_phase = str(payload.get("study_phase") or "").strip().lower()
+        if study_phase:
+            if study_phase not in {"exploratory", "confirmatory"}:
+                raise ResearchGitError(
+                    f"unsupported experiment study phase: {study_phase}"
+                )
+            payload["study_phase"] = study_phase
+        raw_status = str(payload.get("status") or "completed").strip().lower()
+        payload["status"] = raw_status
         state = {
             "success": "completed",
             "completed": "completed",
