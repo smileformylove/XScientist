@@ -32,8 +32,8 @@ except ImportError:  # pragma: no cover - compatibility with older NumPy
     from numpy.core import multiarray as _numpy_multiarray
 
 
-EVALUATOR_SCHEMA_VERSION = "deterministic_evaluation.v1"
-EVALUATOR_VERSION = "1.0.0"
+EVALUATOR_SCHEMA_VERSION = "deterministic_evaluation.v2"
+EVALUATOR_VERSION = "2.0.0"
 DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_ARRAY_ELEMENTS = 5_000_000
 DEFAULT_MAX_CONTAINER_ITEMS = 100_000
@@ -50,6 +50,9 @@ _SCORE_KEYS = (
     "y_score",
     "y_prob",
 )
+_SAMPLE_ID_KEYS = ("sample_ids", "example_ids", "record_ids")
+_INPUT_FINGERPRINT_KEYS = ("input_fingerprints", "sample_fingerprints")
+_EVALUATION_INPUT_KEYS = ("evaluation_inputs", "inputs", "features")
 
 _METRIC_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("roc_auc", ("roc auc", "roc-auc", "roc_auc", "auc")),
@@ -301,6 +304,180 @@ def _canonical_hash(payload: Any) -> str:
     return _sha256_bytes(encoded)
 
 
+def _target_identity(y_true: np.ndarray, *, dataset: str) -> dict[str, Any]:
+    """Commit to the exact evaluated target vector."""
+
+    try:
+        values = y_true.tolist()
+        target_hash = _canonical_hash(
+            {
+                "dtype": y_true.dtype.str,
+                "shape": list(y_true.shape),
+                "values": values,
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise EvaluationInputError(
+            f"{dataset} ground truth cannot be content-addressed"
+        ) from exc
+    return {
+        "target_sha256": target_hash,
+        "target_dtype": y_true.dtype.str,
+        "target_shape": list(y_true.shape),
+    }
+
+
+def _canonical_input_value(value: Any, *, dataset: str) -> Any:
+    """Normalize one evaluated input without trusting an agent-supplied digest."""
+
+    if isinstance(value, np.ndarray):
+        return {
+            "type": "ndarray",
+            "dtype": value.dtype.str,
+            "shape": list(value.shape),
+            "values": _canonical_input_value(value.tolist(), dataset=dataset),
+        }
+    if isinstance(value, np.generic):
+        return _canonical_input_value(value.item(), dataset=dataset)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise EvaluationInputError(
+                f"{dataset} evaluation inputs contain non-finite values"
+            )
+        return value
+    if isinstance(value, bytes):
+        return {"type": "bytes", "hex": value.hex()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_input_value(item, dataset=dataset) for item in value]
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or key in normalized:
+                raise EvaluationInputError(
+                    f"{dataset} evaluation input mappings require unique string keys"
+                )
+            normalized[key] = _canonical_input_value(item, dataset=dataset)
+        return normalized
+    raise EvaluationInputError(
+        f"{dataset} evaluation inputs contain unsupported values"
+    )
+
+
+def _computed_input_fingerprints(
+    evaluation_inputs: Any,
+    *,
+    samples: int,
+    dataset: str,
+) -> list[str]:
+    """Hash each evaluated input record in the deterministic evaluator."""
+
+    try:
+        inputs = np.asarray(evaluation_inputs)
+    except (TypeError, ValueError) as exc:
+        raise EvaluationInputError(
+            f"{dataset} evaluation inputs cannot be normalized"
+        ) from exc
+    if inputs.ndim == 0 or inputs.shape[0] != samples:
+        raise EvaluationInputError(
+            f"{dataset} evaluation inputs and ground truth lengths differ"
+        )
+    return [
+        _canonical_hash(
+            {
+                "schema": "deterministic_input_record.v1",
+                "value": _canonical_input_value(inputs[index], dataset=dataset),
+            }
+        )
+        for index in range(samples)
+    ]
+
+
+def _comparison_identity(
+    *,
+    dataset: str,
+    y_true: np.ndarray,
+    sample_ids: Any,
+    evaluation_inputs: Any,
+    asserted_input_fingerprints: Any,
+) -> dict[str, Any]:
+    """Build an identity from evaluator-computed record commitments."""
+
+    target = _target_identity(y_true, dataset=dataset)
+    unavailable = {
+        **target,
+        "sample_ids_sha256": None,
+        "input_fingerprints_sha256": None,
+        "input_identity_source": None,
+        "split_identity": None,
+        "comparison_ready": False,
+    }
+    if sample_ids is None or evaluation_inputs is None:
+        return unavailable
+    ids = _as_vector(sample_ids, field="sample_ids", dataset=dataset)
+    computed_fingerprints = _computed_input_fingerprints(
+        evaluation_inputs,
+        samples=int(y_true.size),
+        dataset=dataset,
+    )
+    if ids.size != y_true.size:
+        raise EvaluationInputError(
+            f"{dataset} comparison identities and ground truth lengths differ"
+        )
+    normalized_ids: list[str | int] = []
+    seen_ids: set[tuple[str, str]] = set()
+    for raw_id in ids.tolist():
+        if isinstance(raw_id, np.integer):
+            raw_id = int(raw_id)
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+            raise EvaluationInputError(
+                f"{dataset} sample_ids must contain strings or integers"
+            )
+        if isinstance(raw_id, str) and (not raw_id or len(raw_id) > 512):
+            raise EvaluationInputError(
+                f"{dataset} sample_ids contain an invalid string"
+            )
+        identity = (type(raw_id).__name__, str(raw_id))
+        if identity in seen_ids:
+            raise EvaluationInputError(f"{dataset} sample_ids must be unique")
+        seen_ids.add(identity)
+        normalized_ids.append(raw_id)
+    if asserted_input_fingerprints is not None:
+        asserted = _as_vector(
+            asserted_input_fingerprints,
+            field="input_fingerprints",
+            dataset=dataset,
+        )
+        if asserted.size != y_true.size:
+            raise EvaluationInputError(
+                f"{dataset} asserted input fingerprints have the wrong length"
+            )
+        if asserted.tolist() != computed_fingerprints:
+            raise EvaluationInputError(
+                f"{dataset} asserted input fingerprints do not match evaluator-computed inputs"
+            )
+    sample_ids_hash = _canonical_hash(normalized_ids)
+    input_fingerprints_hash = _canonical_hash(computed_fingerprints)
+    identity_source = "evaluator_computed_from_evaluation_inputs.v1"
+    split_payload = {
+        "dataset_path": dataset,
+        "target_sha256": target["target_sha256"],
+        "sample_ids_sha256": sample_ids_hash,
+        "input_fingerprints_sha256": input_fingerprints_hash,
+        "input_identity_source": identity_source,
+        "samples": int(y_true.size),
+    }
+    return {
+        **target,
+        "sample_ids_sha256": sample_ids_hash,
+        "input_fingerprints_sha256": input_fingerprints_hash,
+        "input_identity_source": identity_source,
+        "split_identity": _canonical_hash(split_payload),
+        "comparison_ready": True,
+    }
+
+
 def _implementation_hash() -> str:
     try:
         return _sha256_bytes(Path(__file__).read_bytes())
@@ -499,6 +676,9 @@ def _find_prediction_pairs(value: Any) -> list[dict[str, Any]]:
             true_items = _matching_items(current, _TRUE_KEYS)
             pred_items = _matching_items(current, _PRED_KEYS)
             score_items = _matching_items(current, _SCORE_KEYS)
+            sample_id_items = _matching_items(current, _SAMPLE_ID_KEYS)
+            fingerprint_items = _matching_items(current, _INPUT_FINGERPRINT_KEYS)
+            evaluation_input_items = _matching_items(current, _EVALUATION_INPUT_KEYS)
             if true_items or pred_items or score_items:
                 if len(true_items) != 1:
                     raise EvaluationInputError(
@@ -507,6 +687,14 @@ def _find_prediction_pairs(value: Any) -> list[dict[str, Any]]:
                 if len(pred_items) > 1 or len(score_items) > 1:
                     raise EvaluationInputError(
                         f"{_dataset_name(path)} has ambiguous prediction/score candidates"
+                    )
+                if (
+                    len(sample_id_items) > 1
+                    or len(fingerprint_items) > 1
+                    or len(evaluation_input_items) > 1
+                ):
+                    raise EvaluationInputError(
+                        f"{_dataset_name(path)} has ambiguous comparison identities"
                     )
                 if not pred_items and not score_items:
                     raise EvaluationInputError(
@@ -518,6 +706,17 @@ def _find_prediction_pairs(value: Any) -> list[dict[str, Any]]:
                         "ground_truth": true_items[0][1],
                         "predictions": pred_items[0][1] if pred_items else None,
                         "scores": score_items[0][1] if score_items else None,
+                        "sample_ids": (
+                            sample_id_items[0][1] if sample_id_items else None
+                        ),
+                        "input_fingerprints": (
+                            fingerprint_items[0][1] if fingerprint_items else None
+                        ),
+                        "evaluation_inputs": (
+                            evaluation_input_items[0][1]
+                            if evaluation_input_items
+                            else None
+                        ),
                     }
                 )
             for key, item in current.items():
@@ -808,6 +1007,8 @@ def evaluate_experiment_data(
         "requested_metric": requested_metric,
         "selected_metric": None,
         "trust_tier": "unverified",
+        "verification_scope": "artifact_internal_consistency",
+        "ground_truth_authority": "research_agent_artifact",
         "input": {
             "path": artifact.name,
             "sha256": None,
@@ -816,8 +1017,11 @@ def evaluate_experiment_data(
         "metric": None,
         "datasets": [],
         "sample_count": 0,
+        "comparison_ready": False,
         "safe_for_legacy_parser": False,
-        "warnings": [],
+        "warnings": [
+            "Ground truth and evaluation inputs originate in the research Agent artifact; external dataset validity is not independently established."
+        ],
     }
 
     if not artifact.is_file():
@@ -912,11 +1116,19 @@ def evaluate_experiment_data(
                 )
             if not math.isfinite(value):
                 raise EvaluationInputError(f"{dataset} produced a non-finite metric")
+            comparison_identity = _comparison_identity(
+                dataset=dataset,
+                y_true=y_true,
+                sample_ids=pair["sample_ids"],
+                evaluation_inputs=pair["evaluation_inputs"],
+                asserted_input_fingerprints=pair["input_fingerprints"],
+            )
             values.append(
                 {
                     "dataset_name": dataset,
                     "value": float(value),
                     "samples": int(y_true.size),
+                    **comparison_identity,
                 }
             )
             sample_count += int(y_true.size)
@@ -930,6 +1142,9 @@ def evaluate_experiment_data(
                 "metric": metric,
                 "datasets": values,
                 "sample_count": sample_count,
+                "comparison_ready": all(
+                    item["comparison_ready"] is True for item in values
+                ),
                 "reason": "metric recomputed from structured predictions and ground truth",
             }
         )

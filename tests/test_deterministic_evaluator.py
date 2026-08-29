@@ -8,9 +8,11 @@ import numpy as np
 
 from ai_scientist.utils.deterministic_evaluator import (
     _array_shape_from_build_state,
+    _computed_input_fingerprints,
     evaluate_experiment_data,
     evaluation_hash_binding,
 )
+from ai_scientist.utils.evaluation_binding import evaluation_comparison_contract
 
 
 def _metric_value(report: dict) -> float:
@@ -46,6 +48,65 @@ class DeterministicEvaluatorTests(unittest.TestCase):
         self.assertEqual(report["sample_count"], 4)
         binding = evaluation_hash_binding(report)
         self.assertEqual(binding["input_hash"], report["input"]["sha256"])
+        self.assertEqual(report["verification_scope"], "artifact_internal_consistency")
+        self.assertEqual(report["ground_truth_authority"], "research_agent_artifact")
+
+    def test_comparison_identity_is_computed_from_actual_evaluation_inputs(
+        self,
+    ) -> None:
+        first_inputs = [[1.0, 2.0], [3.0, 4.0]]
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "evaluation_inputs": first_inputs,
+                    "sample_ids": ["a", "b"],
+                    "y_true": [0, 1],
+                    "y_pred": [0, 1],
+                }
+            },
+        )
+        first = evaluate_experiment_data(self.path, requested_metric="accuracy")
+        first_contract = evaluation_comparison_contract(first)
+        self.assertIsNotNone(first_contract)
+
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "evaluation_inputs": [[9.0, 8.0], [7.0, 6.0]],
+                    "sample_ids": ["a", "b"],
+                    "y_true": [0, 1],
+                    "y_pred": [0, 1],
+                }
+            },
+        )
+        changed = evaluate_experiment_data(self.path, requested_metric="accuracy")
+        self.assertNotEqual(
+            first_contract,
+            evaluation_comparison_contract(changed),
+        )
+
+        copied_assertions = _computed_input_fingerprints(
+            first_inputs,
+            samples=2,
+            dataset="test",
+        )
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "evaluation_inputs": [[9.0, 8.0], [7.0, 6.0]],
+                    "input_fingerprints": copied_assertions,
+                    "sample_ids": ["a", "b"],
+                    "y_true": [0, 1],
+                    "y_pred": [0, 1],
+                }
+            },
+        )
+        forged = evaluate_experiment_data(self.path, requested_metric="accuracy")
+        self.assertEqual(forged["status"], "invalid")
+        self.assertIn("do not match evaluator-computed", forged["reason"])
 
     def test_regression_metrics_are_computed_directly(self) -> None:
         np.save(

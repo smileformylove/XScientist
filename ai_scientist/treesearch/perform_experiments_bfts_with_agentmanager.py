@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 import math
 import json
+import re
 import signal
 import statistics
 import threading
@@ -71,7 +72,7 @@ class ExperimentInitializationError(RuntimeError):
     def __init__(self, phase: str, cause: Exception):
         self.phase = phase
         self.cause = cause
-        super().__init__(f"Experiment initialization failed during {phase}: {cause}")
+        super().__init__(f"Experiment initialization failed during {phase}")
 
 
 class ExperimentInitializationInterrupted(KeyboardInterrupt):
@@ -123,15 +124,90 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     atomic_write_json(path, payload)
 
 
+def _failure_payload(cause: BaseException, *, error_code: str) -> dict:
+    """Return a public failure receipt without provider- or code-controlled text."""
+
+    return {
+        "type": type(cause).__name__,
+        "error_code": error_code,
+        "failure_ref": uuid.uuid4().hex,
+        "message": f"{error_code}; inspect the referenced local run artifacts",
+    }
+
+
+def _persistence_error(label: str, cause: BaseException) -> str:
+    return f"{label}:{type(cause).__name__}:{uuid.uuid4().hex}"
+
+
+def _encode_dataset_names(values) -> str:
+    names = list(values)
+    if any(not isinstance(name, str) or not name for name in names) or len(
+        names
+    ) != len(set(names)):
+        raise ValueError("Experiment results ledger dataset names are invalid")
+    return json.dumps(
+        sorted(names),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _decode_dataset_names(value: str) -> list[str]:
+    if value.startswith("["):
+        try:
+            names = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Invalid dataset encoding in experiment results ledger"
+            ) from exc
+        if not isinstance(names, list):
+            raise ValueError("Invalid dataset encoding in experiment results ledger")
+    else:
+        # One-way migration for ledgers written before dataset names used
+        # canonical JSON escaping. Such rows could not represent commas safely.
+        names = [name for name in value.split(",") if name]
+    canonical = _encode_dataset_names(names)
+    return json.loads(canonical)
+
+
+def _node_metric_meta(
+    node: Node,
+) -> tuple[float | None, float | None, str | None, bool | None]:
+    metric = getattr(node, "metric", None)
+    if metric is None or getattr(metric, "value", None) is None:
+        return None, None, None, None
+    try:
+        metric_mean = float(metric.get_mean_value())
+    except Exception:
+        return None, None, None, None
+    if not math.isfinite(metric_mean):
+        return None, None, None, None
+    try:
+        maximize = bool(metric._should_maximize())
+    except Exception:
+        maximize = None
+
+    metric_name = getattr(metric, "name", None)
+    value = getattr(metric, "value", None)
+    if metric_name is None and isinstance(value, dict) and "metric_names" in value:
+        try:
+            metric_name = (value.get("metric_names") or [])[0].get("metric_name")
+        except Exception:
+            metric_name = None
+
+    objective = metric_mean if (maximize is True or maximize is None) else -metric_mean
+    return metric_mean, objective, metric_name, maximize
+
+
 def repair_results_tsv(
     path: Path,
-) -> tuple[set[str], dict[str, dict], dict[str, str]]:
+) -> tuple[set[str], dict[str, dict], dict[str, str], dict[str, dict[str, str]]]:
     """Drop a torn tail row and recover durable ledger decision state."""
 
     header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
     if not path.exists() or path.stat().st_size == 0:
         atomic_write_text(path, header)
-        return set(), {}, {}
+        return set(), {}, {}, {}
 
     raw = path.read_bytes()
     complete_length = raw.rfind(b"\n") + 1
@@ -149,6 +225,10 @@ def repair_results_tsv(
     node_ids: set[str] = set()
     stage_best: dict[str, dict] = {}
     node_stages: dict[str, str] = {}
+    node_kinds: dict[str, str] = {}
+    node_rows: dict[str, dict[str, str]] = {}
+    qualified_stages: set[str] = set()
+    gate_bindings: dict[str, dict[str, str]] = {}
     data_lines = lines[1:]
     for index, line in enumerate(data_lines):
         row_number = index + 2
@@ -156,11 +236,15 @@ def repair_results_tsv(
         if len(fields) != len(RESULTS_TSV_COLUMNS) or not fields[4]:
             raise ValueError(f"Malformed experiment results ledger row {row_number}")
         kind, node_id, status, decision = fields[3], fields[4], fields[6], fields[7]
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", node_id) is None:
+            raise ValueError(
+                f"Invalid node id in experiment results ledger row {row_number}"
+            )
         if node_id in node_ids:
             raise ValueError(
                 f"Duplicate node id in experiment results ledger row {row_number}: {node_id}"
             )
-        if kind not in {"main", "seed", "seed_agg"}:
+        if kind not in {"main", "seed", "seed_agg", "gate"}:
             raise ValueError(
                 f"Invalid experiment results ledger kind at row {row_number}: {kind}"
             )
@@ -168,28 +252,160 @@ def repair_results_tsv(
             raise ValueError(
                 f"Invalid experiment results ledger status at row {row_number}: {status}"
             )
+        if kind == "main" and decision == "keep":
+            if status != "ok":
+                raise ValueError(
+                    f"Invalid positive decision for non-ok ledger row {row_number}"
+                )
+            # Migrate the pre-gate vocabulary without treating it as a final
+            # qualification decision.
+            decision = fields[7] = "provisional"
+            line = "\t".join(fields) + "\n"
         expected_decisions = {
-            "main": {"keep", "discard"},
+            "main": {"provisional", "discard"},
             "seed": {"seed"},
             "seed_agg": {"seed_agg"},
+            "gate": {"qualified", "rejected"},
         }
         if decision not in expected_decisions[kind]:
             raise ValueError(
                 f"Invalid experiment results ledger decision at row {row_number}: {decision}"
             )
-        if status != "ok" and decision == "keep":
+        if status != "ok" and decision in {"provisional", "qualified"}:
             raise ValueError(
-                f"Invalid keep decision for non-ok ledger row {row_number}"
+                f"Invalid positive decision for non-ok ledger row {row_number}"
             )
+        if kind == "main" and decision == "provisional":
+            try:
+                provisional_objective = float(fields[8])
+                provisional_metric = float(fields[9])
+                provisional_loc = int(fields[14])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid provisional metrics in ledger row {row_number}"
+                ) from exc
+            if (
+                not math.isfinite(provisional_objective)
+                or not math.isfinite(provisional_metric)
+                or provisional_loc < 0
+                or fields[11] not in {"True", "False"}
+                or not math.isclose(
+                    provisional_objective,
+                    provisional_metric if fields[11] == "True" else -provisional_metric,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError(
+                    f"Invalid provisional metrics in ledger row {row_number}"
+                )
+        datasets = _decode_dataset_names(fields[12])
+        canonical_datasets = _encode_dataset_names(datasets)
+        if fields[12] != canonical_datasets:
+            fields[12] = canonical_datasets
+            line = "\t".join(fields) + "\n"
+        reserved_gate_id = re.fullmatch(r"gate_[0-9a-f]{64}", node_id) is not None
+        if kind != "gate" and reserved_gate_id:
+            raise ValueError(
+                f"Reserved gate event id used by a node in ledger row {row_number}"
+            )
+        if kind == "gate":
+            parent_id = fields[5]
+            if not reserved_gate_id:
+                raise ValueError(
+                    f"Invalid gate event id in experiment results ledger row {row_number}"
+                )
+            if (
+                not parent_id
+                or parent_id not in node_ids
+                or node_kinds[parent_id] != "main"
+                or node_stages[parent_id] != fields[1]
+                or node_rows[parent_id]["status"] != "ok"
+                or node_rows[parent_id]["decision"] != "provisional"
+            ):
+                raise ValueError(
+                    f"Unbound gate event in experiment results ledger row {row_number}"
+                )
+            if (
+                fields[10] != node_rows[parent_id]["metric_name"]
+                or fields[11] != node_rows[parent_id]["maximize"]
+                or fields[12] != node_rows[parent_id]["datasets"]
+                or fields[14] != node_rows[parent_id]["loc"]
+            ):
+                raise ValueError(
+                    f"Gate evidence contract mismatch in ledger row {row_number}"
+                )
+            try:
+                loc = int(fields[14])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid gate metrics in experiment results ledger row {row_number}"
+                ) from exc
+            if loc < 0:
+                raise ValueError(
+                    f"Invalid gate metrics in experiment results ledger row {row_number}"
+                )
+            if decision == "qualified":
+                if fields[1] in qualified_stages:
+                    raise ValueError(
+                        f"Duplicate qualified gate in experiment results ledger row {row_number}"
+                    )
+                try:
+                    objective = float(fields[8])
+                    metric_mean = float(fields[9])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid gate metrics in experiment results ledger row {row_number}"
+                    ) from exc
+                if (
+                    not math.isfinite(objective)
+                    or not math.isfinite(metric_mean)
+                    or fields[11] not in {"True", "False"}
+                    or not math.isclose(
+                        objective,
+                        metric_mean if fields[11] == "True" else -metric_mean,
+                        rel_tol=1e-9,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    raise ValueError(
+                        f"Invalid gate metrics in experiment results ledger row {row_number}"
+                    )
+                qualified_stages.add(fields[1])
+            elif status != "invalid" or fields[8] or fields[9]:
+                raise ValueError(
+                    f"Invalid rejected gate in experiment results ledger row {row_number}"
+                )
+            gate_bindings[node_id] = {
+                "stage": fields[1],
+                "parent_id": parent_id,
+                "decision": decision,
+                "receipt_hash": "sha256:" + node_id.removeprefix("gate_"),
+                "objective": fields[8],
+                "metric_mean": fields[9],
+                "metric_name": fields[10],
+                "maximize": fields[11],
+                "datasets": fields[12],
+                "loc": fields[14],
+            }
         valid_lines.append(line)
         node_ids.add(node_id)
         node_stages[node_id] = fields[1]
-        if kind == "main" and decision == "keep" and fields[8]:
+        node_kinds[node_id] = kind
+        node_rows[node_id] = {
+            "status": status,
+            "decision": decision,
+            "metric_name": fields[10],
+            "maximize": fields[11],
+            "datasets": fields[12],
+            "loc": fields[14],
+        }
+        if kind == "gate" and decision == "qualified" and fields[8]:
             try:
                 stage_best[fields[1]] = {
-                    "objective": float(fields[8]),
-                    "loc": int(fields[14]),
-                    "node_id": node_id,
+                    "objective": objective,
+                    "loc": loc,
+                    "node_id": parent_id,
                 }
             except ValueError as exc:
                 raise ValueError(
@@ -199,7 +415,128 @@ def repair_results_tsv(
     repaired = "".join(valid_lines)
     if repaired.encode("utf-8") != raw:
         atomic_write_text(path, repaired)
-    return node_ids, stage_best, node_stages
+    return node_ids, stage_best, node_stages, gate_bindings
+
+
+def _checkpoint_gate_bindings(manager) -> dict[str, dict[str, str]]:
+    bindings: dict[str, dict[str, str]] = {}
+    for stage in manager.stages:
+        journal = manager.journals[stage.name]
+        if stage.multi_seed_receipt_hash is not None:
+            receipt_hash = stage.multi_seed_receipt_hash
+            event_id = "gate_" + receipt_hash.removeprefix("sha256:")
+            node = journal.get_node_by_id(stage.qualified_node_id or "")
+            if (
+                node is None
+                or not isinstance(node.multi_seed_report, dict)
+                or node.multi_seed_report.get("receipt_hash") != receipt_hash
+            ):
+                raise ValueError("Checkpoint qualified gate is not bound to evidence")
+            binding = _gate_binding_payload(
+                node,
+                stage=stage.name,
+                receipt_hash=receipt_hash,
+                decision="qualified",
+                report=node.multi_seed_report,
+            )
+            if event_id in bindings and bindings[event_id] != binding:
+                raise ValueError("Checkpoint contains conflicting gate receipts")
+            bindings[event_id] = binding
+        for node in journal.nodes:
+            for attempt in node.multi_seed_attempts:
+                if attempt.get("stage") != stage.name:
+                    continue
+                receipt_hash = attempt["receipt_hash"]
+                event_id = "gate_" + receipt_hash.removeprefix("sha256:")
+                binding = _gate_binding_payload(
+                    node,
+                    stage=stage.name,
+                    receipt_hash=receipt_hash,
+                    decision="rejected",
+                )
+                if event_id in bindings and bindings[event_id] != binding:
+                    raise ValueError("Checkpoint contains conflicting gate receipts")
+                bindings[event_id] = binding
+    return bindings
+
+
+def _validate_ledger_gates_against_checkpoint(
+    ledger_bindings: dict[str, dict[str, str]], manager
+) -> None:
+    expected = _checkpoint_gate_bindings(manager)
+    if any(
+        expected.get(event_id) != binding
+        for event_id, binding in ledger_bindings.items()
+    ):
+        raise ValueError(
+            "Experiment results ledger gate decisions do not match the selected checkpoint"
+        )
+
+
+def _multi_seed_gate_meta(
+    node: Node, report: dict
+) -> tuple[float, float, str | None, bool]:
+    """Derive the gate scalar from confirmation-seed means, not selection score."""
+
+    dataset_stats = report.get("datasets")
+    if not isinstance(dataset_stats, dict) or not dataset_stats:
+        raise ValueError("Qualified gate lacks multi-seed dataset statistics")
+    means: list[float] = []
+    for stats in dataset_stats.values():
+        if not isinstance(stats, dict):
+            raise ValueError("Qualified gate dataset statistics are invalid")
+        value = stats.get("mean")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError("Qualified gate dataset statistics are invalid")
+        means.append(float(value))
+    metric_mean = statistics.mean(means)
+    metric = node.metric
+    maximize = bool(metric._should_maximize())
+    metric_name = getattr(metric, "name", None)
+    metric_value = getattr(metric, "value", None)
+    if metric_name is None and isinstance(metric_value, dict):
+        names = metric_value.get("metric_names") or []
+        metric_name = names[0].get("metric_name") if names else None
+    objective = metric_mean if maximize else -metric_mean
+    return metric_mean, objective, metric_name, maximize
+
+
+def _gate_binding_payload(
+    node: Node,
+    *,
+    stage: str,
+    receipt_hash: str,
+    decision: str,
+    report: dict | None = None,
+) -> dict[str, str]:
+    if decision == "qualified":
+        if report is None:
+            raise ValueError("Qualified gate lacks a multi-seed report")
+        metric_mean, objective, metric_name, maximize = _multi_seed_gate_meta(
+            node, report
+        )
+    elif decision == "rejected":
+        _, _, metric_name, maximize = _node_metric_meta(node)
+        metric_mean = objective = None
+    else:
+        raise ValueError("Gate decision is invalid")
+    datasets = [ds for ds in (node.datasets_successfully_tested or []) if ds]
+    return {
+        "stage": stage,
+        "parent_id": node.id,
+        "decision": decision,
+        "receipt_hash": receipt_hash,
+        "objective": "" if objective is None else f"{objective:.12g}",
+        "metric_mean": "" if metric_mean is None else f"{metric_mean:.12g}",
+        "metric_name": str(metric_name or ""),
+        "maximize": "" if maximize is None else str(bool(maximize)),
+        "datasets": _encode_dataset_names(datasets),
+        "loc": str(len((node.code or "").splitlines())),
+    }
 
 
 def manager_state_payload(manager, cfg, run_status: str) -> dict:
@@ -255,17 +592,10 @@ def initialization_status_result(
         "config_path": str(config_path),
         "lock_root": str(lock_root),
         "initialization_phase": phase,
-        "failure_error": {
-            "type": type(cause).__name__,
-            "message": (
-                str(cause)
-                or (
-                    "Experiment initialization interrupted by user"
-                    if isinstance(cause, KeyboardInterrupt)
-                    else type(cause).__name__
-                )
-            ),
-        },
+        "failure_error": _failure_payload(
+            cause,
+            error_code=f"initialization_{status}_{phase}",
+        ),
         "resumable": False,
     }
     if isinstance(cause, ExperimentTermination):
@@ -280,7 +610,7 @@ def initialization_status_result(
         write_json_atomic(status_path, payload)
     except Exception as status_exc:
         persistence_errors.append(
-            f"initialization_status: {type(status_exc).__name__}: {status_exc}"
+            _persistence_error("initialization_status", status_exc)
         )
         status_path = None
     return {
@@ -292,8 +622,32 @@ def initialization_status_result(
     }
 
 
-def journal_to_rich_tree(journal: Journal, cfg):
-    best_node = journal.get_best_node_by_metric()
+def _progress_best_node(stage: Stage | None, journal: Journal) -> Node | None:
+    """Select a display node without comparing incompatible research contracts."""
+
+    if stage is not None and stage.qualified_node_id:
+        qualified = journal.get_node_by_id(stage.qualified_node_id)
+        if qualified is not None and qualified.has_verified_metric:
+            return qualified
+    reference_contract = next(
+        (
+            node.evaluation_comparison_contract
+            for node in journal.nodes
+            if node.has_verified_metric and not node.is_seed_node
+        ),
+        None,
+    )
+    if reference_contract is None:
+        return None
+    try:
+        return journal.get_best_node_by_metric(reference_contract=reference_contract)
+    except backend.ResearchDecisionError:
+        logger.warning("Progress display skipped incomparable verified nodes")
+        return None
+
+
+def journal_to_rich_tree(journal: Journal, cfg, stage: Stage | None = None):
+    best_node = _progress_best_node(stage, journal)
 
     def append_rec(node: Node, tree):
         if node.is_buggy:
@@ -326,7 +680,7 @@ def _perform_experiments_bfts_locked(config_path: str):
 
             initialization_phase = "task_loading"
             task_desc = load_task_desc(cfg)
-            print(task_desc)
+            print("Research task loaded")
             task_desc_str = backend.compile_prompt_to_md(task_desc)
 
             initialization_phase = "workspace_preparation"
@@ -340,9 +694,12 @@ def _perform_experiments_bfts_locked(config_path: str):
             results_tsv_path = cfg.log_dir / "results.tsv"
             program_md_path = cfg.log_dir / "program.md"
             results_tsv_path.parent.mkdir(parents=True, exist_ok=True)
-            logged_node_ids, stage_best, logged_node_stages = repair_results_tsv(
-                results_tsv_path
-            )
+            (
+                logged_node_ids,
+                stage_best,
+                logged_node_stages,
+                ledger_gate_bindings,
+            ) = repair_results_tsv(results_tsv_path)
     except Exception as exc:
         raise ExperimentInitializationError(initialization_phase, exc) from exc
     except KeyboardInterrupt as exc:
@@ -350,38 +707,8 @@ def _perform_experiments_bfts_locked(config_path: str):
 
     global_step = 0
 
-    def _metric_meta(
-        node: Node,
-    ) -> tuple[float | None, float | None, str | None, bool | None]:
-        metric = getattr(node, "metric", None)
-        if metric is None or getattr(metric, "value", None) is None:
-            return None, None, None, None
-        try:
-            metric_mean = float(metric.get_mean_value())
-        except Exception:
-            return None, None, None, None
-        if math.isnan(metric_mean) or math.isinf(metric_mean):
-            return None, None, None, None
-        try:
-            maximize = bool(metric._should_maximize())
-        except Exception:
-            maximize = None
-
-        metric_name = getattr(metric, "name", None)
-        value = getattr(metric, "value", None)
-        if metric_name is None and isinstance(value, dict) and "metric_names" in value:
-            try:
-                metric_name = (value.get("metric_names") or [])[0].get("metric_name")
-            except Exception:
-                metric_name = None
-
-        objective = (
-            metric_mean if (maximize is True or maximize is None) else -metric_mean
-        )
-        return metric_mean, objective, metric_name, maximize
-
     def _write_program_md(stage: Stage, journal: Journal) -> None:
-        best_node = journal.get_best_node_by_metric()
+        best_node = _progress_best_node(stage, journal)
         if best_node is None:
             best_node_id = None
             metric_mean = None
@@ -392,7 +719,7 @@ def _perform_experiments_bfts_locked(config_path: str):
             seed_stats = None
         else:
             best_node_id = best_node.id
-            metric_mean, objective, metric_name, maximize = _metric_meta(best_node)
+            metric_mean, objective, metric_name, maximize = _node_metric_meta(best_node)
             datasets = [
                 ds for ds in (best_node.datasets_successfully_tested or []) if ds
             ]
@@ -405,7 +732,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                     continue
                 if getattr(node, "is_buggy", False):
                     continue
-                seed_mean, seed_obj, _, _ = _metric_meta(node)
+                seed_mean, seed_obj, _, _ = _node_metric_meta(node)
                 if seed_mean is None:
                     continue
                 seed_values.append(seed_mean)
@@ -429,8 +756,8 @@ def _perform_experiments_bfts_locked(config_path: str):
             "runtime scaling within timeout budget",
         ]
 
-        keep = [
-            "objective improves vs stage-best (epsilon) while keeping evaluation comparable",
+        qualification = [
+            "host scientific gate qualifies the candidate with a bound multi-seed receipt",
             "meets stage-specific validation constraints (e.g. >=2 datasets in stage 2)",
             "passes without crashes/timeouts and produces valid metrics",
         ]
@@ -464,8 +791,8 @@ def _perform_experiments_bfts_locked(config_path: str):
             f"- datasets: {datasets}",
             f"- seed_eval: {seed_stats}",
             "",
-            "## Keep Criteria",
-            *[f"- {item}" for item in keep],
+            "## Qualification Criteria",
+            *[f"- {item}" for item in qualification],
             "",
             "## Discard Criteria",
             *[f"- {item}" for item in discard],
@@ -474,7 +801,7 @@ def _perform_experiments_bfts_locked(config_path: str):
             *[f"- {item}" for item in levers],
             "",
             "## Artifacts",
-            f"- results.tsv: {results_tsv_path}",
+            f"- results.tsv: {results_tsv_path} (append-only provisional and gate events)",
             "- stage_*/notes/stage_progress.json: per-step progress snapshots",
         ]
         atomic_write_text(program_md_path, "\n".join(lines) + "\n")
@@ -482,7 +809,6 @@ def _perform_experiments_bfts_locked(config_path: str):
     def _publish_results_ledger(stage: Stage, journal: Journal) -> None:
         now = datetime.now().isoformat()
         stage_key = stage.name
-        stage_best_entry = stage_best.get(stage_key)
         for node in journal.nodes:
             node_id = getattr(node, "id", None)
             if not node_id or node_id in logged_node_ids:
@@ -495,57 +821,25 @@ def _perform_experiments_bfts_locked(config_path: str):
             loc = len((node.code or "").splitlines())
             datasets = [
                 ds
-                for ds in (
-                    getattr(node, "datasets_successfully_tested", None) or []
-                )
+                for ds in (getattr(node, "datasets_successfully_tested", None) or [])
                 if ds
             ]
-            metric_mean, objective, metric_name, maximize = _metric_meta(node)
+            metric_mean, objective, metric_name, maximize = _node_metric_meta(node)
             status = (
                 "ok" if (node.is_buggy is False and objective is not None) else "crash"
             )
 
             decision = ""
-            next_stage_best_entry = stage_best_entry
             if kind != "main":
                 decision = kind
             elif status != "ok":
                 decision = "discard"
             else:
-                assert objective is not None
-                if (
-                    getattr(stage, "stage_number", None) == 2
-                    and len(set(datasets)) < 2
-                ):
+                if getattr(stage, "stage_number", None) == 2 and len(set(datasets)) < 2:
                     status = "invalid"
                     decision = "discard"
-                    objective_for_keep = None
                 else:
-                    objective_for_keep = objective
-
-                if objective_for_keep is not None:
-                    eps = (
-                        max(1e-6, 1e-3 * abs(stage_best_entry["objective"]))
-                        if stage_best_entry
-                        else 1e-6
-                    )
-                    keep = False
-                    if stage_best_entry is None:
-                        keep = True
-                    elif objective_for_keep > stage_best_entry["objective"] + eps:
-                        keep = True
-                    elif abs(
-                        objective_for_keep - stage_best_entry["objective"]
-                    ) <= eps and loc < stage_best_entry.get("loc", loc):
-                        keep = True
-
-                    decision = "keep" if keep else "discard"
-                    if keep:
-                        next_stage_best_entry = {
-                            "objective": objective_for_keep,
-                            "loc": loc,
-                            "node_id": node_id,
-                        }
+                    decision = "provisional"
 
             durable_append_text(
                 results_tsv_path,
@@ -563,7 +857,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                         "" if metric_mean is None else f"{metric_mean:.12g}",
                         str(metric_name or ""),
                         "" if maximize is None else str(bool(maximize)),
-                        ",".join(datasets),
+                        _encode_dataset_names(datasets),
                         (
                             ""
                             if getattr(node, "exec_time", None) is None
@@ -575,9 +869,65 @@ def _perform_experiments_bfts_locked(config_path: str):
                 + "\n",
             )
             logged_node_ids.add(node_id)
-            if next_stage_best_entry is not stage_best_entry:
-                stage_best_entry = next_stage_best_entry
-                stage_best[stage_key] = stage_best_entry
+
+        # Gate outcomes are separate append-only events. A successful single
+        # run is only provisional; qualification requires the bound receipt.
+        for node in journal.nodes:
+            gate_events: list[tuple[str, str, str, dict | None]] = []
+            report = node.multi_seed_report
+            if (
+                isinstance(report, dict)
+                and report.get("stage") == stage.name
+                and report.get("receipt_hash") == stage.multi_seed_receipt_hash
+            ):
+                gate_events.append((report["receipt_hash"], "ok", "qualified", report))
+            for attempt in node.multi_seed_attempts:
+                if attempt.get("stage") == stage.name:
+                    gate_events.append(
+                        (attempt["receipt_hash"], "invalid", "rejected", None)
+                    )
+            for receipt_hash, gate_status, gate_decision, gate_report in gate_events:
+                event_id = "gate_" + receipt_hash.removeprefix("sha256:")
+                if event_id in logged_node_ids:
+                    continue
+                binding = _gate_binding_payload(
+                    node,
+                    stage=stage.name,
+                    receipt_hash=receipt_hash,
+                    decision=gate_decision,
+                    report=gate_report,
+                )
+                durable_append_text(
+                    results_tsv_path,
+                    "\t".join(
+                        [
+                            now,
+                            stage.name,
+                            str(getattr(node, "step", "")),
+                            "gate",
+                            event_id,
+                            node.id,
+                            gate_status,
+                            gate_decision,
+                            binding["objective"],
+                            binding["metric_mean"],
+                            binding["metric_name"],
+                            binding["maximize"],
+                            binding["datasets"],
+                            "",
+                            binding["loc"],
+                        ]
+                    )
+                    + "\n",
+                )
+                logged_node_ids.add(event_id)
+                ledger_gate_bindings[event_id] = binding
+                if gate_decision == "qualified":
+                    stage_best[stage_key] = {
+                        "objective": float(binding["objective"]),
+                        "loc": int(binding["loc"]),
+                        "node_id": node.id,
+                    }
 
     initialization_phase = (
         "checkpoint_restore" if cfg.resume_from else "manager_creation"
@@ -597,8 +947,9 @@ def _perform_experiments_bfts_locked(config_path: str):
                         checkpoint_node_stages.setdefault(node.id, set()).add(
                             restored_stage.name
                         )
+                ledger_data_node_ids = logged_node_ids - set(ledger_gate_bindings)
                 ledger_only_node_ids = sorted(
-                    logged_node_ids - set(checkpoint_node_stages)
+                    ledger_data_node_ids - set(checkpoint_node_stages)
                 )
                 if ledger_only_node_ids:
                     raise ValueError(
@@ -608,6 +959,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                 misplaced_node_ids = sorted(
                     node_id
                     for node_id, ledger_stage in logged_node_stages.items()
+                    if node_id in ledger_data_node_ids
                     if ledger_stage not in checkpoint_node_stages[node_id]
                 )
                 if misplaced_node_ids:
@@ -615,6 +967,10 @@ def _perform_experiments_bfts_locked(config_path: str):
                         "Experiment results ledger stage assignments do not match the "
                         f"selected checkpoint: {misplaced_node_ids}"
                     )
+                _validate_ledger_gates_against_checkpoint(
+                    ledger_gate_bindings,
+                    manager,
+                )
                 for restored_stage in manager.stages:
                     restored_journal = manager.journals[restored_stage.name]
                     _publish_results_ledger(restored_stage, restored_journal)
@@ -678,18 +1034,18 @@ def _perform_experiments_bfts_locked(config_path: str):
                         summary,
                     )
 
-            if cfg.agent.get("summary", None) is not None:
-                current_findings = journal.generate_summary(
-                    include_code=False,
-                    **{
-                        "model": cfg.agent.summary.model,
-                        "temp": cfg.agent.summary.temp,
-                    },
-                )
-            else:
-                current_findings = journal.generate_summary(include_code=False)
+            summary_cfg = (
+                cfg.agent.summary
+                if cfg.agent.get("summary", None) is not None
+                else cfg.report
+            )
+            current_findings = journal.generate_summary(
+                include_code=False,
+                model=summary_cfg.model,
+                temp=summary_cfg.temp,
+            )
 
-            best_node = journal.get_best_node_by_metric()
+            best_node = _progress_best_node(stage, journal)
             best_metric = best_node.metric if best_node else None
 
             best_metric_mean = None
@@ -719,7 +1075,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                     metric = getattr(node, "metric", None)
                     if metric is None:
                         continue
-                    seed_mean, _, _, _ = _metric_meta(node)
+                    seed_mean, _, _, _ = _node_metric_meta(node)
                     if seed_mean is None:
                         continue
                     seed_values.append(seed_mean)
@@ -768,13 +1124,15 @@ def _perform_experiments_bfts_locked(config_path: str):
             publishing_artifacts = False
 
         except Exception as e:
-            if is_llm_budget_exception(e):
+            if isinstance(e, backend.ResearchDecisionError) or is_llm_budget_exception(
+                e
+            ):
                 raise
             if publishing_artifacts:
                 raise ExperimentArtifactPersistenceError(
                     f"Failed to persist artifacts for stage {stage.name}"
                 ) from e
-            print(f"Error in step callback: {e}")
+            print(f"Step callback skipped advisory output ({type(e).__name__})")
 
         print(f"Run saved at {cfg.log_dir / f'stage_{stage.name}'}")
         print(f"Step {len(journal)}/{stage.max_iterations} at stage_{stage.name}")
@@ -787,7 +1145,7 @@ def _perform_experiments_bfts_locked(config_path: str):
         )
 
         if current_journal:
-            tree = journal_to_rich_tree(current_journal, cfg)
+            tree = journal_to_rich_tree(current_journal, cfg, current_stage)
         else:
             tree = Tree("[bold blue]No results yet")
 
@@ -856,21 +1214,21 @@ def _perform_experiments_bfts_locked(config_path: str):
                 )
             except Exception as persistence_exc:
                 persistence_errors.append(
-                    f"stage_{stage_name}: {type(persistence_exc).__name__}: "
-                    f"{persistence_exc}"
+                    _persistence_error(f"stage_{stage_name}", persistence_exc)
                 )
                 logger.warning(
-                    "Failed to persist stage %s during stopped run: %s",
+                    "Failed to persist stage %s during stopped run (%s)",
                     stage_name,
-                    persistence_exc,
+                    type(persistence_exc).__name__,
                 )
         try:
             checkpoint_path = manager._save_checkpoint()
         except Exception as checkpoint_exc:
-            persistence_errors.append(
-                f"checkpoint: {type(checkpoint_exc).__name__}: {checkpoint_exc}"
+            persistence_errors.append(_persistence_error("checkpoint", checkpoint_exc))
+            logger.warning(
+                "Failed to save stopped-run checkpoint (%s)",
+                type(checkpoint_exc).__name__,
             )
-            logger.warning("Failed to save stopped-run checkpoint: %s", checkpoint_exc)
 
     try:
         with termination_signal_guard():
@@ -881,20 +1239,18 @@ def _perform_experiments_bfts_locked(config_path: str):
         if is_llm_budget_exception(exc):
             run_status = "budget_exhausted"
             budget_error = llm_budget_exception_payload(exc)
-            logger.warning(
-                "Stopping experiment because the LLM budget is exhausted: %s", exc
-            )
+            logger.warning("Stopping experiment because the LLM budget is exhausted")
             print(
-                f"[yellow]LLM budget exhausted; saving a resumable checkpoint: {exc}[/yellow]"
+                "[yellow]LLM budget exhausted; saving a resumable checkpoint.[/yellow]"
             )
         else:
             run_status = "failed"
-            failure_error = {
-                "type": type(exc).__name__,
-                "message": str(exc),
-            }
-            logger.exception("Experiment failed; saving a resumable checkpoint")
-            print(f"[red]Experiment failed; saving a resumable checkpoint: {exc}[/red]")
+            failure_error = _failure_payload(exc, error_code="experiment_failed")
+            logger.error(
+                "Experiment failed; saving a resumable checkpoint (%s)",
+                type(exc).__name__,
+            )
+            print("[red]Experiment failed; saving a resumable checkpoint.[/red]")
     except KeyboardInterrupt as exc:
         run_status = "interrupted"
         failure_error = {
@@ -904,7 +1260,7 @@ def _perform_experiments_bfts_locked(config_path: str):
         if isinstance(exc, ExperimentTermination):
             failure_error.update(
                 {
-                    "message": str(exc),
+                    "message": f"Experiment interrupted by {exc.signal_name}",
                     "signal": exc.signal_name,
                     "signal_number": exc.signum,
                 }
@@ -924,7 +1280,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                     baseline_summary,
                     research_summary,
                     ablation_summary,
-                ) = overall_summarize(manager.journals.items(), cfg)
+                ) = overall_summarize(manager.qualified_report_journals(), cfg)
             draft_summary_path = cfg.log_dir / "draft_summary.json"
             baseline_summary_path = cfg.log_dir / "baseline_summary.json"
             research_summary_path = cfg.log_dir / "research_summary.json"
@@ -945,16 +1301,18 @@ def _perform_experiments_bfts_locked(config_path: str):
                 run_status = "budget_exhausted"
                 budget_error = llm_budget_exception_payload(exc)
                 logger.warning(
-                    "Stopping final report because the LLM budget is exhausted: %s",
-                    exc,
+                    "Stopping final report because the LLM budget is exhausted"
                 )
             else:
                 run_status = "failed"
-                failure_error = {
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                }
-                logger.exception("Final report failed; saving a resumable checkpoint")
+                failure_error = _failure_payload(
+                    exc,
+                    error_code="final_report_failed",
+                )
+                logger.error(
+                    "Final report failed; saving a resumable checkpoint (%s)",
+                    type(exc).__name__,
+                )
             persist_stopped_run()
         except KeyboardInterrupt as exc:
             run_status = "interrupted"
@@ -965,7 +1323,7 @@ def _perform_experiments_bfts_locked(config_path: str):
             if isinstance(exc, ExperimentTermination):
                 failure_error.update(
                     {
-                        "message": str(exc),
+                        "message": f"Final report interrupted by {exc.signal_name}",
                         "signal": exc.signal_name,
                         "signal_number": exc.signum,
                     }
@@ -980,10 +1338,8 @@ def _perform_experiments_bfts_locked(config_path: str):
             manager_state_payload(manager, cfg, run_status),
         )
     except Exception as state_exc:
-        persistence_errors.append(
-            f"manager_state: {type(state_exc).__name__}: {state_exc}"
-        )
-        logger.warning("Failed to save manager state: %s", state_exc)
+        persistence_errors.append(_persistence_error("manager_state", state_exc))
+        logger.warning("Failed to save manager state (%s)", type(state_exc).__name__)
         manager_state_path = None
 
     status_payload = {
@@ -1039,7 +1395,9 @@ def perform_experiments_bfts(config_path: str):
             "lock_owner": exc.owner,
             "failure_error": {
                 "type": type(exc).__name__,
-                "message": str(exc),
+                "error_code": "experiment_run_locked",
+                "failure_ref": uuid.uuid4().hex,
+                "message": "Experiment run is already locked",
             },
             "resumable": False,
         }

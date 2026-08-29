@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omegaconf import OmegaConf
+import numpy as np
 
 from ai_scientist.resources import resolve_bfts_config_path
 
@@ -25,6 +26,7 @@ from ai_scientist.treesearch.bfts_utils import (
 )
 from ai_scientist.treesearch.utils.config import load_cfg, load_task_desc, prep_cfg
 from ai_scientist.utils.llm_budget import llm_budget_manager
+from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
 
 
 class LLMBudgetConfigTests(unittest.TestCase):
@@ -248,6 +250,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 workspace_dir=workspace,
             )
             manager.current_stage.max_iterations = 1
+            manager.current_stage.attempt_count = 1
             manager.journals[manager.current_stage.name].append(
                 Node(
                     code="raise RuntimeError()",
@@ -258,11 +261,12 @@ class LLMBudgetConfigTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(
-                ExperimentCannotContinueError, "did not find a working implementation"
+                ExperimentCannotContinueError,
+                "exhausted its bounded attempts without satisfying deterministic scientific evidence gates",
             ):
                 manager._check_stage_completion(manager.current_stage)
 
-    def test_initial_stage_accepts_working_node_at_iteration_limit(self) -> None:
+    def test_initial_stage_locks_comparable_node_pending_multi_seed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             workspace = root / "workspaces" / "0-run"
@@ -279,19 +283,40 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 workspace_dir=workspace,
             )
             manager.current_stage.max_iterations = 1
+            data_path = workspace / "experiment_data.npy"
+            np.save(
+                data_path,
+                {
+                    f"dataset_{index}": {
+                        "evaluation_inputs": [[index, 0], [index, 1]],
+                        "sample_ids": [f"{index}-0", f"{index}-1"],
+                        "y_true": [0, 1],
+                        "y_pred": [0, 1],
+                    }
+                    for index in range(3)
+                },
+            )
+            report = evaluate_experiment_data(data_path, requested_metric="accuracy")
             manager.journals[manager.current_stage.name].append(
                 Node(
-                    code="print('ok')",
+                    code=(
+                        "XSCIENTIST_DATA_SEED = 7\n"
+                        "XSCIENTIST_TRAINING_SEED = 42\n"
+                        "print(XSCIENTIST_DATA_SEED, XSCIENTIST_TRAINING_SEED)"
+                    ),
                     plan="working",
                     is_buggy=False,
-                    metric=MetricValue(1.0, maximize=True),
+                    metric=MetricValue(report["metric"]),
+                    metric_provenance="deterministic_verified",
+                    evaluation_report=report,
                 )
             )
 
             completed, reason = manager._check_stage_completion(manager.current_stage)
 
-            self.assertTrue(completed)
-            self.assertEqual(reason, "Reached max iterations")
+            self.assertFalse(completed)
+            self.assertIn("multi-seed evidence pending", reason)
+            self.assertIsNotNone(manager.current_stage.qualified_node_id)
 
     def test_resume_reuses_existing_run_directories(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -370,6 +395,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             )
             journal.append(parent)
             journal.append(child)
+            manager.current_stage.attempt_count = 2
 
             checkpoint = manager._save_checkpoint()
             restored = AgentManager.from_checkpoint(
@@ -384,7 +410,7 @@ class LLMBudgetConfigTests(unittest.TestCase):
             self.assertIs(restored_nodes[1].parent, restored_nodes[0])
             self.assertIn(restored_nodes[1], restored_nodes[0].children)
 
-    def test_main_stage_transition_checkpoint_resumes_next_stage(self) -> None:
+    def test_main_stage_transition_rejects_missing_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             workspace = root / "workspaces" / "0-run"
@@ -402,21 +428,14 @@ class LLMBudgetConfigTests(unittest.TestCase):
             )
             completed_stage = manager.current_stage
 
-            next_stage = manager._advance_main_stage()
+            with self.assertRaisesRegex(
+                ExperimentCannotContinueError,
+                "valid multi-seed evidence receipt",
+            ):
+                manager._advance_main_stage()
+            self.assertIs(manager.current_stage, completed_stage)
 
-            self.assertIsNotNone(next_stage)
-            self.assertEqual(manager.current_stage, next_stage)
-            self.assertEqual(manager.current_stage_number, 2)
-            self.assertEqual(manager.completed_stages, [completed_stage.name])
-            checkpoint = log_dir / f"stage_{next_stage.name}" / "checkpoint.json"
-            restored = AgentManager.from_checkpoint(
-                checkpoint, cfg=cfg, workspace_dir=workspace
-            )
-            self.assertEqual(restored.current_stage.name, next_stage.name)
-            self.assertEqual(restored.current_stage_number, 2)
-            self.assertEqual(restored.completed_stages, [completed_stage.name])
-
-    def test_final_stage_checkpoint_records_terminal_state(self) -> None:
+    def test_final_stage_rejects_terminal_state_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             workspace = root / "workspaces" / "0-run"
@@ -445,17 +464,12 @@ class LLMBudgetConfigTests(unittest.TestCase):
             manager.current_stage = final_stage
             manager.current_stage_number = 4
 
-            next_stage = manager._advance_main_stage()
-
-            self.assertIsNone(next_stage)
-            self.assertIsNone(manager.current_stage)
-            self.assertEqual(manager.completed_stages, [final_stage.name])
-            checkpoint = log_dir / f"stage_{final_stage.name}" / "checkpoint.json"
-            restored = AgentManager.from_checkpoint(
-                checkpoint, cfg=cfg, workspace_dir=workspace
-            )
-            self.assertIsNone(restored.current_stage)
-            self.assertEqual(restored.completed_stages, [final_stage.name])
+            with self.assertRaisesRegex(
+                ExperimentCannotContinueError,
+                "valid multi-seed evidence receipt",
+            ):
+                manager._advance_main_stage()
+            self.assertIs(manager.current_stage, final_stage)
 
     def test_checkpoint_rejects_tampering_and_config_drift(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -705,6 +719,14 @@ class LLMBudgetConfigTests(unittest.TestCase):
             envelope["schema"] = "xscientist.bfts.checkpoint.v3"
             checkpoint.write_text(json.dumps(envelope), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "does not bind input content"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
+                )
+            envelope["schema"] = "xscientist.bfts.checkpoint.v4"
+            checkpoint.write_text(json.dumps(envelope), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "does not bind attempt reservations"
+            ):
                 AgentManager.from_checkpoint(
                     checkpoint, cfg=cfg, workspace_dir=workspace
                 )

@@ -62,6 +62,21 @@ class DebugConfig:
 
 
 @dataclass
+class MultiSeedEvaluationConfig:
+    num_seeds: int = 3
+    seeds: list[int] = field(default_factory=lambda: [123, 456, 789])
+    max_relative_ci_half_width: float = 0.25
+    absolute_ci_floor: float = 0.01
+
+
+@dataclass
+class EvidenceGateConfig:
+    minimum_datasets: int = 3
+    stage2_min_improved: int = 2
+    stage3_min_improved: int = 3
+
+
+@dataclass
 class AgentConfig:
     steps: int
     stages: dict[str, int]
@@ -76,10 +91,11 @@ class AgentConfig:
     search: SearchConfig
     num_workers: int
     type: str
-    multi_seed_eval: dict[str, int]
+    multi_seed_eval: MultiSeedEvaluationConfig
 
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
+    evidence_gate: EvidenceGateConfig = field(default_factory=EvidenceGateConfig)
 
 
 @dataclass

@@ -156,7 +156,8 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "failed")
         self.assertEqual(status["failure_error"]["type"], "RuntimeError")
-        self.assertEqual(status["failure_error"]["message"], "worker crashed")
+        self.assertEqual(status["failure_error"]["error_code"], "experiment_failed")
+        self.assertNotIn("worker crashed", json.dumps(status))
         self.assertTrue(result["resumable"])
         self.assertTrue(checkpoint_exists)
 
@@ -169,7 +170,8 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
         self.assertEqual(
             status["failure_error"]["type"], "ExperimentCannotContinueError"
         )
-        self.assertEqual(status["failure_error"]["message"], "no viable implementation")
+        self.assertEqual(status["failure_error"]["error_code"], "experiment_failed")
+        self.assertNotIn("no viable implementation", json.dumps(status))
         self.assertTrue(checkpoint_exists)
 
     def test_completed_run_preserves_workspace_and_writes_json_manager_state(
@@ -323,8 +325,10 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "configuration")
             self.assertEqual(
-                result["failure_error"]["message"], "invalid configuration"
+                result["failure_error"]["error_code"],
+                "initialization_initialization_failed_configuration",
             )
+            self.assertNotIn("invalid configuration", json.dumps(result))
             self.assertTrue(Path(result["initialization_status_path"]).is_file())
 
     def test_workspace_initialization_interrupt_is_structured_and_releases_lock(
@@ -509,10 +513,13 @@ class BudgetExhaustionPersistenceTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertIsNone(result["manager_state_path"])
             self.assertIsNone(status["manager_state_path"])
-            self.assertIn(
-                "manager_state: TypeError: snapshot unavailable",
-                result["persistence_errors"],
+            self.assertTrue(
+                any(
+                    item.startswith("manager_state:TypeError:")
+                    for item in result["persistence_errors"]
+                )
             )
+            self.assertNotIn("snapshot unavailable", json.dumps(result))
 
     def test_keyboard_interrupt_is_checkpointed_and_reported(self) -> None:
         result, status, checkpoint_exists = self._run_manager_stop(KeyboardInterrupt())

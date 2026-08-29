@@ -83,6 +83,27 @@ def extract_text_up_to_code(s):
     return s[: s.find("```")].strip()
 
 
+def extract_single_plan_and_code(text: str) -> tuple[str, str]:
+    """Validate one non-empty plan followed by exactly one Python code block."""
+
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 1024 * 1024:
+        raise ValueError("Plan/code response is invalid")
+    match = re.fullmatch(
+        r"(?P<plan>.*?)```(?:python)?[ \t]*\n(?P<code>.*?)\n?```[ \t\r\n]*",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if match is None:
+        raise ValueError("Plan/code response must contain exactly one fenced block")
+    plan = match.group("plan").strip()
+    code = match.group("code").strip()
+    if not plan or not code or "```" in plan or "```" in code:
+        raise ValueError("Plan/code response is incomplete")
+    if not is_valid_python_script(code):
+        raise ValueError("Plan/code response contains invalid Python")
+    return plan, format_code(code)
+
+
 def format_code(code) -> str:
     """Format Python code using Black."""
     try:

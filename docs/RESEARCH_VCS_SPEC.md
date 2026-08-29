@@ -304,6 +304,38 @@ Exploratory work may proceed without a locked preregistration, but its claims
 remain candidate claims. Confirmatory and submission-grade promotion fails
 closed without the required locked state and independent evidence.
 
+For long-running BFTS execution, the stage state machine is:
+
+`searching -> candidate_locked -> multi_seed_pending -> finalized -> complete`.
+
+An experiment attempt is reserved and checkpointed before worker submission.
+Workers in one reserved batch share one deadline and their results are committed
+atomically. Locking a candidate stops further search attempts; it does not imply
+stage completion. Completion requires a receipt resolving every configured seed
+to a journal node, the exact code rewrite, the fixed evaluation contract, and
+paired uncertainty checks. Data/split randomness is fixed separately from the
+training seed. Confirmation training seeds MUST exclude the training seed used
+to select the candidate. Seed receipts certify a bounded static application
+contract; they do not by themselves prove runtime RNG independence.
+
+`results.tsv` records successful main runs as `provisional`. Qualification and
+rejection are separate append-only `gate` events bound to the candidate and its
+multi-seed receipt. Gate scores are derived from the confirmation-seed dataset
+means, never copied from the selection run. Dataset names use canonical JSON
+escaping. On resume, every existing gate row MUST exactly match the checkpoint's
+candidate, receipt, decision, metric summary, and evidence contract; the
+checkpoint remains the execution authority. An earlier single-run score never
+implies scientific promotion.
+
+The built-in structured-artifact evaluator establishes
+`artifact_internal_consistency`: it recomputes metrics and record fingerprints,
+preserves the evaluated bytes and code, and replays them when a checkpoint is
+restored. Ground truth still originates in the research agent's artifact, so
+this receipt MUST NOT be described as independent dataset validation. It can
+authorize bounded search progression, but confirmatory claim promotion still
+requires a trusted test harness, label store, or independent evaluator outside
+the candidate producer's provenance closure.
+
 Before mutating history, an autonomous agent SHOULD create a deterministic,
 read-only version-control decision trace. Material terminal or milestone state
 requires a checkpoint; a competing hypothesis, incompatible method,

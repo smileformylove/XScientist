@@ -21,9 +21,17 @@ from ai_scientist.apps.project import (
     main,
 )
 from ai_scientist.utils.data_readiness import prepare_data_contract
+from ai_scientist.utils.llm_budget import llm_budget_manager
 
 
 class ProjectAutopilotTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        # Autopilot intentionally binds the process-wide budget manager for the
+        # duration of a project run.  Tests use temporary project directories,
+        # so they must not leave that singleton pointing at a deleted ledger.
+        llm_budget_manager.configure(max_total_tokens=None, reset=True)
+        llm_budget_manager.export_environment()
+
     def test_data_gate_hashes_empirical_inputs_without_disclosing_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "project"

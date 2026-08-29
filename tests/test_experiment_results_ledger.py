@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from omegaconf import OmegaConf
@@ -14,10 +16,14 @@ from ai_scientist.treesearch.agent_manager import Stage
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
     RESULTS_TSV_COLUMNS,
+    _encode_dataset_names,
+    _gate_binding_payload,
+    _multi_seed_gate_meta,
+    _validate_ledger_gates_against_checkpoint,
     perform_experiments_bfts,
     repair_results_tsv,
 )
-from ai_scientist.treesearch.utils.metric import WorstMetricValue
+from ai_scientist.treesearch.utils.metric import MetricValue, WorstMetricValue
 from ai_scientist.treesearch.utils.serialize import durable_append_text
 
 
@@ -28,16 +34,22 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
         *,
         kind: str = "main",
         status: str = "ok",
-        decision: str = "keep",
+        decision: str = "provisional",
+        parent_id: str = "",
     ) -> str:
         values = ["" for _ in RESULTS_TSV_COLUMNS]
         values[0] = "2026-01-01T00:00:00"
         values[1] = "stage"
         values[3] = kind
         values[4] = node_id
+        values[5] = parent_id
         values[6] = status
         values[7] = decision
         values[8] = "1.0"
+        values[9] = "1.0"
+        values[10] = "accuracy"
+        values[11] = "True"
+        values[12] = "[]"
         values[14] = "1"
         return "\t".join(values) + "\n"
 
@@ -47,10 +59,10 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
             path.write_bytes((header + self._row("node-1") + "partial\trow").encode())
 
-            logged, stage_best, node_stages = repair_results_tsv(path)
+            logged, stage_best, node_stages, _gate_bindings = repair_results_tsv(path)
 
             self.assertEqual(logged, {"node-1"})
-            self.assertEqual(stage_best["stage"]["node_id"], "node-1")
+            self.assertEqual(stage_best, {})
             self.assertEqual(node_stages, {"node-1": "stage"})
             self.assertEqual(
                 path.read_text(encoding="utf-8"), header + self._row("node-1")
@@ -113,12 +125,221 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
             path.write_text(
                 header
-                + self._row("node-1", kind="main", status="crash", decision="keep"),
+                + self._row(
+                    "node-1",
+                    kind="main",
+                    status="crash",
+                    decision="provisional",
+                ),
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "keep decision"):
+            with self.assertRaisesRegex(ValueError, "positive decision"):
                 repair_results_tsv(path)
+
+    def test_repair_recovers_only_final_gate_as_stage_best(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            gate_id = "gate_" + "a" * 64
+            path.write_text(
+                header
+                + self._row("candidate")
+                + self._row(
+                    gate_id,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="candidate",
+                ),
+                encoding="utf-8",
+            )
+
+            logged, stage_best, _node_stages, gate_bindings = repair_results_tsv(path)
+
+            self.assertEqual(logged, {"candidate", gate_id})
+            self.assertEqual(stage_best["stage"]["node_id"], "candidate")
+            self.assertEqual(gate_bindings[gate_id]["parent_id"], "candidate")
+
+    def test_repair_migrates_legacy_keep_to_provisional(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            legacy = self._row("candidate", decision="keep")
+            path.write_text(header + legacy, encoding="utf-8")
+
+            _logged, stage_best, _node_stages, _gate_bindings = repair_results_tsv(path)
+
+            self.assertEqual(stage_best, {})
+            self.assertIn("\tprovisional\t", path.read_text(encoding="utf-8"))
+            self.assertNotIn("\tkeep\t", path.read_text(encoding="utf-8"))
+
+    def test_repair_rejects_unbound_or_duplicate_qualified_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            path.write_text(
+                header
+                + self._row("candidate")
+                + self._row(
+                    "gate_" + "a" * 64,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="candidate",
+                )
+                + self._row("candidate-2")
+                + self._row(
+                    "gate_" + "b" * 64,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="candidate-2",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate qualified gate"):
+                repair_results_tsv(path)
+
+            path.write_text(
+                header
+                + self._row(
+                    "gate_" + "c" * 64,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="missing",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unbound gate event"):
+                repair_results_tsv(path)
+
+    def test_repair_rejects_qualified_gate_for_discarded_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            path.write_text(
+                header
+                + self._row(
+                    "candidate",
+                    status="crash",
+                    decision="discard",
+                )
+                + self._row(
+                    "gate_" + "a" * 64,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="candidate",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Unbound gate event"):
+                repair_results_tsv(path)
+
+    def test_repair_rejects_nonfinite_gate_metrics_and_reserved_node_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "results.tsv"
+            header = "\t".join(RESULTS_TSV_COLUMNS) + "\n"
+            gate_fields = (
+                self._row(
+                    "gate_" + "a" * 64,
+                    kind="gate",
+                    status="ok",
+                    decision="qualified",
+                    parent_id="candidate",
+                )
+                .rstrip("\n")
+                .split("\t")
+            )
+            gate_fields[8] = "NaN"
+            gate_fields[9] = "NaN"
+            path.write_text(
+                header + self._row("candidate") + "\t".join(gate_fields) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Invalid gate metrics"):
+                repair_results_tsv(path)
+
+            path.write_text(
+                header + self._row("gate_" + "b" * 64),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Reserved gate event id"):
+                repair_results_tsv(path)
+
+    def test_dataset_names_are_canonical_json_escaped(self) -> None:
+        encoded = _encode_dataset_names(["line\nbreak", "tab\tname", "plain"])
+
+        self.assertNotIn("\n", encoded)
+        self.assertNotIn("\t", encoded)
+        self.assertEqual(
+            json.loads(encoded),
+            ["line\nbreak", "plain", "tab\tname"],
+        )
+
+    def test_resume_gate_bindings_must_match_checkpoint_receipts(self) -> None:
+        stage = SimpleNamespace(
+            name="stage",
+            qualified_node_id=None,
+            multi_seed_receipt_hash=None,
+        )
+        node = Node(
+            id="candidate",
+            metric=MetricValue(0.9, maximize=True),
+            multi_seed_attempts=[],
+        )
+        manager = SimpleNamespace(
+            stages=[stage],
+            journals={"stage": Journal(nodes=[node])},
+        )
+        forged_id = "gate_" + "a" * 64
+        report = {
+            "receipt_hash": "sha256:" + "a" * 64,
+            "datasets": {"test": {"mean": 0.75}},
+        }
+        forged = {
+            forged_id: _gate_binding_payload(
+                node,
+                stage="stage",
+                receipt_hash=report["receipt_hash"],
+                decision="qualified",
+                report=report,
+            )
+        }
+
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            _validate_ledger_gates_against_checkpoint(forged, manager)
+
+        stage.qualified_node_id = "candidate"
+        stage.multi_seed_receipt_hash = "sha256:" + "a" * 64
+        node.multi_seed_report = report
+        _validate_ledger_gates_against_checkpoint(forged, manager)
+
+        altered = {forged_id: {**forged[forged_id], "objective": "0.8"}}
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            _validate_ledger_gates_against_checkpoint(altered, manager)
+
+    def test_gate_scalar_uses_confirmation_means_not_selection_score(self) -> None:
+        node = Node(metric=MetricValue(0.95, maximize=True))
+        report = {
+            "datasets": {
+                "a": {"mean": 0.2},
+                "b": {"mean": 0.4},
+                "c": {"mean": 0.6},
+            }
+        }
+
+        metric_mean, objective, _name, maximize = _multi_seed_gate_meta(node, report)
+
+        self.assertAlmostEqual(metric_mean, 0.4)
+        self.assertAlmostEqual(objective, 0.4)
+        self.assertTrue(maximize)
 
     def test_durable_append_retries_partial_os_writes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -402,7 +623,7 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
             ):
                 result = perform_experiments_bfts(root / "config.yaml")
 
-            logged, _stage_best, node_stages = repair_results_tsv(
+            logged, _stage_best, node_stages, _gate_bindings = repair_results_tsv(
                 log_dir / "results.tsv"
             )
             self.assertEqual(result["status"], "completed")
@@ -475,9 +696,11 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "checkpoint_restore")
-            self.assertIn(
-                "ahead of the selected checkpoint", result["failure_error"]["message"]
+            self.assertEqual(
+                result["failure_error"]["error_code"],
+                "initialization_initialization_failed_checkpoint_restore",
             )
+            self.assertNotIn("ahead of the selected checkpoint", json.dumps(result))
 
     def test_new_run_rejects_existing_populated_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -518,9 +741,11 @@ class ExperimentResultsLedgerTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "initialization_failed")
             self.assertEqual(result["initialization_phase"], "manager_creation")
-            self.assertIn(
-                "requires a resume checkpoint", result["failure_error"]["message"]
+            self.assertEqual(
+                result["failure_error"]["error_code"],
+                "initialization_initialization_failed_manager_creation",
             )
+            self.assertNotIn("requires a resume checkpoint", json.dumps(result))
 
 
 if __name__ == "__main__":

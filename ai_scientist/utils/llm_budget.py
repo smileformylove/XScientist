@@ -386,7 +386,7 @@ class LLMBudgetManager:
         if reset:
             self.reset(remove_state=True)
         if self.enabled:
-            with self._locked_state() as state:
+            with self._locked_state(initialize_if_missing=True) as state:
                 self._sync_limits(state, allow_limit_increase=allow_limit_increase)
                 if allow_limit_increase:
                     self._resume_wall_clock(state)
@@ -559,7 +559,7 @@ class LLMBudgetManager:
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     @contextlib.contextmanager
-    def _locked_state(self):
+    def _locked_state(self, *, initialize_if_missing: bool = False):
         with self._thread_lock:
             if self._state_path is None:
                 if self._memory_state is None:
@@ -570,7 +570,13 @@ class LLMBudgetManager:
                     self._memory_state["updated_at"] = time.time()
                 return
             lock_path = self._state_path.with_suffix(self._state_path.suffix + ".lock")
-            with lock_path.open("a+b") as lock_handle:
+            try:
+                lock_handle = lock_path.open("a+b")
+            except OSError as exc:
+                raise LLMBudgetStateError(
+                    "LLM budget state lock is unavailable; refusing to reset usage"
+                ) from exc
+            with lock_handle:
                 if fcntl is not None:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
                 elif msvcrt is not None:  # pragma: no cover - exercised on Windows
@@ -584,6 +590,10 @@ class LLMBudgetManager:
                     try:
                         raw_state = self._state_path.read_text(encoding="utf-8")
                     except FileNotFoundError:
+                        if not initialize_if_missing:
+                            raise LLMBudgetStateError(
+                                "LLM budget state disappeared; refusing to reset usage"
+                            )
                         state = self._new_state()
                     except OSError as exc:
                         raise LLMBudgetStateError(
@@ -604,11 +614,17 @@ class LLMBudgetManager:
                         temp = self._state_path.with_suffix(
                             self._state_path.suffix + ".tmp"
                         )
-                        temp.write_text(
-                            json.dumps(state, indent=2, sort_keys=True),
-                            encoding="utf-8",
-                        )
-                        temp.replace(self._state_path)
+                        try:
+                            temp.write_text(
+                                json.dumps(state, indent=2, sort_keys=True),
+                                encoding="utf-8",
+                            )
+                            temp.replace(self._state_path)
+                        except OSError as exc:
+                            raise LLMBudgetStateError(
+                                "LLM budget state cannot be persisted; refusing "
+                                "further provider calls"
+                            ) from exc
                 finally:
                     if fcntl is not None:
                         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

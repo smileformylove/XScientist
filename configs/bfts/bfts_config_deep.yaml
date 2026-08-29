@@ -77,7 +77,7 @@ agent:
 
   multi_seed_eval:
     num_seeds: 5
-    seeds: [42, 123, 456, 789, 2024]
+    seeds: [123, 456, 789, 2024, 31415]
 
   expose_prediction: False
   data_preview: False

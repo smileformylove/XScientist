@@ -8,13 +8,15 @@ from ai_scientist.treesearch.backend import get_ai_client
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
 
 report_summarizer_sys_msg = """You are an expert machine learning researcher.
-You are given multiple experiment logs, each representing a node in a stage of exploring scientific ideas and implementations.
-Your task is to aggregate these logs and provide scientifically insightful information.
+You are given only gate-qualified experiment evidence and the confirmation-seed
+nodes bound to its validated receipt. Your task is to summarize that evidence.
 
 Important instructions:
 - Do NOT hallucinate or fabricate information that is not present in the logs.
 - Do NOT introduce errors when repeating information from the logs.
-- Identify notable insights or differences across the nodes without repeating the same information.
+- Treat artifact-internal deterministic verification as an internal consistency
+  check, not independent ground-truth validation.
+- Treat agent-authored analysis as interpretation, not verification authority.
 """
 
 output_format_control = """Respond in the following format:
@@ -107,11 +109,7 @@ def get_nodes_infos(nodes):
     node_infos = ""
     for n in nodes:
         node_info = f"Node ID: {n.id}\n"
-        node_info += (
-            f"Plan: {n.overall_plan}\n"
-            if hasattr(n, "overall_plan")
-            else "Plan: Not available\n"
-        )
+        node_info += f"Plan: {n.overall_plan or n.plan or 'Not available'}\n"
         node_info += (
             f"Analysis: {n.analysis}\n"
             if hasattr(n, "analysis")
@@ -128,19 +126,32 @@ def get_nodes_infos(nodes):
                 node_info += f"- Plot Path: {plot.get('plot_path', 'Not available')}, Description: {plot.get('analysis', 'Not available')}\n"
         else:
             node_info += "No plot analyses available\n"
+        report = n.evaluation_report if isinstance(n.evaluation_report, dict) else {}
+        multi_seed = (
+            n.multi_seed_report if isinstance(n.multi_seed_report, dict) else {}
+        )
+        node_info += (
+            "Verification: "
+            f"provenance={n.metric_provenance}, "
+            f"scope={report.get('verification_scope', 'unavailable')}, "
+            f"ground_truth_authority={report.get('ground_truth_authority', 'unavailable')}, "
+            f"evaluation_result_hash={report.get('result_hash', 'unavailable')}, "
+            f"multi_seed_receipt_hash={multi_seed.get('receipt_hash', 'unavailable')}\n"
+        )
         node_infos += node_info + "\n"
     return node_infos
 
 
 def get_summarizer_prompt(journal, stage_name):
-    good_leaf_nodes = [n for n in journal.good_nodes if n.is_leaf]
-    if not good_leaf_nodes:
-        print("NO GOOD LEAF NODES!!!")
-        good_leaf_nodes = [n for n in journal.good_nodes]
-    if not good_leaf_nodes:
-        print("NO GOOD NODES — falling back to non-buggy experiment nodes")
-        good_leaf_nodes = [n for n in journal.nodes if n.is_buggy is False]
-    node_infos = get_nodes_infos(good_leaf_nodes)
+    verified_nodes = [node for node in journal.nodes if node.has_verified_metric]
+    qualified_nodes = [
+        node
+        for node in verified_nodes
+        if not node.is_seed_node and node.multi_seed_report
+    ]
+    if len(qualified_nodes) != 1:
+        raise ValueError("Report journal must contain exactly one qualified node")
+    node_infos = get_nodes_infos(verified_nodes)
     return report_summarizer_sys_msg, report_summarizer_prompt.format(
         node_infos=node_infos, stage_name=stage_name
     )
@@ -192,14 +203,27 @@ def get_node_log(node):
             ]
         else:
             ret["exp_results_npy_files"] = []
+    evaluation_report = (
+        node.evaluation_report if isinstance(node.evaluation_report, dict) else {}
+    )
+    multi_seed_report = (
+        node.multi_seed_report if isinstance(node.multi_seed_report, dict) else {}
+    )
+    ret["verification"] = {
+        "metric_provenance": node.metric_provenance,
+        "verification_scope": evaluation_report.get("verification_scope"),
+        "ground_truth_authority": evaluation_report.get("ground_truth_authority"),
+        "evaluation_result_hash": evaluation_report.get("result_hash"),
+        "multi_seed_receipt_hash": multi_seed_report.get("receipt_hash"),
+        "multi_seed_stage": multi_seed_report.get("stage"),
+        "multi_seed_count": len(multi_seed_report.get("seeds", [])),
+    }
     return ret
 
 
 def update_summary(
     prev_summary, cur_stage_name, cur_journal, cur_summary, model, client, max_retry=5
 ):
-    good_leaf_nodes = [n for n in cur_journal.good_nodes if n.is_leaf]
-    node_infos = get_nodes_infos(good_leaf_nodes)
     prompt = stage_aggregate_prompt.format(
         prev_summary=prev_summary,
         stage_name=cur_stage_name,
@@ -215,7 +239,10 @@ def update_summary(
         if is_llm_budget_exception(e):
             raise
         if max_retry > 0:
-            print(f"Error occurred: {e}. Retrying... ({max_retry} attempts left)")
+            print(
+                "Summary update failed with "
+                f"{type(e).__name__}; retrying ({max_retry} attempts left)"
+            )
             return update_summary(
                 prev_summary,
                 cur_stage_name,
@@ -226,7 +253,9 @@ def update_summary(
                 max_retry - 1,
             )
         else:
-            print(f"Failed to update summary after multiple attempts. Error: {e}")
+            print(
+                "Summary update failed after bounded retries " f"({type(e).__name__})"
+            )
             raise
     return summary_json
 
@@ -268,12 +297,9 @@ def annotate_history(journal, cfg=None):
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    if cfg.agent.get("summary", None) is not None:
-                        model = cfg.agent.summary.model
-                    else:
-                        model = os.environ.get(
-                            "ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1"
-                        )
+                    if cfg is None or getattr(cfg, "report", None) is None:
+                        raise ValueError("Report model configuration is required")
+                    model = cfg.report.model
                     client = get_ai_client(model)
                     response = get_response_from_llm(
                         overall_plan_summarizer_prompt.format(
@@ -293,10 +319,15 @@ def annotate_history(journal, cfg=None):
                         raise
                     retry_count += 1
                     if retry_count == max_retries:
-                        print(f"Failed after {max_retries} attempts. Error: {e}")
+                        print(
+                            f"History annotation failed after {max_retries} attempts "
+                            f"({type(e).__name__})"
+                        )
                         raise
                     print(
-                        f"Error occurred: {e}. Retrying... ({max_retries - retry_count} attempts left)"
+                        "History annotation failed with "
+                        f"{type(e).__name__}; retrying "
+                        f"({max_retries - retry_count} attempts left)"
                     )
         else:
             node.overall_plan = node.plan
@@ -305,63 +336,62 @@ def annotate_history(journal, cfg=None):
 def overall_summarize(journals, cfg=None):
     from concurrent.futures import ThreadPoolExecutor
 
+    if cfg is None or getattr(cfg, "report", None) is None:
+        raise ValueError("Final report requires an explicit report model")
+    report_model = cfg.report.model
+    journal_items = list(journals)
+    if len(journal_items) != 4:
+        raise ValueError("Final report requires exactly four qualified stages")
+
     def process_stage(idx, stage_tuple):
         stage_name, journal = stage_tuple
-        annotate_history(journal, cfg=cfg)
-        if idx in [1, 2]:
+        qualified_nodes = [
+            node
+            for node in journal.verified_nodes
+            if not node.is_seed_node and node.multi_seed_report
+        ]
+        if len(qualified_nodes) != 1:
+            raise ValueError("Final report input is not gate-qualified")
+        qualified = qualified_nodes[0]
+        confirmation_nodes = [
+            node
+            for node in journal.verified_nodes
+            if node.is_seed_node
+            and not node.is_seed_agg_node
+            and node.parent is qualified
+        ]
+        if idx == 0:
+            client = get_ai_client(report_model)
+            return get_stage_summary(
+                journal,
+                stage_name,
+                report_model,
+                client,
+            )
+        if idx in [1, 2, 3]:
             best_node = journal.get_best_node_by_metric()
-            if best_node is None:
-                best_node = journal.get_best_node(cfg=cfg)
-            # get multi-seed results and aggregater node
-            child_nodes = best_node.children
-            multi_seed_nodes = [
-                n for n in child_nodes if n.is_seed_node and not n.is_seed_agg_node
-            ]
-            agg_node = None
-            for n in child_nodes:
-                if n.is_seed_node and n.is_seed_agg_node:
-                    agg_node = n
-                    break
-            if agg_node is None:
-                # skip agg node
-                return {
-                    "best node": get_node_log(best_node),
-                    "best node with different seeds": [
-                        get_node_log(n) for n in multi_seed_nodes
-                    ],
-                }
-            else:
-                return {
-                    "best node": get_node_log(best_node),
-                    "best node with different seeds": [
-                        get_node_log(n) for n in multi_seed_nodes
-                    ],
-                    "aggregated results of nodes with different seeds": get_node_log(
-                        agg_node
-                    ),
-                }
-        elif idx == 3:
-            good_leaf_nodes = [
-                n for n in journal.good_nodes if n.is_leaf and n.ablation_name
-            ]
-            return [get_node_log(n) for n in good_leaf_nodes]
-        elif idx == 0:
-            if cfg.agent.get("summary", None) is not None:
-                model = cfg.agent.summary.get("model", "")
-            else:
-                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
-            client = get_ai_client(model)
-            summary_json = get_stage_summary(journal, stage_name, model, client)
-            return summary_json
+            if best_node is not qualified:
+                raise ValueError("Report journal selected an unqualified node")
+            return {
+                "qualified node": get_node_log(qualified),
+                "confirmation seeds": [
+                    get_node_log(node) for node in confirmation_nodes
+                ],
+            }
+        raise ValueError("Final report contains an unexpected stage")
 
     from tqdm import tqdm
 
     with ThreadPoolExecutor() as executor:
         results = list(
             tqdm(
-                executor.map(process_stage, range(len(list(journals))), journals),
+                executor.map(
+                    process_stage,
+                    range(len(journal_items)),
+                    journal_items,
+                ),
                 desc="Processing stages",
-                total=len(list(journals)),
+                total=len(journal_items),
             )
         )
         # Handle variable number of stage results

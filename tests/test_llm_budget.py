@@ -227,6 +227,35 @@ class LLMBudgetTests(unittest.TestCase):
             with self.assertRaises(LLMBudgetStateError):
                 manager.configure(max_total_tokens=1000, state_path=state_path)
 
+    def test_disappeared_shared_state_fails_closed_without_reinitializing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state_path = root / "budget.json"
+            manager = LLMBudgetManager()
+            manager.configure(max_total_tokens=1000, state_path=state_path)
+            state_path.unlink()
+
+            with self.assertRaisesRegex(LLMBudgetStateError, "state disappeared"):
+                manager.reserve(model="test", prompt="x", max_output_tokens=1)
+
+            self.assertFalse(state_path.exists())
+
+    def test_disappeared_shared_state_directory_raises_budget_state_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            state_dir = root / "ledger"
+            state_path = state_dir / "budget.json"
+            manager = LLMBudgetManager()
+            manager.configure(max_total_tokens=1000, state_path=state_path)
+            state_path.unlink()
+            state_path.with_suffix(".json.lock").unlink(missing_ok=True)
+            state_dir.rmdir()
+
+            with self.assertRaisesRegex(LLMBudgetStateError, "lock is unavailable"):
+                manager.reserve(model="test", prompt="x", max_output_tokens=1)
+
+            self.assertFalse(state_dir.exists())
+
     def test_file_backed_denial_is_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             state_path = Path(td) / "budget.json"

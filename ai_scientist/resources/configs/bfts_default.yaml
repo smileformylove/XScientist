@@ -27,7 +27,7 @@ report:
   model: glm-4-flash
   temp: 1.0
 experiment:
-  num_syn_datasets: 1
+  num_syn_datasets: 3
 debug:
   stage4: false
 llm_budget:
@@ -46,7 +46,14 @@ agent:
   steps: 3
   k_fold_validation: 1
   multi_seed_eval:
-    num_seeds: 1
+    num_seeds: 3
+    seeds: [123, 456, 789]
+    max_relative_ci_half_width: 0.25
+    absolute_ci_floor: 0.01
+  evidence_gate:
+    minimum_datasets: 3
+    stage2_min_improved: 2
+    stage3_min_improved: 3
   expose_prediction: false
   data_preview: false
   code:

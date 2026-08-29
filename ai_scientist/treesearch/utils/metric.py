@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import total_ordering
+import math
 from typing import Any
 
 import numpy as np
@@ -147,35 +148,124 @@ class MetricValue(DataClassJsonMixin):
             if isinstance(self.value, dict):
                 # Check if it's the new format with metric_names list
                 if "metric_names" in self.value:
-                    # New format - validate and convert values to float
-                    for metric in self.value["metric_names"]:
+                    metric_names = self.value["metric_names"]
+                    if not isinstance(metric_names, list) or len(metric_names) != 1:
+                        raise ValueError(
+                            "Structured metric must contain exactly one metric"
+                        )
+                    # New format - validate and convert values to finite floats.
+                    for metric in metric_names:
+                        if not isinstance(metric, dict):
+                            raise ValueError(
+                                "Structured metric entry must be an object"
+                            )
+                        if (
+                            not isinstance(metric.get("metric_name"), str)
+                            or not metric["metric_name"].strip()
+                        ):
+                            raise ValueError("Structured metric name is required")
+                        if not isinstance(metric.get("lower_is_better"), bool):
+                            raise ValueError(
+                                "Structured metric optimization direction is required"
+                            )
+                        data = metric.get("data")
+                        if not isinstance(data, list) or not data:
+                            raise ValueError(
+                                "Structured metric requires at least one dataset"
+                            )
+                        dataset_names: set[str] = set()
                         for data_point in metric["data"]:
-                            if data_point["final_value"] is not None:
-                                data_point["final_value"] = float(
-                                    data_point["final_value"]
+                            if not isinstance(data_point, dict):
+                                raise ValueError(
+                                    "Structured metric dataset must be an object"
                                 )
-                            if data_point["best_value"] is not None:
-                                data_point["best_value"] = float(
-                                    data_point["best_value"]
+                            dataset_name = data_point.get("dataset_name")
+                            if (
+                                not isinstance(dataset_name, str)
+                                or not dataset_name.strip()
+                                or dataset_name in dataset_names
+                            ):
+                                raise ValueError(
+                                    "Structured metric dataset names must be unique"
+                                )
+                            dataset_names.add(dataset_name)
+                            for field_name in ("final_value", "best_value"):
+                                raw_value = data_point.get(field_name)
+                                if isinstance(raw_value, bool) or not isinstance(
+                                    raw_value, (float, int, np.number, np.floating)
+                                ):
+                                    raise ValueError(
+                                        "Structured metric values must be numeric"
+                                    )
+                                parsed_value = float(raw_value)
+                                if not math.isfinite(parsed_value):
+                                    raise ValueError(
+                                        "Structured metric values must be finite"
+                                    )
+                                data_point[field_name] = parsed_value
+                            if metric["lower_is_better"]:
+                                if data_point["best_value"] > data_point["final_value"]:
+                                    raise ValueError(
+                                        "Best metric value conflicts with minimization direction"
+                                    )
+                            elif data_point["best_value"] < data_point["final_value"]:
+                                raise ValueError(
+                                    "Best metric value conflicts with maximization direction"
                                 )
                 else:
                     # Old format - convert to float
-                    self.value = {
-                        k: float(v) if v is not None else None
-                        for k, v in self.value.items()
-                    }
+                    if not self.value:
+                        raise ValueError("Metric mapping cannot be empty")
+                    converted: dict[str, float] = {}
+                    for key, raw_value in self.value.items():
+                        if (
+                            not isinstance(key, str)
+                            or not key
+                            or isinstance(raw_value, bool)
+                            or not isinstance(
+                                raw_value,
+                                (float, int, np.number, np.floating),
+                            )
+                        ):
+                            raise ValueError(
+                                "Metric mapping must use non-empty names and numeric values"
+                            )
+                        converted[key] = float(raw_value)
+                    self.value = converted
+                    if any(
+                        not isinstance(key, str) or not key or not math.isfinite(value)
+                        for key, value in self.value.items()
+                    ):
+                        raise ValueError("Metric mapping values must be finite")
             else:
                 # Single value case
-                assert isinstance(self.value, (float, int, np.number, np.floating))
+                if isinstance(self.value, bool) or not isinstance(
+                    self.value, (float, int, np.number, np.floating)
+                ):
+                    raise ValueError("Metric value must be numeric")
                 self.value = float(self.value)
+                if not math.isfinite(self.value):
+                    raise ValueError("Metric value must be finite")
 
-    def __gt__(self, other) -> bool:
+    @property
+    def is_valid(self) -> bool:
         if self.value is None:
             return False
-        if other.value is None:
+        try:
+            return math.isfinite(self.get_mean_value())
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def __gt__(self, other) -> bool:
+        if not isinstance(other, MetricValue):
+            return NotImplemented
+        if not self.is_valid:
+            return False
+        if not other.is_valid:
             return True
 
-        assert type(self) is type(other)
+        if self.comparison_signature != other.comparison_signature:
+            raise ValueError("Metric values use incompatible comparison contracts")
 
         # Get mean values for comparison
         self_val = self.get_mean_value()
@@ -189,6 +279,55 @@ class MetricValue(DataClassJsonMixin):
         comp = self_val > other_val
         return comp if should_maximize else not comp
 
+    @property
+    def comparison_signature(self) -> tuple[Any, ...]:
+        """Return the metric/direction/dataset contract required for ranking."""
+
+        if isinstance(self.value, dict) and "metric_names" in self.value:
+            metric = self.value["metric_names"][0]
+            datasets = tuple(
+                sorted(str(item["dataset_name"]) for item in metric["data"])
+            )
+            return (
+                "structured",
+                metric["metric_name"],
+                bool(metric["lower_is_better"]),
+                datasets,
+            )
+        if isinstance(self.value, dict):
+            return (
+                "mapping",
+                self.name,
+                not bool(self.maximize),
+                tuple(sorted(self.value)),
+            )
+        return ("scalar", self.name, not bool(self.maximize), ("__scalar__",))
+
+    @property
+    def dataset_count(self) -> int:
+        return len(self.comparison_signature[-1])
+
+    @property
+    def comparison_family(self) -> tuple[Any, ...]:
+        """Return metric identity and direction without the dataset set."""
+
+        return self.comparison_signature[:-1]
+
+    def values_by_dataset(self) -> dict[str, float]:
+        """Return finite final values keyed by dataset for evidence comparisons."""
+
+        if not self.is_valid:
+            raise ValueError("Metric value is not valid")
+        if isinstance(self.value, dict) and "metric_names" in self.value:
+            metric = self.value["metric_names"][0]
+            return {
+                str(item["dataset_name"]): float(item["final_value"])
+                for item in metric["data"]
+            }
+        if isinstance(self.value, dict):
+            return {str(key): float(value) for key, value in self.value.items()}
+        return {"__scalar__": float(self.value)}
+
     def _should_maximize(self) -> bool:
         """Determine if we should maximize based on the metric format"""
         if isinstance(self.value, dict):
@@ -197,8 +336,8 @@ class MetricValue(DataClassJsonMixin):
                 # Use the first metric's lower_is_better value
                 try:
                     return not self.value["metric_names"][0]["lower_is_better"]
-                except Exception as e:
-                    print(f"error during metric value: {e}")
+                except (IndexError, KeyError, TypeError):
+                    raise ValueError("Structured metric direction is invalid") from None
             # Old format
             return bool(self.maximize)
         # Single value case
@@ -317,12 +456,25 @@ class MetricValue(DataClassJsonMixin):
                     ]
                     if values:
                         all_values.extend(values)
-                return float(np.mean(all_values)) if all_values else float("nan")
+                if not all_values:
+                    raise ValueError("Structured metric has no values")
+                mean_value = float(np.mean(all_values))
+                if not math.isfinite(mean_value):
+                    raise ValueError("Structured metric mean is not finite")
+                return mean_value
             # Old format
             values = [v for v in self.value.values() if v is not None]
-            return float(np.mean(values)) if values else float("nan")
+            if not values:
+                raise ValueError("Metric mapping has no values")
+            mean_value = float(np.mean(values))
+            if not math.isfinite(mean_value):
+                raise ValueError("Metric mapping mean is not finite")
+            return mean_value
         # Single value case
-        return float(self.value)
+        mean_value = float(self.value)
+        if not math.isfinite(mean_value):
+            raise ValueError("Metric value is not finite")
+        return mean_value
 
 
 @dataclass

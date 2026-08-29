@@ -16,6 +16,14 @@ from ai_scientist.protocol.llm_trace import (
     ENV_ENABLED,
     ENV_STRICT,
 )
+from ai_scientist.utils.llm_budget import LLMBudgetManager
+
+
+@pytest.fixture(autouse=True)
+def _isolated_vlm_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider contract tests must not inherit another run's global ledger."""
+
+    monkeypatch.setattr(vlm, "llm_budget_manager", LLMBudgetManager())
 
 
 class _Completions:

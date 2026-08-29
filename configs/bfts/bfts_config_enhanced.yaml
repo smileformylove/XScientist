@@ -34,7 +34,7 @@ experiment:
   multi_seed_eval:
     enabled: true
     num_seeds: 5            # 增加随机种子数量
-    seeds: [42, 123, 456, 789, 2024]
+    seeds: [123, 456, 789, 2024, 31415]
 
   # 自适应预算
   adaptive_budget:

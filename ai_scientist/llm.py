@@ -6,6 +6,7 @@ import re
 import time
 from typing import Any
 from urllib.parse import quote
+from ai_scientist.errors import LLMResponseContractError
 from ai_scientist.protocol.llm_trace import record_llm_call, strict_llm_tracing
 from ai_scientist.utils.token_tracker import track_token_usage
 from ai_scientist.utils.llm_budget import LLMBudgetExceeded, llm_budget_manager
@@ -50,10 +51,6 @@ MAX_NUM_TOKENS = 4096
 MAX_RESEARCH_PROVIDER_RETRIES = 3
 OPENAI_COMPAT_CALL_TIMEOUT_SECONDS = 30.0
 MAX_BATCH_RESPONSES = 8
-
-
-class LLMResponseContractError(RuntimeError):
-    """A provider response cannot safely drive a research action."""
 
 
 def _safe_reported_model(value: Any) -> str | None:

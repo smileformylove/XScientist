@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 from omegaconf import OmegaConf
 
 from ai_scientist.resources import resolve_bfts_config_path
@@ -15,17 +16,39 @@ from ai_scientist.treesearch.agent_manager import AgentManager, Stage
 from ai_scientist.treesearch.utils import serialize
 from ai_scientist.treesearch.utils.config import save_run
 from ai_scientist.treesearch.utils.metric import MetricValue
+from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
 
 
 class SaveRunAtomicTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._evidence_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._evidence_tmp.cleanup)
+
     def _journal(self, node_id: str, metric: float, code: str) -> Journal:
+        artifact = Path(self._evidence_tmp.name) / f"{node_id}.npy"
+        predictions = [0, 1] if metric > 1.0 else [0, 0]
+        np.save(
+            artifact,
+            {
+                "test": {
+                    "evaluation_inputs": [[0.0], [1.0]],
+                    "sample_ids": ["sample-0", "sample-1"],
+                    "ground_truth": [0, 1],
+                    "predictions": predictions,
+                }
+            },
+        )
+        report = evaluate_experiment_data(artifact, requested_metric="accuracy")
+        self.assertEqual(report["status"], "verified")
         return Journal(
             nodes=[
                 Node(
                     id=node_id,
                     code=code,
                     plan="plan",
-                    metric=MetricValue(metric, maximize=True),
+                    metric=MetricValue(report["metric"]),
+                    metric_provenance="deterministic_verified",
+                    evaluation_report=report,
                     is_buggy=False,
                 )
             ]

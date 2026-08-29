@@ -1,21 +1,39 @@
-from concurrent.futures import ProcessPoolExecutor
-from typing import List, Optional, Set, Any, Callable, cast, Dict, Tuple
+from concurrent.futures import ALL_COMPLETED, ProcessPoolExecutor, wait
+from collections.abc import Sequence
+from typing import List, Optional, Any, Callable, cast, Dict, Tuple
+import ast
+import hashlib
+import json
 import random
+import re
 import subprocess
 import os
+import stat
+import unicodedata
 from queue import Queue
 import logging
 import humanize
-from .backend import FunctionSpec, compile_prompt_to_md, query
+from .backend import (
+    FunctionCallValidationError,
+    FunctionSpec,
+    ResearchDecisionError,
+    compile_prompt_to_md,
+    query,
+)
 from .interpreter import ExecutionResult, sandbox_policy_from_config
 from .journal import Journal, Node
+from .errors import ExperimentCannotContinueError
 from .utils import data_preview
 from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
-from .utils.response import extract_code, extract_text_up_to_code, wrap_code
+from .utils.response import extract_single_plan_and_code, wrap_code
 from .utils.serialize import atomic_write_text
 from ai_scientist.protocol import capture_llm_calls
-from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
+from ai_scientist.utils.deterministic_evaluator import (
+    DEFAULT_MAX_FILE_BYTES,
+    evaluate_experiment_data,
+)
+from ai_scientist.utils.atomic_io import atomic_write_bytes
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
 import copy
 import dataclasses
@@ -29,8 +47,637 @@ import base64
 import sys
 
 logger = logging.getLogger("ai-scientist")
+MIN_SCIENTIFIC_SEEDS = 3
+MAX_SCIENTIFIC_SEEDS = 32
+MAX_RESEARCH_DECISION_RETRIES = 3
+MAX_PLOT_FILE_BYTES = 100 * 1024 * 1024
+MAX_PARALLEL_WORKERS = 64
+SUPPORTED_DETERMINISTIC_METRICS = (
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "roc_auc",
+    "rmse",
+    "mse",
+    "mae",
+    "r2",
+)
 
 ExecCallbackType = Callable[[str, bool], ExecutionResult]
+
+
+def _opaque_content_ref(value: Any) -> str:
+    payload = str(value).encode("utf-8", errors="replace")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+ablation_idea_spec = FunctionSpec(
+    name="propose_ablation",
+    description="Propose one falsifiable component-removal experiment",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "component": {"type": "string", "minLength": 1, "maxLength": 256},
+            "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "expected_outcome": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+            },
+        },
+        "required": ["name", "component", "description", "expected_outcome"],
+        "additionalProperties": False,
+    },
+)
+
+hyperparam_idea_spec = FunctionSpec(
+    name="propose_hyperparameter_trial",
+    description="Propose one bounded hyperparameter change to the locked control",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+            },
+        },
+        "required": ["name", "description"],
+        "additionalProperties": False,
+    },
+)
+
+metric_selection_spec = FunctionSpec(
+    name="select_deterministic_metric",
+    description="Select one host-supported primary scientific metric",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "metric": {
+                "type": "string",
+                "enum": list(SUPPORTED_DETERMINISTIC_METRICS),
+            },
+            "rationale": {"type": "string", "minLength": 1, "maxLength": 1000},
+        },
+        "required": ["metric", "rationale"],
+        "additionalProperties": False,
+    },
+)
+
+
+def _validate_retry_count(retries: int) -> int:
+    if (
+        isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or not 1 <= retries <= MAX_RESEARCH_DECISION_RETRIES
+    ):
+        raise ValueError("retries must be an integer between 1 and 3")
+    return retries
+
+
+def _ablation_code_diff_hash(control_code: str, ablation_code: str) -> str:
+    payload = json.dumps(
+        {
+            "control_code": control_code.strip(),
+            "ablation_code": ablation_code.strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+class _ScientificSemanticNormalizer(ast.NodeTransformer):
+    """Remove formatting, comments, docstrings, and statically dead branches."""
+
+    def visit_Expr(self, node: ast.Expr):  # noqa: N802 - ast visitor API
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return None
+        return self.generic_visit(node)
+
+    def visit_If(self, node: ast.If):  # noqa: N802 - ast visitor API
+        node = self.generic_visit(node)
+        if isinstance(node.test, ast.Constant):
+            return node.body if bool(node.test.value) else node.orelse
+        return node
+
+
+def _semantic_code_hash(code: str) -> str:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        raise ExperimentCannotContinueError(
+            "Experiment code has no valid semantic identity"
+        ) from None
+    normalized = _ScientificSemanticNormalizer().visit(tree)
+    ast.fix_missing_locations(normalized)
+    payload = ast.dump(normalized, include_attributes=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _ablation_component_was_transformed(
+    control_code: str,
+    ablation_code: str,
+    component: str,
+) -> bool:
+    tokens = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(component))
+        if len(token) >= 3
+        and token.lower()
+        not in {"and", "component", "disable", "feature", "model", "remove", "the"}
+    }
+    if not tokens:
+        return False
+
+    def signatures(code: str) -> dict[str, set[str]]:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return {}
+        normalized = _ScientificSemanticNormalizer().visit(tree)
+        ast.fix_missing_locations(normalized)
+        result = {token: set() for token in tokens}
+        for statement in ast.walk(normalized):
+            if not isinstance(statement, ast.stmt):
+                continue
+            identifiers: set[str] = set()
+            for item in ast.walk(statement):
+                if isinstance(item, ast.Name):
+                    identifiers.update(item.id.lower().split("_"))
+                    identifiers.add(item.id.lower())
+                elif isinstance(item, ast.Attribute):
+                    identifiers.update(item.attr.lower().split("_"))
+                    identifiers.add(item.attr.lower())
+            dumped = ast.dump(statement, include_attributes=False)
+            for token in tokens & identifiers:
+                result[token].add(dumped)
+        return result
+
+    control = signatures(control_code)
+    ablation = signatures(ablation_code)
+    relevant = [token for token in tokens if control.get(token)]
+    return bool(relevant) and any(
+        control[token] != ablation.get(token) for token in relevant
+    )
+
+
+def _canonical_idea_key(value: Any) -> str:
+    """Normalize an Agent-authored idea label for durable duplicate checks."""
+
+    if value is None:
+        return ""
+    folded = unicodedata.normalize("NFKC", str(value)).casefold()
+    normalized = "".join(char if char.isalnum() else " " for char in folded).strip()
+    return " ".join(normalized.split())
+
+
+def _ablation_idea_key(name: Any, component: Any) -> str:
+    return _canonical_idea_key(component)
+
+
+def _configured_multi_seed_values(seed_cfg: Any) -> list[int]:
+    """Resolve explicit seed sequences, including OmegaConf ListConfig values."""
+
+    configured = getattr(seed_cfg, "seeds", None)
+    if configured is not None:
+        if isinstance(configured, (str, bytes)) or not isinstance(configured, Sequence):
+            raise ExperimentCannotContinueError(
+                "Multi-seed configuration is not a sequence"
+            )
+        if not MIN_SCIENTIFIC_SEEDS <= len(configured) <= MAX_SCIENTIFIC_SEEDS:
+            raise ExperimentCannotContinueError(
+                "Multi-seed configuration requires 3-32 values"
+            )
+        seeds = list(configured)
+    else:
+        count = getattr(seed_cfg, "num_seeds", None)
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not MIN_SCIENTIFIC_SEEDS <= count <= MAX_SCIENTIFIC_SEEDS
+        ):
+            raise ExperimentCannotContinueError(
+                "Multi-seed count must be an integer between 3 and 32"
+            )
+        seeds = list(range(count))
+    if any(
+        isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or not 0 <= seed <= 2**32 - 1
+        for seed in seeds
+    ):
+        raise ExperimentCannotContinueError(
+            "Multi-seed values must be bounded integers"
+        )
+    if len(set(seeds)) != len(seeds):
+        raise ExperimentCannotContinueError(
+            "Multi-seed configuration values must be unique"
+        )
+    return seeds
+
+
+def _inject_seed_bootstrap(code: str, seed: int) -> tuple[str, str]:
+    """Rewrite one explicit training RNG seed while preserving the data seed."""
+
+    if (
+        not isinstance(code, str)
+        or not code.strip()
+        or isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or not 0 <= seed <= 2**32 - 1
+    ):
+        raise ExperimentCannotContinueError("Seed injection inputs are invalid")
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        raise ExperimentCannotContinueError(
+            "Qualified experiment code is not valid Python"
+        ) from None
+    seed_names = {"XSCIENTIST_DATA_SEED", "XSCIENTIST_TRAINING_SEED"}
+    assignments: dict[str, ast.Assign | ast.AnnAssign] = {}
+    allowed_store_ids: set[int] = set()
+    for statement in tree.body:
+        target: ast.Name | None = None
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            target = statement.targets[0]
+        elif isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            target = statement.target
+        if target is not None and target.id in seed_names:
+            if target.id in assignments:
+                raise ExperimentCannotContinueError(
+                    "Experiment seed roles must have one immutable declaration"
+                )
+            assignments[target.id] = statement
+            allowed_store_ids.add(id(target))
+
+    forbidden_binding = False
+    for item in ast.walk(tree):
+        if (
+            isinstance(item, ast.Name)
+            and item.id in seed_names
+            and isinstance(item.ctx, (ast.Store, ast.Del))
+            and id(item) not in allowed_store_ids
+        ):
+            forbidden_binding = True
+        if isinstance(item, ast.arg) and item.arg in seed_names:
+            forbidden_binding = True
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            forbidden_binding |= item.name in seed_names
+        if isinstance(item, ast.alias):
+            bound_name = item.asname or item.name.split(".", 1)[0]
+            forbidden_binding |= bound_name in seed_names
+        if isinstance(item, ast.ExceptHandler):
+            forbidden_binding |= item.name in seed_names
+        if isinstance(item, (ast.Global, ast.Nonlocal)):
+            forbidden_binding |= any(name in seed_names for name in item.names)
+        if isinstance(item, (ast.MatchAs, ast.MatchStar)):
+            forbidden_binding |= item.name in seed_names
+        if isinstance(item, ast.MatchMapping):
+            forbidden_binding |= item.rest in seed_names
+    if set(assignments) != seed_names or forbidden_binding:
+        raise ExperimentCannotContinueError(
+            "Experiment code must declare two distinct immutable seed roles"
+        )
+
+    for name, assignment in assignments.items():
+        value = assignment.value
+        if (
+            not isinstance(value, ast.Constant)
+            or isinstance(value.value, bool)
+            or not isinstance(value.value, int)
+            or not 0 <= value.value <= 2**32 - 1
+        ):
+            raise ExperimentCannotContinueError(
+                f"{name} must be assigned a bounded integer literal"
+            )
+
+    import_aliases: dict[str, str] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                import_aliases[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+        elif isinstance(statement, ast.ImportFrom) and statement.module:
+            for alias in statement.names:
+                if alias.name != "*":
+                    import_aliases[alias.asname or alias.name] = (
+                        f"{statement.module}.{alias.name}"
+                    )
+
+    alias_names = set(import_aliases)
+    for item in ast.walk(tree):
+        rebound_name = None
+        if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
+            rebound_name = item.id
+        elif isinstance(item, ast.arg):
+            rebound_name = item.arg
+        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rebound_name = item.name
+        if rebound_name in alias_names:
+            raise ExperimentCannotContinueError(
+                "RNG import aliases must not be rebound"
+            )
+
+    recognized_seed_calls = {
+        "jax.random.PRNGKey",
+        "numpy.random.RandomState",
+        "numpy.random.SeedSequence",
+        "numpy.random.default_rng",
+        "numpy.random.seed",
+        "random.Random",
+        "random.seed",
+        "tensorflow.random.set_seed",
+        "torch.cuda.manual_seed_all",
+        "torch.manual_seed",
+    }
+
+    def qualified_call_name(function: ast.AST) -> str:
+        if isinstance(function, ast.Name):
+            return import_aliases.get(function.id, function.id)
+        if isinstance(function, ast.Attribute):
+            prefix = qualified_call_name(function.value)
+            resolved = f"{prefix}.{function.attr}" if prefix else function.attr
+            root, separator, remainder = resolved.partition(".")
+            if separator and root in import_aliases:
+                return f"{import_aliases[root]}.{remainder}"
+            return resolved
+        return ""
+
+    def seed_argument(call: ast.Call) -> ast.AST | None:
+        if call.args:
+            return call.args[0]
+        keyword_names = {
+            "jax.random.PRNGKey": {"seed"},
+            "numpy.random.RandomState": {"seed"},
+            "numpy.random.SeedSequence": {"entropy"},
+            "numpy.random.default_rng": {"seed"},
+            "numpy.random.seed": {"seed"},
+            "random.Random": {"x"},
+            "random.seed": {"a"},
+            "tensorflow.random.set_seed": {"seed"},
+            "torch.cuda.manual_seed_all": {"seed"},
+            "torch.manual_seed": {"seed"},
+        }[qualified_call_name(call.func)]
+        matching = [kw.value for kw in call.keywords if kw.arg in keyword_names]
+        return matching[0] if len(matching) == 1 else None
+
+    def direct_seed_role(call: ast.Call) -> str | None:
+        if qualified_call_name(call.func) not in recognized_seed_calls:
+            return None
+        argument = seed_argument(call)
+        if (
+            isinstance(argument, ast.Name)
+            and isinstance(argument.ctx, ast.Load)
+            and argument.id in seed_names
+        ):
+            return argument.id
+        return ""
+
+    local_functions = {
+        statement.name: statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    class _ReachableCallCollector(ast.NodeVisitor):
+        """Collect module-reachable calls without trusting dead helper bodies."""
+
+        def __init__(self) -> None:
+            self.calls: list[ast.Call] = []
+            self._active_functions: set[str] = set()
+            self._conditional_depth = 0
+            self.conditional_seed_call = False
+
+        def _visit_conditionally(self, nodes: list[ast.AST]) -> None:
+            self._conditional_depth += 1
+            try:
+                self._visit_block(nodes)
+            finally:
+                self._conditional_depth -= 1
+
+        def _visit_block(self, nodes: list[ast.AST]) -> None:
+            conditionally_reachable = False
+            for child in nodes:
+                if conditionally_reachable:
+                    self._visit_conditionally([child])
+                else:
+                    self.visit(child)
+                if isinstance(child, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                    break
+                if self._can_interrupt_flow(child):
+                    conditionally_reachable = True
+
+        @classmethod
+        def _can_interrupt_flow(cls, node: ast.AST) -> bool:
+            """Conservatively detect paths that can skip following statements."""
+
+            if isinstance(node, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                return True
+            if isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+            ):
+                return False
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Constant):
+                selected = node.body if bool(node.test.value) else node.orelse
+                return any(cls._can_interrupt_flow(item) for item in selected)
+            return any(
+                cls._can_interrupt_flow(child) for child in ast.iter_child_nodes(node)
+            )
+
+        @staticmethod
+        def _is_main_guard(test: ast.AST) -> bool:
+            return (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "__name__"
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == "__main__"
+            )
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_If(self, node: ast.If) -> None:
+            if isinstance(node.test, ast.Constant):
+                selected = node.body if bool(node.test.value) else node.orelse
+                self._visit_block(list(selected))
+                return
+            if self._is_main_guard(node.test):
+                self._visit_block(list(node.body))
+                return
+            self.visit(node.test)
+            self._visit_conditionally(list(node.body))
+            self._visit_conditionally(list(node.orelse))
+
+        def visit_While(self, node: ast.While) -> None:
+            if isinstance(node.test, ast.Constant) and not bool(node.test.value):
+                self._visit_block(list(node.orelse))
+                return
+            self.visit(node.test)
+            self._visit_conditionally(list(node.body))
+            self._visit_conditionally(list(node.orelse))
+
+        def visit_For(self, node: ast.For) -> None:
+            self.visit(node.iter)
+            self._visit_conditionally(list(node.body))
+            self._visit_conditionally(list(node.orelse))
+
+        def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+            self.visit(node.iter)
+            self._visit_conditionally(list(node.body))
+            self._visit_conditionally(list(node.orelse))
+
+        def visit_IfExp(self, node: ast.IfExp) -> None:
+            self.visit(node.test)
+            self._visit_conditionally([node.body, node.orelse])
+
+        def visit_BoolOp(self, node: ast.BoolOp) -> None:
+            if node.values:
+                self.visit(node.values[0])
+                self._visit_conditionally(list(node.values[1:]))
+
+        def visit_Try(self, node: ast.Try) -> None:
+            self._visit_conditionally(list(node.body))
+            self._visit_conditionally(list(node.orelse))
+            self._visit_conditionally(list(node.finalbody))
+            for handler in node.handlers:
+                self._visit_conditionally(list(handler.body))
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+        def visit_Call(self, node: ast.Call) -> None:
+            self.calls.append(node)
+            if (
+                self._conditional_depth
+                and qualified_call_name(node.func) in recognized_seed_calls
+            ):
+                self.conditional_seed_call = True
+            if isinstance(node.func, ast.Name) and node.func.id in local_functions:
+                name = node.func.id
+                if name not in self._active_functions:
+                    self._active_functions.add(name)
+                    self._visit_block(list(local_functions[name].body))
+                    self._active_functions.remove(name)
+            self.generic_visit(node)
+
+    collector = _ReachableCallCollector()
+    collector._visit_block(
+        [
+            statement
+            for statement in tree.body
+            if not isinstance(
+                statement,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            )
+        ]
+    )
+    calls = collector.calls
+    reachable_seed_calls = [
+        call
+        for call in calls
+        if qualified_call_name(call.func) in recognized_seed_calls
+    ]
+    applied_roles = [direct_seed_role(call) for call in reachable_seed_calls]
+    if (
+        collector.conditional_seed_call
+        or "" in applied_roles
+        or set(applied_roles) != seed_names
+    ):
+        raise ExperimentCannotContinueError(
+            "Every RNG seed call must unconditionally use one declared seed role"
+        )
+
+    training_assignment = assignments["XSCIENTIST_TRAINING_SEED"]
+    training_assignment.value = ast.Constant(value=seed)
+    ast.fix_missing_locations(tree)
+    seeded_code = ast.unparse(tree) + "\n"
+    try:
+        ast.parse(seeded_code)
+    except SyntaxError:
+        raise ExperimentCannotContinueError(
+            "Seeded experiment code is invalid"
+        ) from None
+    receipt_payload = {
+        "schema": "xscientist.seed-bootstrap.v3",
+        "method": "reachable_direct_rng_seed_role_v3",
+        "seed_application_syntax_verified": True,
+        "seed": seed,
+        "parent_code_sha256": "sha256:"
+        + hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "seeded_code_sha256": "sha256:"
+        + hashlib.sha256(seeded_code.encode("utf-8")).hexdigest(),
+    }
+    receipt = json.dumps(
+        receipt_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return seeded_code, "sha256:" + hashlib.sha256(receipt).hexdigest()
+
+
+def _validate_confirmation_seed_set(code: str, seeds: Sequence[int]) -> None:
+    """Require confirmation seeds to be held out from the selection run."""
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, TypeError):
+        raise ExperimentCannotContinueError(
+            "Qualified experiment code is not valid Python"
+        ) from None
+    training_seeds: list[int] = []
+    for statement in tree.body:
+        target: ast.Name | None = None
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            target = statement.targets[0]
+        elif isinstance(statement, ast.AnnAssign) and isinstance(
+            statement.target, ast.Name
+        ):
+            target = statement.target
+        if target is not None and target.id == "XSCIENTIST_TRAINING_SEED":
+            value = statement.value
+            if (
+                not isinstance(value, ast.Constant)
+                or isinstance(value.value, bool)
+                or not isinstance(value.value, int)
+            ):
+                raise ExperimentCannotContinueError(
+                    "XSCIENTIST_TRAINING_SEED must be an integer literal"
+                )
+            training_seeds.append(value.value)
+    if len(training_seeds) != 1:
+        raise ExperimentCannotContinueError(
+            "Experiment code must declare one training seed"
+        )
+    if training_seeds[0] in seeds:
+        raise ExperimentCannotContinueError(
+            "Confirmation seeds must be held out from the selection training seed"
+        )
 
 
 def _publish_source_artifacts(
@@ -40,6 +687,125 @@ def _publish_source_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename, content in artifacts.items():
         atomic_write_text(output_dir / filename, content)
+
+
+def _preserve_evaluation_artifact(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    expected_hash: str,
+) -> Path:
+    """Copy the exact evaluated bytes into durable, replayable evidence."""
+
+    payload = _read_untrusted_regular_file(
+        source,
+        max_bytes=DEFAULT_MAX_FILE_BYTES,
+        purpose="evaluation artifact",
+    )
+    actual_hash = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if actual_hash != expected_hash:
+        raise ExperimentCannotContinueError(
+            "Evaluation artifact no longer matches its evaluator receipt"
+        )
+    atomic_write_bytes(destination, payload)
+    return Path(destination)
+
+
+def _read_untrusted_regular_file(
+    source: str | Path,
+    *,
+    max_bytes: int,
+    purpose: str,
+) -> bytes:
+    """Read a bounded regular file without following an Agent-created symlink."""
+
+    source = Path(source)
+    if source.is_symlink():
+        raise ExperimentCannotContinueError(f"Unsafe {purpose} symlink")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError:
+        raise ExperimentCannotContinueError(f"Cannot safely open {purpose}") from None
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size < 0
+            or before.st_size > max_bytes
+        ):
+            raise ExperimentCannotContinueError(f"Unsafe or oversized {purpose}")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ExperimentCannotContinueError(f"{purpose} changed while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise ExperimentCannotContinueError(f"{purpose} changed while reading")
+    return b"".join(chunks)
+
+
+def _copy_untrusted_png(source: str | Path, destination: str | Path) -> Path:
+    payload = _read_untrusted_regular_file(
+        source,
+        max_bytes=MAX_PLOT_FILE_BYTES,
+        purpose="plot artifact",
+    )
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ExperimentCannotContinueError("Plot artifact is not a PNG file")
+    atomic_write_bytes(destination, payload)
+    return Path(destination)
+
+
+def _publish_plot_artifacts(
+    source_dir: str | Path,
+    destination_dir: str | Path,
+) -> list[Path]:
+    """Publish PNGs only; plotting arrays can never replace scientific evidence."""
+
+    source_dir = Path(source_dir)
+    destination_dir = Path(destination_dir)
+    published: list[Path] = []
+    for source in sorted(source_dir.glob("*.png")):
+        destination = destination_dir / source.name
+        _copy_untrusted_png(source, destination)
+        published.append(destination)
+    return published
+
+
+def _assert_preserved_evaluation_artifact(node: Node) -> None:
+    if not node.has_verified_metric:
+        return
+    evidence_dir = Path(node.exp_results_dir)
+    artifact = evidence_dir / "experiment_data.npy"
+    code_artifact = evidence_dir / "experiment_code.py"
+    if artifact.is_symlink() or code_artifact.is_symlink():
+        raise ExperimentCannotContinueError("Preserved evidence is unsafe")
+    try:
+        preserved_code = code_artifact.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise ExperimentCannotContinueError(
+            "Preserved evidence is unreadable"
+        ) from None
+    replay = evaluate_experiment_data(
+        artifact,
+        requested_metric=node.evaluation_report.get("requested_metric"),
+    )
+    if preserved_code != node.code or replay != node.evaluation_report:
+        raise ExperimentCannotContinueError(
+            "Preserved scientific evidence changed after evaluation"
+        )
 
 
 def _sandbox_policy_for_workspace(cfg: Config):
@@ -101,7 +867,7 @@ def _safe_pickle_test(obj, name="object"):
         pickle.dumps(obj)
         return True
     except Exception as e:
-        logger.error(f"Cannot pickle {name}: {str(e)}")
+        logger.error("Cannot pickle %s: %s", name, type(e).__name__)
         return False
 
 
@@ -140,8 +906,8 @@ def _parse_keyword_prefix_response(
         return name, description
 
     except Exception as e:
-        logger.error(f"Error parsing response: {str(e)}")
-        logger.debug(f"Raw response: {response}")
+        logger.error("Error parsing research response: %s", type(e).__name__)
+        logger.debug("Unparsed research response length: %d", len(response))
         return None, None
 
 
@@ -190,6 +956,7 @@ review_func_spec = FunctionSpec(
             "is_bug",
             "summary",
         ],
+        "additionalProperties": False,
     },
     description="Submit a review evaluating the output of the training script.",
 )
@@ -210,6 +977,7 @@ vlm_feedback_spec = FunctionSpec(
                         },
                     },
                     "required": ["analysis"],
+                    "additionalProperties": False,
                 },
             },
             "valid_plots_received": {
@@ -222,6 +990,7 @@ vlm_feedback_spec = FunctionSpec(
             },
         },
         "required": ["plot_analyses", "valid_plots_received", "vlm_feedback_summary"],
+        "additionalProperties": False,
     },
     description="Analyze experimental plots and provide detailed feedback on the results.",
 )
@@ -230,7 +999,6 @@ metric_parse_spec = FunctionSpec(
     name="parse_metrics",
     json_schema={
         "type": "object",
-        "strict": True,
         "properties": {
             "valid_metrics_received": {
                 "type": "boolean",
@@ -244,6 +1012,8 @@ metric_parse_spec = FunctionSpec(
                     "properties": {
                         "metric_name": {
                             "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
                             "description": "Specify the metric name clearly. Avoid vague terms like 'train,' 'val,' or 'test.' Instead, use precise labels such as 'train accuracy,' 'validation loss,' or 'test F1 score,' etc.",
                         },
                         "lower_is_better": {
@@ -252,15 +1022,20 @@ metric_parse_spec = FunctionSpec(
                         },
                         "description": {
                             "type": "string",
+                            "maxLength": 4096,
                             "description": "Description of the metric",
                         },
                         "data": {
                             "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "dataset_name": {
                                         "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 256,
                                         "description": "The name of the dataset. Never include 'train', 'val', or 'test' in the dataset name.",
                                     },
                                     "final_value": {
@@ -277,6 +1052,7 @@ metric_parse_spec = FunctionSpec(
                                     "final_value",
                                     "best_value",
                                 ],
+                                "additionalProperties": False,
                             },
                         },
                     },
@@ -286,12 +1062,29 @@ metric_parse_spec = FunctionSpec(
                         "lower_is_better",
                         "description",
                     ],
+                    "additionalProperties": False,
                 },
-                "additionalProperties": False,
             },
         },
         "required": ["valid_metrics_received", "metric_names"],
         "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"valid_metrics_received": {"const": True}},
+                    "required": ["valid_metrics_received"],
+                    "additionalProperties": True,
+                },
+                "then": {
+                    "properties": {"metric_names": {"minItems": 1, "maxItems": 1}},
+                    "additionalProperties": True,
+                },
+                "else": {
+                    "properties": {"metric_names": {"maxItems": 0}},
+                    "additionalProperties": True,
+                },
+            }
+        ],
     },
     description="Parse metrics from execution output",
 )
@@ -306,12 +1099,39 @@ plot_selection_spec = FunctionSpec(
                 "type": "array",
                 "description": "List of selected plot file paths",
                 "items": {"type": "string", "description": "Full path to a plot file"},
+                "minItems": 1,
                 "maxItems": 10,
+                "uniqueItems": True,
             }
         },
         "required": ["selected_plots"],
+        "additionalProperties": False,
     },
     description="Select the 10 most relevant plots for analysis",
+)
+
+experiment_summary_spec = FunctionSpec(
+    name="summarize_experiment",
+    description="Summarize experimental findings",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "string",
+                "description": "Key findings and results",
+            },
+            "significance": {
+                "type": "string",
+                "description": "Why these results matter",
+            },
+            "next_steps": {
+                "type": "string",
+                "description": "Suggested improvements or next experiments",
+            },
+        },
+        "required": ["findings", "significance"],
+        "additionalProperties": False,
+    },
 )
 
 
@@ -333,17 +1153,33 @@ class AblationConfig:
 class AblationIdea:
     """Ablation idea"""
 
-    def __init__(self, name: str, description: str):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        component: str,
+        expected_outcome: str,
+        llm_call_refs: list[str] | None = None,
+    ):
         self.name = name
         self.description = description
+        self.component = component
+        self.expected_outcome = expected_outcome
+        self.llm_call_refs = list(llm_call_refs or [])
 
 
 class HyperparamTuningIdea:
     """Hyperparameter tuning idea"""
 
-    def __init__(self, name: str, description: str):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_call_refs: list[str] | None = None,
+    ):
         self.name = name
         self.description = description
+        self.llm_call_refs = list(llm_call_refs or [])
 
 
 class MinimalAgent:
@@ -450,6 +1286,8 @@ class MinimalAgent:
                 "          'losses': {'train': [], 'val': []},",
                 "          'predictions': [],",
                 "          'ground_truth': [],",
+                "          'sample_ids': [],  # stable source/example IDs, unique within this split",
+                "          'evaluation_inputs': [],  # exact raw inputs, one row per ground-truth record",
                 "          # Add other relevant data",
                 "      },",
                 "      # Add additional datasets as needed:",
@@ -458,6 +1296,8 @@ class MinimalAgent:
                 "          'losses': {'train': [], 'val': []},",
                 "          'predictions': [],",
                 "          'ground_truth': [],",
+                "          'sample_ids': [],",
+                "          'evaluation_inputs': [],",
                 "          # Add other relevant data",
                 "      },",
                 "  }",
@@ -465,6 +1305,9 @@ class MinimalAgent:
                 "  experiment_data['dataset_name_1']['metrics']['train'].append(train_metric)",
                 "  ```",
                 "- Include timestamps or epochs with the saved metrics",
+                "- For every evaluated record, save its stable source sample_id and exact raw evaluation input before preprocessing; the deterministic evaluator computes fingerprints itself, and lengths/order MUST match ground_truth",
+                "- Declare top-level integer XSCIENTIST_DATA_SEED and XSCIENTIST_TRAINING_SEED variables. Use DATA_SEED only for dataset generation, sampling, and splitting; use TRAINING_SEED only for initialization, shuffling, optimization, and other training randomness",
+                "- Evaluate the unchanged control and every candidate on the exact same ordered record identities and split paths",
                 "- For large datasets, consider saving in chunks or using np.savez_compressed()",
                 "CRITICAL EVALUATION REQUIREMENTS - Your code MUST include ALL of these:",
                 "  1. Track and print validation loss at each epoch or at suitable intervals:",
@@ -597,13 +1440,13 @@ class MinimalAgent:
         if self.cfg.agent.data_preview:
             prompt["Data Overview"] = self.data_preview
 
-        print("[cyan]--------------------------------[/cyan]")
-        print("[cyan]self.task_desc[/cyan]")
-        print("[cyan]" + self.task_desc + "[/cyan]")
-        print("[cyan]--------------------------------[/cyan]")
+        logger.info(
+            "Research task loaded (ref=%s)",
+            _opaque_content_ref(self.task_desc),
+        )
 
         print("MinimalAgent: Getting plan and code")
-        # Capture the LLM messages_ref hashes that produced this node's code.
+        # Capture semantic LLM call-receipt hashes that produced this node's code.
         # When the ARA tracer is inactive the block is a no-op (refs stays []).
         with capture_llm_calls() as refs:
             plan, code = self.plan_and_code_query(prompt)
@@ -674,6 +1517,15 @@ class MinimalAgent:
             code=parent_node.code,
             parent=parent_node,
             is_seed_node=True,
+            random_seed=parent_node.random_seed,
+            seed_bootstrap_hash=parent_node.seed_bootstrap_hash,
+            ablation_name=parent_node.ablation_name,
+            ablation_control_node_id=parent_node.ablation_control_node_id,
+            ablation_component=parent_node.ablation_component,
+            ablation_expected_outcome=parent_node.ablation_expected_outcome,
+            ablation_code_diff_hash=parent_node.ablation_code_diff_hash,
+            ablation_control_semantic_hash=parent_node.ablation_control_semantic_hash,
+            ablation_semantic_hash=parent_node.ablation_semantic_hash,
         )
 
     def _generate_hyperparam_tuning_node(
@@ -706,6 +1558,8 @@ class MinimalAgent:
                 "              'losses': {'train': [], 'val': []},",
                 "              'predictions': [],",
                 "              'ground_truth': [],",
+                "              'sample_ids': [],",
+                "              'evaluation_inputs': [],",
                 "              # Add other relevant data",
                 "          },",
                 "          # Add additional datasets as needed:",
@@ -713,15 +1567,19 @@ class MinimalAgent:
                 "      # Add additional hyperparam tuning types as needed",
                 "  }",
                 "Make sure to use a filename 'experiment_data.npy' to save the data. Do not use any other filename.",
+                "Reuse the control's exact dataset paths, ordered sample_ids, ground_truth, and raw evaluation inputs.",
+                "Preserve XSCIENTIST_DATA_SEED exactly; vary only XSCIENTIST_TRAINING_SEED for training randomness.",
             ]
         }
         prompt["Instructions"] |= self._prompt_hyperparam_tuning_resp_fmt
-        plan, code = self.plan_and_code_query(prompt)
+        with capture_llm_calls() as refs:
+            plan, code = self.plan_and_code_query(prompt)
         return Node(
             plan="Hyperparam tuning name: " + hyperparam_idea.name + ".\n" + plan,
             code=code,
             parent=parent_node,
             hyperparam_name=hyperparam_idea.name,
+            llm_call_refs=[*hyperparam_idea.llm_call_refs, *refs],
         )
 
     def _generate_ablation_node(self, parent_node: Node, ablation_idea: AblationIdea):
@@ -732,6 +1590,10 @@ class MinimalAgent:
                 + ablation_idea.name
                 + ". "
                 + ablation_idea.description
+                + " Remove or disable exactly this component: "
+                + ablation_idea.component
+                + ". Expected discriminating outcome: "
+                + ablation_idea.expected_outcome
             ),
             "Base code you are working on": wrap_code(parent_node.code),
             "Instructions": {},
@@ -752,6 +1614,8 @@ class MinimalAgent:
                 "              'losses': {'train': [], 'val': []},",
                 "              'predictions': [],",
                 "              'ground_truth': [],",
+                "              'sample_ids': [],",
+                "              'evaluation_inputs': [],",
                 "              # Add other relevant data",
                 "          },",
                 "          # Add additional datasets as needed:",
@@ -760,26 +1624,40 @@ class MinimalAgent:
                 "              'losses': {'train': [], 'val': []},",
                 "              'predictions': [],",
                 "              'ground_truth': [],",
+                "              'sample_ids': [],",
+                "              'evaluation_inputs': [],",
                 "              # Add other relevant data",
                 "          },",
                 "      },",
                 "      # Add additional ablation types as needed",
                 "  }",
                 "Make sure to use a filename 'experiment_data.npy' to save the data. Do not use any other filename.",
+                "Reuse the control's exact dataset paths, ordered sample_ids, ground_truth, and raw evaluation inputs.",
+                "Preserve XSCIENTIST_DATA_SEED exactly; vary only XSCIENTIST_TRAINING_SEED for training randomness.",
             ]
         }
         prompt["Instructions"] |= self._prompt_ablation_resp_fmt
-        plan, code = self.plan_and_code_query(prompt)
+        with capture_llm_calls() as refs:
+            plan, code = self.plan_and_code_query(prompt)
+        control_semantic_hash = _semantic_code_hash(parent_node.code)
+        ablation_semantic_hash = _semantic_code_hash(code)
         return Node(
             plan="Ablation name: " + ablation_idea.name + ".\n" + plan,
             code=code,
             parent=parent_node,
             ablation_name=ablation_idea.name,
+            ablation_control_node_id=parent_node.id,
+            ablation_component=ablation_idea.component,
+            ablation_expected_outcome=ablation_idea.expected_outcome,
+            ablation_code_diff_hash=_ablation_code_diff_hash(parent_node.code, code),
+            ablation_control_semantic_hash=control_semantic_hash,
+            ablation_semantic_hash=ablation_semantic_hash,
+            llm_call_refs=[*ablation_idea.llm_call_refs, *refs],
         )
 
     def plan_and_code_query(self, prompt, retries=3) -> tuple[str, str]:
         """Generate a natural language plan + code in the same LLM call and split them apart."""
-        completion_text = None
+        retries = _validate_retry_count(retries)
         for _ in range(retries):
             completion_text = query(
                 system_message=prompt,
@@ -788,19 +1666,18 @@ class MinimalAgent:
                 temperature=self.cfg.agent.code.temp,
             )
 
-            code = extract_code(completion_text)
-            nl_text = extract_text_up_to_code(completion_text)
-
-            if code and nl_text:
-                # merge all code blocks into a single string
-                return nl_text, code
+            try:
+                return extract_single_plan_and_code(completion_text)
+            except ValueError:
+                pass
 
             print("Plan + code extraction failed, retrying...")
             prompt["Parsing Feedback"] = (
                 "The code extraction failed. Make sure to use the format ```python ... ``` for the code blocks."
             )
-        print("Final plan + code extraction attempt failed, giving up...")
-        return "", completion_text  # type: ignore
+        raise ResearchDecisionError(
+            "Research Agent returned malformed plan/code after bounded retries"
+        )
 
     def parse_exec_result(
         self, node: Node, exec_result: ExecutionResult, workspace: str
@@ -820,24 +1697,29 @@ class MinimalAgent:
             "Execution output": wrap_code(node.term_out, lang=""),
         }
 
-        response = cast(
-            dict,
-            query(
-                system_message=prompt,
-                user_message=None,
-                func_spec=review_func_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
-            ),
-        )
+        with capture_llm_calls() as refs:
+            response = cast(
+                dict,
+                query(
+                    system_message=prompt,
+                    user_message=None,
+                    func_spec=review_func_spec,
+                    model=self.cfg.agent.feedback.model,
+                    temperature=self.cfg.agent.feedback.temp,
+                ),
+            )
 
         node.analysis = response["summary"]
-        node.is_buggy = response["is_bug"] or node.exc_type is not None
+        node.agent_review_bug_advisory = response["is_bug"]
+        node.llm_call_refs.extend(refs)
+        # GLM review is explanatory only. It cannot hide a successful host
+        # execution (or rescue an execution exception) from deterministic gates.
+        node.is_buggy = node.exc_type is not None
         print(
             "[red]Checking if response contains metric name and description[/red]",
             flush=True,
         )
-        print(response)
+        print("[red]Execution review received[/red]")
 
     def _generate_plotting_code(
         self, node: Node, working_dir: str, plot_code_from_prev_stage: str = None
@@ -972,7 +1854,7 @@ class MinimalAgent:
         }
 
         retry_count = 0
-        retry_limit = 5
+        retry_limit = MAX_RESEARCH_DECISION_RETRIES
         while retry_count < retry_limit:
             response = query(
                 system_message=determine_prompt,
@@ -986,10 +1868,6 @@ class MinimalAgent:
                 datasets_successfully_tested_str,
             ) = _parse_keyword_prefix_response(
                 response, "REASONING:", "SUCCESSFULLY_TESTED_DATASETS:"
-            )
-            print(f"[green]Reasoning:[/green] {reasoning}")
-            print(
-                f"[green]Datasets successfully tested:[/green] {datasets_successfully_tested_str}"
             )
             if reasoning is not None and datasets_successfully_tested_str is not None:
                 if datasets_successfully_tested_str == "":
@@ -1019,14 +1897,14 @@ class MinimalAgent:
             return
 
         # for debugging
-        print(f"[cyan]Plot paths:[/cyan] {node.plot_paths}")
+        print(f"[cyan]Plots available for review: {len(node.plot_paths)}[/cyan]")
 
         def encode_image_to_base64(image_path):
             with open(image_path, "rb") as image_file:
                 try:
                     return base64.b64encode(image_file.read()).decode("utf-8")
                 except Exception as e:
-                    print(f"[red]Error encoding image {image_path}: {e}[/red]")
+                    print(f"[red]Error encoding image: {type(e).__name__}[/red]")
                     return None
 
         if not len(node.plot_paths) > 10:
@@ -1059,49 +1937,42 @@ class MinimalAgent:
                     ),
                 )
 
-                print(f"[cyan]Plot selection response:[/cyan] {response_select_plots}")
+                print("[cyan]Plot selection response received[/cyan]")
                 # Extract the plot paths list
                 selected_plots = response_select_plots.get("selected_plots", [])
 
                 # Validate that all paths exist and are image files
+                allowed_plots = set(node.plot_paths)
                 valid_plots = []
                 for plot_path in selected_plots:
                     if (
                         isinstance(plot_path, str)
+                        and plot_path in allowed_plots
                         and os.path.exists(plot_path)
                         and plot_path.lower().endswith((".png", ".jpg", ".jpeg"))
                     ):
                         valid_plots.append(plot_path)
                     else:
-                        logger.warning(f"Invalid plot path received: {plot_path}")
+                        logger.warning("Research agent selected an invalid plot path")
 
                 # Use the validated list
                 if valid_plots:
-                    print(f"[cyan]Selected valid plots:[/cyan] {valid_plots}")
+                    print(f"[cyan]Selected valid plots: {len(valid_plots)}[/cyan]")
                     selected_plots = valid_plots
                 else:
-                    logger.warning(
-                        "No valid plot paths found in response, falling back to first 10 plots"
+                    raise FunctionCallValidationError(
+                        "Plot selection did not reference an allowed plot"
                     )
-                    # fallback to first 10 plots
-                    # validate node.plot_paths
-                    selected_plots = []
-                    for plot_path in node.plot_paths[:10]:
-                        if os.path.exists(plot_path) and plot_path.lower().endswith(
-                            (".png", ".jpg", ".jpeg")
-                        ):
-                            selected_plots.append(plot_path)
-                        else:
-                            logger.warning(f"Invalid plot path received: {plot_path}")
 
             except Exception as e:
-                if is_llm_budget_exception(e):
+                if isinstance(e, ResearchDecisionError) or is_llm_budget_exception(e):
                     raise
                 logger.error(
-                    f"Error in plot selection: {str(e)}; falling back to first 10 plots"
+                    "Plot-selection research decision failed: %s", type(e).__name__
                 )
-                # Fallback to using first 10 plots
-                selected_plots = node.plot_paths[:10]
+                raise ResearchDecisionError(
+                    "Plot-selection research decision failed"
+                ) from None
 
         print("[cyan]Before encoding images[/cyan]")
         user_message = [
@@ -1139,17 +2010,22 @@ class MinimalAgent:
             ),
         )
         print(
-            f"[cyan]VLM response from {self.cfg.agent.vlm_feedback.model}:[/cyan] {response}"
+            f"[cyan]VLM response received from {self.cfg.agent.vlm_feedback.model}[/cyan]"
         )
+        analyses = response["plot_analyses"]
+        if len(analyses) != len(selected_plots):
+            raise FunctionCallValidationError(
+                "Plot analyses do not match the selected evidence set"
+            )
         if response["valid_plots_received"]:
             node.is_buggy_plots = False
         else:
             node.is_buggy_plots = True
 
-        for index, analysis in enumerate(response["plot_analyses"]):
-            analysis["plot_path"] = node.plot_paths[index]
+        for analysis, plot_path in zip(analyses, selected_plots):
+            analysis["plot_path"] = plot_path
 
-        node.plot_analyses = response["plot_analyses"]
+        node.plot_analyses = analyses
         node.vlm_feedback_summary = response["vlm_feedback_summary"]
 
         # Prefer dataset names extracted from parsed metrics (deterministic).
@@ -1190,28 +2066,7 @@ class MinimalAgent:
             query(
                 system_message=summary_prompt,
                 user_message=None,
-                func_spec={
-                    "name": "summarize_experiment",
-                    "description": "Summarize experimental findings",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "findings": {
-                                "type": "string",
-                                "description": "Key findings and results",
-                            },
-                            "significance": {
-                                "type": "string",
-                                "description": "Why these results matter",
-                            },
-                            "next_steps": {
-                                "type": "string",
-                                "description": "Suggested improvements or next experiments",
-                            },
-                        },
-                        "required": ["findings", "significance"],
-                    },
-                },
+                func_spec=experiment_summary_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
             ),
@@ -1221,52 +2076,55 @@ class MinimalAgent:
 class GPUManager:
     """Manages GPU allocation across processes"""
 
-    def __init__(self, num_gpus: int):
-        self.num_gpus = num_gpus
-        self.available_gpus: Set[int] = set(range(num_gpus))
-        self.gpu_assignments: Dict[str, int] = {}  # process_id -> gpu_id
+    def __init__(self, devices: Sequence[str]):
+        self.devices = tuple(str(device) for device in devices)
+        self.num_gpus = len(self.devices)
+        self.available_gpus: list[str] = list(self.devices)
+        self.gpu_assignments: Dict[str, str] = {}
 
-    def acquire_gpu(self, process_id: str) -> int:
+    def acquire_gpu(self, process_id: str) -> str:
         """Assigns a GPU to a process"""
         if not self.available_gpus:
             raise RuntimeError("No GPUs available")
-        print(f"Available GPUs: {self.available_gpus}")
-        print(f"Process ID: {process_id}")
-        gpu_id = min(self.available_gpus)
-        print(f"Acquiring GPU {gpu_id} for process {process_id}")
-        self.available_gpus.remove(gpu_id)
+        gpu_id = self.available_gpus.pop(0)
         self.gpu_assignments[process_id] = gpu_id
-        print(f"GPU assignments: {self.gpu_assignments}")
         return gpu_id
 
     def release_gpu(self, process_id: str):
         """Releases GPU assigned to a process"""
         if process_id in self.gpu_assignments:
             gpu_id = self.gpu_assignments[process_id]
-            self.available_gpus.add(gpu_id)
+            self.available_gpus.append(gpu_id)
             del self.gpu_assignments[process_id]
 
 
-def get_gpu_count() -> int:
-    """Get number of available NVIDIA GPUs without using torch"""
+def get_gpu_devices() -> list[str]:
+    """Return the exact CUDA device tokens authorized by the parent process."""
+
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        raw = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        devices = [token.strip() for token in raw.split(",") if token.strip()]
+        if not devices or devices == ["-1"]:
+            return []
+        if "-1" in devices or len(devices) != len(set(devices)):
+            return []
+        return devices
     try:
-        # First try using nvidia-smi
         nvidia_smi = subprocess.run(
-            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
             capture_output=True,
             text=True,
             check=True,
         )
-        gpus = nvidia_smi.stdout.strip().split("\n")
-        return len(gpus)
+        return [line.strip() for line in nvidia_smi.stdout.splitlines() if line.strip()]
     except (subprocess.SubprocessError, FileNotFoundError):
-        # If nvidia-smi fails, try environment variable
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if cuda_visible_devices:
-            # Filter out empty strings and -1 values
-            devices = [d for d in cuda_visible_devices.split(",") if d and d != "-1"]
-            return len(devices)
-        return 0
+        return []
+
+
+def get_gpu_count() -> int:
+    """Compatibility wrapper for callers that need only the authorized count."""
+
+    return len(get_gpu_devices())
 
 
 class ParallelAgent:
@@ -1279,6 +2137,7 @@ class ParallelAgent:
         best_stage3_node=None,
         best_stage2_node=None,
         best_stage1_node=None,
+        evaluation_metric: str | None = None,
     ):
         super().__init__()
         self.task_desc = task_desc
@@ -1295,15 +2154,23 @@ class ParallelAgent:
             best_stage2_node  # to initialize plotting code (stage 3)
         )
         self.data_preview = None
-        self.num_workers = cfg.agent.num_workers
-        self.num_gpus = get_gpu_count()
+        configured_workers = cfg.agent.num_workers
+        if (
+            isinstance(configured_workers, bool)
+            or not isinstance(configured_workers, int)
+            or not 1 <= configured_workers <= MAX_PARALLEL_WORKERS
+        ):
+            raise ValueError("agent.num_workers must be an integer between 1 and 64")
+        self.num_workers = configured_workers
+        self.gpu_devices = get_gpu_devices()
+        self.num_gpus = len(self.gpu_devices)
         print(f"num_gpus: {self.num_gpus}")
         if self.num_gpus == 0:
             print("No GPUs detected, falling back to CPU-only mode")
         else:
             print(f"Detected {self.num_gpus} GPUs")
 
-        self.gpu_manager = GPUManager(self.num_gpus) if self.num_gpus > 0 else None
+        self.gpu_manager = GPUManager(self.gpu_devices) if self.num_gpus > 0 else None
 
         if self.num_gpus > 0:
             self.num_workers = min(self.num_workers, self.num_gpus)
@@ -1311,14 +2178,32 @@ class ParallelAgent:
 
         self.timeout = self.cfg.exec.timeout
         self._is_shutdown = False
-        # Define the metric once at initialization
-        self.evaluation_metrics = self._define_global_metrics()
+        # The manager persists this research decision in the checkpoint. A
+        # resumed pending-seed stage must never ask the model to redefine it.
+        self.evaluation_metrics = (
+            evaluation_metric
+            if isinstance(evaluation_metric, str) and evaluation_metric.strip()
+            else self._define_global_metrics()
+        )
         self.executor = ProcessPoolExecutor(max_workers=self.num_workers)
         self._ablation_state = {  # store ablation names
-            "completed_ablations": set(),
+            "completed_ablations": {
+                key
+                for candidate in self.journal.nodes
+                if (
+                    key := _ablation_idea_key(
+                        candidate.ablation_name,
+                        candidate.ablation_component,
+                    )
+                )
+            },
         }
         self._hyperparam_tuning_state = {  # store hyperparam tuning ideas
-            "tried_hyperparams": set(),
+            "tried_hyperparams": {
+                key
+                for candidate in self.journal.nodes
+                if (key := _canonical_idea_key(candidate.hyperparam_name))
+            },
         }
 
     def _define_global_metrics(self) -> str:
@@ -1331,29 +2216,30 @@ class ParallelAgent:
             ),
             "Research idea": self.task_desc,
             "Instructions": [
-                "Propose a single evaluation metric that would be useful for analyzing the performance of solutions for this research task.",
-                "Note: Validation loss will be tracked separately so you don't need to include it in your response.",
-                "Format your response as a list containing:",
-                "- name: The name of the metric",
-                "- maximize: Whether higher values are better (true/false)",
-                "- description: A brief explanation of what the metric measures"
-                "Your list should contain only one metric.",
+                "Select exactly one metric from the host-supported enum in the function schema.",
+                "Choose the metric that best tests the stated hypothesis.",
+                "Validation loss is tracked separately.",
             ],
         }
 
         response = query(
             system_message=prompt,
             user_message=None,
+            func_spec=metric_selection_spec,
             model=self.cfg.agent.code.model,
             temperature=self.cfg.agent.code.temp,
         )
-
-        print(f"[green]Defined eval metrics:[/green] {response}")
-        return response
+        metric = response["metric"]
+        if metric not in SUPPORTED_DETERMINISTIC_METRICS:
+            raise FunctionCallValidationError(
+                "Research Agent selected an unsupported deterministic metric"
+            )
+        print("[green]Research Agent selected the stage metric contract[/green]")
+        return metric
 
     def plan_and_code_query(self, prompt, retries=3) -> tuple[str, str]:
         """Generate a natural language plan + code in the same LLM call and split them apart."""
-        completion_text = None
+        retries = _validate_retry_count(retries)
         for _ in range(retries):
             completion_text = query(
                 system_message=prompt,
@@ -1362,18 +2248,17 @@ class ParallelAgent:
                 temperature=self.cfg.agent.code.temp,
             )
 
-            code = extract_code(completion_text)
-            nl_text = extract_text_up_to_code(completion_text)
-
-            if code and nl_text:
-                # merge all code blocks into a single string
-                return nl_text, code
+            try:
+                return extract_single_plan_and_code(completion_text)
+            except ValueError:
+                pass
             print("Plan + code extraction failed, retrying...")
             prompt["Parsing Feedback"] = (
                 "The code extraction failed. Make sure to use the format ```python ... ``` for the code blocks."
             )
-        print("Final plan + code extraction attempt failed, giving up...")
-        return "", completion_text
+        raise ResearchDecisionError(
+            "Research Agent returned malformed plan/code after bounded retries"
+        )
 
     def _generate_seed_eval_aggregation_node(
         self, node: Node, agg_plotting_code: str
@@ -1396,93 +2281,156 @@ class ParallelAgent:
         node_data = node.to_dict()
         node_code = node.code
 
-        # Submit parallel jobs for different seeds
-        seed_nodes = []
-        futures = []
-        future_to_process_id: Dict[Any, str] = {}
         seed_cfg = self.cfg.agent.multi_seed_eval
-        configured_seeds = getattr(seed_cfg, "seeds", None)
-        if isinstance(configured_seeds, (list, tuple)) and configured_seeds:
-            seeds_to_run = list(configured_seeds)
-        else:
-            seeds_to_run = list(range(seed_cfg.num_seeds))
+        seeds_to_run = _configured_multi_seed_values(seed_cfg)
+        _validate_confirmation_seed_set(node_code, seeds_to_run)
 
-        for seed in seeds_to_run:
-            gpu_id = None
-            process_id = f"seed_{seed}_worker"
-            if self.gpu_manager is not None:
+        staged_results: list[dict[str, Any]] = []
+        seen_node_ids: set[str] = set()
+        expected_contract = node.evaluation_comparison_contract
+        expected_signature = node.metric.comparison_signature
+        if expected_contract is None:
+            raise ExperimentCannotContinueError(
+                "Qualified node lacks a comparison-ready evaluation"
+            )
+
+        # A wave never contains more work than the executor (or GPU pool) can
+        # actually run. Each wave has its own execution timeout and releases
+        # its GPU leases before the next wave is submitted. Results remain in
+        # memory until every wave has passed validation.
+        try:
+            for offset in range(0, len(seeds_to_run), self.num_workers):
+                wave_seeds = seeds_to_run[offset : offset + self.num_workers]
+                futures = []
+                future_metadata: Dict[Any, tuple[str, int, str, str]] = {}
+                wave_process_ids: list[str] = []
                 try:
-                    gpu_id = self.gpu_manager.acquire_gpu(process_id)
-                    logger.info(f"Assigned GPU {gpu_id} to seed {seed}")
-                except RuntimeError as e:
-                    logger.warning(
-                        f"Could not acquire GPU for seed {seed}: {e}. Running on CPU"
+                    for seed in wave_seeds:
+                        gpu_id = None
+                        process_id = f"seed_{seed}_worker"
+                        if self.gpu_manager is not None:
+                            gpu_id = self.gpu_manager.acquire_gpu(process_id)
+                            wave_process_ids.append(process_id)
+                            logger.info("Assigned a GPU to multi-seed worker")
+
+                        seeded_code, bootstrap_hash = _inject_seed_bootstrap(
+                            node_code, seed
+                        )
+                        seed_node_data = copy.deepcopy(node_data)
+                        seed_node_data["code"] = seeded_code
+                        seed_node_data["random_seed"] = seed
+                        seed_node_data["seed_bootstrap_hash"] = bootstrap_hash
+
+                        print("[yellow]Starting multi-seed eval...[/yellow]")
+                        future = self.executor.submit(
+                            self._process_node_wrapper,
+                            seed_node_data,
+                            self.task_desc,
+                            self.cfg,
+                            gpu_id,
+                            "",
+                            self.evaluation_metrics,
+                            self.stage_name,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            True,
+                        )
+                        futures.append(future)
+                        future_metadata[future] = (
+                            process_id,
+                            seed,
+                            bootstrap_hash,
+                            seeded_code,
+                        )
+
+                    _done, unfinished = wait(
+                        futures,
+                        timeout=self.timeout,
+                        return_when=ALL_COMPLETED,
                     )
+                    if unfinished:
+                        raise TimeoutError("multi-seed wave deadline exceeded")
+                    for future in futures:
+                        (
+                            _process_id,
+                            seed,
+                            bootstrap_hash,
+                            seeded_code,
+                        ) = future_metadata[future]
+                        result_data = future.result()
+                        if not isinstance(result_data, dict):
+                            raise ExperimentCannotContinueError(
+                                "Multi-seed worker returned an invalid result"
+                            )
+                        result_node = Node.from_dict(copy.deepcopy(result_data))
+                        if (
+                            result_data.get("parent_id") != node.id
+                            or result_node.random_seed != seed
+                            or result_node.seed_bootstrap_hash != bootstrap_hash
+                            or result_node.code != seeded_code
+                            or result_node.is_seed_node is not True
+                            or result_node.is_seed_agg_node is True
+                            or not result_node.has_verified_metric
+                            or result_node.evaluation_comparison_contract
+                            != expected_contract
+                            or result_node.metric.comparison_signature
+                            != expected_signature
+                            or result_node.id in seen_node_ids
+                            or self.journal.get_node_by_id(result_node.id) is not None
+                        ):
+                            raise ExperimentCannotContinueError(
+                                "Multi-seed result does not match the qualified evidence contract"
+                            )
+                        seen_node_ids.add(result_node.id)
+                        staged_results.append(copy.deepcopy(result_data))
+                finally:
+                    if self.gpu_manager is not None:
+                        for process_id in wave_process_ids:
+                            self.gpu_manager.release_gpu(process_id)
+        except BaseException as exc:
+            for pending in locals().get("futures", []):
+                pending.cancel()
+            self.cleanup()
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, ResearchDecisionError) or is_llm_budget_exception(exc):
+                raise
+            logger.error("Multi-seed evaluation failed: %s", type(exc).__name__)
+            raise ExperimentCannotContinueError(
+                "Multi-seed evaluation did not complete every required seed"
+            ) from None
 
-            # Add seed to node code
-            node_data["code"] = (
-                f"# Set random seed\nimport random\nimport numpy as np\nimport torch\n\nseed = {seed}\nrandom.seed(seed)\nnp.random.seed(seed)\ntorch.manual_seed(seed)\nif torch.cuda.is_available():\n    torch.cuda.manual_seed(seed)\n    torch.cuda.manual_seed_all(seed)\ntry:\n    torch.backends.cudnn.deterministic = True\n    torch.backends.cudnn.benchmark = False\nexcept Exception:\n    pass\n\n"
-                + node_code
+        journal_size = len(self.journal.nodes)
+        parent = self.journal.get_node_by_id(node.id)
+        if parent is None:
+            raise ExperimentCannotContinueError(
+                "Qualified node is missing from the stage journal"
             )
-
-            new_ablation_idea = None
-            new_hyperparam_idea = None
-            best_stage1_plot_code = None
-            best_stage2_plot_code = None
-            best_stage3_plot_code = None
-            seed_eval = True
-            memory_summary = ""
-            print("[yellow]Starting multi-seed eval...[/yellow]")
-            future = self.executor.submit(
-                self._process_node_wrapper,
-                node_data,
-                self.task_desc,
-                self.cfg,
-                gpu_id,
-                memory_summary,
-                self.evaluation_metrics,
-                self.stage_name,
-                new_ablation_idea,
-                new_hyperparam_idea,
-                best_stage1_plot_code,
-                best_stage2_plot_code,
-                best_stage3_plot_code,
-                seed_eval,
-            )
-            futures.append(future)
-            future_to_process_id[future] = process_id
-
-        for future in futures:
-            process_id = future_to_process_id.get(future)
-            try:
-                result_data = future.result(timeout=self.timeout)
-                result_node = Node.from_dict(result_data, self.journal)
-                print(f"Parent node id: {result_node.parent.id}")
-                print(f"Sanity check: actual parent node id: {node.id}")
-                # Add node to journal's list and assign its step number
+        original_children = set(parent.children)
+        seed_nodes: list[Node] = []
+        try:
+            for result_data in staged_results:
+                result_node = Node.from_dict(copy.deepcopy(result_data), self.journal)
                 self.journal.append(result_node)
-                seed_nodes.append(self.journal.get_node_by_id(result_node.id))
-                print("Added result node to journal")
-            except Exception as e:
-                if is_llm_budget_exception(e):
-                    for pending in futures:
-                        pending.cancel()
-                    raise
-                logger.error(f"Error in multi-seed evaluation: {str(e)}")
-            finally:
-                if (
-                    process_id
-                    and self.gpu_manager is not None
-                    and process_id in self.gpu_manager.gpu_assignments
-                ):
-                    self.gpu_manager.release_gpu(process_id)
-                    logger.info(f"Released GPU for seed process {process_id}")
-
+                seed_nodes.append(result_node)
+        except BaseException as exc:
+            del self.journal.nodes[journal_size:]
+            parent.children = original_children
+            if not isinstance(exc, Exception):
+                raise
+            raise ExperimentCannotContinueError(
+                "Multi-seed evidence could not be committed atomically"
+            ) from None
         return seed_nodes
 
     def _run_plot_aggregation(self, node: Node, seed_nodes: List[Node]) -> Node:
         """Generate an aggregation node for seed evaluation results"""
-        if seed_nodes:
+        if len(seed_nodes) >= MIN_SCIENTIFIC_SEEDS and all(
+            seed.has_verified_metric for seed in seed_nodes
+        ):
             try:
                 from .interpreter import Interpreter
 
@@ -1506,34 +2454,31 @@ class ParallelAgent:
                 try:
                     working_dir = process_interpreter.working_dir
                     plot_exec_result = process_interpreter.run(agg_plotting_code, True)
-                    print(plot_exec_result)
+                    logger.info(
+                        "Aggregation plotting finished (exception_type=%s)",
+                        plot_exec_result.exc_type,
+                    )
                     process_interpreter.cleanup_session()
                     # Save aggregated plots
                     plots_dir = Path(working_dir) / "working"
-                    print("[red]plots_dir[/red]", plots_dir)
                     if plots_dir.exists():
-                        base_dir = Path(self.cfg.workspace_dir).parent  # .parent
-                        run_name = Path(self.cfg.workspace_dir).name
                         exp_results_dir = (
-                            base_dir
-                            / "logs"
-                            / run_name
+                            Path(self.cfg.log_dir).resolve()
                             / "experiment_results"
                             / f"seed_aggregation_{agg_node.id}"
                         )
-                        print("[red]exp_results_dir[/red]", exp_results_dir)
                         _publish_source_artifacts(
                             exp_results_dir,
                             {"aggregation_plotting_code.py": agg_plotting_code},
                         )
 
-                        # Move generated plots
-                        for plot_file in plots_dir.glob("*.png"):
-                            final_path = exp_results_dir / plot_file.name
-                            print("mv_from:plot_file.resolve(): ", plot_file.resolve())
-                            print("mv_to:final_path: ", final_path)
-                            plot_file.resolve().rename(final_path)
-                            web_path = f"../../logs/{Path(self.cfg.workspace_dir).name}/experiment_results/seed_aggregation_{agg_node.id}/{plot_file.name}"
+                        # Copy only bounded regular PNGs. Agent-created symlinks
+                        # are rejected and source files are never moved by the host.
+                        for final_path in _publish_plot_artifacts(
+                            plots_dir,
+                            exp_results_dir,
+                        ):
+                            web_path = f"../../logs/{Path(self.cfg.workspace_dir).name}/experiment_results/seed_aggregation_{agg_node.id}/{final_path.name}"
                             agg_node.plots.append(web_path)
                             agg_node.plot_paths.append(str(final_path.absolute()))
 
@@ -1545,21 +2490,29 @@ class ParallelAgent:
                     )  # to update the parent-child relationship in the journal
                     # Add aggregation node to journal
                     self.journal.append(agg_node_new)
+                    return agg_node_new
                 finally:
                     if process_interpreter:
                         process_interpreter.cleanup_session()
 
             except Exception as e:
-                if is_llm_budget_exception(e):
+                if isinstance(e, ResearchDecisionError) or is_llm_budget_exception(e):
                     raise
-                print(f"Error in seed result aggregation: {str(e)}")
+                logger.error("Seed result aggregation failed: %s", type(e).__name__)
+                raise ExperimentCannotContinueError(
+                    "Seed result aggregation failed"
+                ) from None
+        else:
+            raise ExperimentCannotContinueError(
+                "Seed aggregation requires at least three verified seed results"
+            )
 
     @staticmethod
     def _process_node_wrapper(
         node_data,
         task_desc,
         cfg,
-        gpu_id: int = None,
+        gpu_id: str | None = None,
         memory_summary: str = None,
         evaluation_metrics=None,
         stage_name=None,
@@ -1611,10 +2564,14 @@ class ParallelAgent:
             workspace,
             allow_network=_experiment_network_enabled(cfg),
         )
-        analysis_interpreter = _interpreter_for_workspace(
-            cfg,
-            workspace,
-            allow_network=False,
+        analysis_interpreter = (
+            None
+            if seed_eval
+            else _interpreter_for_workspace(
+                cfg,
+                workspace,
+                allow_network=False,
+            )
         )
 
         try:
@@ -1682,14 +2639,28 @@ class ParallelAgent:
             try:
                 experiment_data_path.unlink(missing_ok=True)
             except OSError as exc:
-                logger.warning("Could not remove stale experiment data: %s", exc)
+                logger.warning(
+                    "Could not remove stale experiment data: %s",
+                    type(exc).__name__,
+                )
             exec_result = experiment_interpreter.run(child_node.code, True)
             experiment_interpreter.cleanup_session()
 
             print("Parsing execution results")
-            worker_agent.parse_exec_result(
-                node=child_node, exec_result=exec_result, workspace=working_dir
-            )
+            if seed_eval:
+                # Confirmation seeds are a host-only replay path. Advisory LLM
+                # review, plotting, and VLM cannot veto or consume the budget
+                # of a deterministic multi-seed transaction.
+                child_node.absorb_exec_result(exec_result)
+                child_node.analysis = "Host-only confirmation-seed replay"
+                child_node.agent_review_bug_advisory = None
+                child_node.is_buggy = child_node.exc_type is not None
+            else:
+                worker_agent.parse_exec_result(
+                    node=child_node,
+                    exec_result=exec_result,
+                    workspace=working_dir,
+                )
 
             # Add check for saved data files
             data_files = (
@@ -1708,8 +2679,24 @@ class ParallelAgent:
             if evaluation_report.get("status") == "verified" and isinstance(
                 deterministic_metric, dict
             ):
+                evidence_dir = (
+                    Path(cfg.log_dir).resolve()
+                    / "experiment_results"
+                    / f"experiment_{child_node.id}"
+                )
+                _preserve_evaluation_artifact(
+                    experiment_data_path,
+                    evidence_dir / "experiment_data.npy",
+                    expected_hash=evaluation_report["input"]["sha256"],
+                )
+                _publish_source_artifacts(
+                    evidence_dir,
+                    {"experiment_code.py": child_node.code},
+                )
+                child_node.exp_results_dir = str(evidence_dir)
                 child_node.metric = MetricValue(value=deterministic_metric)
                 child_node.metric_provenance = "deterministic_verified"
+                child_node.advisory_metric = None
                 child_node.datasets_successfully_tested = (
                     _extract_dataset_names_from_metric(child_node.metric)
                 )
@@ -1726,65 +2713,56 @@ class ParallelAgent:
 
             if (
                 data_files
+                and not seed_eval
                 and evaluation_report.get("safe_for_legacy_parser") is True
                 and child_node.metric_provenance != "deterministic_verified"
             ):
-                if seed_eval:
-                    # Use the parent node's parse code to parse the same data files again
-                    parse_metrics_code = parent_node.parse_metrics_code
-                    parse_metrics_plan = parent_node.parse_metrics_plan
-                    print(
-                        f"[blue]SEED EVAL: Parse metrics plan:[/blue] {parse_metrics_plan}"
-                    )
-                    print(
-                        f"[blue]SEED EVAL: Parse metrics code:[/blue] {parse_metrics_code}"
-                    )
-                    child_node.parse_metrics_code = parse_metrics_code
-                    child_node.parse_metrics_plan = parse_metrics_plan
-                else:
-                    # Call LLM to parse data files and extract metrics
-                    parse_metrics_prompt = {
-                        "Introduction": (
-                            "You are an AI researcher analyzing experimental results stored in numpy files. "
-                            "Write code to load and analyze the metrics from experiment_data.npy."
-                        ),
-                        "Primary Evaluation Metric (optimize this)": worker_agent.evaluation_metrics,
-                        "Context": [
-                            "Original Code: " + child_node.code,
-                        ],
-                        "Instructions": [
-                            "0. Make sure to get the working directory from os.path.join(os.getcwd(), 'working')",
-                            "1. Load the experiment_data.npy file, which is located in the working directory",
-                            "2. Extract ONLY the primary evaluation metric above for each dataset (prefer validation split if present).",
-                            "3. Always print the name of the dataset before printing the metrics.",
-                            "4. Always print the name of the metric before printing the value by specifying the metric name clearly (e.g. 'validation accuracy').",
-                            "5. You only need to print the best or final value for this metric for each dataset.",
-                            "6. Do NOT print losses or additional metrics; keep output minimal and focused on the primary metric.",
-                            "7. DO NOT CREATE ANY PLOTS",
-                            "Important code structure requirements:",
-                            "  - Do NOT put any execution code inside 'if __name__ == \"__main__\":' block. Do not use 'if __name__ == \"__main__\":' at all.",
-                            "  - All code should be at the global scope or in functions that are called from the global scope",
-                            "  - The script should execute immediately when run, without requiring any special entry point",
-                        ],
-                        "Example data loading code": [
-                            """
+                # Call LLM to parse data files and extract advisory metrics.
+                parse_metrics_prompt = {
+                    "Introduction": (
+                        "You are an AI researcher analyzing experimental results stored in numpy files. "
+                        "Write code to load and analyze the metrics from experiment_data.npy."
+                    ),
+                    "Primary Evaluation Metric (optimize this)": worker_agent.evaluation_metrics,
+                    "Context": [
+                        "Original Code: " + child_node.code,
+                    ],
+                    "Instructions": [
+                        "0. Make sure to get the working directory from os.path.join(os.getcwd(), 'working')",
+                        "1. Load the experiment_data.npy file, which is located in the working directory",
+                        "2. Extract ONLY the primary evaluation metric above for each dataset (prefer validation split if present).",
+                        "3. Always print the name of the dataset before printing the metrics.",
+                        "4. Always print the name of the metric before printing the value by specifying the metric name clearly (e.g. 'validation accuracy').",
+                        "5. You only need to print the best or final value for this metric for each dataset.",
+                        "6. Do NOT print losses or additional metrics; keep output minimal and focused on the primary metric.",
+                        "7. DO NOT CREATE ANY PLOTS",
+                        "Important code structure requirements:",
+                        "  - Do NOT put any execution code inside 'if __name__ == \"__main__\":' block. Do not use 'if __name__ == \"__main__\":' at all.",
+                        "  - All code should be at the global scope or in functions that are called from the global scope",
+                        "  - The script should execute immediately when run, without requiring any special entry point",
+                    ],
+                    "Example data loading code": [
+                        """
                             import matplotlib.pyplot as plt
                             import numpy as np
 
                             experiment_data = np.load(os.path.join(os.getcwd(), 'experiment_data.npy'), allow_pickle=True).item()
                             """
-                        ],
-                        "Response format": worker_agent._prompt_metricparse_resp_fmt(),
-                    }
+                    ],
+                    "Response format": worker_agent._prompt_metricparse_resp_fmt(),
+                }
 
-                    (
-                        parse_metrics_plan,
-                        parse_metrics_code,
-                    ) = worker_agent.plan_and_code_query(parse_metrics_prompt)
-                    print(f"[blue]Parse metrics plan:[/blue] {parse_metrics_plan}")
-                    print(f"[blue]Parse metrics code:[/blue] {parse_metrics_code}")
-                    child_node.parse_metrics_plan = parse_metrics_plan
-                    child_node.parse_metrics_code = parse_metrics_code
+                (
+                    parse_metrics_plan,
+                    parse_metrics_code,
+                ) = worker_agent.plan_and_code_query(parse_metrics_prompt)
+                logger.info(
+                    "Metric parser generated (plan_ref=%s code_ref=%s)",
+                    _opaque_content_ref(parse_metrics_plan),
+                    _opaque_content_ref(parse_metrics_code),
+                )
+                child_node.parse_metrics_plan = parse_metrics_plan
+                child_node.parse_metrics_code = parse_metrics_code
                 try:
                     # Execute the parsing code
                     metrics_exec_result = analysis_interpreter.run(
@@ -1806,12 +2784,7 @@ class ParallelAgent:
                             "Primary Evaluation Metric (optimize this)": worker_agent.evaluation_metrics,
                             "Execution Output": metrics_exec_result.term_out,
                         }
-                        print(
-                            f"[blue]Metrics_exec_result.term_out: {metrics_exec_result.term_out}[/blue]"
-                        )
-                        print(
-                            f"[blue]Metrics Parsing Execution Result:\n[/blue] {metrics_exec_result}"
-                        )
+                        print("[blue]Metrics parsing execution completed[/blue]")
 
                         metrics_response = cast(
                             dict,
@@ -1827,17 +2800,19 @@ class ParallelAgent:
                         # This is achieved by raising an error in the MetricValue class,
                         # which sets child_node.is_buggy to True, thereby
                         # causing child_node.metric to be assigned WorstMetricValue.
-                        print(f"[blue]Metrics:[/blue] {metrics_response}")
+                        print("[blue]Structured metrics response received[/blue]")
                         if metrics_response["valid_metrics_received"]:
-                            child_node.metric = MetricValue(
+                            advisory_metric = MetricValue(
                                 value={"metric_names": metrics_response["metric_names"]}
                             )
-                            child_node.metric_provenance = "agent_reported"
-                            child_node.datasets_successfully_tested = (
-                                _extract_dataset_names_from_metric(child_node.metric)
-                            )
+                            child_node.advisory_metric = advisory_metric.value
+                            child_node.metric = WorstMetricValue()
+                            child_node.metric_provenance = "agent_reported_advisory"
+                            child_node.datasets_successfully_tested = []
                             logger.info(
-                                f"Successfully extracted metrics for node {child_node.id}"
+                                "Stored an advisory agent-reported metric for node %s; "
+                                "it is excluded from ranking and stage gates",
+                                child_node.id,
                             )
                         else:
                             child_node.metric = WorstMetricValue()
@@ -1849,7 +2824,8 @@ class ParallelAgent:
                             child_node.datasets_successfully_tested = []
                     else:
                         logger.error(
-                            f"Error executing metrics parsing code: {metrics_exec_result.exc_info}"
+                            "Metric parser execution failed: %s",
+                            metrics_exec_result.exc_type or "unknown",
                         )
                         child_node.metric = WorstMetricValue()
                         child_node.metric_provenance = "unavailable"
@@ -1857,20 +2833,23 @@ class ParallelAgent:
                         child_node.datasets_successfully_tested = []
 
                 except Exception as e:
-                    if is_llm_budget_exception(e):
+                    if isinstance(e, ResearchDecisionError) or is_llm_budget_exception(
+                        e
+                    ):
                         raise
                     logger.error(
-                        f"Error parsing metrics for node {child_node.id}: {str(e)}"
+                        "Error parsing metrics for node %s: %s",
+                        child_node.id,
+                        type(e).__name__,
                     )
                     child_node.metric = WorstMetricValue()
                     child_node.metric_provenance = "unavailable"
                     child_node.is_buggy = True
-                    child_node.parse_exc_type = str(e)
+                    child_node.parse_exc_type = type(e).__name__
                     child_node.parse_exc_info = None
                     child_node.parse_exc_stack = None
                     child_node.parse_term_out = (
-                        "Error parsing metrics. There was an error in the parsing code: "
-                        + str(e)
+                        "Metric parsing failed with " + type(e).__name__
                     )
                     child_node.datasets_successfully_tested = []
             elif (
@@ -1886,7 +2865,7 @@ class ParallelAgent:
                 )
 
             # if experiment was successful, generate and run plotting code
-            if not child_node.is_buggy:
+            if not child_node.is_buggy and not seed_eval:
                 try:
                     retry_count = 0
                     while True:
@@ -1914,37 +2893,29 @@ class ParallelAgent:
                             )
                         plot_exec_result = analysis_interpreter.run(plotting_code, True)
                         analysis_interpreter.cleanup_session()
-                        child_node.plot_exec_result = plot_exec_result
+                        child_node.absorb_plot_exec_result(plot_exec_result)
                         if child_node.plot_exc_type and retry_count < 3:
                             print(
                                 f"[red]Plotting code failed with exception: {child_node.plot_exc_type}[/red]"
                             )
                             print(
-                                f"[red]Plotting code term out:[/red] {child_node.plot_term_out}"
-                            )
-                            print(
-                                f"[red]Plotting code code:[/red] {child_node.plot_code}"
+                                "[red]Plotting failed; code and output remain in the node artifact[/red]"
                             )
                             retry_count += 1
                             continue
                         else:
                             break
 
-                    print("[blue]Plotting result:[/blue] ", plot_exec_result)
+                    logger.info(
+                        "Plotting finished (exception_type=%s)",
+                        plot_exec_result.exc_type,
+                    )
                     # Track generated plots
                     plots_dir = Path(working_dir)
                     if plots_dir.exists():
                         print("Plots directory exists, saving plots to node")
                         # Save the plotting code first
-                        base_dir = Path(cfg.workspace_dir).parent
-                        run_name = Path(cfg.workspace_dir).name
-                        exp_results_dir = (
-                            base_dir
-                            / "logs"
-                            / run_name
-                            / "experiment_results"
-                            / f"experiment_{child_node.id}_proc_{os.getpid()}"
-                        )
+                        exp_results_dir = Path(child_node.exp_results_dir)
                         child_node.exp_results_dir = exp_results_dir
                         _publish_source_artifacts(
                             exp_results_dir,
@@ -1957,23 +2928,15 @@ class ParallelAgent:
                         logger.info(f"Saved plotting code to {plot_code_path}")
                         exp_code_path = exp_results_dir / "experiment_code.py"
                         logger.info(f"Saved experiment code to {exp_code_path}")
-                        # Move experiment data files to experiment_results directory
-                        for exp_data_file in plots_dir.glob("*.npy"):
-                            exp_data_path = exp_results_dir / exp_data_file.name
-                            exp_data_file.resolve().rename(exp_data_path)
-                            logger.info(f"Saved experiment data to {exp_data_path}")
-
-                        for plot_file in plots_dir.glob("*.png"):
-                            # Get the base directory (parent of workspaces/logs)
-                            base_dir = Path(cfg.workspace_dir).parent.parent
-                            run_name = Path(cfg.workspace_dir).name
-
-                            # Create the final path in logs directory
-                            final_path = exp_results_dir / plot_file.name
-                            plot_file.resolve().rename(final_path)
-
+                        # Never publish plotting-generated arrays into the
+                        # canonical evidence directory. In particular,
+                        # experiment_data.npy is immutable after evaluation.
+                        for final_path in _publish_plot_artifacts(
+                            plots_dir,
+                            exp_results_dir,
+                        ):
                             # Create a web-friendly relative path starting from logs directory
-                            web_path = f"../../logs/{Path(cfg.workspace_dir).name}/experiment_results/experiment_{child_node.id}_proc_{os.getpid()}/{plot_file.name}"
+                            web_path = f"../../logs/{Path(cfg.workspace_dir).name}/experiment_results/experiment_{child_node.id}/{final_path.name}"
 
                             child_node.plots.append(web_path)  # For visualization
                             child_node.plot_paths.append(
@@ -1981,7 +2944,7 @@ class ParallelAgent:
                             )  # For programmatic access
 
                             logger.info(
-                                f"[green]Generated plot: {plot_file.stem}[/green]"
+                                f"[green]Generated plot: {final_path.stem}[/green]"
                             )
                             logger.debug(f"Plot absolute path: {final_path.absolute()}")
                             logger.debug(f"Plot web path: {web_path}")
@@ -1989,7 +2952,9 @@ class ParallelAgent:
                     if is_llm_budget_exception(e):
                         raise
                     logger.error(
-                        f"Error generating plots for node {child_node.id}: {str(e)}"
+                        "Error generating plots for node %s: %s",
+                        child_node.id,
+                        type(e).__name__,
                     )
 
                 if child_node.plots:
@@ -1999,11 +2964,17 @@ class ParallelAgent:
                             f"Generated VLM analysis for plots in node {child_node.id}"
                         )
                     except Exception as e:
-                        if is_llm_budget_exception(e):
+                        if isinstance(
+                            e, ResearchDecisionError
+                        ) or is_llm_budget_exception(e):
                             raise
                         logger.error(
-                            f"Error analyzing plots for node {child_node.id}: {str(e)}"
+                            "Error analyzing plots for node %s: %s",
+                            child_node.id,
+                            type(e).__name__,
                         )
+
+            _assert_preserved_evaluation_artifact(child_node)
 
             # Convert result node to dict
             print("Converting result to dict")
@@ -2014,20 +2985,24 @@ class ParallelAgent:
             return result_data
 
         except Exception as e:
-            print(f"Worker process error: {str(e)}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error("Worker process failed: %s", type(e).__name__)
             raise
         finally:
             experiment_interpreter.cleanup_session()
-            analysis_interpreter.cleanup_session()
+            if analysis_interpreter is not None:
+                analysis_interpreter.cleanup_session()
 
-    def _generate_hyperparam_tuning_idea(self) -> Optional[HyperparamTuningIdea]:
+    def _generate_hyperparam_tuning_idea(
+        self,
+        excluded_keys: set[str] | None = None,
+    ) -> Optional[HyperparamTuningIdea]:
         """Generate the next hyperparam tuning idea based on what's been done.
         This is minaly for Stage 2 (baseline tuning).
         """
-        tried = list(self._hyperparam_tuning_state["tried_hyperparams"])
+        tried = sorted(
+            set(self._hyperparam_tuning_state["tried_hyperparams"])
+            | set(excluded_keys or ())
+        )
 
         hyperparam_tuning_prompt = {
             "Introduction": (
@@ -2054,42 +3029,30 @@ class ParallelAgent:
             ),
         }
 
-        retry_count = 0
-        retry_limit = 5
-        while retry_count < retry_limit:
+        with capture_llm_calls() as refs:
             response = query(
                 system_message=hyperparam_tuning_prompt,
                 user_message=None,
+                func_spec=hyperparam_idea_spec,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
             )
-
-            # Parse the response
-            hyperparam_name, hyperparam_description = _parse_keyword_prefix_response(
-                response, "HYPERPARAM NAME:", "DESCRIPTION:"
-            )
-            if hyperparam_name and hyperparam_description:
-                return HyperparamTuningIdea(
-                    name=hyperparam_name, description=hyperparam_description
-                )
-
-            retry_count += 1
-            logger.warning(
-                f"Failed to parse hyperparam tuning response (attempt {retry_count}/{retry_limit})"
-            )
-
-        logger.error(
-            f"Failed to parse hyperparam tuning response after {retry_limit} retries. Falling back to default idea of increasing learning rate."
-        )
         return HyperparamTuningIdea(
-            name="increase learning rate", description="increase learning rate"
+            name=response["name"],
+            description=response["description"],
+            llm_call_refs=list(refs),
         )
 
-    def _generate_ablation_idea(self) -> Optional[AblationIdea]:
+    def _generate_ablation_idea(
+        self,
+        excluded_keys: set[str] | None = None,
+    ) -> Optional[AblationIdea]:
         """Generate the next ablation idea based on what's been done"""
 
         # Prepare context of what's been tried
-        completed = list(self._ablation_state["completed_ablations"])
+        completed = sorted(
+            set(self._ablation_state["completed_ablations"]) | set(excluded_keys or ())
+        )
 
         ablation_prompt = {
             "Introduction": (
@@ -2111,40 +3074,22 @@ class ParallelAgent:
                     "4. If you have only used a single synthetic dataset throughout the experiment, one of your ablations should be to use multiple synthetic datasets (at least 3 different datasets)",
                 ]
             },
-            "Response format": (
-                "Your response should start with 'ABLATION NAME: <ablation name>' on the first line to represent the name of the ablation."
-                "The second line should start with 'ABLATION DESCRIPTION: <description>', a brief description of what component is being ablated and why (3-5 sentences), "
-            ),
         }
-
-        retry_count = 0
-        retry_limit = 5
-        while retry_count < retry_limit:
+        with capture_llm_calls() as refs:
             response = query(
                 system_message=ablation_prompt,
                 user_message=None,
+                func_spec=ablation_idea_spec,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
             )
-
-            # Parse the response
-            ablation_name, ablation_description = _parse_keyword_prefix_response(
-                response, "ABLATION NAME:", "ABLATION DESCRIPTION:"
-            )
-            if ablation_name and ablation_description:
-                return AblationIdea(
-                    name=ablation_name, description=ablation_description
-                )
-
-            retry_count += 1
-            logger.warning(
-                f"Failed to parse ablation response (attempt {retry_count}/{retry_limit})"
-            )
-
-        logger.error(
-            f"Failed to parse ablation response after {retry_limit} retries. Falling back to default idea of removing dropout."
+        return AblationIdea(
+            name=response["name"],
+            component=response["component"],
+            description=response["description"],
+            expected_outcome=response["expected_outcome"],
+            llm_call_refs=list(refs),
         )
-        return AblationIdea(name="add one more layer", description="add one more layer")
 
     def _get_leaves(self, node: Node) -> List[Node]:
         """Get all leaf nodes in the subtree rooted at node."""
@@ -2173,6 +3118,13 @@ class ParallelAgent:
         search_mode = (
             str(os.environ.get("AI_SCIENTIST_SEARCH_MODE") or "").strip().lower()
         )
+        reference_contract = None
+        if (
+            self.stage_name
+            and not self.stage_name.startswith("1_")
+            and self.journal.nodes
+        ):
+            reference_contract = self.journal.nodes[0].evaluation_comparison_contract
         print(f"[cyan]self.num_workers: {self.num_workers}, [/cyan]")
 
         while len(nodes_to_process) < self.num_workers:
@@ -2218,7 +3170,7 @@ class ParallelAgent:
                         )
                     ]
                 except Exception as e:
-                    print(f"Error getting debuggable nodes: {e}")
+                    print(f"Error getting debuggable nodes: {type(e).__name__}")
                 if debuggable_nodes:
                     print("Found debuggable nodes")
                     node = random.choice(debuggable_nodes)
@@ -2247,7 +3199,12 @@ class ParallelAgent:
             else:  # Stage 1, 3 (normal best-first search)
                 # Improvement phase
                 print("Checking good nodes..")
-                good_nodes = self.journal.good_nodes
+                good_nodes = [
+                    node
+                    for node in self.journal.verified_nodes
+                    if reference_contract is None
+                    or node.evaluation_comparison_contract == reference_contract
+                ]
                 if not good_nodes:
                     nodes_to_process.append(None)  # Back to drafting
                     continue
@@ -2255,7 +3212,9 @@ class ParallelAgent:
                 # Autoresearch-style exploitation: always propose variants off the current best.
                 # This mimics a keep/discard hill-climb loop (see karpathy/autoresearch).
                 if search_mode == "autoresearch":
-                    best_node = self.journal.get_best_node_by_metric()
+                    best_node = self.journal.get_best_node_by_metric(
+                        reference_contract=reference_contract
+                    )
                     if best_node is None:
                         nodes_to_process.append(None)
                         continue
@@ -2263,7 +3222,9 @@ class ParallelAgent:
                     continue
 
                 # Get best node deterministically (avoid extra LLM calls in the inner loop).
-                best_node = self.journal.get_best_node_by_metric()
+                best_node = self.journal.get_best_node_by_metric(
+                    reference_contract=reference_contract
+                )
                 if best_node is None:
                     nodes_to_process.append(None)
                     continue
@@ -2294,9 +3255,22 @@ class ParallelAgent:
 
         return nodes_to_process
 
-    def step(self, exec_callback: ExecCallbackType):
+    def step(
+        self,
+        exec_callback: ExecCallbackType,
+        *,
+        max_new_nodes: int | None = None,
+    ) -> int:
+        if max_new_nodes is None:
+            max_new_nodes = self.num_workers
+        if (
+            isinstance(max_new_nodes, bool)
+            or not isinstance(max_new_nodes, int)
+            or not 1 <= max_new_nodes <= self.num_workers
+        ):
+            raise ValueError("max_new_nodes must be between 1 and num_workers")
         print("Selecting nodes to process")
-        nodes_to_process = self._select_parallel_nodes()
+        nodes_to_process = self._select_parallel_nodes()[:max_new_nodes]
         print(f"Selected nodes: {[n.id if n else None for n in nodes_to_process]}")
 
         # Convert nodes to dicts
@@ -2308,110 +3282,137 @@ class ParallelAgent:
                     _safe_pickle_test(node_data, f"node {node.id} data")
                     node_data_list.append(node_data)
                 except Exception as e:
-                    logger.error(f"Error preparing node {node.id}: {str(e)}")
+                    logger.error(
+                        "Error preparing node %s: %s", node.id, type(e).__name__
+                    )
                     raise
             else:
                 node_data_list.append(None)  # None means new draft
 
-        if self.cfg.agent.get("summary", None) is not None:
-            memory_summary = self.journal.generate_summary(
-                include_code=False,
-                **{
-                    "model": self.cfg.agent.summary.model,
-                    "temp": self.cfg.agent.summary.temp,
-                },
-            )
-        else:
-            memory_summary = self.journal.generate_summary(include_code=False)
+        summary_cfg = (
+            self.cfg.agent.summary
+            if self.cfg.agent.get("summary", None) is not None
+            else self.cfg.report
+        )
+        memory_summary = self.journal.generate_summary(
+            include_code=False,
+            model=summary_cfg.model,
+            temp=summary_cfg.temp,
+        )
 
         print("Submitting tasks to process pool")
-        futures = []
+        futures: list[Any] = []
+        future_idea_keys: dict[Any, tuple[str, str] | None] = {}
+        reserved_hyperparams = set(self._hyperparam_tuning_state["tried_hyperparams"])
+        reserved_ablations = set(self._ablation_state["completed_ablations"])
         live_nodes = [node.to_dict() for node in self.journal.nodes]
-        for node_data in node_data_list:
-            worker_memory_summary = memory_summary
-            context_pack_ref = None
-            try:
-                from ai_scientist.utils.ara_context import (
-                    compile_live_continue_context,
-                    persist_active_context_pack,
-                    render_context_pack_for_prompt,
-                )
-
-                context_pack = compile_live_continue_context(
-                    live_nodes,
-                    target_node_id=(str(node_data.get("id")) if node_data else None),
-                    stage=self.stage_name,
-                    budget_tokens=3000,
-                )
-                context_pack_ref = persist_active_context_pack(
-                    context_pack,
-                    consumer="experiment_agent",
-                )
-                context_prompt = render_context_pack_for_prompt(context_pack)
-                legacy_summary = str(memory_summary or "")[:6000]
-                worker_memory_summary = (
-                    f"{context_prompt}\n\n## Secondary journal synopsis\n{legacy_summary}"
-                    if legacy_summary
-                    else context_prompt
-                )
-            except Exception as exc:
-                # Live context is best-effort for old/ad-hoc runners. The final
-                # ARA catalog still provides deterministic post-run contexts.
-                logger.warning("Could not compile live ARA context: %s", exc)
-                legacy_summary = str(memory_summary or "")[:6000]
-                worker_memory_summary = (
-                    "## Context fallback (degraded, not source-bound)\n"
-                    f"reason={type(exc).__name__}\n"
-                    "The semantic ContextPack was unavailable. Treat this journal "
-                    "synopsis as advisory and do not promote claims from it.\n\n"
-                    f"{legacy_summary}"
-                )
-            gpu_id = None
-            if self.gpu_manager is not None:
+        try:
+            for node_data in node_data_list:
+                worker_memory_summary = memory_summary
+                context_pack_ref = None
                 try:
-                    # Get current process ID for GPU assignment
+                    from ai_scientist.utils.ara_context import (
+                        compile_live_continue_context,
+                        persist_active_context_pack,
+                        render_context_pack_for_prompt,
+                    )
+
+                    context_pack = compile_live_continue_context(
+                        live_nodes,
+                        target_node_id=(
+                            str(node_data.get("id")) if node_data else None
+                        ),
+                        stage=self.stage_name,
+                        budget_tokens=3000,
+                    )
+                    context_pack_ref = persist_active_context_pack(
+                        context_pack,
+                        consumer="experiment_agent",
+                    )
+                    context_prompt = render_context_pack_for_prompt(context_pack)
+                    legacy_summary = str(memory_summary or "")[:6000]
+                    worker_memory_summary = (
+                        f"{context_prompt}\n\n## Secondary journal synopsis\n{legacy_summary}"
+                        if legacy_summary
+                        else context_prompt
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not compile live ARA context: %s",
+                        type(exc).__name__,
+                    )
+                    legacy_summary = str(memory_summary or "")[:6000]
+                    worker_memory_summary = (
+                        "## Context fallback (degraded, not source-bound)\n"
+                        f"reason={type(exc).__name__}\n"
+                        "The semantic ContextPack was unavailable. Treat this journal "
+                        "synopsis as advisory and do not promote claims from it.\n\n"
+                        f"{legacy_summary}"
+                    )
+
+                new_ablation_idea = None
+                new_hyperparam_idea = None
+                expected_idea: tuple[str, str] | None = None
+                if (
+                    self.stage_name
+                    and self.stage_name.startswith("2_")
+                    and node_data is not None
+                    and node_data["is_buggy"] is False
+                ):
+                    for _ in range(3):
+                        proposal = self._generate_hyperparam_tuning_idea(
+                            reserved_hyperparams
+                        )
+                        proposal_key = _canonical_idea_key(
+                            proposal.name if proposal is not None else None
+                        )
+                        if proposal_key and proposal_key not in reserved_hyperparams:
+                            new_hyperparam_idea = proposal
+                            reserved_hyperparams.add(proposal_key)
+                            expected_idea = ("hyperparam", proposal_key)
+                            break
+                    if new_hyperparam_idea is None:
+                        raise ResearchDecisionError(
+                            "Research Agent repeated a hyperparameter idea"
+                        )
+                elif (
+                    self.stage_name
+                    and self.stage_name.startswith("4_")
+                    and node_data is not None
+                    and node_data["is_buggy"] is False
+                ):
+                    for _ in range(3):
+                        proposal = self._generate_ablation_idea(reserved_ablations)
+                        proposal_key = _ablation_idea_key(
+                            proposal.name if proposal is not None else None,
+                            proposal.component if proposal is not None else None,
+                        )
+                        if proposal_key and proposal_key not in reserved_ablations:
+                            new_ablation_idea = proposal
+                            reserved_ablations.add(proposal_key)
+                            expected_idea = ("ablation", proposal_key)
+                            break
+                    if new_ablation_idea is None:
+                        raise ResearchDecisionError(
+                            "Research Agent repeated an ablation idea"
+                        )
+
+                gpu_id = None
+                if self.gpu_manager is not None:
                     process_id = f"worker_{len(futures)}"
                     gpu_id = self.gpu_manager.acquire_gpu(process_id)
-                    logger.info(f"Assigned GPU {gpu_id} to process {process_id}")
-                except RuntimeError as e:
-                    logger.warning(f"Could not acquire GPU: {e}. Running on CPU")
+                    logger.info("Assigned a GPU to a research worker")
 
-            if (
-                self.stage_name
-                and self.stage_name.startswith("2_")
-                and node_data is not None
-                and node_data["is_buggy"] is False
-            ):
-                new_hyperparam_idea = self._generate_hyperparam_tuning_idea()
-                self._hyperparam_tuning_state["tried_hyperparams"].add(
-                    new_hyperparam_idea.name
+                best_stage1_plot_code = (
+                    self.best_stage1_node.plot_code if self.best_stage1_node else None
                 )
-                new_ablation_idea = None
-            elif (
-                self.stage_name
-                and self.stage_name.startswith("4_")
-                and node_data is not None
-                and node_data["is_buggy"] is False
-            ):
-                new_ablation_idea = self._generate_ablation_idea()
-                self._ablation_state["completed_ablations"].add(new_ablation_idea.name)
-                new_hyperparam_idea = None
-            else:
-                new_ablation_idea = None
-                new_hyperparam_idea = None
-
-            best_stage1_plot_code = (
-                self.best_stage1_node.plot_code if self.best_stage1_node else None
-            )
-            best_stage2_plot_code = (
-                self.best_stage2_node.plot_code if self.best_stage2_node else None
-            )
-            best_stage3_plot_code = (
-                self.best_stage3_node.plot_code if self.best_stage3_node else None
-            )
-            seed_eval = False
-            futures.append(
-                self.executor.submit(
+                best_stage2_plot_code = (
+                    self.best_stage2_node.plot_code if self.best_stage2_node else None
+                )
+                best_stage3_plot_code = (
+                    self.best_stage3_node.plot_code if self.best_stage3_node else None
+                )
+                future = self.executor.submit(
                     self._process_node_wrapper,
                     node_data,
                     self.task_desc,
@@ -2425,72 +3426,132 @@ class ParallelAgent:
                     best_stage1_plot_code,
                     best_stage2_plot_code,
                     best_stage3_plot_code,
-                    seed_eval,
+                    False,
                     context_pack_ref,
                 )
-            )
-
-        # Add results to journal
-        print("Waiting for results")
-        for i, future in enumerate(futures):
-            try:
-                print("About to get result from future")
-                result_data = future.result(timeout=self.timeout)
-                if "metric" in result_data:
-                    print(f"metric type: {type(result_data['metric'])}")
-                    print(f"metric contents: {result_data['metric']}")
-
-                # Create node and restore relationships using journal.
-                # Journal acts as a database to look up a parent node,
-                # and add the result node as a child.
-                result_node = Node.from_dict(result_data, self.journal)
-                print("[red]Investigating if result node has metric[/red]", flush=True)
-                print(result_node.metric)
-                # Update hyperparam tuning state if in Stage 2
-                self._update_hyperparam_tuning_state(result_node)
-                # Update ablation state if in Stage 4
-                self._update_ablation_state(result_node)
-
-                # Add node to journal's list and assign its step number
-                self.journal.append(result_node)
-                for ref in result_node.context_pack_refs or []:
-                    try:
-                        from ai_scientist.utils.ara_context import (
-                            record_active_context_consumption,
-                        )
-
-                        record_active_context_consumption(
-                            pack_ref=ref,
-                            consumer="experiment_agent",
-                            output_type="node",
-                            output_id=result_node.id,
-                        )
-                    except Exception:
-                        pass
-                print("Added result node to journal")
-
-            except TimeoutError:
-                print("Worker process timed out, couldn't get the result")
-                logger.error(f"Worker process timed out, couldn't get the result")
-            except Exception as e:
-                if is_llm_budget_exception(e):
-                    for pending in futures:
-                        pending.cancel()
-                print(f"Error processing node: {str(e)}")
-                logger.error(f"Error processing node: {str(e)}")
-                import traceback
-
-                traceback.print_exc()
+                futures.append(future)
+                future_idea_keys[future] = expected_idea
+        except BaseException as exc:
+            for pending in futures:
+                pending.cancel()
+            self.cleanup()
+            if not isinstance(exc, Exception):
                 raise
-            finally:
-                # Release GPU for this process if it was using one
-                process_id = f"worker_{i}"
+            if isinstance(exc, ResearchDecisionError) or is_llm_budget_exception(exc):
+                raise
+            raise ExperimentCannotContinueError(
+                "Research worker batch could not be submitted atomically"
+            ) from None
+
+        # Treat one reserved worker batch as a transaction with one deadline.
+        # A partial batch is not scientific evidence and is never journaled.
+        print("Waiting for bounded worker batch")
+        staged_results: list[dict[str, Any]] = []
+        try:
+            _done, unfinished = wait(
+                futures,
+                timeout=self.timeout,
+                return_when=ALL_COMPLETED,
+            )
+            if unfinished:
+                raise TimeoutError("worker batch deadline exceeded")
+            seen_ids: set[str] = set()
+            for future in futures:
+                result_data = future.result()
+                if not isinstance(result_data, dict):
+                    raise ExperimentCannotContinueError(
+                        "Research worker returned an invalid result"
+                    )
+                parent_id = result_data.get("parent_id")
                 if (
-                    self.gpu_manager is not None
-                    and process_id in self.gpu_manager.gpu_assignments
+                    parent_id is not None
+                    and self.journal.get_node_by_id(parent_id) is None
                 ):
+                    raise ExperimentCannotContinueError(
+                        "Research worker result references a missing parent"
+                    )
+                staged_node = Node.from_dict(copy.deepcopy(result_data))
+                expected_idea = future_idea_keys.get(future)
+                actual_idea = None
+                if expected_idea is not None and expected_idea[0] == "hyperparam":
+                    actual_idea = _canonical_idea_key(staged_node.hyperparam_name)
+                elif expected_idea is not None and expected_idea[0] == "ablation":
+                    actual_idea = _ablation_idea_key(
+                        staged_node.ablation_name,
+                        staged_node.ablation_component,
+                    )
+                if (
+                    not isinstance(staged_node.id, str)
+                    or not staged_node.id
+                    or staged_node.id in seen_ids
+                    or self.journal.get_node_by_id(staged_node.id) is not None
+                    or staged_node.is_seed_node
+                    or staged_node.is_seed_agg_node
+                    or (expected_idea is not None and actual_idea != expected_idea[1])
+                ):
+                    raise ExperimentCannotContinueError(
+                        "Research worker result identity is invalid"
+                    )
+                seen_ids.add(staged_node.id)
+                staged_results.append(copy.deepcopy(result_data))
+        except BaseException as exc:
+            for pending in futures:
+                pending.cancel()
+            self.cleanup()
+            if not isinstance(exc, Exception):
+                raise
+            if isinstance(exc, ResearchDecisionError) or is_llm_budget_exception(exc):
+                raise
+            logger.error("Research worker batch failed: %s", type(exc).__name__)
+            raise ExperimentCannotContinueError(
+                "Research worker batch did not complete atomically"
+            ) from None
+        finally:
+            if self.gpu_manager is not None:
+                for process_id in list(self.gpu_manager.gpu_assignments):
                     self.gpu_manager.release_gpu(process_id)
-                    logger.info(f"Released GPU for process {process_id}")
+
+        journal_size = len(self.journal.nodes)
+        parent_children = {node.id: set(node.children) for node in self.journal.nodes}
+        tried_hyperparams = set(self._hyperparam_tuning_state["tried_hyperparams"])
+        completed_ablations = set(self._ablation_state["completed_ablations"])
+        committed_nodes: list[Node] = []
+        try:
+            for result_data in staged_results:
+                result_node = Node.from_dict(copy.deepcopy(result_data), self.journal)
+                self.journal.append(result_node)
+                committed_nodes.append(result_node)
+            for result_node in committed_nodes:
+                self._update_hyperparam_tuning_state(result_node)
+                self._update_ablation_state(result_node)
+        except BaseException as exc:
+            del self.journal.nodes[journal_size:]
+            for node in self.journal.nodes:
+                node.children = parent_children.get(node.id, set())
+            self._hyperparam_tuning_state["tried_hyperparams"] = tried_hyperparams
+            self._ablation_state["completed_ablations"] = completed_ablations
+            if not isinstance(exc, Exception):
+                raise
+            raise ExperimentCannotContinueError(
+                "Research worker batch could not be committed atomically"
+            ) from None
+
+        for result_node in committed_nodes:
+            for ref in result_node.context_pack_refs or []:
+                try:
+                    from ai_scientist.utils.ara_context import (
+                        record_active_context_consumption,
+                    )
+
+                    record_active_context_consumption(
+                        pack_ref=ref,
+                        consumer="experiment_agent",
+                        output_type="node",
+                        output_id=result_node.id,
+                    )
+                except Exception:
+                    pass
+        return len(committed_nodes)
 
     def _update_hyperparam_tuning_state(self, result_node: Node):
         """Update hyperparam tuning tracking state based on execution results."""
@@ -2504,11 +3565,13 @@ class ParallelAgent:
             )
             return
 
-        if not result_node.is_buggy:
-            self._hyperparam_tuning_state["tried_hyperparams"].add(hyperparam_name)
-            logger.info(f"Hyperparam tuning {hyperparam_name} ran successfully")
-        else:
-            logger.warning(f"Hyperparam tuning {hyperparam_name} failed")
+        key = _canonical_idea_key(hyperparam_name)
+        if not key:
+            raise ExperimentCannotContinueError(
+                "Hyperparameter attempt has an invalid identity"
+            )
+        self._hyperparam_tuning_state["tried_hyperparams"].add(key)
+        logger.info("Recorded a hyperparameter attempt")
 
     def _update_ablation_state(self, result_node: Node):
         """Update ablation tracking state based on execution results.
@@ -2524,9 +3587,13 @@ class ParallelAgent:
             print(f"[red]ablation_name is None for result_node: {result_node.id}[/red]")
             return
 
-        if not result_node.is_buggy:
-            self._ablation_state["completed_ablations"].add(ablation_name)
-            logger.info(f"Ablation {ablation_name} completed successfully")
+        key = _ablation_idea_key(ablation_name, result_node.ablation_component)
+        if not key:
+            raise ExperimentCannotContinueError(
+                "Ablation attempt has an invalid identity"
+            )
+        self._ablation_state["completed_ablations"].add(key)
+        logger.info("Recorded an ablation attempt")
 
     def _aggregate_seed_eval_results(
         self, seed_nodes: List[Node], parent_node: Node
@@ -2614,22 +3681,31 @@ class ParallelAgent:
         plotting_prompt["Instructions"] |= {
             "Plotting code guideline": prompt_guideline,
         }
+        if any(
+            not isinstance(seed.plot_code, str)
+            or not seed.plot_code.strip()
+            or not isinstance(seed.exp_results_dir, (str, Path))
+            for seed in seed_nodes
+        ):
+            raise ExperimentCannotContinueError(
+                "Verified seed evidence is missing plotting artifacts"
+            )
         plotting_prompt["Instructions"] |= {
-            "Plotting code reference": (
-                "plotting code 1:\n" + seed_nodes[0].plot_code + "\n\n"
-                "plotting code 2:\n" + seed_nodes[1].plot_code + "\n\n"
-                "plotting code 3:\n" + seed_nodes[2].plot_code + "\n\n"
+            "Plotting code reference": "\n\n".join(
+                f"plotting code {index}:\n{seed.plot_code}"
+                for index, seed in enumerate(seed_nodes, start=1)
             ),
-            "Experiment Data Path": (
-                f"{seed_nodes[0].exp_results_dir}/experiment_data.npy\n"
-                f"{seed_nodes[1].exp_results_dir}/experiment_data.npy\n"
-                f"{seed_nodes[2].exp_results_dir}/experiment_data.npy\n"
+            "Experiment Data Path": "\n".join(
+                f"{seed.exp_results_dir}/experiment_data.npy" for seed in seed_nodes
             ),
         }
         plan, code = self.plan_and_code_query(plotting_prompt)
 
-        print("[green]Plan:[/green]\n", plan)
-        print(f"[green]Generated aggregated plotting code:[/green]\n{code}")
+        logger.info(
+            "Generated seed aggregation plan/code: plan_chars=%d code_chars=%d",
+            len(plan),
+            len(code),
+        )
 
         return code
 
@@ -2660,7 +3736,7 @@ class ParallelAgent:
                 print("Executor shutdown complete")
 
             except Exception as e:
-                print(f"Error during executor shutdown: {e}")
+                print(f"Error during executor shutdown: {type(e).__name__}")
             finally:
                 self._is_shutdown = True
 

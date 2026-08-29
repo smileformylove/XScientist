@@ -4,22 +4,95 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Any
 import copy
+import math
 import os
+import re
 
 from dataclasses_json import DataClassJsonMixin
 from .interpreter import ExecutionResult
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import trim_long_string
 from .utils.serialize import atomic_write_json, atomic_write_text
-from .backend import FunctionSpec, query
+from .backend import (
+    FunctionCallValidationError,
+    FunctionSpec,
+    ResearchDecisionError,
+    query,
+)
 
 from rich import print
 
 import logging
 from pathlib import Path
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
+from ai_scientist.utils.evaluation_binding import (
+    evaluation_comparison_contract,
+    evaluation_hash_binding,
+)
 
 logger = logging.getLogger(__name__)
+
+NODE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+NODE_ID_RE = re.compile(NODE_ID_PATTERN)
+
+
+def _optional_config_value(config: Any, key: str) -> Any:
+    """Read an optional field from mapping-, OmegaConf-, or object-style config."""
+
+    if config is None:
+        return None
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, None)
+        except TypeError:
+            # Some object-like configs expose ``get(key)`` without a default.
+            return getter(key)
+    return getattr(config, key, None)
+
+
+def _experiment_notes_summary_route(cfg: Any) -> tuple[str, float]:
+    """Resolve the stage-notes model without inventing a provider route.
+
+    The explicit precedence is ``agent.summary``, then ``report``, then the
+    operator-provided ``ZHIPU_DEFAULT_MODEL`` environment variable. A missing
+    route fails before any note artifact is written instead of silently using a
+    hard-coded model/provider combination.
+    """
+
+    agent_cfg = _optional_config_value(cfg, "agent")
+    summary_cfg = _optional_config_value(agent_cfg, "summary")
+    route_name = "cfg.agent.summary"
+    if summary_cfg is None:
+        summary_cfg = _optional_config_value(cfg, "report")
+        route_name = "cfg.report"
+
+    if summary_cfg is not None:
+        model = _optional_config_value(summary_cfg, "model")
+        temperature = _optional_config_value(summary_cfg, "temp")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"{route_name}.model must be a non-empty string")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(float(temperature))
+        ):
+            raise ValueError(f"{route_name}.temp must be a finite number")
+        return model.strip(), float(temperature)
+
+    environment_model = os.environ.get("ZHIPU_DEFAULT_MODEL", "").strip()
+    if environment_model:
+        return environment_model, 0.3
+    raise ValueError(
+        "Experiment-note summary requires cfg.agent.summary, cfg.report, "
+        "or ZHIPU_DEFAULT_MODEL"
+    )
+
+
+def _validate_node_id(node_id: Any, *, context: str = "Node") -> str:
+    if not isinstance(node_id, str) or NODE_ID_RE.fullmatch(node_id) is None:
+        raise ValueError(f"{context} has an invalid id")
+    return node_id
 
 
 def _safe_relative_to(path: Path) -> Path:
@@ -27,6 +100,7 @@ def _safe_relative_to(path: Path) -> Path:
         return path.relative_to(os.getcwd())
     except ValueError:
         return path
+
 
 node_selection_spec = FunctionSpec(
     name="select_best_implementation",
@@ -44,6 +118,7 @@ node_selection_spec = FunctionSpec(
             },
         },
         "required": ["selected_id", "reasoning"],
+        "additionalProperties": False,
     },
 )
 
@@ -95,9 +170,15 @@ class Node(DataClassJsonMixin):
     # ---- evaluation ----
     # post-execution result analysis (findings/feedback)
     analysis: str = field(default=None, kw_only=True)  # type: ignore
+    agent_review_bug_advisory: bool | None = field(default=None, kw_only=True)
     metric: MetricValue = field(default=None, kw_only=True)  # type: ignore
     metric_provenance: str = field(default="unavailable", kw_only=True)
+    advisory_metric: dict[str, Any] | None = field(default=None, kw_only=True)
     evaluation_report: dict[str, Any] | None = field(default=None, kw_only=True)
+    multi_seed_report: dict[str, Any] | None = field(default=None, kw_only=True)
+    multi_seed_attempts: list[dict[str, Any]] = field(
+        default_factory=list, kw_only=True
+    )
     # whether the agent decided that the code is buggy
     # -> always True if exc_type is not None or no valid metric
     is_buggy: bool = field(default=None, kw_only=True)  # type: ignore
@@ -121,6 +202,12 @@ class Node(DataClassJsonMixin):
 
     # ---- ablation study ----
     ablation_name: str = field(default=None, kw_only=True)
+    ablation_control_node_id: str | None = field(default=None, kw_only=True)
+    ablation_component: str | None = field(default=None, kw_only=True)
+    ablation_expected_outcome: str | None = field(default=None, kw_only=True)
+    ablation_code_diff_hash: str | None = field(default=None, kw_only=True)
+    ablation_control_semantic_hash: str | None = field(default=None, kw_only=True)
+    ablation_semantic_hash: str | None = field(default=None, kw_only=True)
 
     # ---- hyperparam tuning ----
     hyperparam_name: str = field(default=None, kw_only=True)
@@ -128,9 +215,11 @@ class Node(DataClassJsonMixin):
     # ---- seed node ----
     is_seed_node: bool = field(default=False, kw_only=True)
     is_seed_agg_node: bool = field(default=False, kw_only=True)
+    random_seed: int | None = field(default=None, kw_only=True)
+    seed_bootstrap_hash: str | None = field(default=None, kw_only=True)
 
     # ---- LLM provenance ----
-    # messages_ref.hash values from <ara>/llm/calls.jsonl for calls that
+    # Semantic call_receipt_ref.hash values from <ara>/llm/calls.jsonl for calls that
     # produced this node's code/plan. Left empty on nodes built without an
     # active tracer (legacy runs, seed nodes, deterministic replays).
     # Consumed by export_ara → hash_node_payload(llm_call_hashes=...) so
@@ -143,12 +232,33 @@ class Node(DataClassJsonMixin):
     context_pack_refs: list[str] = field(default_factory=list, kw_only=True)
 
     def __post_init__(self) -> None:
+        _validate_node_id(self.id)
         # Ensure children is a set even if initialized with a list
         if isinstance(self.children, list):
             self.children = set(self.children)
         # Only try to add to parent's children if parent is a Node object
         if self.parent is not None and not isinstance(self.parent, str):
             self.parent.children.add(self)
+
+    @property
+    def has_verified_metric(self) -> bool:
+        """Return whether metric provenance is bound to a valid evaluator receipt."""
+
+        if (
+            self.metric_provenance != "deterministic_verified"
+            or not isinstance(self.metric, MetricValue)
+            or not self.metric.is_valid
+            or not isinstance(self.evaluation_report, dict)
+            or evaluation_hash_binding(self.evaluation_report) is None
+        ):
+            return False
+        return self.evaluation_report.get("metric") == self.metric.value
+
+    @property
+    def evaluation_comparison_contract(self) -> dict[str, Any] | None:
+        if not self.has_verified_metric:
+            return None
+        return evaluation_comparison_contract(self.evaluation_report)
 
     def __deepcopy__(self, memo):
         # Create a new instance with copied attributes
@@ -238,8 +348,22 @@ class Node(DataClassJsonMixin):
             return 0
         return self.parent.debug_depth + 1  # type: ignore
 
-    def to_dict(self) -> Dict:
+    def to_dict(self, *, artifact_base: Path | None = None) -> Dict:
         """Convert node to dictionary for serialization"""
+        serialized_results_dir = None
+        if self.exp_results_dir:
+            results_path = Path(self.exp_results_dir)
+            if not results_path.is_absolute():
+                results_path = Path.cwd() / results_path
+            results_path = results_path.resolve()
+            if artifact_base is not None:
+                try:
+                    results_path = results_path.relative_to(artifact_base.resolve())
+                except ValueError:
+                    pass
+            else:
+                results_path = _safe_relative_to(results_path)
+            serialized_results_dir = str(results_path)
         return {
             "code": self.code,
             "plan": self.plan,
@@ -265,11 +389,8 @@ class Node(DataClassJsonMixin):
             "execution_backend": self.execution_backend,
             "execution_isolation": self.execution_isolation,
             "analysis": self.analysis,
-            "exp_results_dir": (
-                str(_safe_relative_to(Path(self.exp_results_dir).resolve()))
-                if self.exp_results_dir
-                else None
-            ),
+            "agent_review_bug_advisory": self.agent_review_bug_advisory,
+            "exp_results_dir": serialized_results_dir,
             "metric": {
                 "value": self.metric.value if self.metric else None,
                 "maximize": self.metric.maximize if self.metric else None,
@@ -281,7 +402,10 @@ class Node(DataClassJsonMixin):
                 ),
             },
             "metric_provenance": self.metric_provenance,
+            "advisory_metric": self.advisory_metric,
             "evaluation_report": self.evaluation_report,
+            "multi_seed_report": self.multi_seed_report,
+            "multi_seed_attempts": self.multi_seed_attempts,
             "is_buggy": self.is_buggy,
             "is_buggy_plots": self.is_buggy_plots,
             "parent_id": None if self.parent is None else self.parent.id,
@@ -290,10 +414,7 @@ class Node(DataClassJsonMixin):
             "plots_generated": self.plots_generated,
             "plots": self.plots,
             "plot_paths": (
-                [
-                    str(_safe_relative_to(Path(p).resolve()))
-                    for p in self.plot_paths
-                ]
+                [str(_safe_relative_to(Path(p).resolve())) for p in self.plot_paths]
                 if self.plot_paths
                 else []
             ),
@@ -301,11 +422,7 @@ class Node(DataClassJsonMixin):
                 {
                     **analysis,
                     "plot_path": (
-                        str(
-                            _safe_relative_to(
-                                Path(analysis["plot_path"]).resolve()
-                            )
-                        )
+                        str(_safe_relative_to(Path(analysis["plot_path"]).resolve()))
                         if analysis.get("plot_path")
                         else None
                     ),
@@ -315,9 +432,17 @@ class Node(DataClassJsonMixin):
             "vlm_feedback_summary": self.vlm_feedback_summary,
             "datasets_successfully_tested": self.datasets_successfully_tested,
             "ablation_name": self.ablation_name,
+            "ablation_control_node_id": self.ablation_control_node_id,
+            "ablation_component": self.ablation_component,
+            "ablation_expected_outcome": self.ablation_expected_outcome,
+            "ablation_code_diff_hash": self.ablation_code_diff_hash,
+            "ablation_control_semantic_hash": self.ablation_control_semantic_hash,
+            "ablation_semantic_hash": self.ablation_semantic_hash,
             "hyperparam_name": self.hyperparam_name,
             "is_seed_node": self.is_seed_node,
             "is_seed_agg_node": self.is_seed_agg_node,
+            "random_seed": self.random_seed,
+            "seed_bootstrap_hash": self.seed_bootstrap_hash,
             "exec_time_feedback": self.exec_time_feedback,
             "llm_call_refs": list(self.llm_call_refs or []),
             "context_pack_refs": list(self.context_pack_refs or []),
@@ -411,6 +536,9 @@ class Journal:
 
     def append(self, node: Node) -> None:
         """Append a new node to the journal."""
+        _validate_node_id(node.id)
+        if any(existing.id == node.id for existing in self.nodes):
+            raise ValueError(f"Journal contains duplicate node id: {node.id}")
         node.step = len(self.nodes)
         self.nodes.append(node)
 
@@ -440,11 +568,13 @@ class Journal:
         print(
             f"[purple]all nodes ID and is_buggy/is_buggy_plots flags: {list_of_nodes}[/purple]"
         )
-        return [
-            n
-            for n in self.nodes
-            if n.is_buggy is False
-        ]
+        return [n for n in self.nodes if n.is_buggy is False]
+
+    @property
+    def verified_nodes(self) -> list[Node]:
+        """Return runnable nodes backed by a finite deterministic metric."""
+
+        return [node for node in self.good_nodes if node.has_verified_metric]
 
     def get_node_by_id(self, node_id: str) -> Optional[Node]:
         """Get a node by its ID."""
@@ -457,14 +587,16 @@ class Journal:
         """Return a list of all metric values in the journal."""
         return [n.metric for n in self.nodes]
 
-    def get_best_node(self, only_good=True, use_val_metric_only=False, cfg=None) -> None | Node:
+    def get_best_node(
+        self, only_good=True, use_val_metric_only=False, cfg=None
+    ) -> None | Node:
         """Return the best solution found so far."""
         if only_good:
-            nodes = self.good_nodes
+            nodes = self.verified_nodes
             if not nodes:
                 return None
         else:
-            nodes = self.nodes
+            nodes = [node for node in self.nodes if node.has_verified_metric]
 
         if use_val_metric_only:
             return max(nodes, key=lambda n: n.metric)
@@ -508,9 +640,7 @@ class Journal:
 
         try:
             if cfg is None or cfg.agent.get("select_node", None) is None:
-                # Use environment variable or default to Zhipu
-                model = os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
-                temperature = 0.3
+                return self.get_best_node_by_metric()
             else:
                 model = cfg.agent.select_node.model
                 temperature = cfg.agent.select_node.temp
@@ -519,7 +649,7 @@ class Journal:
                 user_message=None,
                 func_spec=node_selection_spec,
                 model=model,
-                temperature=temperature
+                temperature=temperature,
             )
 
             # Find and return the selected node
@@ -531,18 +661,20 @@ class Journal:
                 logger.warning(
                     f"Selected node {selected_node.id} as best implementation"
                 )
-                logger.warning(f"Reasoning: {selection['reasoning']}")
+                logger.warning("Research-agent node selection validated")
                 return selected_node
             else:
-                logger.warning("Falling back to metric-based selection")
-                return max(nodes, key=lambda n: n.metric)
+                raise FunctionCallValidationError(
+                    "Selected implementation is not an allowed candidate"
+                )
 
         except Exception as e:
-            if is_llm_budget_exception(e):
+            if isinstance(e, ResearchDecisionError) or is_llm_budget_exception(e):
                 raise
-            logger.error(f"Error in LLM selection process: {e}")
-            logger.warning("Falling back to metric-based selection")
-            return max(nodes, key=lambda n: n.metric)
+            logger.error("Research-agent node selection failed: %s", type(e).__name__)
+            raise ResearchDecisionError(
+                "Research-agent node selection failed"
+            ) from None
 
     def get_best_node_by_metric(
         self,
@@ -550,6 +682,7 @@ class Journal:
         only_good: bool = True,
         include_seed_nodes: bool = False,
         include_seed_agg_nodes: bool = False,
+        reference_contract: dict[str, Any] | None = None,
     ) -> Optional[Node]:
         """
         Deterministically pick the best node by MetricValue comparison.
@@ -558,14 +691,42 @@ class Journal:
         By default we ignore seed evaluation nodes so the "best" node corresponds to a
         first-class candidate implementation rather than a resampled rerun.
         """
-        nodes = self.good_nodes if only_good else self.nodes
+        nodes = self.verified_nodes if only_good else self.nodes
+        nodes = [node for node in nodes if node.has_verified_metric]
         if not include_seed_nodes:
             nodes = [n for n in nodes if not getattr(n, "is_seed_node", False)]
         if not include_seed_agg_nodes:
             nodes = [n for n in nodes if not getattr(n, "is_seed_agg_node", False)]
+        if reference_contract is not None:
+            nodes = [
+                node
+                for node in nodes
+                if node.evaluation_comparison_contract == reference_contract
+            ]
         if not nodes:
             return None
-        return max(nodes, key=lambda n: n.metric)
+        # Metric family is locked before considering evidence coverage. A
+        # wider but scientifically different metric must never win by breadth.
+        families = {node.metric.comparison_family for node in nodes}
+        if len(families) != 1:
+            raise ResearchDecisionError(
+                "Verified metrics use incompatible comparison contracts"
+            )
+        signatures = {node.metric.comparison_signature for node in nodes}
+        if len(signatures) != 1:
+            raise ResearchDecisionError(
+                "Verified metrics use incompatible comparison contracts"
+            )
+        if len(nodes) > 1:
+            locked_contract = nodes[0].evaluation_comparison_contract
+            if locked_contract is None or any(
+                node.evaluation_comparison_contract != locked_contract
+                for node in nodes[1:]
+            ):
+                raise ResearchDecisionError(
+                    "Verified evaluations use incompatible dataset identities"
+                )
+        return max(nodes, key=lambda node: node.metric)
 
     def generate_summary(self, include_code: bool = False, **model_kwargs) -> str:
         """Generate a summary of the research progress using LLM, including both successes and failures."""
@@ -575,20 +736,35 @@ class Journal:
         prompt = {
             "Introduction": (
                 "You are an AI researcher summarizing experimental progress. "
-                "Please analyze both successful and failed experiments to provide insights "
-                "for future improvements."
+                "Only deterministically verified experiments count as scientific "
+                "successes. Unverified runnable experiments are advisory and must not "
+                "support performance or causal claims."
             ),
-            "Successful Experiments": "",
+            "Deterministically Verified Experiments": "",
+            "Unverified Runnable Experiments (advisory only)": "",
             "Failed Experiments": "",
         }
 
-        for node in self.good_nodes:
+        verified_nodes = self.verified_nodes
+        verified_ids = {node.id for node in verified_nodes}
+        for node in verified_nodes:
             exp_info = f"Design: {node.plan}\n  "
             exp_info += f"Results: {node.analysis}\n"
             exp_info += f"Metric: {str(node.metric)}\n"
             if include_code:
                 exp_info += f"Code: {node.code}\n"
-            prompt["Successful Experiments"] += exp_info
+            prompt["Deterministically Verified Experiments"] += exp_info
+
+        for node in self.good_nodes:
+            if node.id in verified_ids:
+                continue
+            advisory_info = f"Design: {node.plan}\n"
+            advisory_info += (
+                "Verification: unavailable; do not use for ranking or claims.\n"
+            )
+            if include_code:
+                advisory_info += f"Code: {node.code}\n"
+            prompt["Unverified Runnable Experiments (advisory only)"] += advisory_info
 
         for node in self.buggy_nodes:
             failure_info = f"Design: {node.plan}\n  "
@@ -599,16 +775,19 @@ class Journal:
                 failure_info += f"Code: {node.code}\n"
             prompt["Failed Experiments"] += failure_info
 
+        model = model_kwargs.get("model") or os.environ.get("ZHIPU_DEFAULT_MODEL")
+        if not model:
+            raise ValueError("Summary generation requires an explicit model")
         summary = query(
             system_message=prompt,
             user_message=(
                 "Please provide a comprehensive summary of the experimental progress that includes:\n"
-                "1. Key patterns of success across working experiments\n"
+                "1. Key patterns supported by deterministically verified experiments\n"
                 "2. Common failure patterns and pitfalls to avoid\n"
-                "3. Specific recommendations for future experiments based on both successes and failures"
+                "3. Exploratory recommendations, with unverified evidence clearly separated"
             ),
-            model=model_kwargs.get("model", os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")),
-            temperature=model_kwargs.get("temp", 0.3)
+            model=model,
+            temperature=model_kwargs.get("temp", 0.3),
         )
 
         return summary
@@ -624,9 +803,11 @@ class Journal:
             summary.append(summary_part)
         return "\n-------------------------------\n".join(summary)
 
-    def to_dict(self):
+    def to_dict(self, *, artifact_base: Path | None = None):
         """Convert journal to a JSON-serializable dictionary"""
-        return {"nodes": [node.to_dict() for node in self.nodes]}
+        return {
+            "nodes": [node.to_dict(artifact_base=artifact_base) for node in self.nodes]
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Journal":
@@ -644,15 +825,17 @@ class Journal:
             if not isinstance(node_data, dict):
                 raise ValueError(f"Journal node {index} must be an object")
             node_id = node_data.get("id")
-            if not isinstance(node_id, str) or not node_id:
-                raise ValueError(f"Journal node {index} has an invalid id")
+            _validate_node_id(node_id, context=f"Journal node {index}")
             if node_id in parent_ids:
                 raise ValueError(f"Journal contains duplicate node id: {node_id}")
             parent_id = node_data.get("parent_id")
-            if parent_id is not None and (
-                not isinstance(parent_id, str) or not parent_id
-            ):
-                raise ValueError(f"Journal node {node_id} has an invalid parent id")
+            if parent_id is not None:
+                try:
+                    _validate_node_id(parent_id)
+                except ValueError:
+                    raise ValueError(
+                        f"Journal node {node_id} has an invalid parent id"
+                    ) from None
             parent_ids[node_id] = parent_id
             node_payloads.append(copy.deepcopy(node_data))
 
@@ -692,8 +875,11 @@ class Journal:
                 node.parent.children.add(node)
         return journal
 
-    def save_experiment_notes(self, workspace_dir: str, stage_name: str, cfg: Any) -> None:
+    def save_experiment_notes(
+        self, workspace_dir: str, stage_name: str, cfg: Any
+    ) -> None:
         """Save experimental notes and summaries to files"""
+        model, temperature = _experiment_notes_summary_route(cfg)
         notes_dir = os.path.join(workspace_dir, "experiment_notes")
         os.makedirs(notes_dir, exist_ok=True)
 
@@ -732,16 +918,11 @@ class Journal:
             ),
         }
 
-        # 安全获取 summary 配置
-        summary_cfg = cfg.agent.get("summary")
-        model = summary_cfg.model if summary_cfg else os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")
-        temperature = summary_cfg.temp if summary_cfg else 0.3
-
         stage_summary = query(
             system_message=summary_prompt,
             user_message="Generate a comprehensive summary of the experimental findings in this stage",
             model=model,
-            temperature=temperature
+            temperature=temperature,
         )
 
         atomic_write_text(
