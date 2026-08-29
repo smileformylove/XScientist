@@ -1112,6 +1112,112 @@ class OnboardingTests(unittest.TestCase):
                         else:
                             self.assertFalse(target.exists())
 
+    def test_workspace_creation_refuses_a_symlinked_parent_component(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for target_exists in (True, False):
+                with self.subTest(target_exists=target_exists):
+                    target = root / f"parent-target-{target_exists}"
+                    if target_exists:
+                        target.mkdir()
+                        (target / "sentinel.txt").write_text(
+                            "EXTERNAL SENTINEL\n",
+                            encoding="utf-8",
+                        )
+                    linked_parent = root / f"linked-parent-{target_exists}"
+                    try:
+                        linked_parent.symlink_to(target, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+
+                    with self.assertRaisesRegex(
+                        WorkspaceInitError,
+                        "symlinked workspace path",
+                    ):
+                        create_workspace(linked_parent / "study", force=True)
+
+                    self.assertFalse((target / "study").exists())
+                    if target_exists:
+                        self.assertEqual(
+                            (target / "sentinel.txt").read_text(encoding="utf-8"),
+                            "EXTERNAL SENTINEL\n",
+                        )
+
+    def test_workspace_commands_reject_parent_symlinks_with_stable_json(self) -> None:
+        commands = (
+            (
+                "init",
+                "xscientist.init.v1",
+                lambda workspace: ["init", str(workspace), "--force", "--json"],
+            ),
+            (
+                "setup",
+                "xscientist.setup.v1",
+                lambda workspace: [
+                    "setup",
+                    str(workspace),
+                    "--task",
+                    "protocol",
+                    "--skip-credentials",
+                    "--force",
+                    "--json",
+                ],
+            ),
+            (
+                "start",
+                "xscientist.start.v1",
+                lambda workspace: [
+                    "start",
+                    str(workspace),
+                    "--question",
+                    "Does X change Y?",
+                    "--provider",
+                    "ollama",
+                    "--model",
+                    "ollama/qwen2.5:7b",
+                    "--prepare-only",
+                    "--skip-credentials",
+                    "--force",
+                    "--json",
+                ],
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for command, schema, argv in commands:
+                with self.subTest(command=command):
+                    target = root / f"outside-parent-{command}"
+                    target.mkdir()
+                    sentinel = target / "sentinel.txt"
+                    sentinel.write_text("EXTERNAL SENTINEL\n", encoding="utf-8")
+                    linked_parent = root / f"linked-parent-{command}"
+                    try:
+                        linked_parent.symlink_to(target, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                    workspace = linked_parent / "study"
+
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        code = cli_main(argv(workspace))
+
+                    self.assertEqual(code, 2)
+                    payload = json.loads(stdout.getvalue())
+                    self.assertEqual(payload["schema"], schema)
+                    self.assertFalse(payload["ok"])
+                    self.assertIn("symlinked workspace path", payload["error"])
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertNotIn(str(target), stdout.getvalue())
+                    self.assertNotIn(str(linked_parent), stdout.getvalue())
+                    self.assertFalse(workspace.exists())
+                    self.assertEqual(
+                        sentinel.read_text(encoding="utf-8"),
+                        "EXTERNAL SENTINEL\n",
+                    )
+
     def test_workspace_creation_refuses_a_symlinked_managed_leaf(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

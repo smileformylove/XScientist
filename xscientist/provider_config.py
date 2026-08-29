@@ -4,6 +4,8 @@ import contextvars
 import itertools
 import json
 import os
+import stat
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -232,9 +234,14 @@ class ProviderFileTransaction:
     _context_token: contextvars.Token["ProviderFileTransaction | None"] | None = None
     _conflicts: tuple[str, ...] = ()
 
-    def _record(self, mutation: _ProviderFileMutation) -> None:
-        if any(existing.path == mutation.path for existing in self._mutations):
+    def _prepare_path(self, path: Path) -> None:
+        if not self._active:
+            raise RuntimeError("provider file transaction is closed")
+        if any(existing.path == path for existing in self._mutations):
             raise RuntimeError("provider file transaction wrote one path twice")
+
+    def _record(self, mutation: _ProviderFileMutation) -> None:
+        self._prepare_path(mutation.path)
         self._mutations.append(mutation)
 
     def _leave_context(self) -> None:
@@ -345,8 +352,9 @@ def _atomic_provider_text_replace(
     content: str,
     *,
     mode: int,
-) -> tuple[int, int]:
-    """Replace a file and return the exact identity of our temporary inode."""
+    expected_before: _ProviderFileState,
+) -> _ProviderFileState:
+    """Replace a file after rechecking the snapshot at the rename boundary."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -361,6 +369,10 @@ def _atomic_provider_text_replace(
             handle.flush()
             os.fsync(handle.fileno())
             stat_result = os.fstat(handle.fileno())
+        if _capture_provider_file_state(path) != expected_before:
+            raise ProviderConfigError(
+                "provider file changed concurrently before atomic replacement"
+            )
         temp.replace(path)
         try:
             directory_descriptor = os.open(path.parent, os.O_RDONLY)
@@ -373,7 +385,13 @@ def _atomic_provider_text_replace(
                 pass
             finally:
                 os.close(directory_descriptor)
-        return stat_result.st_dev, stat_result.st_ino
+        return _ProviderFileState(
+            kind="file",
+            content=content.encode("utf-8"),
+            mode=stat_result.st_mode & 0o7777,
+            device=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
     finally:
         temp.unlink(missing_ok=True)
 
@@ -392,33 +410,52 @@ def _tracked_provider_file_write(
         if before.kind not in {"absent", "file"}:
             raise ProviderConfigError("provider file must be a regular file")
         before_generation = _PROVIDER_FILE_GENERATIONS.get(target, missing)
-        expected_identity = _atomic_provider_text_replace(
+        transaction = _ACTIVE_PROVIDER_FILE_TRANSACTION.get()
+        if transaction is not None:
+            transaction._prepare_path(target)
+        after = _atomic_provider_text_replace(
             target,
             content,
             mode=(0o600 if secure else int(before.mode or 0o600)),
+            expected_before=before,
         )
-        after = _capture_provider_file_state(target)
-        if (
-            after.kind != "file"
-            or after.content != encoded
-            or (after.device, after.inode) != expected_identity
-        ):
-            raise ProviderConfigError(
-                "provider file changed concurrently after atomic replacement"
-            )
         generation = next(_PROVIDER_FILE_GENERATION_COUNTER)
         _PROVIDER_FILE_GENERATIONS[target] = generation
-        transaction = _ACTIVE_PROVIDER_FILE_TRANSACTION.get()
+        mutation = _ProviderFileMutation(
+            path=target,
+            before=before,
+            before_generation=before_generation,
+            after=after,
+            after_generation=generation,
+        )
         if transaction is not None:
-            transaction._record(
-                _ProviderFileMutation(
-                    path=target,
-                    before=before,
-                    before_generation=before_generation,
-                    after=after,
-                    after_generation=generation,
+            transaction._record(mutation)
+        try:
+            observed = _capture_provider_file_state(target)
+            if observed != after or observed.content != encoded:
+                raise ProviderConfigError(
+                    "provider file changed concurrently after atomic replacement"
                 )
-            )
+        except BaseException:
+            # An enclosing provider command now has a complete pending journal
+            # even when the first post-replace lstat/read fails.  Standalone
+            # direct APIs do not have that outer rollback, so undo only while
+            # the exact replacement inode and generation are still ours.
+            if transaction is None:
+                try:
+                    current = _capture_provider_file_state(target)
+                    owned = current == after and _environment_values_equal(
+                        _PROVIDER_FILE_GENERATIONS.get(target, missing), generation
+                    )
+                    if owned:
+                        _restore_provider_file_state(target, before)
+                        if before_generation is missing:
+                            _PROVIDER_FILE_GENERATIONS.pop(target, None)
+                        else:
+                            _PROVIDER_FILE_GENERATIONS[target] = int(before_generation)
+                except (OSError, ProviderConfigError):
+                    pass
+            raise
 
 
 @dataclass(frozen=True)
@@ -487,6 +524,106 @@ ALLOWED_ENV_NAMES = {
 
 class ProviderConfigError(ValueError):
     """Raised when provider configuration is unsafe or malformed."""
+
+
+def _lexical_absolute_workspace_path(root: str | Path) -> Path:
+    """Return an absolute path without resolving caller-controlled symlinks."""
+
+    candidate = Path(root).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+
+    # macOS exposes TemporaryDirectory paths through its root-owned,
+    # platform-defined ``/var -> /private/var`` alias.  Normalize only that
+    # exact alias; never trust TMPDIR or another caller-controlled prefix.
+    system_alias = Path("/var")
+    system_real = Path("/private/var")
+    trusted_system_alias = False
+    if sys.platform == "darwin":
+        try:
+            alias_metadata = system_alias.lstat()
+            trusted_system_alias = bool(
+                stat.S_ISLNK(alias_metadata.st_mode)
+                and alias_metadata.st_uid == 0
+                and system_alias.resolve(strict=True) == system_real
+            )
+        except (OSError, RuntimeError):
+            trusted_system_alias = False
+    if trusted_system_alias:
+        try:
+            relative = candidate.relative_to(system_alias)
+        except ValueError:
+            pass
+        else:
+            candidate = system_real / relative
+    # Inspect the uncollapsed spelling as well.  Otherwise a path such as
+    # ``linked-parent/../workspace`` could hide a symlink behind lexical
+    # normalization even though the kernel would have traversed it.
+    _workspace_component_snapshot(candidate)
+    return Path(os.path.abspath(os.fspath(candidate)))
+
+
+def _workspace_component_snapshot(candidate: Path) -> tuple[tuple[Path, object], ...]:
+    """Inspect every component without following links or disclosing paths."""
+
+    missing = _MISSING_ENVIRONMENT_VALUE
+    components: list[tuple[Path, object]] = []
+    current = Path(candidate.anchor)
+    parts = candidate.parts[1:] if candidate.anchor else candidate.parts
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            components.append((current, missing))
+            continue
+        except OSError as exc:
+            raise ProviderConfigError(
+                "could not safely inspect workspace path"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ProviderConfigError("refusing a symlinked workspace path")
+        if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise ProviderConfigError(
+                "workspace path has a non-directory parent component"
+            )
+        components.append(
+            (
+                current,
+                (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    stat.S_IFMT(metadata.st_mode),
+                ),
+            )
+        )
+    return tuple(components)
+
+
+def resolve_provider_workspace_root(root: str | Path) -> Path:
+    """Resolve a workspace only after rejecting every symlink component.
+
+    The two identity passes catch path substitution during validation.  Error
+    messages deliberately omit the caller-supplied path because workspace
+    locations may themselves be private.
+    """
+
+    candidate = _lexical_absolute_workspace_path(root)
+    before = _workspace_component_snapshot(candidate)
+    after = _workspace_component_snapshot(candidate)
+    if before != after:
+        raise ProviderConfigError("workspace path changed concurrently")
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ProviderConfigError("could not safely resolve workspace path") from exc
+    if resolved != candidate:
+        # No component was a link in either pass, so a changed resolution is a
+        # concurrent substitution (or another path indirection we cannot audit).
+        raise ProviderConfigError("workspace path changed concurrently")
+    if _workspace_component_snapshot(candidate) != before:
+        raise ProviderConfigError("workspace path changed concurrently")
+    return candidate
 
 
 def normalize_provider_name(provider: str) -> str:
@@ -665,7 +802,8 @@ def probe_provider_model(
 
 
 def workspace_config_path(root: str | Path) -> Path:
-    return Path(root).expanduser().resolve() / CONFIG_RELATIVE_PATH
+    workspace = resolve_provider_workspace_root(root)
+    return resolve_provider_workspace_root(workspace / CONFIG_RELATIVE_PATH)
 
 
 def _normalized_private_env_name(env_file: str) -> str:
@@ -689,19 +827,16 @@ def _normalized_private_env_name(env_file: str) -> str:
 
 
 def resolve_env_file(root: str | Path, env_file: str) -> Path:
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     relative = Path(_normalized_private_env_name(env_file))
-    target = (workspace / relative).resolve()
+    target = resolve_provider_workspace_root(workspace / relative)
     try:
         target.relative_to(workspace)
     except ValueError as exc:
         raise ProviderConfigError(
             "provider env_file cannot escape the workspace"
         ) from exc
-    unresolved = workspace / relative
-    if unresolved.is_symlink():
-        raise ProviderConfigError("provider env_file must not be a symlink")
-    if unresolved.exists() and not unresolved.is_file():
+    if target.exists() and not target.is_file():
         raise ProviderConfigError("provider env_file must be a regular file")
     return target
 
@@ -709,9 +844,9 @@ def resolve_env_file(root: str | Path, env_file: str) -> Path:
 def discover_workspace_root() -> Path | None:
     explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
     if explicit:
-        candidate = Path(explicit).expanduser().resolve()
+        candidate = resolve_provider_workspace_root(explicit)
         return candidate if workspace_config_path(candidate).is_file() else None
-    candidate = Path.cwd().resolve()
+    candidate = resolve_provider_workspace_root(Path.cwd())
     for directory in (candidate, *candidate.parents):
         if workspace_config_path(directory).is_file():
             return directory
@@ -924,7 +1059,7 @@ def configured_field_value(
 
 
 def _workspace_key(root: str | Path) -> str:
-    return str(Path(root).expanduser().resolve())
+    return str(resolve_provider_workspace_root(root))
 
 
 def _process_environment_for_workspace(
@@ -988,7 +1123,7 @@ def workspace_environment(
     that XScientist previously injected for a different workspace.
     """
 
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     config = load_provider_config(workspace, missing_ok=True)
     env_file = resolve_env_file(
         workspace, str(config.get("env_file") or DEFAULT_ENV_FILE)
@@ -1010,7 +1145,7 @@ def _env_file_is_private(path: Path) -> bool:
 
 def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]:
     workspace = (
-        Path(root).expanduser().resolve()
+        resolve_provider_workspace_root(root)
         if root is not None
         else discover_workspace_root()
     )
@@ -1135,7 +1270,7 @@ def save_provider(
     env_file: str = DEFAULT_ENV_FILE,
     activate: bool = True,
 ) -> dict[str, Any]:
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     normalized, selected_model = validate_provider_model(provider, model)
     config = load_provider_config(workspace, missing_ok=False)
     env_path = resolve_env_file(workspace, env_file)
@@ -1156,7 +1291,7 @@ def save_provider(
 
 
 def activate_provider(root: str | Path, provider: str) -> dict[str, Any]:
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     normalized = normalize_provider_name(provider)
     config = load_provider_config(workspace, missing_ok=False)
     if normalized not in config["providers"]:
@@ -1167,7 +1302,7 @@ def activate_provider(root: str | Path, provider: str) -> dict[str, Any]:
 
 
 def remove_provider(root: str | Path, provider: str) -> dict[str, Any]:
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     normalized = normalize_provider_name(provider)
     config = load_provider_config(workspace, missing_ok=False)
     if normalized not in config["providers"]:
@@ -1222,7 +1357,7 @@ def provider_statuses(
     environ: Mapping[str, str] | None = None,
     allow_uninitialized: bool = False,
 ) -> list[dict[str, Any]]:
-    workspace = Path(root).expanduser().resolve()
+    workspace = resolve_provider_workspace_root(root)
     config = load_provider_config(workspace, missing_ok=allow_uninitialized)
     initialized = workspace_config_path(workspace).is_file()
     env_file = resolve_env_file(
@@ -1346,6 +1481,7 @@ __all__ = [
     "read_env_file",
     "remove_provider",
     "resolve_env_file",
+    "resolve_provider_workspace_root",
     "save_provider",
     "update_bfts_models",
     "update_env_file",

@@ -292,6 +292,70 @@ class ManagedEnvironmentTransactionTests(unittest.TestCase):
                 self.assertNotIn(key, os.environ)
                 self.assertNotIn(key, provider_config._MANAGED_ENV_VALUES)
 
+    def test_post_replace_inspection_failure_keeps_a_rollback_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td).resolve() / "providers.json"
+            baseline = b'{"state": "baseline"}\n'
+            replacement = b'{"state": "replacement"}\n'
+            target.write_bytes(baseline)
+            original_capture = provider_config._capture_provider_file_state
+
+            def fail_only_after_replacement(path: Path) -> object:
+                state = original_capture(path)
+                if Path(path) == target and state.content == replacement:
+                    raise OSError("forced post-replace lstat/read failure")
+                return state
+
+            transaction = provider_config.begin_provider_file_transaction()
+            try:
+                with (
+                    mock.patch(
+                        "xscientist.provider_config._capture_provider_file_state",
+                        side_effect=fail_only_after_replacement,
+                    ),
+                    self.assertRaisesRegex(OSError, "post-replace"),
+                ):
+                    provider_config._tracked_provider_file_write(
+                        target,
+                        replacement.decode("utf-8"),
+                    )
+
+                self.assertEqual(target.read_bytes(), replacement)
+                self.assertEqual(transaction.rollback(), ())
+            finally:
+                transaction.rollback()
+
+            self.assertEqual(target.read_bytes(), baseline)
+
+    def test_pre_replace_recheck_preserves_an_external_write(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td).resolve() / "providers.json"
+            target.write_text("baseline\n", encoding="utf-8")
+            external = "external concurrent value\n"
+            original_capture = provider_config._capture_provider_file_state
+            calls = 0
+
+            def change_before_rename(path: Path) -> object:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    target.write_text(external, encoding="utf-8")
+                return original_capture(path)
+
+            with (
+                mock.patch(
+                    "xscientist.provider_config._capture_provider_file_state",
+                    side_effect=change_before_rename,
+                ),
+                self.assertRaisesRegex(
+                    provider_config.ProviderConfigError,
+                    "before atomic replacement",
+                ),
+            ):
+                provider_config._tracked_provider_file_write(target, "ours\n")
+
+            self.assertEqual(target.read_text(encoding="utf-8"), external)
+
     def test_provider_test_uses_a_pure_workspace_mapping(self) -> None:
         keys = ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL")
         with (

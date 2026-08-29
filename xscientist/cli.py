@@ -1771,6 +1771,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         normalize_provider_name,
         provider_statuses,
         remove_provider,
+        resolve_provider_workspace_root,
         update_bfts_models,
         workspace_config_path,
         workspace_environment,
@@ -1782,7 +1783,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             workspace = discover_workspace_root()
             if workspace is None:
                 if parsed.provider_command == "list":
-                    workspace = Path.cwd().resolve()
+                    workspace = resolve_provider_workspace_root(Path.cwd())
                     discovery_only = True
                 else:
                     raise ProviderConfigError(
@@ -1790,7 +1791,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                         "run `xscientist setup WORKSPACE` first or pass --workspace"
                     )
         else:
-            workspace = Path(parsed.workspace).expanduser().resolve()
+            workspace = resolve_provider_workspace_root(parsed.workspace)
         if parsed.provider_command == "list":
             initialized = workspace_config_path(workspace).is_file()
             rows = provider_statuses(

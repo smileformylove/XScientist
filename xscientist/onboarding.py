@@ -29,6 +29,7 @@ from .provider_config import (
     empty_provider_config,
     normalize_provider_name,
     provider_config_payload,
+    resolve_provider_workspace_root,
     validate_provider_model,
 )
 
@@ -38,45 +39,12 @@ class WorkspaceInitError(ValueError):
 
 
 def resolve_workspace_root(directory: str | Path) -> Path:
-    """Resolve one workspace root without following a symlinked leaf path."""
-
-    candidate = Path(directory).expanduser()
-    try:
-        before = candidate.lstat()
-    except FileNotFoundError:
-        before = None
-    except OSError as exc:
-        raise WorkspaceInitError("could not safely inspect workspace path") from exc
-    if before is not None and stat.S_ISLNK(before.st_mode):
-        raise WorkspaceInitError("refusing a symlinked workspace path")
+    """Resolve one workspace root without following any symlink component."""
 
     try:
-        resolved = candidate.resolve()
-    except (OSError, RuntimeError) as exc:
-        raise WorkspaceInitError("could not safely resolve workspace path") from exc
-
-    try:
-        after = candidate.lstat()
-    except FileNotFoundError:
-        after = None
-    except OSError as exc:
-        raise WorkspaceInitError("could not safely recheck workspace path") from exc
-    if after is not None and stat.S_ISLNK(after.st_mode):
-        raise WorkspaceInitError("refusing a symlinked workspace path")
-    if before is None:
-        if after is not None:
-            raise WorkspaceInitError("workspace path changed concurrently")
-    elif after is None or (
-        before.st_dev,
-        before.st_ino,
-        stat.S_IFMT(before.st_mode),
-    ) != (
-        after.st_dev,
-        after.st_ino,
-        stat.S_IFMT(after.st_mode),
-    ):
-        raise WorkspaceInitError("workspace path changed concurrently")
-    return resolved
+        return resolve_provider_workspace_root(directory)
+    except ProviderConfigError as exc:
+        raise WorkspaceInitError(str(exc)) from exc
 
 
 def _validate_persisted_config_value(label: str, value: object) -> str:

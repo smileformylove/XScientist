@@ -24,13 +24,17 @@ from xscientist.onboarding import create_workspace
 from xscientist.provider_config import (
     ProviderConfigError,
     PROVIDER_NAMES,
+    activate_provider,
     discover_workspace_root,
     load_provider_config,
     load_workspace_environment,
     provider_statuses,
+    remove_provider,
     resolve_env_file,
+    save_provider,
     update_bfts_models,
     validate_custom_base_url,
+    workspace_config_path,
     workspace_environment,
 )
 
@@ -1158,6 +1162,130 @@ class ProviderConfigTests(unittest.TestCase):
                 row for row in payload["providers"] if row["provider"] == "openai"
             )
             self.assertFalse(openai["ready"])
+
+    def test_provider_direct_apis_reject_root_and_parent_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for alias_kind in ("root", "parent"):
+                with self.subTest(alias_kind=alias_kind):
+                    real_parent = root / f"real-parent-{alias_kind}"
+                    workspace = real_parent / "study"
+                    create_workspace(workspace, provider="zhipu")
+                    if alias_kind == "root":
+                        alias = root / "workspace-alias"
+                        target = workspace
+                    else:
+                        alias_parent = root / "parent-alias"
+                        alias = alias_parent / "study"
+                        target = real_parent
+                    try:
+                        (alias if alias_kind == "root" else alias_parent).symlink_to(
+                            target,
+                            target_is_directory=True,
+                        )
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+
+                    provider_path = workspace / ".xscientist" / "providers.json"
+                    bfts_path = workspace / "bfts_config.yaml"
+                    before = (provider_path.read_bytes(), bfts_path.read_bytes())
+                    operations = (
+                        lambda path: workspace_config_path(path),
+                        lambda path: load_provider_config(path, missing_ok=False),
+                        lambda path: workspace_environment(path, environ={}),
+                        lambda path: load_workspace_environment(path),
+                        lambda path: provider_statuses(path, environ={}),
+                        lambda path: save_provider(
+                            path,
+                            provider="ollama",
+                            model="ollama/qwen2.5:7b",
+                        ),
+                        lambda path: activate_provider(path, "zhipu"),
+                        lambda path: remove_provider(path, "zhipu"),
+                    )
+                    for operation in operations:
+                        with self.assertRaisesRegex(
+                            ProviderConfigError,
+                            "symlinked workspace path",
+                        ) as raised:
+                            operation(alias)
+                        self.assertNotIn(str(target), str(raised.exception))
+                        self.assertNotIn(str(alias), str(raised.exception))
+
+                    self.assertEqual(
+                        (provider_path.read_bytes(), bfts_path.read_bytes()),
+                        before,
+                    )
+
+    def test_provider_add_rejects_explicit_and_discovered_symlink_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cases: list[tuple[str, Path, Path]] = []
+
+            root_workspace = root / "root-target"
+            create_workspace(root_workspace, provider="zhipu")
+            root_alias = root / "root-alias"
+            try:
+                root_alias.symlink_to(root_workspace, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            cases.append(("root", root_alias, root_workspace))
+
+            real_parent = root / "real-parent"
+            parent_workspace = real_parent / "study"
+            create_workspace(parent_workspace, provider="zhipu")
+            parent_alias = root / "parent-alias"
+            try:
+                parent_alias.symlink_to(real_parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            cases.append(("parent", parent_alias / "study", parent_workspace))
+
+            for alias_kind, alias, target in cases:
+                for discovery in (False, True):
+                    with self.subTest(alias_kind=alias_kind, discovery=discovery):
+                        provider_path = target / ".xscientist" / "providers.json"
+                        bfts_path = target / "bfts_config.yaml"
+                        before = (provider_path.read_bytes(), bfts_path.read_bytes())
+                        argv = [
+                            "provider",
+                            "add",
+                            "ollama",
+                            "--model",
+                            "ollama/qwen2.5:7b",
+                            "--non-interactive",
+                            "--json",
+                        ]
+                        if not discovery:
+                            argv[3:3] = ["--workspace", str(alias)]
+                        environment = (
+                            {"XSCIENTIST_WORKSPACE": str(alias)} if discovery else {}
+                        )
+                        stdout, stderr = io.StringIO(), io.StringIO()
+                        with (
+                            mock.patch.dict(os.environ, environment, clear=False),
+                            contextlib.redirect_stdout(stdout),
+                            contextlib.redirect_stderr(stderr),
+                        ):
+                            code = cli_main(argv)
+
+                        self.assertEqual(code, 2)
+                        payload = json.loads(stderr.getvalue())
+                        self.assertEqual(
+                            payload["schema"], "xscientist.provider-error.v1"
+                        )
+                        self.assertFalse(payload["ok"])
+                        self.assertIn(
+                            "symlinked workspace path",
+                            payload["error"],
+                        )
+                        rendered = stdout.getvalue() + stderr.getvalue()
+                        self.assertNotIn(str(alias), rendered)
+                        self.assertNotIn(str(target), rendered)
+                        self.assertEqual(
+                            (provider_path.read_bytes(), bfts_path.read_bytes()),
+                            before,
+                        )
 
     def test_provider_list_never_prints_the_absolute_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as td:
