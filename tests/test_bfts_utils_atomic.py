@@ -6,11 +6,52 @@ from pathlib import Path
 from unittest import mock
 
 import yaml
+from omegaconf import OmegaConf
 
+from ai_scientist.resources import resolve_bfts_config_path
+from ai_scientist.treesearch.agent_manager import AgentManager
 from ai_scientist.treesearch import bfts_utils
 
 
 class BftsUtilsAtomicTests(unittest.TestCase):
+    def test_machine_task_descriptor_reaches_agent_with_binding_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "bfts_task.json"
+            idea = {
+                "Title": "Confounding probe",
+                "Abstract": "Test the apparent effect.",
+                "Short Hypothesis": "The pooled effect is confounded.",
+                "Experiments": ["pooled comparison", "stratified comparison"],
+                "Risk Factors and Limitations": ["observational assignment"],
+            }
+            bfts_utils.write_bfts_task_descriptor(
+                idea,
+                str(output),
+                research_plan={
+                    "plan_id": "plan-1",
+                    "workflow_mode": "program_driven",
+                    "tasks": [{"task_id": "stratify", "owner": "experiment"}],
+                    "required_discriminating_tests": ["stratified comparison"],
+                    "acceptance_rules": ["do not infer causality from pooling"],
+                },
+            )
+
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
+            cfg.log_dir = root / "logs"
+            cfg.workspace_dir = root / "workspace"
+            manager = AgentManager(
+                task_desc=output.read_text(encoding="utf-8"),
+                cfg=cfg,
+                workspace_dir=root / "workspace",
+            )
+
+            prompt = manager._get_task_desc_str()
+            self.assertIn("Binding XScientist Research Contract", prompt)
+            self.assertIn("stratified comparison", prompt)
+            self.assertIn("do not infer causality from pooling", prompt)
+            self.assertIn("not optional context", prompt)
+
     def test_idea_markdown_embeds_binding_research_contract(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "idea.md"

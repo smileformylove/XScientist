@@ -213,6 +213,13 @@ def edit_bfts_config_file(*args, **kwargs):
     )(*args, **kwargs)
 
 
+def write_bfts_task_descriptor(*args, **kwargs):
+    return load_module_attr(
+        "ai_scientist.treesearch.bfts_utils",
+        "write_bfts_task_descriptor",
+    )(*args, **kwargs)
+
+
 def aggregate_plots(*args, **kwargs):
     return load_module_attr("ai_scientist.perform_plotting", "aggregate_plots")(
         *args, **kwargs
@@ -2283,12 +2290,18 @@ def process_single_idea(args):
             None,
             research_plan=research_plan,
         )
+        bfts_task_path = osp.join(exp_dir, "bfts_task.json")
+        write_bfts_task_descriptor(
+            idea,
+            bfts_task_path,
+            research_plan=research_plan,
+        )
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
         idea_config_path = edit_bfts_config_file(
             config_path,
             exp_dir,
-            idea_path_md,
+            bfts_task_path,
             resume_from=resume_from,
         )
 

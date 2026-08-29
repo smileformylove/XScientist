@@ -11,6 +11,51 @@ from ai_scientist.resources import resolve_bfts_config_path
 from .utils.serialize import atomic_write_text
 
 
+def _research_contract_payload(research_plan: dict | None) -> dict | None:
+    """Return the bounded research-plan surface that the executor must obey."""
+
+    if not research_plan:
+        return None
+    return {
+        "plan_id": research_plan.get("plan_id"),
+        "workflow_mode": research_plan.get("workflow_mode"),
+        "tasks": [
+            item for item in research_plan.get("tasks") or [] if isinstance(item, dict)
+        ],
+        "acceptance_rules": research_plan.get("acceptance_rules") or [],
+        "required_discriminating_tests": research_plan.get(
+            "required_discriminating_tests"
+        )
+        or [],
+        "produced_artifacts": research_plan.get("produced_artifacts") or [],
+        "execution_policy": research_plan.get("execution_policy") or {},
+    }
+
+
+def write_bfts_task_descriptor(
+    data: dict,
+    output_path: str,
+    *,
+    research_plan: dict | None = None,
+) -> None:
+    """Write the machine-readable task consumed by ``AgentManager``.
+
+    ``idea.md`` remains the human-facing rendering.  The experiment runner,
+    however, constructs an ``AgentManager`` from JSON and must receive the
+    same binding research contract rather than a Markdown document that fails
+    before the first model turn.
+    """
+
+    descriptor = json.loads(json.dumps(data, ensure_ascii=False, default=str))
+    contract = _research_contract_payload(research_plan)
+    if contract is not None:
+        descriptor["XScientist Research Contract"] = contract
+    atomic_write_text(
+        output_path,
+        json.dumps(descriptor, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+    )
+
+
 def idea_to_markdown(
     data: dict,
     output_path: str,
@@ -54,23 +99,8 @@ def idea_to_markdown(
             ]
         )
 
-    if research_plan:
-        contract = {
-            "plan_id": research_plan.get("plan_id"),
-            "workflow_mode": research_plan.get("workflow_mode"),
-            "tasks": [
-                item
-                for item in research_plan.get("tasks") or []
-                if isinstance(item, dict)
-            ],
-            "acceptance_rules": research_plan.get("acceptance_rules") or [],
-            "required_discriminating_tests": research_plan.get(
-                "required_discriminating_tests"
-            )
-            or [],
-            "produced_artifacts": research_plan.get("produced_artifacts") or [],
-            "execution_policy": research_plan.get("execution_policy") or {},
-        }
+    contract = _research_contract_payload(research_plan)
+    if contract is not None:
         lines.extend(
             [
                 "## Binding Research Contract\n\n",

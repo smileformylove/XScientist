@@ -192,6 +192,10 @@ _RUNTIME_IMPORT_ATTRS = {
         "ai_scientist.treesearch.bfts_utils",
         "edit_bfts_config_file",
     ),
+    "write_bfts_task_descriptor": (
+        "ai_scientist.treesearch.bfts_utils",
+        "write_bfts_task_descriptor",
+    ),
     "aggregate_plots": ("ai_scientist.perform_plotting", "aggregate_plots"),
     "perform_icbinb_writeup": (
         "ai_scientist.perform_icbinb_writeup",
@@ -2819,6 +2823,10 @@ def _process_single_paper(args):
     Returns:
         结果字典
     """
+    # Worker processes may enter this function without constructing the
+    # parent ``ContinuousPaperGenerator`` first.  Load the new task-descriptor
+    # writer explicitly instead of depending on inherited module globals.
+    _ensure_runtime_imports({"write_bfts_task_descriptor"})
     args = list(args)
     requested_workflow_mode = None
     if len(args) == 39:
@@ -2983,13 +2991,19 @@ def _process_single_paper(args):
             None,
             research_plan=research_plan,
         )
+        bfts_task_path = paper_structure["root"] / "bfts_task.json"
+        write_bfts_task_descriptor(
+            idea,
+            str(bfts_task_path),
+            research_plan=research_plan,
+        )
 
         # 使用论文目录作为实验目录
         exp_dir = str(paper_structure["root"])
 
         config_path = str(bfts_config_path or "bfts_config.yaml")
         idea_config_path = edit_bfts_config_file(
-            config_path, exp_dir, str(idea_path_md)
+            config_path, exp_dir, str(bfts_task_path)
         )
 
         experiment_result = perform_experiments_bfts(idea_config_path)

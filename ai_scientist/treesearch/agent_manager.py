@@ -236,6 +236,23 @@ Your research idea:\n\n
         )
         if "Code" in self.task_desc:
             task_desc += "Code To Use:\n" + self.task_desc["Code"] + "\n"
+        research_contract = self.task_desc.get("XScientist Research Contract")
+        if isinstance(research_contract, dict):
+            task_desc += (
+                "\nBinding XScientist Research Contract:\n"
+                "This contract is an execution constraint, not optional context. "
+                "Run the required tasks and discriminating tests, preserve failed "
+                "or refuting outcomes, and report every deviation. Do not claim "
+                "completion while an acceptance rule or required artifact is "
+                "missing.\n"
+                + json.dumps(
+                    research_contract,
+                    indent=2,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
         return task_desc
 
     def _create_initial_stage(self):
