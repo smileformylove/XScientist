@@ -40,8 +40,12 @@ class ThinkingConfig:
 class StageConfig:
     model: str
     temp: float
-    thinking: ThinkingConfig
-    betas: str
+    # Historical and packaged BFTS configs predate these experimental knobs.
+    # They are not consumed by the current backends, so absence must remain a
+    # stable, explicit default instead of an OmegaConf mandatory-value trap
+    # during checkpoint fingerprinting.
+    thinking: Optional[ThinkingConfig] = None
+    betas: str = ""
     max_tokens: Optional[int] = None
 
 

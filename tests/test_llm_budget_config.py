@@ -18,7 +18,11 @@ from ai_scientist.treesearch.agent_manager import (
 )
 from ai_scientist.treesearch.journal import Journal, Node
 from ai_scientist.treesearch.utils.metric import MetricValue
-from ai_scientist.treesearch.utils.config import load_cfg, prep_cfg
+from ai_scientist.treesearch.bfts_utils import (
+    edit_bfts_config_file,
+    write_bfts_task_descriptor,
+)
+from ai_scientist.treesearch.utils.config import load_cfg, load_task_desc, prep_cfg
 from ai_scientist.utils.llm_budget import llm_budget_manager
 
 
@@ -65,6 +69,68 @@ class LLMBudgetConfigTests(unittest.TestCase):
                 loaded.workspace_dir.parent,
                 (config_dir / "workspaces").resolve(),
             )
+
+    def test_packaged_config_can_checkpoint_and_resume_real_agent_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            task_path = root / "bfts_task.json"
+            task = {
+                "Title": "Confounding probe",
+                "Abstract": "Test an apparent pooled effect.",
+                "Short Hypothesis": "The pooled effect is confounded.",
+                "Experiments": ["pooled comparison", "stratified comparison"],
+                "Risk Factors and Limitations": ["observational assignment"],
+            }
+            write_bfts_task_descriptor(
+                task,
+                str(task_path),
+                research_plan={
+                    "plan_id": "plan-1",
+                    "required_discriminating_tests": ["stratified comparison"],
+                },
+            )
+            config_path = edit_bfts_config_file(
+                str(resolve_bfts_config_path("bfts_config.yaml")),
+                str(root),
+                str(task_path),
+            )
+
+            old_state = os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+            try:
+                cfg = load_cfg(Path(config_path))
+                task_desc = load_task_desc(cfg)
+                manager = AgentManager(
+                    task_desc=task_desc,
+                    cfg=cfg,
+                    workspace_dir=Path(cfg.workspace_dir),
+                )
+                checkpoint = manager._save_checkpoint()
+                self.assertIsNotNone(checkpoint)
+                self.assertTrue(Path(checkpoint).is_file())
+
+                resume_config_path = edit_bfts_config_file(
+                    str(resolve_bfts_config_path("bfts_config.yaml")),
+                    str(root),
+                    str(task_path),
+                    resume_from=str(checkpoint),
+                )
+                resumed_cfg = load_cfg(Path(resume_config_path))
+                restored = AgentManager.from_checkpoint(
+                    checkpoint,
+                    cfg=resumed_cfg,
+                    workspace_dir=Path(resumed_cfg.workspace_dir),
+                    expected_task_desc=task_desc,
+                )
+            finally:
+                if old_state is None:
+                    os.environ.pop("AI_SCIENTIST_LLM_BUDGET_STATE", None)
+                else:
+                    os.environ["AI_SCIENTIST_LLM_BUDGET_STATE"] = old_state
+                llm_budget_manager.configure(max_total_tokens=None, reset=True)
+                llm_budget_manager.export_environment()
+
+            self.assertEqual(restored.task_desc["Title"], task["Title"])
+            self.assertIn("XScientist Research Contract", restored.task_desc)
 
     def test_load_cfg_resolves_relative_checkpoint_from_config_directory(self) -> None:
         with tempfile.TemporaryDirectory() as td:
