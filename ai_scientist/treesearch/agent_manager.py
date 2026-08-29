@@ -14,6 +14,7 @@ from .parallel_agent import (
     _configured_multi_seed_values,
     _inject_seed_bootstrap,
     _semantic_code_hash,
+    _stage_max_tokens,
     _validate_confirmation_seed_set,
 )
 from .errors import ExperimentCannotContinueError, MultiSeedGateRejectedError
@@ -1865,6 +1866,7 @@ Your research idea:\n\n
                 func_spec=stage_completion_eval_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             )
             _validate_stage_completion_evaluation(evaluation)
             if evaluation["is_complete"]:
@@ -2455,6 +2457,7 @@ Your research idea:\n\n
                 func_spec=substage_goal_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             )
 
             # Format the response into a structured goal string
@@ -3093,6 +3096,7 @@ Your research idea:\n\n
                 func_spec=stage_config_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             )
             if not STAGE_NAME_COMPONENT_RE.fullmatch(response["name"]):
                 raise FunctionCallValidationError("Stage name is invalid")
@@ -3450,6 +3454,7 @@ Your research idea:\n\n
                 func_spec=stage_progress_eval_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             )
 
             # Log the evaluation for transparency

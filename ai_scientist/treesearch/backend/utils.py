@@ -77,8 +77,16 @@ def backoff_create(
             system_message=budget_system_message,
             max_output_tokens=budget_max_output_tokens,
         )
-        if reservation.timeout_seconds is not None and "timeout" not in kwargs:
-            kwargs["timeout"] = reservation.timeout_seconds
+        if reservation.timeout_seconds is not None:
+            # The remaining wall-time budget is an authority boundary.  It
+            # must be able to shorten a provider/caller timeout that was
+            # already placed in the request kwargs.
+            requested_timeout = kwargs.get("timeout")
+            kwargs["timeout"] = (
+                reservation.timeout_seconds
+                if requested_timeout is None
+                else min(float(requested_timeout), reservation.timeout_seconds)
+            )
     try:
         if reservation is None:
             return create_fn(*args, **kwargs)

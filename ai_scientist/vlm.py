@@ -8,6 +8,7 @@ from typing import Any
 
 from ai_scientist.utils.token_tracker import track_token_usage
 from ai_scientist.utils.llm_budget import llm_budget_manager
+from ai_scientist.errors import LLMResponseContractError
 from ai_scientist.utils.optional_dependencies import (
     import_backoff,
     import_optional_module,
@@ -76,6 +77,38 @@ SUPPORTED_VLM_PROVIDERS = {
 def _is_supported_vlm_model(model: str) -> bool:
     spec = resolve_model_provider(model)
     return spec.provider in SUPPORTED_VLM_PROVIDERS
+
+
+def validate_vlm_response(
+    spec: Any,
+    response: Any,
+    *,
+    expected_choices: int = 1,
+) -> str | None:
+    """Validate the complete custom-provider VLM response envelope."""
+
+    reported_model = _validate_openai_compat_response(
+        spec,
+        response,
+        expected_choices=expected_choices,
+    )
+    if getattr(spec, "provider", None) != "openai_compat":
+        return reported_model
+
+    usage = getattr(response, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+    values = (prompt_tokens, completion_tokens, total_tokens)
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in values
+        )
+        or total_tokens != prompt_tokens + completion_tokens
+    ):
+        raise LLMResponseContractError("Provider response token usage is invalid")
+    return reported_model
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -283,7 +316,7 @@ def get_response_from_vlm(
             prompt=new_msg_history,
         )
 
-        _validate_openai_compat_response(spec, response)
+        validate_vlm_response(spec, response)
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     else:
@@ -442,7 +475,7 @@ def get_batch_responses_from_vlm(
             reservation.settle(response=response)
 
         # Extract content from all responses
-        _validate_openai_compat_response(
+        validate_vlm_response(
             spec,
             response,
             expected_choices=n_responses,

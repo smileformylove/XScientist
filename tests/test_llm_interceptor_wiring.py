@@ -20,6 +20,7 @@ from ai_scientist.protocol.llm_trace import (
     ENV_STAGE,
     ENV_STRICT,
 )
+from ai_scientist.utils.llm_budget import LLMBudgetManager
 
 
 class _FakeUsage:
@@ -205,6 +206,27 @@ class LLMInterceptorWiringTests(unittest.TestCase):
         ]
         self.assertEqual(row["provider"], "openai_compat")
         self.assertEqual(row["model_provenance"]["reported_model"], "glm-5.3")
+
+    def test_custom_route_uses_shorter_remaining_budget_timeout(self) -> None:
+        os.environ["OPENAI_COMPAT_API_KEY"] = "compat-test-key"
+        os.environ["OPENAI_COMPAT_BASE_URL"] = "https://gateway.example/v1"
+        client = _FakeOpenAIClient(_FakeResponse("result", model="glm-5.3"))
+        budget = LLMBudgetManager()
+        budget.configure(max_wall_time_seconds=5)
+
+        with mock.patch.object(llm_mod, "llm_budget_manager", budget):
+            llm_mod.get_response_from_llm(
+                prompt="research-task",
+                client=client,
+                model="openai_compat/glm-5.3",
+                system_message="execute only",
+                temperature=0.0,
+            )
+
+        timeout = client.chat.completions.calls[0]["timeout"]
+        self.assertEqual(llm_mod.OPENAI_COMPAT_CALL_TIMEOUT_SECONDS, 300.0)
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 5)
 
     def test_custom_route_rejects_missing_alias_and_secret_model_without_trace(
         self,

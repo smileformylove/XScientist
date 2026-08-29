@@ -1043,6 +1043,7 @@ def _perform_experiments_bfts_locked(config_path: str):
                 include_code=False,
                 model=summary_cfg.model,
                 temp=summary_cfg.temp,
+                max_tokens=getattr(summary_cfg, "max_tokens", None),
             )
 
             best_node = _progress_best_node(stage, journal)

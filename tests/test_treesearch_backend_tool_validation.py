@@ -32,6 +32,10 @@ from ai_scientist.protocol.llm_trace import (
     ENV_ENABLED,
     ENV_STRICT,
 )
+from ai_scientist.utils.llm_budget import LLMBudgetManager
+from ai_scientist.utils.provider_registry import (
+    OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+)
 
 RESEARCH_DECISION_SPEC = FunctionSpec(
     name="choose_next_experiment",
@@ -576,6 +580,11 @@ def test_central_backend_verifies_and_traces_exact_custom_model_digest_only(
     assert row["model_provenance"]["reported_model"] == "glm-5.3"
     assert row["model_provenance"]["reported_model_exact"] is True
     assert refs == [row["call_receipt_ref"]["hash"]]
+    assert (
+        adapter.query.call_args.kwargs["timeout"]
+        == OPENAI_COMPAT_CALL_TIMEOUT_SECONDS
+        == 300.0
+    )
 
     store = ObjectStore(tmp_path)
     message_digest = store.get_json(row["messages_ref"]["hash"])
@@ -590,6 +599,36 @@ def test_central_backend_verifies_and_traces_exact_custom_model_digest_only(
     )
     for forbidden in (prompt, response, secret_key, endpoint):
         assert forbidden.encode("utf-8") not in persisted
+
+
+def test_backend_budget_timeout_shortens_existing_provider_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ai_scientist.treesearch.backend import utils as backend_utils
+
+    manager = LLMBudgetManager()
+    manager.configure(max_wall_time_seconds=4)
+    seen: dict[str, object] = {}
+    response = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1)
+    )
+
+    def create(**kwargs):
+        seen.update(kwargs)
+        return response
+
+    monkeypatch.setattr(backend_utils, "llm_budget_manager", manager)
+    result = backoff_create(
+        create,
+        (),
+        _budget_model="openai_compat/glm-5.3",
+        _budget_prompt={"task": "bounded"},
+        _budget_max_output_tokens=64,
+        timeout=OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+    )
+
+    assert result is response
+    assert 0 < seen["timeout"] <= 4
 
 
 @pytest.mark.parametrize(

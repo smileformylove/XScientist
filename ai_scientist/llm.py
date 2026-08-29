@@ -16,6 +16,7 @@ from ai_scientist.utils.optional_dependencies import (
     resolve_exception_types,
 )
 from ai_scientist.utils.provider_registry import (
+    OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
     build_openai_compatible_client_kwargs,
     model_provenance as build_model_provenance,
     model_uses_anthropic_client,
@@ -49,7 +50,6 @@ _ANTHROPIC_RETRY_EXCEPTIONS = resolve_exception_types(
 
 MAX_NUM_TOKENS = 4096
 MAX_RESEARCH_PROVIDER_RETRIES = 3
-OPENAI_COMPAT_CALL_TIMEOUT_SECONDS = 30.0
 MAX_BATCH_RESPONSES = 8
 
 

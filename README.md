@@ -274,7 +274,9 @@ its own result: host-side deterministic evaluation, held-out confirmation
 seeds, checkpoint replay, and scientific gates decide progression. The preset
 contains no endpoint, key, headers, or private transport data and applies a
 500,000-token / 6-hour ceiling; configure custom pricing separately if a cost
-limit is required.
+limit is required. A `null` role limit selects XScientist's bounded runtime
+default (currently 8,192 output tokens); it does not delegate an unbounded
+choice to the provider.
 
 For this route, the endpoint must report the exact model identity `glm-5.3`.
 A successful function-call probe does not prove image-input support. If the

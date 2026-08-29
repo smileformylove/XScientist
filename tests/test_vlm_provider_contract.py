@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from ai_scientist import vlm
+from ai_scientist import perform_vlm_review as vlm_review
 from ai_scientist.llm import LLMResponseContractError
 from ai_scientist.protocol import capture_llm_calls
 from ai_scientist.protocol.llm_trace import (
@@ -108,6 +109,7 @@ def test_vlm_custom_route_is_exact_bounded_and_digest_only(
     request = client.chat.completions.calls[0]
     assert request["model"] == "glm-5.3"
     assert request["timeout"] == vlm.OPENAI_COMPAT_CALL_TIMEOUT_SECONDS
+    assert vlm.OPENAI_COMPAT_CALL_TIMEOUT_SECONDS == 300.0
     [row] = [
         json.loads(line)
         for line in (tmp_path / CALLS_JSONL_RELPATH).read_text().splitlines()
@@ -191,6 +193,132 @@ def test_vlm_create_client_preserves_route_qualified_model(monkeypatch) -> None:
         _client_object, model = vlm.create_client("openai_compat/glm-5.3")
 
     assert model == "openai_compat/glm-5.3"
+
+
+def _stub_duplicate_figure_inputs(monkeypatch: pytest.MonkeyPatch) -> mock.Mock:
+    monkeypatch.setattr(vlm_review, "load_paper", lambda _path: "paper")
+    monkeypatch.setattr(
+        vlm_review,
+        "extract_figure_screenshots",
+        lambda *_args, **_kwargs: [
+            {
+                "img_name": "figure_1",
+                "caption": "Figure 1.",
+                "images": [b"image-bytes"],
+                "main_text_figrefs": [],
+            }
+        ],
+    )
+    prepare = mock.Mock(side_effect=_prepared_prompt)
+    monkeypatch.setattr(vlm, "prepare_vlm_prompt", prepare)
+    return prepare
+
+
+def test_duplicate_figure_review_uses_wire_model_and_route_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare = _stub_duplicate_figure_inputs(monkeypatch)
+    _enable_trace(tmp_path, monkeypatch)
+    budget = LLMBudgetManager()
+    budget.configure(max_wall_time_seconds=5)
+    monkeypatch.setattr(vlm, "llm_budget_manager", budget)
+    client = _client(_response(["No duplicates found"]))
+
+    with capture_llm_calls() as refs:
+        result = vlm_review.detect_duplicate_figures(
+            client,
+            "openai_compat/glm-5.3",
+            str(tmp_path / "paper.pdf"),
+        )
+
+    assert result == "No duplicates found"
+    request = client.chat.completions.calls[0]
+    assert request["model"] == "glm-5.3"
+    assert 0 < request["timeout"] <= 5
+    assert prepare.call_args.args[2] == 25
+    snapshot = budget.snapshot()
+    assert set(snapshot["per_model"]) == {"openai_compat/glm-5.3"}
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / CALLS_JSONL_RELPATH).read_text().splitlines()
+    ]
+    assert len(rows) == len(refs) == 1
+    assert rows[0]["model"] == "openai_compat/glm-5.3"
+    assert rows[0]["model_provenance"]["reported_model"] == "glm-5.3"
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (_response(["analysis"], model="glm-5.3-alias"), "identity is not exact"),
+        (_response([], model="glm-5.3"), "unexpected number of choices"),
+        (
+            _response(["analysis"], model="glm-5.3", finish_reason="length"),
+            "did not terminate normally",
+        ),
+        (_response(["  "], model="glm-5.3"), "content is not valid text"),
+    ],
+)
+def test_duplicate_figure_review_rejects_invalid_provider_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response: object,
+    message: str,
+) -> None:
+    _stub_duplicate_figure_inputs(monkeypatch)
+    client = _client(response)
+
+    with pytest.raises(LLMResponseContractError, match=message):
+        vlm_review.detect_duplicate_figures(
+            client,
+            "openai_compat/glm-5.3",
+            str(tmp_path / "paper.pdf"),
+        )
+
+
+def test_duplicate_figure_review_rejects_invalid_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_duplicate_figure_inputs(monkeypatch)
+    response = _response(["analysis"])
+    response.usage.total_tokens = 999
+
+    with pytest.raises(LLMResponseContractError, match="token usage is invalid"):
+        vlm_review.detect_duplicate_figures(
+            _client(response),
+            "openai_compat/glm-5.3",
+            str(tmp_path / "paper.pdf"),
+        )
+
+
+def test_duplicate_figure_provider_error_is_sanitized_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_duplicate_figure_inputs(monkeypatch)
+    secret = "provider-exception-secret-canary"
+    create = mock.Mock(side_effect=RuntimeError(secret))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+
+    with pytest.raises(
+        LLMResponseContractError,
+        match="Duplicate-figure VLM review failed",
+    ) as exc_info:
+        vlm_review.detect_duplicate_figures(
+            client,
+            "openai_compat/glm-5.3",
+            str(tmp_path / "paper.pdf"),
+        )
+
+    captured = capsys.readouterr()
+    rendered = caplog.text + captured.out + captured.err + str(exc_info.value)
+    assert secret not in rendered
 
 
 @pytest.mark.parametrize("count", [0, -1, True, 9])

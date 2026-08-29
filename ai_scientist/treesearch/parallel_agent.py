@@ -138,6 +138,24 @@ def _validate_retry_count(retries: int) -> int:
     return retries
 
 
+def _stage_max_tokens(stage_cfg: Any) -> int | None:
+    """Read a role limit; ``None`` selects the router's bounded global fallback."""
+
+    getter = getattr(stage_cfg, "get", None)
+    if callable(getter):
+        try:
+            value = getter("max_tokens", None)
+        except TypeError:
+            value = getter("max_tokens")
+    else:
+        value = getattr(stage_cfg, "max_tokens", None)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("stage max_tokens must be a positive integer or null")
+    return value
+
+
 def _ablation_code_diff_hash(control_code: str, ablation_code: str) -> str:
     payload = json.dumps(
         {
@@ -1664,6 +1682,7 @@ class MinimalAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.code),
             )
 
             try:
@@ -1706,6 +1725,7 @@ class MinimalAgent:
                     func_spec=review_func_spec,
                     model=self.cfg.agent.feedback.model,
                     temperature=self.cfg.agent.feedback.temp,
+                    max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
                 ),
             )
 
@@ -1861,6 +1881,7 @@ class MinimalAgent:
                 user_message=None,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             )
 
             (
@@ -1934,6 +1955,7 @@ class MinimalAgent:
                         func_spec=plot_selection_spec,
                         model=self.cfg.agent.feedback.model,
                         temperature=self.cfg.agent.feedback.temp,
+                        max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
                     ),
                 )
 
@@ -2007,6 +2029,7 @@ class MinimalAgent:
                 func_spec=vlm_feedback_spec,
                 model=self.cfg.agent.vlm_feedback.model,
                 temperature=self.cfg.agent.vlm_feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.vlm_feedback),
             ),
         )
         print(
@@ -2069,6 +2092,7 @@ class MinimalAgent:
                 func_spec=experiment_summary_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
             ),
         )
 
@@ -2228,6 +2252,7 @@ class ParallelAgent:
             func_spec=metric_selection_spec,
             model=self.cfg.agent.code.model,
             temperature=self.cfg.agent.code.temp,
+            max_tokens=_stage_max_tokens(self.cfg.agent.code),
         )
         metric = response["metric"]
         if metric not in SUPPORTED_DETERMINISTIC_METRICS:
@@ -2246,6 +2271,7 @@ class ParallelAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.code),
             )
 
             try:
@@ -2794,6 +2820,7 @@ class ParallelAgent:
                                 func_spec=metric_parse_spec,
                                 model=cfg.agent.feedback.model,
                                 temperature=cfg.agent.feedback.temp,
+                                max_tokens=_stage_max_tokens(cfg.agent.feedback),
                             ),
                         )
                         # If there is any None value, child_node.metric should be set to WorstMetricValue.
@@ -3036,6 +3063,7 @@ class ParallelAgent:
                 func_spec=hyperparam_idea_spec,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.code),
             )
         return HyperparamTuningIdea(
             name=response["name"],
@@ -3082,6 +3110,7 @@ class ParallelAgent:
                 func_spec=ablation_idea_spec,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                max_tokens=_stage_max_tokens(self.cfg.agent.code),
             )
         return AblationIdea(
             name=response["name"],
@@ -3298,6 +3327,7 @@ class ParallelAgent:
             include_code=False,
             model=summary_cfg.model,
             temp=summary_cfg.temp,
+            max_tokens=_stage_max_tokens(summary_cfg),
         )
 
         print("Submitting tasks to process pool")

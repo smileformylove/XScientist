@@ -16,12 +16,13 @@ from .utils import (
     ResearchDecisionError,
     compile_prompt_to_md,
 )
-from ai_scientist.utils.provider_registry import resolve_model_provider
+from ai_scientist.utils.provider_registry import (
+    OPENAI_COMPAT_CALL_TIMEOUT_SECONDS,
+    resolve_model_provider,
+)
 from ai_scientist.utils.provider_registry import model_provenance
 from ai_scientist.utils.privacy import redact_sensitive_payload, redact_sensitive_text
 from ai_scientist.protocol.llm_trace import record_llm_call
-
-OPENAI_COMPAT_CALL_TIMEOUT_SECONDS = 30.0
 
 
 @lru_cache(maxsize=None)
@@ -108,7 +109,8 @@ def query(
         user_message (PromptType | None): Uncompiled user message (will generate a message following the OpenAI/Anthropic format)
         model (str): string identifier for the model to use (e.g. "gpt-4-turbo")
         temperature (float | None, optional): Temperature to sample at. Defaults to the model-specific default.
-        max_tokens (int | None, optional): Maximum number of tokens to generate. Defaults to the model-specific max tokens.
+        max_tokens (int | None, optional): Maximum output tokens. ``None`` uses
+            the router's bounded global fallback (8192), not a provider default.
         func_spec (FunctionSpec | None, optional): Optional FunctionSpec object defining a function call. If given, the return value will be a dict.
 
     Returns:
@@ -117,6 +119,14 @@ def query(
 
     if func_spec is not None and not isinstance(func_spec, FunctionSpec):
         raise TypeError("func_spec must be a FunctionSpec")
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or max_tokens <= 0
+    ):
+        raise ValueError("max_tokens must be a positive integer or null")
+
+    bounded_max_tokens = 8192 if max_tokens is None else max_tokens
 
     model_kwargs = model_kwargs | {
         "model": model,
@@ -167,11 +177,11 @@ def query(
         system_message = None
         # model_kwargs["temperature"] = 0.5
         model_kwargs["reasoning_effort"] = "high"
-        model_kwargs["max_completion_tokens"] = max_tokens or 8192
+        model_kwargs["max_completion_tokens"] = bounded_max_tokens
         # remove 'temperature' from model_kwargs
         model_kwargs.pop("temperature", None)
     else:
-        model_kwargs["max_tokens"] = max_tokens or 8192
+        model_kwargs["max_tokens"] = bounded_max_tokens
 
     query_func = _resolve_backend_module(model).query
     if provider_env_snapshot is not None:

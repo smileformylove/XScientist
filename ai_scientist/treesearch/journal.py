@@ -51,7 +51,7 @@ def _optional_config_value(config: Any, key: str) -> Any:
     return getattr(config, key, None)
 
 
-def _experiment_notes_summary_route(cfg: Any) -> tuple[str, float]:
+def _experiment_notes_summary_route(cfg: Any) -> tuple[str, float, int | None]:
     """Resolve the stage-notes model without inventing a provider route.
 
     The explicit precedence is ``agent.summary``, then ``report``, then the
@@ -70,6 +70,7 @@ def _experiment_notes_summary_route(cfg: Any) -> tuple[str, float]:
     if summary_cfg is not None:
         model = _optional_config_value(summary_cfg, "model")
         temperature = _optional_config_value(summary_cfg, "temp")
+        max_tokens = _optional_config_value(summary_cfg, "max_tokens")
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"{route_name}.model must be a non-empty string")
         if (
@@ -78,11 +79,19 @@ def _experiment_notes_summary_route(cfg: Any) -> tuple[str, float]:
             or not math.isfinite(float(temperature))
         ):
             raise ValueError(f"{route_name}.temp must be a finite number")
-        return model.strip(), float(temperature)
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or max_tokens <= 0
+        ):
+            raise ValueError(
+                f"{route_name}.max_tokens must be a positive integer or null"
+            )
+        return model.strip(), float(temperature), max_tokens
 
     environment_model = os.environ.get("ZHIPU_DEFAULT_MODEL", "").strip()
     if environment_model:
-        return environment_model, 0.3
+        return environment_model, 0.3, None
     raise ValueError(
         "Experiment-note summary requires cfg.agent.summary, cfg.report, "
         "or ZHIPU_DEFAULT_MODEL"
@@ -650,6 +659,7 @@ class Journal:
                 func_spec=node_selection_spec,
                 model=model,
                 temperature=temperature,
+                max_tokens=_optional_config_value(cfg.agent.select_node, "max_tokens"),
             )
 
             # Find and return the selected node
@@ -788,6 +798,7 @@ class Journal:
             ),
             model=model,
             temperature=model_kwargs.get("temp", 0.3),
+            max_tokens=model_kwargs.get("max_tokens"),
         )
 
         return summary
@@ -879,7 +890,7 @@ class Journal:
         self, workspace_dir: str, stage_name: str, cfg: Any
     ) -> None:
         """Save experimental notes and summaries to files"""
-        model, temperature = _experiment_notes_summary_route(cfg)
+        model, temperature, max_tokens = _experiment_notes_summary_route(cfg)
         notes_dir = os.path.join(workspace_dir, "experiment_notes")
         os.makedirs(notes_dir, exist_ok=True)
 
@@ -923,6 +934,7 @@ class Journal:
             user_message="Generate a comprehensive summary of the experimental findings in this stage",
             model=model,
             temperature=temperature,
+            max_tokens=max_tokens,
         )
 
         atomic_write_text(

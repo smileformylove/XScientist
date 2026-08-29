@@ -1,28 +1,19 @@
 import os
 import hashlib
+import logging
 import pymupdf
 import re
-import base64
 from ai_scientist.vlm import (
     get_response_from_vlm,
     get_batch_responses_from_vlm,
     extract_json_between_markers,
 )
+from ai_scientist.errors import LLMResponseContractError
+from ai_scientist.utils.llm_budget import LLMBudgetExceeded
 
 from ai_scientist.perform_llm_review import load_paper
 
-
-def encode_image_to_base64(image_data):
-    """Encode image data to base64 string."""
-    if isinstance(image_data, str):
-        with open(image_data, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    elif isinstance(image_data, list):
-        return base64.b64encode(image_data[0]).decode("utf-8")
-    elif isinstance(image_data, bytes):
-        return base64.b64encode(image_data).decode("utf-8")
-    else:
-        raise TypeError(f"Unsupported image data type: {type(image_data)}")
+logger = logging.getLogger(__name__)
 
 
 reviewer_system_prompt_base = (
@@ -396,66 +387,35 @@ def detect_duplicate_figures(client, client_model, pdf_path):
         os.makedirs(img_folder_path)
     img_pairs = extract_figure_screenshots(pdf_path, img_folder_path)
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert at identifying duplicate or highly similar images. "
-                "Please analyze these images and determine if they are duplicates or variations of the same visualization. "
-                "Response format: reasoning, followed by `Duplicate figures: <list of duplicate figure names>`."
-                "Make sure you use the exact figure names (e.g. Figure 1, Figure 2b, etc.) as they appear in the paper."
-                "If you find no duplicates, respond with `No duplicates found`."
-            ),
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Are any of these images duplicates or highly similar? If so, please identify which ones are similar and explain why. Focus on content similarity, not just visual style.",
-                }
-            ],
-        },
-    ]
-
-    # Add images in the correct format
-    for img_info in img_pairs:
-        messages[1]["content"].append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{encode_image_to_base64(img_info['images'][0])}"
-                },
-            }
-        )
+    system_message = (
+        "You are an expert at identifying duplicate or highly similar images. "
+        "Analyze whether the supplied figures duplicate or vary the same "
+        "visualization. Use exact figure names. If there are no duplicates, "
+        "respond with `No duplicates found`."
+    )
+    prompt = (
+        "Are any of these images duplicates or highly similar? Identify the "
+        "matching figures and explain why, focusing on content rather than "
+        "visual style. Respond with reasoning followed by "
+        "`Duplicate figures: <list of duplicate figure names>`."
+    )
+    image_paths = [img_info["images"][0] for img_info in img_pairs]
 
     try:
-        from ai_scientist.vlm import budgeted_vlm_provider_call
-
-        response = budgeted_vlm_provider_call(
-            model=client_model,
-            prompt=messages,
-            system_message=messages[0]["content"],
-            max_output_tokens=1000,
-            create=lambda timeout: client.chat.completions.create(
-                model=client_model,
-                messages=messages,
-                max_tokens=1000,
-                **({"timeout": timeout} if timeout is not None else {}),
-            ),
+        analysis, _history = get_response_from_vlm(
+            prompt,
+            image_paths,
+            client,
+            client_model,
+            system_message,
+            max_images=25,
         )
-
-        analysis = response.choices[0].message.content
-
         return analysis
-
-    except Exception as e:
-        from ai_scientist.utils.llm_budget import LLMBudgetExceeded
-
-        if isinstance(e, LLMBudgetExceeded):
-            raise
-        print(f"Error analyzing images: {e}")
-        return {"error": str(e)}
+    except (LLMBudgetExceeded, LLMResponseContractError):
+        raise
+    except Exception:
+        logger.error("Duplicate-figure VLM provider call failed")
+        raise LLMResponseContractError("Duplicate-figure VLM review failed") from None
 
 
 def generate_vlm_img_selection_review(

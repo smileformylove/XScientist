@@ -11,6 +11,7 @@ def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):
         include_code=True,
         model=rcfg.model,
         temp=rcfg.temp,
+        max_tokens=getattr(rcfg, "max_tokens", None),
     )
     system_prompt_dict = {
         "Role": "You are a research assistant that always uses concise language.",
@@ -31,5 +32,5 @@ def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):
         user_message=context_prompt,
         model=rcfg.model,
         temperature=rcfg.temp,
-        max_tokens=4096,
+        max_tokens=getattr(rcfg, "max_tokens", None) or 4096,
     )
