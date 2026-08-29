@@ -166,6 +166,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "preflight_check.py",
                 "ai_scientist/apps/preflight.py",
                 "ai_scientist/resources/configs/bfts_default.yaml",
+                "ai_scientist/resources/configs/bfts_glm53.yaml",
                 "ai_scientist/blank_icbinb_latex/template.tex",
                 "ai_scientist/treesearch/utils/viz_templates/template.html",
                 "ai_scientist/protocol/schemas/manifest.schema.json",

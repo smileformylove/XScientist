@@ -34,6 +34,42 @@ from xscientist.provider_config import (
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_glm53_workspace_keeps_custom_route_and_optional_sections(self) -> None:
+        self.assertEqual(
+            validate_provider_model("custom", "glm-5.3"),
+            ("openai_compat", "openai_compat/glm-5.3"),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "glm53-study"
+            create_workspace(
+                workspace,
+                profile="glm53",
+                provider="custom",
+                model="glm-5.3",
+            )
+
+            provider_payload = json.loads(
+                (workspace / ".xscientist" / "providers.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(provider_payload["active_provider"], "openai_compat")
+            self.assertEqual(
+                provider_payload["providers"]["openai_compat"]["model"],
+                "openai_compat/glm-5.3",
+            )
+
+            config_text = (workspace / "bfts_config.yaml").read_text(encoding="utf-8")
+            config = yaml.safe_load(config_text)
+            for role in ("code", "feedback", "vlm_feedback", "summary"):
+                self.assertEqual(
+                    config["agent"][role]["model"], "openai_compat/glm-5.3"
+                )
+            self.assertEqual(config["report"]["model"], "openai_compat/glm-5.3")
+            self.assertNotIn("select_node", config["agent"])
+            self.assertNotIn("OPENAI_COMPAT_API_KEY", config_text)
+            self.assertNotIn("OPENAI_COMPAT_BASE_URL", config_text)
+
     def test_ollama_model_discovery_and_bare_name_normalization(self) -> None:
         response = io.StringIO(
             json.dumps({"models": [{"name": "qwen2.5:7b"}, {"name": "qwen3:1.7b"}]})

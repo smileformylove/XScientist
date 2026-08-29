@@ -6,6 +6,7 @@ from pathlib import Path
 _CONFIG_NAMES = {
     "default": "bfts_default.yaml",
     "deep": "bfts_deep.yaml",
+    "glm53": "bfts_glm53.yaml",
 }
 
 _LATEX_TEMPLATE_NAMES = {
@@ -48,6 +49,10 @@ def resolve_bfts_config_path(
         "bfts_config.yaml": "default",
         "deep": "deep",
         "bfts_config_deep.yaml": "deep",
+        "glm53": "glm53",
+        "glm-5.3": "glm53",
+        "bfts_glm53.yaml": "glm53",
+        "bfts_config_glm53.yaml": "glm53",
     }
     candidate = Path(text).expanduser()
     if candidate.is_file():
@@ -66,9 +71,10 @@ def resolve_bfts_config_path(
     )
     if profile is not None:
         return bfts_config_path(profile)
+    choices = ", ".join(repr(name) for name in sorted(_CONFIG_NAMES))
     raise FileNotFoundError(
-        f"BFTS config not found: {value}. Use an existing YAML path or "
-        "the profile name 'default'/'deep'."
+        f"BFTS config not found: {value}. Use an existing YAML path or one of "
+        f"the packaged profiles: {choices}."
     )
 
 

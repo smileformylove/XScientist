@@ -1,0 +1,79 @@
+data_dir: "data"
+preprocess_data: false
+goal: null
+eval: null
+log_dir: logs
+workspace_dir: workspaces
+copy_data: true
+exp_name: run
+exec:
+  timeout: 3600
+  agent_file_name: runfile.py
+  format_tb_ipython: false
+  backend: auto
+  require_isolation: true
+  docker_image: xscientist-exec:latest
+  network: none
+  allow_experiment_network: false
+  memory: 4g
+  cpus: 2.0
+  pids_limit: 256
+  read_only_root: true
+  max_output_chars: 200000
+  max_workspace_bytes: 10737418240
+  max_workspace_files: 100000
+generate_report: true
+report:
+  model: openai_compat/glm-5.3
+  temp: 1.0
+experiment:
+  num_syn_datasets: 3
+debug:
+  stage4: false
+llm_budget:
+  max_total_tokens: 500000
+  max_cost_usd: null
+  max_wall_time_seconds: 21600
+  prices_per_million: {}
+agent:
+  type: parallel
+  num_workers: 1
+  stages:
+    stage1_max_iters: 10
+    stage2_max_iters: 8
+    stage3_max_iters: 8
+    stage4_max_iters: 10
+  steps: 3
+  k_fold_validation: 1
+  multi_seed_eval:
+    num_seeds: 3
+    # Confirmation seeds are held out from the selection/training seed (42).
+    seeds: [123, 456, 789]
+    max_relative_ci_half_width: 0.25
+    absolute_ci_floor: 0.01
+  evidence_gate:
+    minimum_datasets: 3
+    stage2_min_improved: 2
+    stage3_min_improved: 3
+  expose_prediction: false
+  data_preview: false
+  code:
+    model: openai_compat/glm-5.3
+    temp: 1.0
+    max_tokens: 8192
+  feedback:
+    model: openai_compat/glm-5.3
+    temp: 0.5
+    max_tokens: 4096
+  vlm_feedback:
+    model: openai_compat/glm-5.3
+    temp: 0.5
+    max_tokens: null
+  summary:
+    model: openai_compat/glm-5.3
+    temp: 1.0
+    max_tokens: null
+  search:
+    max_debug_depth: 2
+    debug_prob: 0.3
+    num_drafts: 1

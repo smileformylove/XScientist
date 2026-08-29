@@ -201,6 +201,32 @@ xscientist provider test custom --json
 `provider test` 会发起一次明确的最小请求，并比较客户端发送的模型和端点返回的
 模型。如果网关静默切换到较小模型，会标记为未验证；测试不会保存响应正文。
 
+### 把 GLM-5.3 作为科研执行者
+
+通过自定义 OpenAI-compatible 路由使用 GLM-5.3 时，传输参数只放在权限受限的
+Provider 配置中，并显式选择带路由前缀的模型：
+
+```bash
+xscientist provider add custom \
+  --model glm-5.3 \
+  --base-url "https://your-compatible-service.example/v1" \
+  --non-interactive
+xscientist provider test custom --json
+xscientist start ./glm53-study \
+  --provider custom \
+  --model openai_compat/glm-5.3
+```
+
+Python SDK 和底层 `--bfts-config glm53` 流程也可以直接使用内置的 `glm53` BFTS
+预设。它把 `openai_compat/glm-5.3` 分配给代码生成、执行反馈、图表审查、阶段总结
+和最终报告；但 GLM 无权自行晋级结果，流程推进仍由宿主确定性评估、held-out 确认
+种子、checkpoint 重放和科研门禁决定。该预设不包含 endpoint、key、headers 或任何
+私有传输信息，并设置 500,000 token / 6 小时上限；如果需要成本上限，必须另行
+配置自定义模型价格。
+
+该路由要求端点返回的模型身份精确等于 `glm-5.3`。文本探针通过不代表图像输入
+一定可用；如果端点不能接收图像，VLM 图表审查会安全失败，不会静默切换模型。
+
 脚本和 CI 应显式写出所有重要选择：
 
 ```bash

@@ -29,12 +29,63 @@ from xscientist.provider_config import (
     load_workspace_environment,
     provider_statuses,
     resolve_env_file,
+    update_bfts_models,
     validate_custom_base_url,
     workspace_environment,
 )
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_bfts_model_update_preserves_optional_agent_section_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with_optional = Path(td) / "with-optional.yaml"
+            with_optional.write_text(
+                yaml.safe_dump(
+                    {
+                        "report": {"model": "old/report"},
+                        "agent": {
+                            "code": {"model": "old/code"},
+                            "feedback": {"model": "old/feedback"},
+                            "vlm_feedback": {"model": "old/vlm"},
+                            "summary": {"model": "old/summary"},
+                            "select_node": {"model": "old/planner"},
+                        },
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            without_optional = Path(td) / "without-optional.yaml"
+            without_optional.write_text(
+                yaml.safe_dump(
+                    {
+                        "report": {"model": "old/report"},
+                        "agent": {"code": {"model": "old/code"}},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            model = "openai_compat/glm-5.3"
+            self.assertTrue(update_bfts_models(with_optional, model))
+            self.assertTrue(update_bfts_models(without_optional, model))
+
+            updated = yaml.safe_load(with_optional.read_text(encoding="utf-8"))
+            self.assertEqual(updated["report"]["model"], model)
+            for role in (
+                "code",
+                "feedback",
+                "vlm_feedback",
+                "summary",
+                "select_node",
+            ):
+                self.assertEqual(updated["agent"][role]["model"], model)
+
+            minimal = yaml.safe_load(without_optional.read_text(encoding="utf-8"))
+            self.assertNotIn("summary", minimal["agent"])
+            self.assertNotIn("select_node", minimal["agent"])
+
     def test_loading_two_workspaces_does_not_reuse_managed_provider_values(
         self,
     ) -> None:

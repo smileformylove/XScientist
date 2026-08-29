@@ -231,6 +231,37 @@ to the model reported by the endpoint. A mismatch (for example a gateway
 silently selecting a smaller model) is reported as unverified; the response
 content is never stored by the test.
 
+### GLM-5.3 as the research executor
+
+To use GLM-5.3 through a custom OpenAI-compatible route, keep transport values
+in the protected provider configuration and select the route-qualified model:
+
+```bash
+xscientist provider add custom \
+  --model glm-5.3 \
+  --base-url "https://your-compatible-service.example/v1" \
+  --non-interactive
+xscientist provider test custom --json
+xscientist start ./glm53-study \
+  --provider custom \
+  --model openai_compat/glm-5.3
+```
+
+The packaged `glm53` BFTS preset is also available to the Python SDK and
+low-level `--bfts-config glm53` workflows. It assigns
+`openai_compat/glm-5.3` to code, execution feedback, chart review, stage
+summary, and final report generation. It does not give GLM authority to promote
+its own result: host-side deterministic evaluation, held-out confirmation
+seeds, checkpoint replay, and scientific gates decide progression. The preset
+contains no endpoint, key, headers, or private transport data and applies a
+500,000-token / 6-hour ceiling; configure custom pricing separately if a cost
+limit is required.
+
+For this route, the endpoint must report the exact model identity `glm-5.3`.
+A successful text probe does not prove image-input support. If the endpoint
+cannot accept images, VLM chart review fails closed instead of silently
+switching models.
+
 For scripts and CI, make every consequential choice explicit:
 
 ```bash

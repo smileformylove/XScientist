@@ -179,7 +179,13 @@ def _configured_models(payload: dict) -> list[str]:
         models.append(str(report.get("model") or "").strip())
     agent = payload.get("agent")
     if isinstance(agent, dict):
-        for key in ("code", "feedback", "vlm_feedback"):
+        for key in (
+            "code",
+            "feedback",
+            "vlm_feedback",
+            "summary",
+            "select_node",
+        ):
             section = agent.get(key)
             if isinstance(section, dict):
                 models.append(str(section.get("model") or "").strip())

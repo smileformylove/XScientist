@@ -25,6 +25,30 @@ def _write_session(path: Path, *, username: str = "smoke-user") -> None:
 
 
 class PreflightCheckTests(unittest.TestCase):
+    def test_configured_models_include_existing_optional_agent_routes(self) -> None:
+        payload = {
+            "report": {"model": "openai_compat/report-model"},
+            "agent": {
+                "code": {"model": "openai_compat/code-model"},
+                "feedback": {"model": "openai_compat/feedback-model"},
+                "vlm_feedback": {"model": "openai_compat/vlm-model"},
+                "summary": {"model": "openai_compat/summary-model"},
+                "select_node": {"model": "openai_compat/planner-model"},
+            },
+        }
+
+        self.assertEqual(
+            preflight_check._configured_models(payload),
+            [
+                "openai_compat/report-model",
+                "openai_compat/code-model",
+                "openai_compat/feedback-model",
+                "openai_compat/vlm-model",
+                "openai_compat/summary-model",
+                "openai_compat/planner-model",
+            ],
+        )
+
     def test_bfts_config_checks_selected_model_and_exact_docker_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "bfts.yaml"

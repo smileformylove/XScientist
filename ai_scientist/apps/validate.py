@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import importlib
 import json
 import os
@@ -15,6 +16,89 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIN_PYTHON = (3, 10)
 _IGNORED_PATH_PARTS = {"__pycache__", "tests"}
+_GLM53_MODEL = "openai_compat/glm-5.3"
+_GLM53_MAX_TOTAL_TOKENS = 500_000
+_GLM53_MAX_WALL_TIME_SECONDS = 21_600
+_GLM53_FORBIDDEN_CONFIG_KEY_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "base_url",
+    "endpoint",
+    "headers",
+)
+
+
+def _nested_config_keys(value: object) -> list[str]:
+    if isinstance(value, Mapping):
+        return [str(key).lower() for key in value] + [
+            nested for child in value.values() for nested in _nested_config_keys(child)
+        ]
+    if isinstance(value, list):
+        return [nested for child in value for nested in _nested_config_keys(child)]
+    return []
+
+
+def _is_positive_limit(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _validate_glm53_profile(profile: object) -> None:
+    if not isinstance(profile, dict):
+        raise RuntimeError("Installed GLM-5.3 BFTS profile is invalid")
+    agent = profile.get("agent")
+    if not isinstance(agent, dict):
+        raise RuntimeError("Installed GLM-5.3 BFTS agent profile is invalid")
+
+    models = [
+        ((profile.get("report") or {}).get("model")),
+        *(
+            (agent.get(role) or {}).get("model")
+            for role in ("code", "feedback", "vlm_feedback", "summary")
+        ),
+    ]
+    if models != [_GLM53_MODEL] * 5 or "select_node" in agent:
+        raise RuntimeError("Installed GLM-5.3 BFTS model routing is invalid")
+
+    forbidden_keys = {
+        key
+        for key in _nested_config_keys(profile)
+        if any(fragment in key for fragment in _GLM53_FORBIDDEN_CONFIG_KEY_FRAGMENTS)
+    }
+    serialized = json.dumps(profile, ensure_ascii=True, sort_keys=True).lower()
+    if forbidden_keys or "sk-" in serialized or "://" in serialized:
+        raise RuntimeError("Installed GLM-5.3 BFTS profile contains transport data")
+
+    execution = profile.get("exec") or {}
+    if (
+        execution.get("require_isolation") is not True
+        or execution.get("network") != "none"
+        or execution.get("allow_experiment_network") is not False
+        or execution.get("read_only_root") is not True
+        or not _is_positive_limit(execution.get("timeout"))
+    ):
+        raise RuntimeError("Installed GLM-5.3 BFTS isolation policy is invalid")
+
+    multi_seed = agent.get("multi_seed_eval") or {}
+    seeds = multi_seed.get("seeds")
+    if (
+        not isinstance(seeds, list)
+        or len(seeds) < 3
+        or not all(
+            isinstance(seed, int) and not isinstance(seed, bool) for seed in seeds
+        )
+        or len(seeds) != len(set(seeds))
+        or multi_seed.get("num_seeds") != len(seeds)
+        or 42 in seeds
+    ):
+        raise RuntimeError("Installed GLM-5.3 confirmation seeds are not held out")
+
+    budget = profile.get("llm_budget") or {}
+    if (
+        budget.get("max_total_tokens") != _GLM53_MAX_TOTAL_TOKENS
+        or budget.get("max_wall_time_seconds") != _GLM53_MAX_WALL_TIME_SECONDS
+    ):
+        raise RuntimeError("Installed GLM-5.3 BFTS budget contract is invalid")
 
 
 def is_source_distribution() -> bool:
@@ -76,12 +160,15 @@ def run_installed_py_compile() -> None:
 
 def run_installed_package_smoke() -> None:
     import xscientist
+    from omegaconf import OmegaConf
+
     from ai_scientist.protocol.schemas import load_schema
     from ai_scientist.resources import bfts_config_path, latex_template_dir
 
     required = [
         bfts_config_path("default"),
         bfts_config_path("deep"),
+        bfts_config_path("glm53"),
         latex_template_dir("icbinb") / "template.tex",
         latex_template_dir("icml") / "template.tex",
     ]
@@ -98,6 +185,10 @@ def run_installed_package_smoke() -> None:
     }
     if not required_fields.issubset(manifest_schema.get("required") or []):
         raise RuntimeError("Installed ARA manifest schema is invalid")
+    glm53 = OmegaConf.to_container(
+        OmegaConf.load(bfts_config_path("glm53")), resolve=True
+    )
+    _validate_glm53_profile(glm53)
     if not xscientist.__version__:
         raise RuntimeError("Installed xscientist package has no version")
     print(
