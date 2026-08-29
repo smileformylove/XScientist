@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from omegaconf import OmegaConf
 
@@ -490,9 +491,14 @@ class LLMBudgetConfigTests(unittest.TestCase):
                     checkpoint, cfg=drifted_cfg, workspace_dir=workspace
                 )
 
-            with self.assertRaisesRegex(ValueError, "workspace mismatch"):
+            different_workspace = root / "other-workspace"
+            (different_workspace / "input").mkdir(parents=True)
+            (different_workspace / "input" / "different.txt").write_text(
+                "different input", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "input tree fingerprint"):
                 AgentManager.from_checkpoint(
-                    checkpoint, cfg=cfg, workspace_dir=root / "other-workspace"
+                    checkpoint, cfg=cfg, workspace_dir=different_workspace
                 )
 
             with self.assertRaisesRegex(ValueError, "current task"):
@@ -507,6 +513,200 @@ class LLMBudgetConfigTests(unittest.TestCase):
                         "Experiments": [],
                         "Risk Factors and Limitations": [],
                     },
+                )
+
+    def test_checkpoint_binds_input_tree_add_modify_and_delete(self) -> None:
+        mutations = {
+            "add": lambda input_dir: (input_dir / "added.txt").write_text(
+                "new", encoding="utf-8"
+            ),
+            "modify": lambda input_dir: (input_dir / "modify.txt").write_text(
+                "omega", encoding="utf-8"
+            ),
+            "delete": lambda input_dir: (input_dir / "delete.txt").unlink(),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for mutation_name, mutate in mutations.items():
+                with self.subTest(mutation=mutation_name):
+                    case_root = root / mutation_name
+                    workspace = case_root / "workspaces" / "0-run"
+                    input_dir = workspace / "input"
+                    log_dir = case_root / "logs" / "0-run"
+                    input_dir.mkdir(parents=True)
+                    log_dir.mkdir(parents=True)
+                    (input_dir / "modify.txt").write_text("alpha", encoding="utf-8")
+                    (input_dir / "delete.txt").write_text("keep", encoding="utf-8")
+                    cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
+                    cfg.log_dir = log_dir
+                    cfg.workspace_dir = workspace
+                    manager = AgentManager(
+                        task_desc='{"Title":"T","Abstract":"A",'
+                        '"Short Hypothesis":"H","Experiments":[],'
+                        '"Risk Factors and Limitations":[]}',
+                        cfg=cfg,
+                        workspace_dir=workspace,
+                    )
+                    checkpoint = manager._save_checkpoint()
+
+                    unchanged = AgentManager.from_checkpoint(
+                        checkpoint, cfg=cfg, workspace_dir=workspace
+                    )
+                    self.assertEqual(unchanged.task_desc["Title"], "T")
+
+                    mutate(input_dir)
+                    with self.assertRaisesRegex(
+                        ValueError, "input tree fingerprint mismatch"
+                    ):
+                        AgentManager.from_checkpoint(
+                            checkpoint, cfg=cfg, workspace_dir=workspace
+                        )
+
+    def test_checkpoint_input_identity_is_portable_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source-data"
+            (source / "nested").mkdir(parents=True)
+            (source / "nested" / "values.csv").write_text(
+                "group,value\na,1\n", encoding="utf-8"
+            )
+
+            workspace = root / "first-location" / "0-run"
+            input_dir = workspace / "input"
+            input_dir.mkdir(parents=True)
+            try:
+                (input_dir / "dataset").symlink_to(source, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            log_dir = root / "logs" / "0-run"
+            log_dir.mkdir(parents=True)
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
+            cfg.log_dir = log_dir
+            cfg.workspace_dir = workspace
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            checkpoint = manager._save_checkpoint()
+
+            relocated = root / "relocated" / "renamed-run"
+            relocated_file = relocated / "input" / "dataset" / "nested" / "values.csv"
+            relocated_file.parent.mkdir(parents=True)
+            relocated_file.write_text("group,value\na,1\n", encoding="utf-8")
+            relocated_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+            relocated_cfg.workspace_dir = relocated
+            relocated_cfg.log_dir = root / "relocated-logs"
+
+            restored = AgentManager.from_checkpoint(
+                checkpoint,
+                cfg=relocated_cfg,
+                workspace_dir=relocated,
+            )
+            self.assertEqual(restored.workspace_dir, relocated)
+
+            serialized = checkpoint.read_text(encoding="utf-8")
+            self.assertNotIn(str(workspace), serialized)
+            self.assertNotIn(str(source), serialized)
+            self.assertNotIn("values.csv", serialized)
+            input_identity = json.loads(serialized)["payload"]["input_tree"]
+            self.assertEqual(set(input_identity), {"schema", "fingerprint"})
+
+    def test_input_tree_fingerprint_fails_closed_on_unsafe_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            input_dir = workspace / "input"
+            input_dir.mkdir(parents=True)
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
+            cfg.log_dir = root / "logs" / "0-run"
+            cfg.workspace_dir = workspace
+
+            if hasattr(os, "mkfifo"):
+                fifo = input_dir / "stream"
+                os.mkfifo(fifo)
+                with self.assertRaisesRegex(ValueError, "non-regular input entry"):
+                    AgentManager(
+                        task_desc='{"Title":"T","Abstract":"A",'
+                        '"Short Hypothesis":"H","Experiments":[],'
+                        '"Risk Factors and Limitations":[]}',
+                        cfg=cfg,
+                        workspace_dir=workspace,
+                    )
+                fifo.unlink()
+
+            (input_dir / "one.txt").write_text("1", encoding="utf-8")
+            (input_dir / "two.txt").write_text("2", encoding="utf-8")
+            with patch(
+                "ai_scientist.treesearch.agent_manager.INPUT_TREE_MAX_ENTRIES", 1
+            ):
+                with self.assertRaisesRegex(ValueError, "entry limit"):
+                    AgentManager(
+                        task_desc='{"Title":"T","Abstract":"A",'
+                        '"Short Hypothesis":"H","Experiments":[],'
+                        '"Risk Factors and Limitations":[]}',
+                        cfg=cfg,
+                        workspace_dir=workspace,
+                    )
+            with patch("ai_scientist.treesearch.agent_manager.INPUT_TREE_MAX_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "byte limit"):
+                    AgentManager(
+                        task_desc='{"Title":"T","Abstract":"A",'
+                        '"Short Hypothesis":"H","Experiments":[],'
+                        '"Risk Factors and Limitations":[]}',
+                        cfg=cfg,
+                        workspace_dir=workspace,
+                    )
+
+    def test_input_tree_fingerprint_rejects_symlink_cycles_and_legacy_v3(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspaces" / "0-run"
+            input_dir = workspace / "input"
+            nested = input_dir / "nested"
+            nested.mkdir(parents=True)
+            cfg = OmegaConf.load(resolve_bfts_config_path("bfts_config.yaml"))
+            cfg.log_dir = root / "logs" / "0-run"
+            cfg.workspace_dir = workspace
+            try:
+                broken_link = nested / "broken"
+                broken_link.symlink_to(root / "does-not-exist")
+                with self.assertRaisesRegex(ValueError, "broken or invalid link"):
+                    AgentManager(
+                        task_desc='{"Title":"T","Abstract":"A",'
+                        '"Short Hypothesis":"H","Experiments":[],'
+                        '"Risk Factors and Limitations":[]}',
+                        cfg=cfg,
+                        workspace_dir=workspace,
+                    )
+                broken_link.unlink()
+                (nested / "cycle").symlink_to(input_dir, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "symlink cycle"):
+                AgentManager(
+                    task_desc='{"Title":"T","Abstract":"A",'
+                    '"Short Hypothesis":"H","Experiments":[],'
+                    '"Risk Factors and Limitations":[]}',
+                    cfg=cfg,
+                    workspace_dir=workspace,
+                )
+
+            (nested / "cycle").unlink()
+            manager = AgentManager(
+                task_desc='{"Title":"T","Abstract":"A","Short Hypothesis":"H",'
+                '"Experiments":[],"Risk Factors and Limitations":[]}',
+                cfg=cfg,
+                workspace_dir=workspace,
+            )
+            checkpoint = manager._save_checkpoint()
+            envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+            envelope["schema"] = "xscientist.bfts.checkpoint.v3"
+            checkpoint.write_text(json.dumps(envelope), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not bind input content"):
+                AgentManager.from_checkpoint(
+                    checkpoint, cfg=cfg, workspace_dir=workspace
                 )
 
     def test_checkpoint_rejects_inconsistent_stage_structure(self) -> None:

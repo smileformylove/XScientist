@@ -4,6 +4,8 @@ from enum import Enum, auto
 from pathlib import Path
 import logging
 import hashlib
+import os
+import stat
 from .parallel_agent import ParallelAgent
 from .journal import Journal, Node
 import copy
@@ -18,7 +20,11 @@ from ai_scientist.utils.privacy import portable_path
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_SCHEMA = "xscientist.bfts.checkpoint.v3"
+CHECKPOINT_SCHEMA = "xscientist.bfts.checkpoint.v4"
+INPUT_TREE_SCHEMA = "xscientist.bfts.input-tree.v1"
+INPUT_TREE_MAX_ENTRIES = 100_000
+INPUT_TREE_MAX_BYTES = 10 * 1024 * 1024 * 1024
+INPUT_TREE_MAX_DEPTH = 256
 
 
 def _canonical_json(value: Any) -> str:
@@ -52,6 +58,170 @@ def _checkpoint_config_projection(cfg: Any) -> dict:
         "exec": plain(cfg.exec),
         "experiment": plain(cfg.experiment),
         "debug": plain(cfg.debug),
+    }
+
+
+def _input_tree_manifest(workspace_dir: Path) -> dict:
+    """Build a portable, content-addressed manifest for ``workspace/input``.
+
+    The manifest exists only in memory. Checkpoints persist its digest, not
+    absolute paths, file names, link targets, or file contents. Symlinks are
+    followed so the default linked-data workspace and a copied workspace have
+    the same identity when their effective inputs are identical.
+    """
+
+    input_dir = Path(workspace_dir) / "input"
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    def fail(reason: str) -> None:
+        raise ValueError(f"Cannot safely fingerprint BFTS input tree: {reason}")
+
+    def stable_stat_fields(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    def encoded_name(path: Path) -> str:
+        # Hex encoding makes even surrogate-escaped POSIX names canonical and
+        # avoids retaining readable input names in the in-memory manifest.
+        return os.fsencode(path.name).hex()
+
+    def add_entry(entry: dict[str, Any]) -> None:
+        if len(entries) >= INPUT_TREE_MAX_ENTRIES:
+            fail(f"entry limit ({INPUT_TREE_MAX_ENTRIES}) exceeded")
+        entries.append(entry)
+
+    def hash_file(path: Path, initial_stat: os.stat_result) -> str:
+        nonlocal total_bytes
+        if total_bytes + initial_stat.st_size > INPUT_TREE_MAX_BYTES:
+            fail(f"byte limit ({INPUT_TREE_MAX_BYTES}) exceeded")
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            final_stat = path.stat()
+        except OSError as exc:
+            raise ValueError(
+                "Cannot safely fingerprint BFTS input tree: unreadable file"
+            ) from exc
+        if stable_stat_fields(initial_stat) != stable_stat_fields(final_stat):
+            fail("file changed during traversal")
+        total_bytes += final_stat.st_size
+        return "sha256:" + digest.hexdigest()
+
+    def walk_directory(
+        directory: Path,
+        relative_parts: tuple[str, ...],
+        ancestor_directories: frozenset[tuple[int, int]],
+    ) -> None:
+        if len(relative_parts) > INPUT_TREE_MAX_DEPTH:
+            fail(f"depth limit ({INPUT_TREE_MAX_DEPTH}) exceeded")
+        try:
+            directory_before = directory.stat()
+            directory_link_before = directory.lstat()
+        except OSError as exc:
+            raise ValueError(
+                "Cannot safely fingerprint BFTS input tree: invalid directory link"
+            ) from exc
+        if not stat.S_ISDIR(directory_before.st_mode):
+            fail("input root is not a directory")
+        directory_identity = (directory_before.st_dev, directory_before.st_ino)
+        if directory_identity in ancestor_directories:
+            fail("directory symlink cycle detected")
+        ancestors = ancestor_directories | {directory_identity}
+        try:
+            children = sorted(
+                directory.iterdir(), key=lambda child: os.fsencode(child.name)
+            )
+        except OSError as exc:
+            raise ValueError(
+                "Cannot safely fingerprint BFTS input tree: unreadable directory"
+            ) from exc
+
+        for child in children:
+            child_parts = relative_parts + (encoded_name(child),)
+            manifest_path = "/".join(child_parts)
+            try:
+                link_before = child.lstat()
+                resolved_before = child.stat()
+            except OSError as exc:
+                raise ValueError(
+                    "Cannot safely fingerprint BFTS input tree: broken or invalid link"
+                ) from exc
+
+            if stat.S_ISDIR(resolved_before.st_mode):
+                add_entry({"path": manifest_path, "type": "directory"})
+                walk_directory(child, child_parts, ancestors)
+            elif stat.S_ISREG(resolved_before.st_mode):
+                add_entry(
+                    {
+                        "path": manifest_path,
+                        "type": "file",
+                        "size": resolved_before.st_size,
+                        "digest": hash_file(child, resolved_before),
+                    }
+                )
+            else:
+                fail("non-regular input entry encountered")
+
+            try:
+                link_after = child.lstat()
+            except OSError as exc:
+                raise ValueError(
+                    "Cannot safely fingerprint BFTS input tree: entry changed during traversal"
+                ) from exc
+            if stable_stat_fields(link_before) != stable_stat_fields(link_after):
+                fail("entry changed during traversal")
+
+        try:
+            directory_after = directory.stat()
+            directory_link_after = directory.lstat()
+        except OSError as exc:
+            raise ValueError(
+                "Cannot safely fingerprint BFTS input tree: directory changed during traversal"
+            ) from exc
+        if stable_stat_fields(directory_before) != stable_stat_fields(directory_after):
+            fail("directory changed during traversal")
+        if stable_stat_fields(directory_link_before) != stable_stat_fields(
+            directory_link_after
+        ):
+            fail("directory link changed during traversal")
+
+    try:
+        input_dir.lstat()
+    except FileNotFoundError:
+        return {
+            "schema": INPUT_TREE_SCHEMA,
+            "root": "missing",
+            "entries": [],
+            "total_file_bytes": 0,
+        }
+    except OSError as exc:
+        raise ValueError(
+            "Cannot safely fingerprint BFTS input tree: inaccessible input root"
+        ) from exc
+
+    walk_directory(input_dir, (), frozenset())
+    return {
+        "schema": INPUT_TREE_SCHEMA,
+        "root": "directory",
+        "entries": entries,
+        "total_file_bytes": total_bytes,
+    }
+
+
+def _input_tree_identity(workspace_dir: Path) -> dict[str, str]:
+    manifest = _input_tree_manifest(workspace_dir)
+    return {
+        "schema": INPUT_TREE_SCHEMA,
+        "fingerprint": _sha256_json(manifest),
     }
 
 
@@ -175,6 +345,10 @@ class AgentManager:
                 raise ValueError(f"Key {k} not found in task_desc")
         self.cfg = cfg
         self.workspace_dir = workspace_dir
+        # Capture the immutable scientific input identity once. Repeated stage
+        # checkpoints then bind to the run's original inputs without re-hashing
+        # large datasets on every save.
+        self._input_tree_identity = _input_tree_identity(workspace_dir)
         self.current_stage_number = 0
         self.stages: List[Stage] = []
         self.current_stage: Optional[Stage] = None
@@ -324,7 +498,7 @@ Your research idea:\n\n
             "completed_stages": self.completed_stages,
             "current_stage_number": self.current_stage_number,
             "task_desc": self.task_desc,
-            "workspace_dir": self.workspace_dir,
+            "input_tree": self._input_tree_identity,
             "current_stage": (
                 checkpoint_stage.__dict__ if self.current_stage is not None else None
             ),
@@ -362,14 +536,20 @@ Your research idea:\n\n
             envelope = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid BFTS checkpoint JSON: {exc}") from exc
-        if envelope.get("schema") != CHECKPOINT_SCHEMA:
+        checkpoint_schema = envelope.get("schema")
+        if checkpoint_schema == "xscientist.bfts.checkpoint.v3":
+            raise ValueError(
+                "Legacy BFTS checkpoint v3 does not bind input content; "
+                "start a new run to create a v4 checkpoint"
+            )
+        if checkpoint_schema != CHECKPOINT_SCHEMA:
             raise ValueError("Unsupported BFTS checkpoint schema")
         checkpoint = envelope.get("payload")
         if not isinstance(checkpoint, dict):
             raise ValueError("Invalid BFTS checkpoint payload")
         if envelope.get("payload_hash") != _sha256_json(checkpoint):
             raise ValueError("BFTS checkpoint content hash mismatch")
-        required = {"journals", "task_desc", "current_stage"}
+        required = {"journals", "task_desc", "input_tree", "current_stage"}
         missing = sorted(required - set(checkpoint))
         if missing:
             raise ValueError(f"BFTS checkpoint is missing fields: {missing}")
@@ -387,12 +567,18 @@ Your research idea:\n\n
             _checkpoint_config_projection(cfg)
         ):
             raise ValueError("BFTS checkpoint configuration fingerprint mismatch")
-        expected_workspace = str(Path(workspace_dir).expanduser().resolve())
-        checkpoint_workspace = str(
-            Path(checkpoint.get("workspace_dir") or "").expanduser().resolve()
-        )
-        if checkpoint_workspace != expected_workspace:
-            raise ValueError("BFTS checkpoint workspace mismatch")
+        checkpoint_input_tree = checkpoint["input_tree"]
+        if (
+            not isinstance(checkpoint_input_tree, dict)
+            or set(checkpoint_input_tree) != {"schema", "fingerprint"}
+            or checkpoint_input_tree.get("schema") != INPUT_TREE_SCHEMA
+            or not isinstance(checkpoint_input_tree.get("fingerprint"), str)
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", checkpoint_input_tree["fingerprint"]
+            )
+            is None
+        ):
+            raise ValueError("BFTS checkpoint input tree identity is invalid")
 
         journals_payload = checkpoint["journals"]
         if not isinstance(journals_payload, dict):
@@ -542,6 +728,8 @@ Your research idea:\n\n
             cfg=cfg,
             workspace_dir=workspace_dir,
         )
+        if manager._input_tree_identity != checkpoint_input_tree:
+            raise ValueError("BFTS checkpoint input tree fingerprint mismatch")
         manager.journals = {
             name: (
                 payload if isinstance(payload, Journal) else Journal.from_dict(payload)
@@ -574,6 +762,7 @@ Your research idea:\n\n
         manager.task_desc = checkpoint["task_desc"]
         manager.cfg = cfg
         manager.workspace_dir = workspace_dir
+        manager._input_tree_identity = checkpoint_input_tree
         return manager
 
     def _create_agent_for_stage(self, stage: Stage) -> ParallelAgent:
