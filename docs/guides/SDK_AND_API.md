@@ -143,8 +143,14 @@ lifecycle = ResearchLifecycle(repository)
 
 next_step = repository.guide(language="en")["next_steps"][0]
 metadata_graph = repository.dag(disclose_summaries=False)
+structured_trajectory = repository.trajectory(limit=50)
 repository.export_dag("./research-dag")
 ```
+
+`trajectory()` verifies the exact included checkpoints and returns a bounded,
+payload-free projection of typed object identities, relations, actors and
+checkpoint-parent edges. Its `projection_hash` is an inspection artifact, not
+the stricter publication attestation or an independent authority decision.
 
 Method-discovery contracts use the same local repository from Python:
 
@@ -182,13 +188,18 @@ xscientist git doctor
 xscientist research hypothesis "H1" --falsifier "no improvement"
 xscientist research preregister <hypothesis-id> \
   --dataset benchmark-v1 --metric accuracy --baseline baseline-a \
-  --split-file ./splits/benchmark-v1.json --registered-by lead-researcher
+  --split-file ./splits/benchmark-v1.json \
+  --registered-by recorder:lead-researcher
 xscientist research experiment "run failed" --status failed
 xscientist research review "independent checks passed" \
   --evaluates <evidence-id> --verifier independent-reviewer --decision pass
+xscientist research trajectory --repo ./study
 xscientist git add -A
 xscientist git commit --stage evidence -m "bind result"
 ```
+
+`--registered-by` is self-reported recorder provenance. It does not authenticate
+a `human:` principal or grant independent evaluator/verifier authority.
 
 ## Unified CLI
 

@@ -15,7 +15,7 @@
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/v/xscientist.svg" alt="PyPI version"></a>
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/pyversions/xscientist.svg" alt="Python versions"></a>
   <a href="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml"><img src="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main" alt="Smoke checks"></a>
-  <a href="https://github.com/smileformylove/XScientist/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md"><img src="https://img.shields.io/badge/License-Apache--2.0%20AND%20MIT-blue.svg" alt="Apache-2.0 AND MIT distribution license"></a>
   <a href="https://arxiv.org/abs/2607.12301"><img src="https://img.shields.io/badge/arXiv-2607.12301-b31b1b.svg" alt="arXiv paper"></a>
 </p>
 
@@ -37,6 +37,43 @@ them through a configured executor boundary, criticize its own results, and
 preserve the whole path as typed, machine-readable research objects. A
 completed run is never presented as a verified scientific claim unless its
 evidence and review gates actually pass.
+
+The architectural prerequisite for this Git-like workflow is a **structured
+research trajectory**. Observable steps—question framing, hypotheses,
+decisions, tool calls, experiment attempts, evidence, objections, failures,
+recoveries and gates—are externalized as typed objects with content hashes,
+relations, producers and state transitions. Research VCS can therefore commit,
+diff, branch, merge, blame and revert scientific meaning instead of versioning
+an opaque chat transcript. Hidden chain-of-thought is neither required nor
+stored; the auditable substrate is the explicit decision and evidence trail.
+This trajectory is the ordered projection of the Research Git/Research VCS
+object-and-checkpoint model, not a second free-form log. In publication-oriented
+work, it is also a hard gate: every confirmatory or reproduction registry row
+must bind one typed attempt and its origin checkpoint, and every unsuccessful
+attempt must remain visible with one immutable disposition.
+
+Transition advice is preview-only until it is adopted. Add `--record` to turn
+the selected policy, rejected actions, and exact bounded evidence context into
+a typed decision plus checkpoint; after a confirmatory freeze, the generic
+path closes and only protocol-specific binding/disposition decisions are
+accepted:
+
+```bash
+xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
+xscientist research trajectory --repo ./my-study
+```
+
+`research trajectory` returns a bounded, payload-free projection of typed
+object identities, relations, actors, checkpoint hashes and checkpoint-parent
+edges. Its projection hash is for inspection and exchange; publication still
+requires the stricter live trajectory attestation and external authority
+receipt.
+
+The checkpoint-parent DAG—not `created_at`—is the authoritative history.
+Trajectory views always place parents before children; a deterministic sibling
+tie-break is display order only. Branch-local `@latest:<kind>` follows
+first-parent introduction order and fails closed when one checkpoint introduces
+multiple latest objects of that kind. Use an explicit object ID in that case.
 
 > **Important:** XScientist is alpha research software, not an oracle.
 > Autonomous runs may use
@@ -62,6 +99,12 @@ commit when an experiment must remain exactly reproducible.
 
 If you are unsure, start with `explore`. It records what you know and leaves
 unknown fields honestly incomplete.
+
+To configure a provider without starting a study, run
+`xscientist setup ./my-study`. This single guided command creates the workspace,
+asks only for missing provider/model/credential choices, and prints ordered
+readiness repairs. It diagnoses prerequisites; it does not claim that a study
+has passed the scientific quality gates.
 
 ## Start with your own idea — no API key
 
@@ -238,6 +281,20 @@ To persist a key in that protected `.env` file, do not export it and omit
 `--non-interactive`; XScientist requests it through a hidden prompt. A process
 environment value always takes precedence and is intentionally not duplicated.
 
+Before making a live request, inspect exactly where each setting will come from:
+
+```bash
+xscientist provider explain custom \
+  --workspace ./compatible-study \
+  --json
+```
+
+This read-only command changes no file and makes no network request. It reports
+only field names and sources (`process_environment`, `workspace_env_file`,
+`provider_default`, or `missing`), plus hashed endpoint provenance; it never
+returns a key or endpoint value. Its live-test command is explicitly marked as
+optional and potentially billable.
+
 `provider test` makes one explicit minimal request and compares the model sent
 to the model reported by the endpoint. For `custom` routes it forces and
 validates one schema-constrained function call, because a text-only response
@@ -245,7 +302,18 @@ does not qualify a research executor. A mismatch (for example a gateway
 silently selecting a smaller model) is reported as unverified; prompt,
 response, and tool-argument content are never stored by the test.
 
-### GLM-5.3 as the research executor
+### Optional executor example: GLM-5.3
+
+GLM-5.3 is not part of XScientist's identity or scientific-judgment boundary.
+It is one replaceable OpenAI-compatible execution route: after the task is
+locked, use it for implementation steps, coding, bounded tool work, execution
+outputs/logs, and manuscript drafts. It is never the default route for ideation,
+final-figure or source selection, candidate ranking, quality judgment, or paper
+review. GLM
+may draft prose around already selected citations, but it is not the authority
+for whether a source supports a claim. Host-owned research policy and
+deterministic gates retain scientific authority; only the separately signed
+external verifier can authorize publication.
 
 To use GLM-5.3 through a custom OpenAI-compatible route, keep credentials in the
 process environment or protected `.env`, keep the endpoint in protected
@@ -263,15 +331,46 @@ xscientist provider add custom \
 xscientist provider test custom \
   --workspace ./glm53-study \
   --json
-xscientist start ./glm53-study
+# Configure a non-GLM judgment route in its own provider environment.
+export OPENAI_API_KEY="..."
+xscientist start ./glm53-study \
+  --judgment-model openai/gpt-4.1
 ```
+
+`--judgment-model` is required when the execution model resolves to GLM-5.3.
+It handles ideation, final-figure and source selection, candidate ranking,
+internal scientific quality decisions, and paper review. It is authoritative for
+those internal research decisions and conformance checks, but it is not the
+independent signed publication verifier. In `start`, autonomous, and publication flows, generated plotting code
+is executed by the configured isolated Docker executor rather than the host
+Python process. Atomic plot publication currently requires POSIX `fcntl`; on an
+unsupported platform XScientist fails before generated plotting code is run or
+published, with no unlocked fallback. To store that route's key in
+the protected workspace instead of exporting it, add it without changing the
+active GLM executor:
+
+```bash
+xscientist provider add openai \
+  --workspace ./glm53-study \
+  --model gpt-4.1 \
+  --no-activate --no-update-bfts
+```
+
+If the judgment route is omitted, or also resolves to GLM-5.3, `start` fails
+closed with a copyable recovery command before beginning the research run.
+Other execution models retain the convenient single-model default unless the
+user explicitly supplies `--judgment-model`.
 
 The packaged `glm53` BFTS preset is also available to the Python SDK and
 low-level `--bfts-config glm53` workflows. It assigns
-`openai_compat/glm-5.3` to code, execution feedback, chart review, stage
-summary, and final report generation. It does not give GLM authority to promote
-its own result: host-side deterministic evaluation, held-out confirmation
-seeds, checkpoint replay, and scientific gates decide progression. The preset
+`openai_compat/glm-5.3` to locked-task implementation/code and
+non-authoritative final-report drafting. Scientific feedback, plot
+interpretation, stage summary, node selection, citation/source judgment, and
+conformance review stay on the distinct judgment route. The preset does not run
+the full-project ideation/ranking/quality/review roles, and
+it does not give GLM authority to promote its own result: host-side
+deterministic evaluation, held-out confirmation seeds, checkpoint replay, and
+scientific gates decide progression. The preset
 contains no endpoint, key, headers, or private transport data and applies a
 500,000-token / 6-hour ceiling; configure custom pricing separately if a cost
 limit is required. A `null` role limit selects XScientist's bounded runtime
@@ -434,6 +533,7 @@ If you know GitHub, the mental model is deliberately familiar:
 | GitHub | XScientist |
 | --- | --- |
 | Repository | One local research workspace |
+| Structured activity graph | Typed, verifiable trajectory projected from immutable objects and checkpoint-parent edges |
 | Commit and activity | Hash-checked checkpoint and `history list` |
 | Files changed | Scientific `history diff`, including claim/object changes |
 | Branch and pull request | Competing research line and semantic merge preview |
@@ -488,6 +588,19 @@ Git commit. `show`, `fsck`, reproduction, tags, bundles, exports, and semantic
 merge therefore fail closed for an unbound tip; copied trailers also fail when
 the checkpoint JSON, parent, hash, or exact `changed_paths` binding disagrees.
 Raw Git history is not deleted, but it is not granted Research VCS authority.
+
+Ordinary checkpoints may add immutable scientific objects but cannot modify or
+delete existing ones; corrections add a `supersedes` object. A typed revert
+binds the exact target commit and checkpoint hash, applies only the target's
+exact inverse material change, and appends a rollback edge instead of rewriting
+history. `blame` finds an object's origin only in history reachable from the
+selected ref or commit—it does not claim a global origin across unreachable
+branches or other repositories.
+
+Low-level `--research-vcs off` and non-strict adapter runs are legacy
+exploration/recovery modes. Their outputs are not eligible for publication or
+for `trace`, `replay`, or `verify` claims until they have been migrated into and
+revalidated as a strict, hash-valid Research VCS closure.
 
 Commit-enabled one-command recorders such as `research hypothesis` first
 require an empty native stage and a clean set of Git-staged, tracked, and
@@ -995,6 +1108,191 @@ xscientist research switch main --repo ./first-study
 xscientist research merge challenge/boundary --repo ./first-study --preview
 ```
 
+## Submission preparation is a gate, not an acceptance promise
+
+One command starts a publication-oriented research campaign:
+
+```bash
+xscientist start ./paper-study \
+  --autopilot publication \
+  --target-venue icml \
+  --data-dir ./data
+```
+
+XScientist improves submission preparedness against named, inspectable local
+gates; it does **not** estimate an acceptance probability or promise a paper,
+acceptance, novelty, correctness, or scientific truth. A run may honestly end
+with a blocked package, an inconclusive result, or a negative result. A single
+command does not manufacture confirmation or an independent review: the
+package remains blocked until those executions and receipts actually exist.
+
+For NeurIPS/ICML, deterministic local checks cover a content-addressed data
+contract, a host-resolvable exploration/confirmation freeze, completed and
+paired primary/ablation/robustness records, preregistered metrics, splits and
+stopping rules, numerical uncertainty, durable result artifacts, exact
+claim-evidence bindings, a byte-verified official venue/year template receipt,
+an externally trusted verifier signature, and zero open hard blockers.
+Literature completeness, novelty, whether a baseline is genuinely strong and
+budget-fair, and whether all real-world failure modes were found remain named
+reviewer obligations; XScientist does not misrepresent those judgments as
+mechanically guaranteed.
+
+The publication gate also separates adaptive exploration from confirmation.
+Before held-out results are observed, the host content-addresses and freezes the
+hypothesis, method, code/Research VCS state, memory, protocol, split, metric,
+and evaluator specification. Confirmatory and independent-reproduction records
+must bind that same state and explicitly disable post-freeze adaptation. The
+machine-readable decision is `submission_package_ready` or `blocked`, always
+with `acceptance_guaranteed: false` and actionable blockers. External expert
+review and genuinely independent reproduction remain necessary.
+
+`xscientist research review` records useful in-workspace criticism, but its
+identities are locally declared and its authority scope is therefore
+`local_advisory`. Even `--decision pass` produces an effective hold gate; it
+cannot create a verified claim. Publication authority comes only from the
+separate externally trusted, Ed25519-signed verifier receipt whose principal
+and complete producer provenance are recomputed by the host.
+
+After the generated plan and empirical manifest have been inspected, one
+host-owned handoff locks all planned tasks and creates the auditable execution
+queue. Repeat `--split` for every task in the generated plan:
+
+```bash
+xscientist research confirm \
+  --paper-dir PAPER_DIR \
+  --registered-by recorder:RESEARCHER \
+  --split task_0=sha256:<64-hex> \
+  --split task_1=sha256:<64-hex> \
+  --split task_2=sha256:<64-hex>
+```
+
+`--registered-by` is a self-reported recorder label for provenance. Even when
+the label names a real person, it grants neither `human:` identity nor
+independent-verifier authority; those require the separate signed authority
+flow below.
+
+After each confirmatory or reproduction run has produced both a typed Research
+VCS `experiment_attempt` and an immutable `experiment_registry.jsonl` row, bind
+the two. Then preserve an explicit disposition for every failed, timed-out, or
+cancelled row. A terminal negative result is the smallest complete example:
+
+```bash
+xscientist research trajectory-bind \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --attempt ATTEMPT_OBJECT_ID
+
+xscientist research attempt-disposition \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --disposition terminal_negative \
+  --reason "The attempt hit its preregistered terminal failure condition; artifacts are retained." \
+  --negative-result-artifact PATH/TO/RESULT.json \
+  --negative-result-evidence EVIDENCE_OBJECT_ID
+```
+
+`terminal_negative` is accepted only for the exact
+`scientific_negative_result` failure class. The host bounded-reads the
+repository-contained artifact, recomputes its hash against both the registry
+row and attempt, and validates a metric-bearing `evidence` object derived from
+that attempt. The resulting artifact/evidence hashes are covered by the
+trajectory hash and, ultimately, the external verifier signature. A caller
+boolean cannot resolve the blocker. A `technical_failure_retried` must link to
+a completed same-task bound retry. `approved_deviation` and
+`excluded_with_reason` remain valuable audit records but never authorize
+publication by self-report.
+
+The publication gate recomputes a one-to-one registry-row ↔ attempt ↔ origin
+checkpoint closure from the live Research Git history. An unbound, extra,
+running, hidden, or unsuccessfully disposed attempt is a hard blocker, not a
+score penalty that prose or an LLM review can offset.
+
+Required portfolios count only confirmatory records. Ablation and robustness
+records must match their locked task roles and pairings, use a different
+content-addressed configuration from the primary control, and carry a hashed
+transformation manifest describing actual changed factors. The locked data
+manifest and snapshot IDs then flow through every confirmatory/reproduction
+record, the verification report, and the final authority signature; replacing
+the data after signing invalidates the chain.
+
+The final verifier authority is deliberately a separate principal, not another
+role label assigned to the research executor. Install the optional signing
+dependency, prepare the hash-only payload, have the named verifier sign it in a
+verifier-controlled environment, then finalize and check the receipt:
+
+```bash
+python -m pip install "xscientist[trust]"
+
+xscientist research verifier-authority prepare \
+  --paper-dir PAPER_DIR \
+  --identity human:INDEPENDENT_REVIEWER \
+  --output authority-payload.json
+
+xscientist evolution attest sign \
+  --payload authority-payload.json \
+  --purpose xscientist.independent-verification.v1 \
+  --identity human:INDEPENDENT_REVIEWER \
+  --key-id REVIEWER_KEY_ID \
+  --private-key /verifier-controlled/reviewer-private.pem \
+  --out verifier-attestation.json
+
+xscientist research verifier-authority finalize \
+  --paper-dir PAPER_DIR \
+  --identity human:INDEPENDENT_REVIEWER \
+  --attestation verifier-attestation.json
+
+xscientist research verifier-authority verify \
+  --paper-dir PAPER_DIR \
+  --trust-store /outside-workspace/verifier-trust.json
+```
+
+`XSCIENTIST_VERIFIER_TRUST_STORE` can supply the same trust-store path to the
+publication gate. The signed payload binds the same host-verified
+`data_manifest_hash` and `data_snapshot_id` carried by the locked
+preregistration, every confirmatory/reproduction record, and the final
+verification report; replacing the data with another valid snapshot after
+signing fails verification. Only Ed25519 is accepted. HMAC, trust roots or keys
+inside the paper/repository/workspace, signer/verifier mismatches, cross-prefix
+producer aliases such as `agent:executor` versus `human:executor`, tampered
+reports, and symlinked keys fail closed. The receipt contains no key material.
+The standalone `verify` command reports `signature_binding_verified` with
+`submission_ready: false` and submission readiness `unknown`; only the full
+publication gate can return a submission-package decision.
+
+## Research and code lineage
+
+XScientist distinguishes modified code lineage from design references. A
+listed source does not transfer its benchmark results or make the local
+implementation equivalent.
+
+| Primary source | Relationship and adopted mechanism | Boundary |
+| --- | --- | --- |
+| [AI-Scientist-v2 paper](https://arxiv.org/abs/2504.08066) · [audited Apache-era code](https://github.com/SakanaAI/AI-Scientist-v2/tree/defddb8174905aac3bf4f7de7650e4cbf2ac353c) | **Modified code lineage:** original `ai_scientist` ideation, experiment-tree, plotting, review and writing runtime, now substantially hardened | This is derivative code, not merely inspiration. No benchmark parity. Upstream later changed its license; future imports require a new review |
+| [AIDE](https://github.com/WecoAI/aideml/tree/a4d58d94ad2035b7b458b5677c26a55e66ea8ca0) | **Transitive modified code lineage via AI-Scientist-v2:** interpreter, journal, backends, metric/response, serialization and tree visualization foundations | MIT notice retained; no AIDE result claimed |
+| [AI-Scientist](https://github.com/SakanaAI/AI-Scientist) | Architectural predecessor for `classic_pipeline` and template-oriented ideation → experiment → write-up → review | No additional direct import established beyond the v2 lineage |
+| [autoresearch](https://github.com/karpathy/autoresearch) · [awesome-ai-research-writing](https://github.com/Leey21/awesome-ai-research-writing) · [DeepReviewer-v2](https://github.com/ResearAI/DeepReviewer-v2) | Research-program budgets/stopping, evidence-to-writing studio, and multi-role review/repair ownership | Design references; no vendored code or score equivalence |
+| [GEPA](https://github.com/gepa-ai/gepa) | Pareto manuscript candidates and per-issue repair trajectories | Independent implementation, not the GEPA optimizer |
+| [Faraday / Replica](https://arxiv.org/abs/2608.13331) | Auditable research-policy rollouts; research judgment, model execution, and deterministic host gates are separate | No weights, RL training, Replica tasks, coding harness, or reported score inherited |
+| [FAR](https://arxiv.org/abs/2608.16977) · [code](https://github.com/zeyu-zheng/FAR) | Auditable find → attempt → recommend opportunity funnel | No prompts, corpus, outputs, code, or mathematical-discovery result imported |
+| [Belief Context Graph](https://github.com/bigai-nlco/belief-context-graph) | Bounded belief projection with conflict, temporal state, and provenance over immutable research objects | Independent implementation; ordinal state is not calibrated confidence |
+| [AutoResearchEval](https://arxiv.org/abs/2608.14905) · [code](https://github.com/PrentisAI/AutoResearchEval) | Offline artifact/process coverage and explicit local conformance | No official rollout, annotated trajectory, judge score, or cross-system comparison |
+| [MLS-Bench](https://arxiv.org/abs/2605.08678) · [code](https://github.com/Imbernoulli/MLS-Bench) | Gates that distinguish local engineering gains from transferable methods | No benchmark tasks, code, or scores included |
+| [Reflexion](https://arxiv.org/abs/2303.11366), [AI co-scientist](https://arxiv.org/abs/2502.18864), [Darwin Gödel Machine](https://arxiv.org/abs/2505.22954), [Red Queen Gödel Machine](https://arxiv.org/abs/2606.26294), [AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) | L0/L1/L2 adaptation, fixed evaluators, shadow candidates, sealed evaluation, canary and rollback | Independent synthesis; model self-scores cannot authorize promotion |
+| [Recuris paper](https://arxiv.org/abs/2608.24876) · [code](https://github.com/Gen-Verse/Recuris) · [audited commit](https://github.com/Gen-Verse/Recuris/tree/a0479b27a2d08b7fbf2607acf1841a06b121ee91) | **Newly assessed convergent reference:** state-grounded `M=(E,W,ρ,C)`, structured step evidence and paired held-out admission informed the explicit host-owned exploration/confirmation freeze and typed primary/ablation/robustness portfolio | No Recuris code or benchmark imported. Component-local repair and activation-fingerprint scoring are not claimed as implemented. Older XScientist memory/evolution work predates Recuris and is not retroactively attributed to it |
+
+Recuris and XScientist use structure at different layers. Recuris uses
+structured step tuples to localize execution failures and evolve agent memory
+within long-running work. XScientist's structured trajectory versions
+hypotheses, decisions, model/tool attempts, evidence, negative results, reviews,
+and gates across checkpoints and branches, making scientific diff, merge,
+revert, blame, and audit possible. The approaches are complementary: Recuris
+strengthens long-horizon execution reliability, but it cannot replace novelty
+review, strong baselines, ablations, statistical robustness, reproducibility,
+independent review, or claim-evidence closure. See the full
+[research lineage](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_LINEAGE.md),
+[third-party notices](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md),
+and machine-readable [upstream provenance](https://github.com/smileformylove/XScientist/blob/main/provenance/upstream_sources.json).
+
 ## A small surface over inspectable layers
 
 ```mermaid
@@ -1084,6 +1382,7 @@ print(result.returncode)
 | Literature opportunities | [Opportunity funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) · [FAR paper](https://arxiv.org/abs/2608.16977) |
 | Research policy rollouts | [Rollout contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_ROLLOUTS.md) · [Faraday paper](https://arxiv.org/abs/2608.13331) |
 | Belief-aware decision context | [Belief-context projection](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md) · [BCG project](https://github.com/bigai-nlco/belief-context-graph) |
+| Research/code lineage and licenses | [Research lineage](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_LINEAGE.md) · [Third-party notices](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md) |
 | Integrity and scientific strategy | [Research integrity](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) · [Science constitution](https://github.com/smileformylove/XScientist/blob/main/docs/SCIENCE_CONSTITUTION.md) |
 | Current limitations and audit | [2026 project audit](https://github.com/smileformylove/XScientist/blob/main/docs/PROJECT_AUDIT_2026-08.md) · [Onboarding audit](https://github.com/smileformylove/XScientist/blob/main/docs/ONBOARDING_AUDIT.md) |
 | SDK, HTTP API, and adapters | [SDK/API](https://github.com/smileformylove/XScientist/blob/main/docs/guides/SDK_AND_API.md) · [DAG/adapters](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_DAG_AND_ADAPTERS.md) |
@@ -1101,4 +1400,9 @@ and [CHANGELOG.md](https://github.com/smileformylove/XScientist/blob/main/CHANGE
 
 Paper: [XScientist: Towards an AI-Driven Scientific Research Ecosystem](https://arxiv.org/abs/2607.12301).
 
-Apache-2.0 licensed. See [LICENSE](https://github.com/smileformylove/XScientist/blob/main/LICENSE).
+XScientist-authored contributions are released under Apache-2.0. Package
+metadata uses `Apache-2.0 AND MIT` because the distribution also contains
+modified third-party components listed in
+[THIRD_PARTY_NOTICES.md](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md);
+their original notices and licenses remain applicable. See
+[LICENSE](https://github.com/smileformylove/XScientist/blob/main/LICENSE).

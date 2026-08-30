@@ -7,6 +7,30 @@ GitHub account, remote, daemon, or server is required. Git is the current local
 persistence adapter; public operations and identifiers remain Research VCS
 semantics.
 
+## Structured trajectory is the version-control substrate
+
+Research VCS is possible only because XScientist externalizes observable
+research work as a structured trajectory. The trajectory is the ordered,
+content-addressed projection of the Research Git object-and-checkpoint model,
+not a parallel transcript or optional free-form log. A durable step is a typed
+scientific object or checkpoint transition, carrying content identity, semantic
+state, producer/provenance, relations to prior work, and evidence or artifact
+references appropriate to its kind. Failed attempts, contrary evidence and
+recovery decisions remain first-class trajectory entries.
+
+This yields the scientific equivalents of commit, diff, branch, merge, blame,
+required checks and revert. The adapter does not store or reconstruct hidden
+chain-of-thought. It versions explicit actions, decisions, observations and
+evidence that another human or agent can inspect and challenge.
+
+`research decide` is deliberately a read-only policy preview. Once a choice is
+adopted, `research decide ... --record` persists a deterministic
+`gate_decision`, the exact bounded `context_snapshot` it used, and (unless
+`--no-commit` is requested) their checkpoint. Generic decisions are refused
+after a confirmatory freeze; post-freeze changes must use a typed protocol such
+as `trajectory-bind` or `attempt-disposition`, so an arbitrary label cannot
+rewrite the sealed scientific meaning.
+
 The design separates three concerns:
 
 | Layer | Stores | Why |
@@ -26,6 +50,7 @@ xscientist history diff ./my-research
 xscientist history save ./my-research -m "record measurement decision"
 xscientist history rollback ./my-research --commit HEAD
 xscientist audit ./my-research --level trace
+xscientist research trajectory --repo ./my-research
 ```
 
 Rollback is preview-only by default and appends a reversal checkpoint only with
@@ -44,6 +69,13 @@ check still does not replace independent scientific review.
 XScientist never creates a remote and never pushes automatically. Every backend
 mutation is scoped to the research repository and uses an explicit privacy and
 file policy; it never stages the whole working tree implicitly.
+
+`research trajectory` is the direct inspection surface for the core scientific
+history. It verifies each selected checkpoint, projects only typed object
+identity/relations/actor metadata, preserves checkpoint-parent edges across
+research lines and merges, and emits a canonical projection hash. It does not
+copy semantic payloads or hidden reasoning, and its bounded projection is not a
+substitute for the full publication attestation.
 
 Commit-enabled one-command recorders are stricter still. Before creating an
 object, they require an empty native research stage and no Git-staged, tracked,
@@ -132,6 +164,46 @@ read compatibility with older commit-bound checkpoints. ARA bindings carry
 forward across later checkpoints until that ARA is explicitly changed or
 passed with `--ara`; an unrelated checkpoint therefore cannot silently accept
 a graph that was edited through raw Git.
+
+### Close the publication trajectory
+
+For publication-oriented research, typed history is a hard prerequisite rather
+than explanatory metadata. Every confirmatory or independent-reproduction row
+in `experiment_registry.jsonl` must bind exactly one compatible Research VCS
+`experiment_attempt` and that attempt's origin checkpoint:
+
+```bash
+xscientist research trajectory-bind \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --attempt ATTEMPT_OBJECT_ID
+```
+
+Every failed, timed-out, or cancelled row remains visible and receives one
+immutable disposition. For example:
+
+```bash
+xscientist research attempt-disposition \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --disposition terminal_negative \
+  --reason "The attempt hit its preregistered terminal failure condition; artifacts are retained." \
+  --negative-result-artifact PATH/TO/RESULT.json \
+  --negative-result-evidence EVIDENCE_OBJECT_ID
+```
+
+The host accepts this resolving disposition only for a
+`scientific_negative_result`: the selected repository file must hash-match the
+failed registry row and typed attempt, while the evidence object must contain a
+hash-valid metric assessment derived only from that attempt. Those identities
+are bound into the disposition and trajectory hashes; there is no caller-owned
+preservation switch.
+
+The publication gate recomputes the registry-row ↔ attempt ↔ origin-checkpoint
+bijection from the live repository. It rejects hidden or extra attempts,
+contract/status/hash mismatches, running attempts, missing bindings, and failed
+attempts without a valid disposition. See
+[Research Integrity](RESEARCH_INTEGRITY.md) for retry and deviation rules.
 
 Checkpoint-sensitive operations bind the exact selected commit; they never
 borrow the latest checkpoint from its first-parent ancestry. A valid commit

@@ -55,6 +55,7 @@ nav:
       - Protocol conformance: PROTOCOL_CONFORMANCE.md
   - Understand:
       - Architecture: ARCHITECTURE.md
+      - Research and code lineage: RESEARCH_LINEAGE.md
       - Research protocol v2: RESEARCH_PROTOCOL_V2.md
       - Research VCS: RESEARCH_VCS_SPEC.md
       - Scientific integrity: RESEARCH_INTEGRITY.md

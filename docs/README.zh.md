@@ -15,12 +15,12 @@
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/v/xscientist.svg" alt="PyPI 版本"></a>
   <a href="https://pypi.org/project/xscientist/"><img src="https://img.shields.io/pypi/pyversions/xscientist.svg" alt="Python 版本"></a>
   <a href="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml"><img src="https://github.com/smileformylove/XScientist/actions/workflows/smoke.yml/badge.svg?branch=main" alt="Smoke 检查"></a>
-  <a href="https://github.com/smileformylove/XScientist/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0 许可证"></a>
+  <a href="https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md"><img src="https://img.shields.io/badge/License-Apache--2.0%20AND%20MIT-blue.svg" alt="Apache-2.0 AND MIT 发行许可"></a>
   <a href="https://arxiv.org/abs/2607.12301"><img src="https://img.shields.io/badge/arXiv-2607.12301-b31b1b.svg" alt="arXiv 论文"></a>
 </p>
 
 <p align="center">
-  <a href="#api-key">快速开始</a> ·
+  <a href="#quick-start">快速开始</a> ·
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#far-启发的研究机会漏斗">研究机会漏斗</a> ·
   <a href="#信念上下文投影受-bcg-启发">信念上下文</a> ·
@@ -34,6 +34,34 @@ XScientist 既是本地优先的自主科研系统，也是一套开放科学协
 解释、选择更有信息量的实验、通过配置好的执行器边界运行、主动批判结果，并把整个
 过程保存为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；
 只有证据和评审门禁真正通过后，系统才会把它标记为已验证。
+
+这套 Git 式科研的架构前提是**结构化科研轨迹**。问题定义、假设、决策、工具调用、
+实验尝试、证据、反对意见、失败、恢复与门禁等可观察步骤，都会外化为带类型、内容
+哈希、关系、生产者和状态迁移的对象。Research VCS 因而可以对“科研含义”执行
+commit、diff、branch、merge、blame 与 revert，而不是给一团聊天日志做版本控制。
+系统不需要也不保存隐藏思维链；可审计基础是显式的决策—证据轨迹。这条轨迹就是
+Research Git/Research VCS 对象与 checkpoint 模型的有序投影，不是额外维护的一份自由
+文本日志。在投稿导向流程中，它还是发布硬门槛：每条确认或独立复现 registry 记录都
+必须唯一绑定一个有类型的 attempt 及其来源 checkpoint，每次失败也必须保留一条不可变
+处置决策。
+
+版本控制建议默认只预览；一旦决定采纳，加 `--record` 就会把所选策略、被拒动作和当时
+可见的有界证据上下文写成有类型的决策对象与 checkpoint。进入确认性冻结后，通用记录
+入口会关闭，只接受协议明确的绑定或失败处置决策：
+
+```bash
+xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
+xscientist research trajectory --repo ./my-study
+```
+
+`research trajectory` 会给出有界且不暴露语义 payload 的轨迹投影，包括对象身份、关系、
+行为者、checkpoint 哈希和 checkpoint 父边。它的投影哈希用于检查与交换；投稿授权仍
+必须经过更严格的实时轨迹证明和外部权限签名。
+
+权威历史来自 checkpoint-parent DAG，而不是 `created_at`。轨迹投影始终先展示父节点、
+再展示子节点；无法比较因果先后的兄弟节点只使用确定性规则稳定展示，不因此获得先后或
+权限。分支内 `@latest:<kind>` 按 first-parent 引入顺序解析；如果同一个 checkpoint
+引入多个同类型的最新对象，系统会安全拒绝猜测，此时必须使用明确对象 ID。
 
 > **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
 > 生成代码必须经过配置好的隔离执行器；机器生成的结论只有补齐证据和独立评审
@@ -53,6 +81,12 @@ PyPI 当前提供已发布的 `0.1.4` 正式版；`main` README 同时明确记�
 | 已有托管模型 Key | `xscientist start ./my-study` | 可能产生模型费用 | 在同一历史中启动受控自主科研 |
 
 如果不确定，从 `explore` 开始。它只记录你真正知道的内容，未知项会诚实保持为空。
+
+如果只想完成配置、暂不启动研究，运行 `xscientist setup ./my-study`。这一条引导命令
+会创建工作区，只询问尚缺的 Provider、模型和凭据选项，再按顺序给出就绪修复动作。
+它负责诊断前置条件，不会把“配置完成”表述成“已经通过科研质量门禁”。
+
+<a id="quick-start"></a>
 
 ## 从自己的想法开始：不需要 API Key
 
@@ -209,12 +243,32 @@ xscientist provider test custom \
 `--non-interactive`；XScientist 会通过隐藏输入读取。进程环境中的值始终优先，且
 不会被重复落盘。
 
+在发送在线请求之前，可以先检查每个配置究竟来自哪里：
+
+```bash
+xscientist provider explain custom \
+  --workspace ./compatible-study \
+  --json
+```
+
+这条只读命令不修改文件，也不发送网络请求。它只返回字段名及其来源
+（`process_environment`、`workspace_env_file`、`provider_default` 或 `missing`）和
+端点哈希，不会返回密钥或端点原文；在线测试命令会明确标为可选且可能计费。
+
 `provider test` 会发起一次明确的最小请求，并比较客户端发送的模型和端点返回的
 模型。对于 `custom` 路由，它会强制并校验一次受 schema 约束的函数调用，因为只会
 返回文本还不足以成为科研执行者。如果网关静默切换到较小模型，会标记为未验证；
 测试不会保存 prompt、响应正文或工具参数。
 
-### 把 GLM-5.3 作为科研执行者
+### 可选执行器示例：GLM-5.3
+
+GLM-5.3 不是 XScientist 的项目身份，也不属于科研判断边界；它只是可替换的
+OpenAI-compatible 执行路由之一。研究任务锁定后，它可以承担实现步骤、编码、有界工具
+任务、原始执行输出/日志和论文草稿，但不会默认承担 idea 生成、最终图表或引用来源选择、候选排序、
+质量判断或论文审查。GLM 可以围绕已选定的引用起草文字，但无权判断来源是否真正支持
+结论。
+科研策略和确定性门禁仍由宿主掌握科学授权；只有单独签名的外部 verifier 才能授权
+发布。
 
 通过自定义 OpenAI-compatible 路由使用 GLM-5.3 时，密钥只放在进程环境或受保护
 的 `.env`，端点放在受保护的 Provider 配置中，并显式选择带路由前缀的模型：
@@ -231,13 +285,37 @@ xscientist provider add custom \
 xscientist provider test custom \
   --workspace ./glm53-study \
   --json
-xscientist start ./glm53-study
+# 在独立 Provider 环境中配置一个非 GLM 的判断路由。
+export OPENAI_API_KEY="..."
+xscientist start ./glm53-study \
+  --judgment-model openai/gpt-4.1
 ```
 
+当执行模型解析为 GLM-5.3 时，必须显式提供 `--judgment-model`。这个模型负责 idea
+生成、最终图表和引用来源选择、候选排序、内部科研质量判定和论文 review；它对这些内部
+科研决策及一致性检查具有权威，但不是独立签名的 publication verifier。在 `start`、autonomous 和 publication 流程中，模型生成的绘图代码只由
+配置好的隔离 Docker executor 执行，不会交给宿主 Python 进程执行。原子绘图发布目前
+要求 POSIX `fcntl`；在不支持的平台上，XScientist 会在运行或发布生成代码之前安全
+失败，不会退回无锁发布。如果不想
+export 密钥，可以把判断路由写入受保护的工作区，同时保持 GLM 为 active executor：
+
+```bash
+xscientist provider add openai \
+  --workspace ./glm53-study \
+  --model gpt-4.1 \
+  --no-activate --no-update-bfts
+```
+
+如果省略判断路由，或判断路由仍解析为 GLM-5.3，`start` 会在研究运行开始前安全失败，
+并返回可复制的修复命令。其他执行模型仍保留便捷的单模型默认行为，除非用户主动提供
+`--judgment-model`。
+
 Python SDK 和底层 `--bfts-config glm53` 流程也可以直接使用内置的 `glm53` BFTS
-预设。它把 `openai_compat/glm-5.3` 分配给代码生成、执行反馈、图表审查、阶段总结
-和最终报告；但 GLM 无权自行晋级结果，流程推进仍由宿主确定性评估、held-out 确认
-种子、checkpoint 重放和科研门禁决定。该预设不包含 endpoint、key、headers 或任何
+预设。它只在已锁定任务内把 `openai_compat/glm-5.3` 分配给实现/代码生成和无权威性的
+最终报告草稿；科研反馈、图表解释、阶段总结、节点选择、引用/来源判断和一致性审查仍由
+独立判断路由承担。它不运行完整项目的 idea/ranking/quality/review 判断角色。GLM 无权
+自行晋级结果，流程推进仍由宿主确定性评估、held-out 确认种子、
+checkpoint 重放和科研门禁决定。该预设不包含 endpoint、key、headers 或任何
 私有传输信息，并设置 500,000 token / 6 小时上限；如果需要成本上限，必须另行
 配置自定义模型价格。角色的 `null` 输出上限表示使用 XScientist 的有界运行时
 默认值（当前为 8,192 个输出 token），不是把无上限选择交给 Provider。
@@ -336,7 +414,7 @@ xscientist runs resume RUN_ID --workspace ./ood-study
 
 CLI 使用同一套带类型的协议（默认只写入本地历史，不会自行推送远端）：
 
-如果 `./first-study` 还不存在，请先按[快速开始](#api-key)
+如果 `./first-study` 还不存在，请先按[快速开始](#quick-start)
 创建工作区，再运行下面的命令。
 
 ```bash
@@ -377,6 +455,7 @@ solver、三个 judge 全部通过规则或 pilot 数字，也不生成“人类
 | GitHub | XScientist |
 | --- | --- |
 | Repository | 一个本地科研工作区 |
+| 结构化 Activity graph | 从不可变对象与 checkpoint 父边投影出的有类型、可验证轨迹 |
 | Commit 与 Activity | 经过哈希检查的 checkpoint 与 `history list` |
 | Files changed | 同时比较文件、结论和科研对象的 `history diff` |
 | Branch 与 Pull Request | 竞争科研分支与语义合并预览 |
@@ -424,6 +503,16 @@ supersede 当前 active retraction。历史决策使用 `--as-of` 时，会排�
 bundle、export 和语义 merge 都会对未绑定 tip fail-closed；即使复制了 trailer，
 只要 checkpoint JSON、父提交、hash 或精确 `changed_paths` 不一致，仍会失败。raw
 Git 历史不会被删除，但不会获得 Research VCS 权限。
+
+普通 checkpoint 只能新增不可变科研对象，不能修改或删除既有对象；科研纠错要新增带
+`supersedes` 关系的对象。有类型的 revert 会绑定精确目标 commit 与 checkpoint 哈希，
+只执行该目标 material change 的精确逆变更，并追加 rollback 边，而不会重写历史。
+`blame` 也只会在所选 ref/commit 的可达历史中定位对象来源，不会夸大为不可达分支或
+其他仓库中的全局唯一来源。
+
+底层 `--research-vcs off` 与非 strict adapter 只适合 legacy exploration 和故障恢复。
+其输出在迁移并重新验证为严格、哈希有效的 Research VCS 闭包之前，不具备投稿资格，
+也不能获得 `trace`、`replay` 或 `verify` 结论。
 
 启用 commit 的单命令 recorder（如 `research hypothesis`）会先要求 native stage
 为空，并要求 Git staged、tracked 与 research-eligible 路径均干净。生成的 checkpoint
@@ -867,6 +956,161 @@ xscientist research switch main --repo ./first-study
 xscientist research merge challenge/boundary --repo ./first-study --preview
 ```
 
+## 投稿准备度是门禁，不是录用承诺
+
+一条命令可以启动投稿导向的研究 campaign：
+
+```bash
+xscientist start ./paper-study \
+  --autopilot publication \
+  --target-venue icml \
+  --data-dir ./data
+```
+
+XScientist 会依据具名、可检查的本地门禁提高投稿准备度，但不会估计录用概率，也不
+承诺一定产出论文、一定新颖、结论正确或被会议接收。流程可以诚实地以阻塞研究包、
+不确定结果或负结果结束。一条命令不会凭空制造确认实验或独立评审；这些执行与收据
+尚未真实存在时，研究包必须保持 `blocked`。
+
+NeurIPS/ICML 的确定性本地检查包括：内容寻址的数据合同、宿主可解析的探索/确认冻结、
+已完成并正确配对的 primary/ablation/robustness 记录、预注册指标/数据划分/停止规则、
+数值不确定性、持久结果产物、精确的 claim-evidence 绑定、按字节校验的官方会议/年份
+模板收据、外部信任的验证者签名，以及零个未解决硬阻断。文献是否完整、选题是否真正
+新颖、基线是否足够强且预算公平、现实失败模式是否穷尽，仍是明确列出的审稿与外部
+审计职责；系统不会把这些判断冒充为机械保证。
+
+投稿门禁还会强制隔离自适应探索和确认性实验。查看 held-out 结果之前，宿主必须对
+假设、方法、代码/Research VCS 状态、记忆、协议、数据划分、指标和评价器规范做内容
+寻址冻结；确认性实验与独立复现必须绑定同一状态，并显式禁止冻结后的自适应更新。
+机器可读结论只有 `submission_package_ready` 或 `blocked`，始终附带
+`acceptance_guaranteed: false` 和可执行阻断原因。外部专家评审与真正独立复现仍不可替代。
+
+`xscientist research review` 用于记录仓库内有价值的批评意见，但其中的身份仍是本地
+声明，因此权限范围固定为 `local_advisory`。即使传入 `--decision pass`，有效结果仍是
+`hold`，不能据此生成 verified claim。发布权限只能来自独立的外部信任 Ed25519 签名
+收据；宿主会重新验证其 principal，并与包括失败尝试在内的完整 producer provenance
+做不相交检查。
+
+人工检查生成的计划与经验数据 manifest 后，用一条宿主权威命令锁定全部任务并生成
+可审计执行队列；生成计划里的每个任务都要重复提供一次 `--split`：
+
+```bash
+xscientist research confirm \
+  --paper-dir PAPER_DIR \
+  --registered-by recorder:RESEARCHER \
+  --split task_0=sha256:<64-hex> \
+  --split task_1=sha256:<64-hex> \
+  --split task_2=sha256:<64-hex>
+```
+
+`--registered-by` 只是用于 provenance 的记录者自报标签。即使标签对应现实中的人，
+它也不会授予 `human:` 身份或独立验证者权限；后者必须经过下文独立的签名权限流程。
+
+每次确认或独立复现运行同时形成有类型的 Research VCS `experiment_attempt` 和不可变的
+`experiment_registry.jsonl` 记录后，必须把两者绑定；每条失败、超时或取消记录还必须
+保留明确处置。保留终止性负结果的最小完整示例如下：
+
+```bash
+xscientist research trajectory-bind \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --attempt ATTEMPT_OBJECT_ID
+
+xscientist research attempt-disposition \
+  --paper-dir PAPER_DIR \
+  --record-id REGISTRY_RECORD_ID \
+  --disposition terminal_negative \
+  --reason "该尝试触发预注册的终止失败条件；负结果产物已保留。" \
+  --negative-result-artifact PATH/TO/RESULT.json \
+  --negative-result-evidence EVIDENCE_OBJECT_ID
+```
+
+`terminal_negative` 只接受明确的 `scientific_negative_result` 失败类型。宿主会以有界、
+拒绝符号链接的方式读取仓库内结果文件，重新计算其哈希并与 registry 记录及 attempt
+双向核对，同时验证一个只从该 attempt 派生、包含度量结果的 `evidence` 对象。产物与
+证据哈希随后进入 trajectory hash，并最终由外部验证者签名覆盖；调用者布尔值不能解除
+阻断。`technical_failure_retried` 必须指向已完成、同任务且已绑定的重试。
+`approved_deviation` 与 `excluded_with_reason` 只保留审计信息，永远不会依靠自报获得
+发布授权。
+
+投稿门禁会从当前 Research Git 历史重新计算 registry 记录 ↔ attempt ↔ 来源 checkpoint
+的一一闭包。未绑定、多余、仍在运行、被隐藏或失败后未处置的尝试都是硬阻断，不能靠
+润色文本或提高 LLM 评审分抵消。
+
+必需证据组合只计算 confirmatory 记录。消融与稳健性实验必须匹配已锁任务角色和配对，
+使用与 primary control 不同的内容寻址配置，并带有说明真实改动因素的哈希变换清单。
+锁定的数据 manifest 与 snapshot ID 会继续贯穿每条确认/复现记录、verification report
+和最终权限签名；签名后替换数据会使整条证据链失效。
+
+最终验证权限必须来自独立 principal，不能只是给科研执行器换一个角色名。安装可选
+签名依赖后，先生成只含哈希的待签名载荷，由具名验证者在其控制的环境中签名，再合并
+并验证收据：
+
+```bash
+python -m pip install "xscientist[trust]"
+
+xscientist research verifier-authority prepare \
+  --paper-dir PAPER_DIR \
+  --identity human:INDEPENDENT_REVIEWER \
+  --output authority-payload.json
+
+xscientist evolution attest sign \
+  --payload authority-payload.json \
+  --purpose xscientist.independent-verification.v1 \
+  --identity human:INDEPENDENT_REVIEWER \
+  --key-id REVIEWER_KEY_ID \
+  --private-key /verifier-controlled/reviewer-private.pem \
+  --out verifier-attestation.json
+
+xscientist research verifier-authority finalize \
+  --paper-dir PAPER_DIR \
+  --identity human:INDEPENDENT_REVIEWER \
+  --attestation verifier-attestation.json
+
+xscientist research verifier-authority verify \
+  --paper-dir PAPER_DIR \
+  --trust-store /outside-workspace/verifier-trust.json
+```
+
+投稿门禁也可以通过 `XSCIENTIST_VERIFIER_TRUST_STORE` 读取同一条工作区外 trust store
+路径。签名载荷会绑定同一组经宿主校验的 `data_manifest_hash` 与 `data_snapshot_id`；
+它们必须同时出现在锁定预注册、每条确认/复现记录和最终验证报告中，签名后即便替换成
+另一份内部合法的数据快照也会校验失败。这个权限边界只接受 Ed25519；HMAC、位于论文/
+仓库/工作区内部的信任根或公钥、签名者与报告 verifier 不一致、`agent:executor` 与
+`human:executor` 这类跨前缀同主体别名、被篡改报告或符号链接公钥都会安全阻断。
+收据不包含任何密钥内容。独立运行 `verify` 只返回 `signature_binding_verified`，并明确
+给出 `submission_ready: false`、投稿就绪状态 `unknown`；只有完整投稿门禁才能作出研究包
+是否就绪的判断。
+
+## 研究与代码谱系
+
+XScientist 明确区分修改代码谱系与设计参考。列出一个来源不等于继承其 benchmark
+成绩，也不表示本地实现与原项目等价。
+
+| 一手来源 | 关系与吸收机制 | 边界 |
+| --- | --- | --- |
+| [AI-Scientist-v2 论文](https://arxiv.org/abs/2504.08066) · [审计的 Apache 时代代码](https://github.com/SakanaAI/AI-Scientist-v2/tree/defddb8174905aac3bf4f7de7650e4cbf2ac353c) | **修改代码谱系：** 原始 `ai_scientist` 选题、实验树、绘图、评审和写作运行时，当前已进行大量加固和扩展 | 这是衍生代码，不应只写成“受到启发”；不主张 benchmark 等价。上游后来更换许可证，未来同步必须重新审查 |
+| [AIDE](https://github.com/WecoAI/aideml/tree/a4d58d94ad2035b7b458b5677c26a55e66ea8ca0) | **经 AI-Scientist-v2 继承的修改代码谱系：** interpreter、journal、backend、metric/response、序列化和实验树可视化基础 | 已保留 MIT notice；不主张 AIDE 成绩 |
+| [AI-Scientist](https://github.com/SakanaAI/AI-Scientist) | `classic_pipeline` 与模板式选题 → 实验 → 写作 → 评审的架构前身 | 除 v2 谱系外，本次审计未确认额外直接导入 |
+| [autoresearch](https://github.com/karpathy/autoresearch) · [awesome-ai-research-writing](https://github.com/Leey21/awesome-ai-research-writing) · [DeepReviewer-v2](https://github.com/ResearAI/DeepReviewer-v2) | research program 的预算/停止、证据到写作，以及多角色评审与修复归属 | 设计参考；未 vendored code，不声称评分等价 |
+| [GEPA](https://github.com/gepa-ai/gepa) | Pareto 稿件候选与逐问题修复轨迹 | 本地独立实现，不是 GEPA optimizer |
+| [Faraday / Replica](https://arxiv.org/abs/2608.13331) | 可审计研究策略 rollout；科研判断、模型执行和宿主确定性门禁分离 | 不包含权重、RL 训练、Replica 任务、coding harness 或论文分数 |
+| [FAR](https://arxiv.org/abs/2608.16977) · [代码](https://github.com/zeyu-zheng/FAR) | 可审计的发现 → 尝试 → 推荐机会漏斗 | 未复制 prompt、语料、输出或代码；不主张复现数学发现 |
+| [Belief Context Graph](https://github.com/bigai-nlco/belief-context-graph) | 基于不可变科研对象的有界信念投影、冲突、时间状态和来源 | 独立实现；序数状态不是校准概率 |
+| [AutoResearchEval](https://arxiv.org/abs/2608.14905) · [代码](https://github.com/PrentisAI/AutoResearchEval) | 离线 artifact/process 覆盖与明确本地 conformance | 未运行官方 rollout、标注轨迹或 judge；不能跨系统比较分数 |
+| [MLS-Bench](https://arxiv.org/abs/2605.08678) · [代码](https://github.com/Imbernoulli/MLS-Bench) | 区分局部工程收益与可迁移方法的门禁 | 不包含 benchmark 任务、代码或成绩 |
+| [Reflexion](https://arxiv.org/abs/2303.11366)、[AI co-scientist](https://arxiv.org/abs/2502.18864)、[Darwin Gödel Machine](https://arxiv.org/abs/2505.22954)、[Red Queen Gödel Machine](https://arxiv.org/abs/2606.26294)、[AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) | L0/L1/L2 适应、固定评价器、shadow candidate、sealed evaluation、canary 与 rollback | 独立综合；模型自评不能授权晋级 |
+| [Recuris 论文](https://arxiv.org/abs/2608.24876) · [代码](https://github.com/Gen-Verse/Recuris) · [审计 commit](https://github.com/Gen-Verse/Recuris/tree/a0479b27a2d08b7fbf2607acf1841a06b121ee91) | **新近审查的趋同参考：** 状态驱动 `M=(E,W,ρ,C)`、逐步结构证据与配对 held-out 准入，推动了宿主权威的探索/确认冻结及 typed primary/ablation/robustness 证据组合 | 当前未导入 Recuris 代码或 benchmark，也不声称已实现其组件级修补或 activation fingerprint。已有记忆/进化能力早于该项目，不能倒写成 Recuris 启发 |
+
+Recuris 与 XScientist 在不同层面使用“结构”。Recuris 用结构化 step tuple 定位执行
+故障并演化长程运行中的 agent memory；XScientist 的结构化轨迹则跨 checkpoint 与分支
+版本化假设、决策、模型/工具 attempt、证据、负结果、审查和 gate，使科研 diff、merge、
+revert、blame 与 audit 成为可能。两者可以互补：Recuris 提升长程执行可靠性，但不能
+替代新颖性审查、强基线、消融、统计稳健性、可复现性、独立评审或
+claim-evidence closure。完整内容见[研究谱系](RESEARCH_LINEAGE.md)、
+[第三方声明](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md)和机器可读的
+[上游 provenance](https://github.com/smileformylove/XScientist/blob/main/provenance/upstream_sources.json)。
+
 ## 小入口，透明分层
 
 ```mermaid
@@ -951,6 +1195,7 @@ print(result.returncode)
 | 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
 | 研究策略 Rollout | [Rollout 契约](RESEARCH_ROLLOUTS.zh.md) · [Faraday 论文](https://arxiv.org/abs/2608.13331) |
 | 信念感知决策上下文 | [信念上下文投影](BELIEF_CONTEXT.zh.md) · [BCG 项目](https://github.com/bigai-nlco/belief-context-graph) |
+| 研究/代码谱系与许可 | [研究谱系](RESEARCH_LINEAGE.md) · [第三方声明](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md) |
 | 科研诚信与策略 | [科研诚信](RESEARCH_INTEGRITY.md) · [科学宪法](SCIENCE_CONSTITUTION.md) |
 | 当前劣势与审计 | [2026 项目审计](PROJECT_AUDIT_2026-08.md) · [入门审计](ONBOARDING_AUDIT.md) |
 | SDK、HTTP API 与适配器 | [SDK/API](guides/SDK_AND_API.md) · [DAG/适配器](RESEARCH_DAG_AND_ADAPTERS.md) |
@@ -968,5 +1213,8 @@ print(result.returncode)
 
 论文：[XScientist: Towards an AI-Driven Scientific Research Ecosystem](https://arxiv.org/abs/2607.12301)。
 
-许可证：Apache-2.0，见
+XScientist 自有贡献以 Apache-2.0 发布；发行元数据使用
+`Apache-2.0 AND MIT`，因为发行包同时包含
+[THIRD_PARTY_NOTICES.md](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md) 所列的修改后第三方组件，
+其原始归属声明和许可证继续适用。主许可证见
 [LICENSE](https://github.com/smileformylove/XScientist/blob/main/LICENSE)。

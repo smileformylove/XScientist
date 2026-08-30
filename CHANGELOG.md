@@ -8,6 +8,87 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Made the structured scientific trajectory an explicit protocol invariant:
+  observable hypotheses, decisions, tool executions, attempts, evidence,
+  objections, failures, recoveries and gates are typed, content-addressed and
+  related so Research VCS operations apply to scientific meaning rather than
+  hidden reasoning or opaque chat logs.
+- Added `research trajectory`, a bounded payload-free view that validates exact
+  checkpoints and projects typed object identities, relations, actors, hashes
+  and checkpoint-parent edges with its own canonical projection hash.
+- Defined trajectory chronology from the authoritative checkpoint-parent DAG:
+  projections are parent-before-child, content-derived sibling order is
+  presentation-only, and `created_at` never selects or authorizes scientific
+  state. Branch-local `@latest:<kind>` follows first-parent introduction order
+  and fails closed when one checkpoint makes the latest kind ambiguous.
+- Enforced immutable correction semantics: ordinary checkpoints cannot modify
+  or delete existing Research Objects; typed reverts bind the exact target
+  commit/checkpoint, verify an exact inverse material diff, and append rollback
+  edges without rewriting history. Historical blame is explicitly scoped to
+  the selected ref/commit's reachable history.
+- Documented that `--research-vcs off` and non-strict adapter execution are
+  legacy exploration/recovery modes without publication, `trace`, `replay`, or
+  `verify` standing until migrated into a strict hash-valid closure.
+- Added publication-grade trajectory closure: every confirmatory/reproduction
+  registry row must bind bijectively to one typed attempt and its hash-valid
+  origin checkpoint through `research trajectory-bind`; unsuccessful attempts
+  remain immutable and require a typed `research attempt-disposition` decision
+  before the verification report can pass. Trajectory hashes, frozen/lineage
+  heads and object/checkpoint sets are included in external authority receipts.
+- Closed unsuccessful-attempt authority gaps: failed confirmatory and
+  reproduction rows now participate in completeness and in every producer set;
+  trajectory gates require both structural validity and publication readiness,
+  while audit-only deviation/exclusion dispositions never clear a blocker.
+  `terminal_negative` no longer accepts a preservation boolean: it requires the
+  exact `scientific_negative_result` class, a bounded host-rehashed repository
+  artifact matching both registry and attempt hashes, and a metric-bearing
+  evidence assessment derived from that attempt. Those identities are covered
+  by the final externally signed trajectory receipt.
+- Bound experiment object actors to payload producers and canonicalized
+  role-prefixed principals for all local provenance-disjointness checks. Generic
+  in-workspace `research review` is now explicitly advisory-only: a requested
+  pass produces a hold gate and cannot mint a verified claim without the
+  separate externally trusted authority flow.
+- Added an explicit adoption boundary for version-control decisions. Read-only
+  transition previews remain available, while adopted decisions can be stored
+  as deterministic gate objects linked to the exact, bounded evidence-context
+  snapshot visible at decision time; policy reasons are retained without
+  persisting hidden chain-of-thought.
+- Added `xscientist research confirm`, which validates the empirical snapshot
+  and draft preregistration, locks the exploration-to-confirmation transition,
+  and emits a hash-bound multi-task confirmatory queue. Post-freeze attempts
+  must retain the frozen research/code/protocol/data identities, while
+  ablation and robustness records must disclose the exact configuration
+  transformation they performed.
+- Bound the complete empirical data contract and every primary or reproduction
+  producer, including unsuccessful attempts, into verification reports and external authority
+  receipts. Canonical principal matching now prevents role-prefix aliases from
+  impersonating an independent verifier, and trust roots inside the research
+  workspace are rejected.
+- Tightened numerical evidence admission: point estimates and effect sizes no
+  longer masquerade as uncertainty; confirmatory results need a valid interval,
+  p-value, standard error, dispersion statistic or repeated measurements.
+- Added a fail-closed NeurIPS/ICML publication contract: typed and comparable
+  primary/ablation/robustness evidence, a host-attested Research VCS freeze,
+  content-addressed non-synthetic empirical data, pinned official venue/year
+  templates with source-byte receipts, and zero tolerated submission blockers.
+- Added external verifier-authority receipts and
+  `research verifier-authority prepare|finalize|verify`. The top-venue gate
+  accepts only an Ed25519 signer whose trusted principal matches the report
+  verifier and is disjoint from research producers; report, registry,
+  manuscript, evidence-snapshot, preregistration and record hashes are bound.
+- Added secret-free provider configuration explanations, stricter custom-model
+  identity/tool probes, transaction-safe environment handling, and clearer
+  GLM-5.3 executor-only guidance without granting the model planning or audit
+  authority.
+- Replaced redistributed paper/template examples with project-authored
+  synthetic fixtures, pinned runtime downloads for official templates, and
+  explicit derivative-code, MIT-lineage and acquisition-provenance notices.
+- Clarified the Recuris comparison: its structured step tuples localize
+  execution failures and support memory evolution, whereas XScientist versions
+  hypotheses, decisions, model/tool attempts, evidence, negative results,
+  reviews and gates across branches as a scientific VCS trajectory.
+
 - Added a bounded GLM-5.3 research-policy benchmark with a fixed Simpson's
   paradox task, four deterministic statistical tools, strict JSON actions,
   per-turn model identity checks, redacted traces, an offline verifier, and

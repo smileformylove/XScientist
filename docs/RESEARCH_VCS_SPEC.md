@@ -48,6 +48,32 @@ a filesystem snapshot.
 14. An automated experiment-priority decision MUST preserve the complete
     candidate set, per-hypothesis predicted outcomes, versioned scoring policy,
     selected and rejected alternatives, and deterministic reasons.
+15. The structured trajectory MUST be an ordered projection of typed Research
+    Objects and hash-valid checkpoints, not an opaque transcript or optional
+    log. Hidden chain-of-thought MUST NOT be required for protocol validity.
+16. Every publication-facing confirmatory or reproduction registry row MUST
+    bind bijectively to one typed attempt and its origin checkpoint. Completed
+    attempts bind producer, configuration and result-artifact hashes; failed,
+    timed-out or cancelled attempts bind a failure class and exactly one typed
+    disposition. No attempt may disappear from the trajectory.
+17. A read-only policy preview is not a durable decision. Once adopted, a
+    transition decision MUST record the deterministic policy result, selected
+    and rejected actions, and exact bounded context snapshot it consumed.
+    After a confirmatory freeze, only protocol-defined transition decisions may
+    extend the sealed lineage.
+18. A user-facing trajectory projection MUST validate the exact checkpoint at
+    every included commit and MUST preserve typed object identity, relations,
+    actor authority, object hashes, checkpoint hashes and checkpoint-parent
+    edges. A bounded or payload-free projection MUST label itself as such and
+    MUST NOT be treated as the complete publication attestation.
+19. The checkpoint-parent DAG is the authoritative scientific history.
+    Timestamps, including `created_at`, are provenance metadata only: they MUST
+    NOT establish causal order, select a latest object, resolve a conflict, or
+    grant scientific authority.
+20. An ordinary checkpoint MUST NOT modify, rename, or delete an existing
+    immutable Research Object. A semantic correction creates a new object with
+    an explicit `supersedes` relation. Material removal is permitted only in a
+    validated typed revert.
 
 ## 3. Logical layers
 
@@ -160,6 +186,49 @@ A research commit contains:
 The first implementation MAY store commits as Git commits plus protocol
 objects. Research VCS identifiers and semantics remain authoritative.
 
+### 5.1 Authoritative history and trajectory ordering
+
+The checkpoint-parent DAG, rooted at the selected ref or commit, defines
+scientific reachability and happens-before order. A structured trajectory is a
+typed, hash-verified projection of that DAG; it is not a second history store.
+Every included parent MUST appear before its child. When two reachable
+checkpoints are siblings or otherwise causally incomparable, an implementation
+MAY use a stable content-derived tie-breaker for presentation. Such a tie-break
+MUST NOT create a causal relation, resolve scientific disagreement, or confer
+authority. The reference projection orders those siblings by checkpoint hash
+and then commit identifier.
+
+`created_at`, author time, file modification time, directory enumeration, and
+transcript position MUST NOT be used as authoritative chronology. They may be
+displayed only as non-authoritative provenance.
+
+`@latest:<kind>` is local to the selected branch/ref. It follows that ref's
+first-parent object-introduction order, rather than wall-clock time or the
+working-tree filename order. Objects of the same kind introduced by one
+checkpoint deliberately share an introduction position; if more than one is
+eligible at the latest position, resolution MUST fail closed and require an
+explicit object ID. Multiple eligible uncommitted objects are likewise
+ambiguous and MUST NOT be silently ordered.
+
+### 5.2 Immutable correction, typed revert, and blame
+
+An ordinary checkpoint may add new immutable Research Objects, including a new
+object that explicitly supersedes an older one. It MUST NOT overwrite or
+delete an existing object's repository path. This makes scientific correction
+an inspectable transition instead of an edit to the past.
+
+A typed revert MUST append a new checkpoint and MUST bind both the exact target
+commit and its checkpoint hash. Its material path/status/blob/mode transition
+MUST be the exact inverse of the target transition, with no undeclared extra
+paths. The new checkpoint records a rollback edge to the target; it does not
+delete the target, rewrite ancestry, or erase the scientific reason for the
+original transition.
+
+`blame` resolves the selector against the exact requested ref or commit and
+locates the immutable object's originating transition only within history
+reachable from that selection. It MUST NOT imply that the reported origin is
+global across unreachable refs, another repository, or an unimported history.
+
 ## 6. Refs and branch roles
 
 The reference implementation initializes `main` as the default local ref.
@@ -264,6 +333,13 @@ reported. A privacy-preserving tree view MUST NOT emit object payloads.
 | Independent evaluator | Read candidate state and write a separate evaluation |
 | Deterministic gate | Enforce fixed promotion and integrity rules |
 | Human approver | Optional approval at policy-defined high-impact boundaries |
+
+Recorder provenance is not an authority escalation. Fields such as
+`registered_by` and CLI values such as `recorder:alice` are self-reported labels
+for the actor that requested a persisted transition. They MUST NOT authenticate
+a human, create a `human:` principal, establish evaluator independence, or
+grant verifier/approver authority. Those authorities require their own policy
+checks and, where specified, an externally trusted signed receipt.
 
 A research agent MUST NOT write an evaluation that is treated as independent
 for its own candidate. Independence MUST be evaluated against the complete
@@ -393,6 +469,14 @@ The existing `checkpoint` operation remains a compatibility alias for a
 Research VCS commit until a future major version. Ordinary Git inspection MAY
 remain available for operators, but agents and public clients do not depend on
 it.
+
+The reference CLI's `--research-vcs off` mode and non-strict adapter mode exist
+only for legacy exploratory execution and output recovery. They do not produce
+the authoritative, hash-valid trajectory required for publication or for a
+`trace`, `replay`, or `verify` sufficiency claim. Outputs from such a run MUST
+be migrated into, and revalidated as, a strict Research VCS closure before any
+of those claims can be made. Preserving an expensive output after a non-strict
+adapter warning is not equivalent to checkpointing it.
 
 ## 13. Out of scope for the core
 
