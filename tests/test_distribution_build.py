@@ -115,6 +115,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/onboarding.py",
                 "xscientist/dependency_profiles.py",
                 "xscientist/provider_config.py",
+                "xscientist/file_transactions.py",
                 "xscientist/service.py",
                 "xscientist/service_jobs.py",
                 "xscientist/research_git.py",
@@ -131,6 +132,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "xscientist/research_tools.py",
                 "xscientist/git_support.py",
                 "xscientist/research_commands.py",
+                "xscientist/publication_authority.py",
                 "xscientist/system_comparison.py",
                 "xscientist/evidence_index.py",
                 "run_project.py",
@@ -186,6 +188,8 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/protocol/schemas/evidence_index.schema.json",
                 "ai_scientist/protocol/schemas/system_comparison.schema.json",
                 "ai_scientist/protocol/schemas/attestation.schema.json",
+                "ai_scientist/protocol/schemas/verification_report.schema.json",
+                "ai_scientist/protocol/schemas/verifier_authority.schema.json",
                 "ai_scientist/protocol/schemas/evolution_artifact.schema.json",
                 "ai_scientist/protocol/schemas/benchmark_suite.schema.json",
                 "ai_scientist/protocol/schemas/benchmark_run.schema.json",
@@ -205,18 +209,43 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/utils/evolution_artifacts.py",
                 "ai_scientist/utils/evolution_runtime.py",
                 "ai_scientist/utils/evolution_deployment.py",
-                "ai_scientist/fewshot_examples/132_automated_relational.txt",
-                "ai_scientist/fewshot_examples/132_automated_relational.json",
-                "ai_scientist/fewshot_examples/attention.txt",
-                "ai_scientist/fewshot_examples/attention.json",
-                "ai_scientist/fewshot_examples/2_carpe_diem.txt",
-                "ai_scientist/fewshot_examples/2_carpe_diem.json",
+                "ai_scientist/utils/verifier_authority.py",
+                "ai_scientist/utils/principal_identity.py",
+                "ai_scientist/utils/safe_files.py",
+                "ai_scientist/utils/trajectory_binding.py",
+                "ai_scientist/config/venues.py",
+                "ai_scientist/fewshot_examples/synthetic_strong.txt",
+                "ai_scientist/fewshot_examples/synthetic_strong.json",
+                "ai_scientist/fewshot_examples/synthetic_borderline.txt",
+                "ai_scientist/fewshot_examples/synthetic_borderline.json",
+                "ai_scientist/fewshot_examples/synthetic_negative.txt",
+                "ai_scientist/fewshot_examples/synthetic_negative.json",
             }
             self.assertFalse(
                 required - names, f"missing wheel files: {required - names}"
             )
+            self.assertTrue(
+                any(
+                    name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md")
+                    for name in names
+                ),
+                "wheel must retain the code-lineage notice",
+            )
+            self.assertTrue(
+                any(
+                    name.endswith(
+                        ".dist-info/licenses/third_party/licenses/AIDE-MIT.txt"
+                    )
+                    for name in names
+                ),
+                "wheel must retain the transitive AIDE MIT license",
+            )
             self.assertIn(
                 'Requires-Dist: tomli>=2.0; python_version < "3.11"',
+                metadata,
+            )
+            self.assertIn(
+                "License-Expression: Apache-2.0 AND MIT",
                 metadata,
             )
             for extra in (
@@ -260,6 +289,40 @@ class DistributionBuildTests(unittest.TestCase):
                     for name in names
                 ),
                 "text-backed review few-shots must not ship duplicate PDFs",
+            )
+            expected_fewshots = {
+                f"ai_scientist/fewshot_examples/synthetic_{quality}.{suffix}"
+                for quality in ("strong", "borderline", "negative")
+                for suffix in ("txt", "json")
+            }
+            actual_fewshots = {
+                name
+                for name in names
+                if name.startswith("ai_scientist/fewshot_examples/")
+            }
+            self.assertEqual(actual_fewshots, expected_fewshots)
+            with zipfile.ZipFile(wheel) as archive:
+                for name in sorted(expected_fewshots):
+                    payload = archive.read(name)
+                    self.assertLess(len(payload), 4096)
+                    self.assertNotIn(b"Attention Is All You Need", payload)
+
+            removed_tex_assets = {
+                "ai_scientist/blank_icbinb_latex/fancyhdr.sty",
+                "ai_scientist/blank_icbinb_latex/natbib.sty",
+                "ai_scientist/blank_icbinb_latex/iclr2025.bib",
+                "ai_scientist/blank_icbinb_latex/iclr2025.bst",
+                "ai_scientist/blank_icbinb_latex/iclr2025.sty",
+                "ai_scientist/blank_icbinb_latex/math_commands.tex",
+                "ai_scientist/blank_icml_latex/algorithm.sty",
+                "ai_scientist/blank_icml_latex/algorithmic.sty",
+                "ai_scientist/blank_icml_latex/icml2025.bst",
+                "ai_scientist/blank_icml_latex/icml2025.sty",
+            }
+            self.assertFalse(
+                removed_tex_assets & names,
+                "wheel must not redistribute removed TeX assets: "
+                f"{removed_tex_assets & names}",
             )
             self.assertFalse(
                 any(name.endswith(".pyc") or "/__pycache__/" in name for name in names),

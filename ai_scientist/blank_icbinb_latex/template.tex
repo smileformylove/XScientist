@@ -1,57 +1,24 @@
-\documentclass{article} % For LaTeX2e
-\usepackage{iclr2025,times}
+% XScientist-authored generic manuscript seed.
+% This is intentionally NOT an official conference template. Venue-targeted
+% workflows must materialize the pinned official template at runtime.
+\documentclass[11pt]{article}
 
-% Optional math commands from https://github.com/goodfeli/dlbook_notation.
-\input{math_commands.tex}
-
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{url}
-\usepackage{graphicx}
-\usepackage{subfigure}
-\usepackage{booktabs}
 
-% For theorems and such
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{mathtools}
-\usepackage{amsthm}
-
-% Custom
-\usepackage{multirow}
-\usepackage{color}
-\usepackage{colortbl}
-\usepackage[capitalize,noabbrev]{cleveref}
-\usepackage{xspace}
-
-% ARA (Agent-Native Research Artifact) claim marker — see
-% ai_scientist/utils/claim_registry.py. Invisible in the PDF, machine-readable
-% after compilation.
-\providecommand{\claimref}[2][]{}
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% THEOREMS
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\theoremstyle{plain}
 \newtheorem{theorem}{Theorem}[section]
-\newtheorem{proposition}[theorem]{Proposition}
 \newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{corollary}[theorem]{Corollary}
-\theoremstyle{definition}
+\newtheorem{proposition}[theorem]{Proposition}
 \newtheorem{definition}[theorem]{Definition}
-\newtheorem{assumption}[theorem]{Assumption}
-\theoremstyle{remark}
-\newtheorem{remark}[theorem]{Remark}
-
-\graphicspath{{../figures/}} % To reference your generated figures, name the PNGs directly. DO NOT CHANGE THIS.
+\providecommand{\claimref}[2][]{}
+\graphicspath{{../figures/}}
 
 \begin{filecontents}{references.bib}
-@book{goodfellow2016deep,
-  title={Deep learning},
-  author={Goodfellow, Ian and Bengio, Yoshua and Courville, Aaron and Bengio, Yoshua},
-  volume={1},
-  year={2016},
-  publisher={MIT Press}
-}
+% Citation entries are inserted here by the write-up workflow.
 \end{filecontents}
 
 \title{
@@ -59,28 +26,10 @@
 TITLE HERE
 %%%%%%%%%TITLE%%%%%%%%%
 }
-
-% Authors must not appear in the submitted version. They should be hidden
-% as long as the \iclrfinalcopy macro remains commented out below.
-% Non-anonymous submissions will be rejected without review.
-
 \author{Anonymous}
+\date{}
 
-% The \author macro works with any number of authors. There are two commands
-% used to separate the names and addresses of multiple authors: \And and \AND.
-%
-% Using \And between authors leaves it to \LaTeX{} to determine where to break
-% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
-% puts 3 of 4 authors names on the first line, and the last on the second
-% line, try using \AND instead of \And before the third author name.
-
-\newcommand{\fix}{\marginpar{FIX}}
-\newcommand{\new}{\marginpar{NEW}}
-
-%\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
 \begin{document}
-
-
 \maketitle
 
 \begin{abstract}
@@ -123,14 +72,6 @@ EXPERIMENTAL SETUP HERE
 \label{sec:experiments}
 %%%%%%%%%EXPERIMENTS%%%%%%%%%
 RESULTS HERE
-
-% EXAMPLE FIGURE: REPLACE AND ADD YOUR OWN FIGURES / CAPTIONS
-\begin{figure}[h!]
-\centering
-\includegraphics[width=0.5\textwidth]{example-image-a}
-\caption{PLEASE FILL IN CAPTION HERE}
-\label{fig:first_figure}
-\end{figure}
 %%%%%%%%%EXPERIMENTS%%%%%%%%%
 
 \section{Conclusion}
@@ -139,16 +80,12 @@ RESULTS HERE
 CONCLUSIONS HERE
 %%%%%%%%%CONCLUSION%%%%%%%%%
 
-\bibliography{iclr2025}
-\bibliographystyle{iclr2025}
+\bibliographystyle{plain}
+\bibliography{references}
 
 \appendix
-
-\section*{\LARGE Supplementary Material}
-\label{sec:appendix}
-
 %%%%%%%%%APPENDIX%%%%%%%%%
-\section{Appendix Section}
+\section{Supplementary Material}
 APPENDIX TEXT
 %%%%%%%%%APPENDIX%%%%%%%%%
 

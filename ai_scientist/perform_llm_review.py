@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2 lineage.
+# Review loading now uses original synthetic calibration assets; see THIRD_PARTY_NOTICES.md.
 import os
 import json
 import importlib
@@ -309,22 +311,23 @@ def load_review(json_path):
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 fewshot_papers = [
-    os.path.join(dir_path, "fewshot_examples/132_automated_relational.txt"),
-    os.path.join(dir_path, "fewshot_examples/attention.txt"),
-    os.path.join(dir_path, "fewshot_examples/2_carpe_diem.txt"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_strong.txt"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_borderline.txt"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_negative.txt"),
 ]
 
 fewshot_reviews = [
-    os.path.join(dir_path, "fewshot_examples/132_automated_relational.json"),
-    os.path.join(dir_path, "fewshot_examples/attention.json"),
-    os.path.join(dir_path, "fewshot_examples/2_carpe_diem.json"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_strong.json"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_borderline.json"),
+    os.path.join(dir_path, "fewshot_examples/synthetic_negative.json"),
 ]
 
 
 def get_review_fewshot_examples(num_fs_examples=1):
     fewshot_prompt = """
-Below are some sample reviews, copied from previous machine learning conferences.
-Note that while each review is formatted differently according to each reviewer's style, the reviews are well-structured and therefore easy to navigate.
+Below are XScientist-authored synthetic papers and reviews. They are fictional
+calibration examples, not conference submissions or reviews. Use them to
+calibrate evidence standards, not as evidence about any real work.
 """
     for paper_path, review_path in zip(
         fewshot_papers[:num_fs_examples], fewshot_reviews[:num_fs_examples]

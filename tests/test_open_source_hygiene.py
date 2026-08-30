@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -13,6 +14,83 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 
 class OpenSourceHygieneTests(unittest.TestCase):
+    def test_bilingual_docs_define_structured_trajectory_as_git_substrate(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        english = (repo_root / "README.md").read_text(encoding="utf-8")
+        chinese = (repo_root / "docs" / "README.zh.md").read_text(encoding="utf-8")
+        protocol = (repo_root / "ai_scientist" / "protocol" / "SPEC.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertRegex(english, r"structured\s+research trajectory")
+        self.assertIn("结构化科研轨迹", chinese)
+        self.assertIn("Structured Trajectory Invariant", protocol)
+        self.assertIn("chain-of-thought", english)
+        self.assertIn("隐藏思维链", chinese)
+        self.assertIn("chain-of-thought", protocol)
+
+    def test_third_party_code_lineage_is_disclosed_and_machine_readable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        notice = (repo_root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        provenance = json.loads(
+            (repo_root / "provenance" / "upstream_sources.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        aide_license = (
+            repo_root / "third_party" / "licenses" / "AIDE-MIT.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("AI-Scientist-v2", notice)
+        self.assertIn("AIDE", notice)
+        self.assertIn("maintainer_confirmation_required", json.dumps(provenance))
+        self.assertEqual(provenance["schema"], "xscientist.upstream-provenance.v1")
+        self.assertIn("Copyright (c) 2024 Weco AI Ltd", aide_license)
+        self.assertTrue(
+            provenance["sources"][0]["distribution_remediation"][
+                "removed_upstream_full_paper_review_examples"
+            ]
+        )
+        self.assertIn("fictional XScientist-authored", notice)
+
+    def test_distribution_license_and_authored_asset_boundary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with (repo_root / "pyproject.toml").open("rb") as handle:
+            metadata = tomllib.load(handle)
+
+        self.assertEqual(metadata["project"]["license"], "Apache-2.0 AND MIT")
+        self.assertIn(
+            "setuptools>=77",
+            metadata["build-system"]["requires"],
+        )
+
+        retained_templates = {
+            repo_root / "ai_scientist" / "blank_icbinb_latex" / "template.tex",
+            repo_root / "ai_scientist" / "blank_icml_latex" / "template.tex",
+        }
+        for template in retained_templates:
+            self.assertIn(
+                "XScientist-authored generic manuscript seed",
+                template.read_text(encoding="utf-8"),
+            )
+
+        risky_assets = (
+            "natbib.sty",
+            "fancyhdr.sty",
+            "algorithm.sty",
+            "algorithmic.sty",
+            "iclr2025.sty",
+            "iclr2025.bst",
+            "icml2025.sty",
+            "icml2025.bst",
+        )
+        for name in risky_assets:
+            self.assertFalse(
+                any((repo_root / "ai_scientist").glob(f"blank_*_latex/{name}"))
+            )
+
     def test_repository_root_visible_files_are_intentional(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         expected = {
@@ -23,6 +101,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
             "Makefile",
             "mkdocs.yml",
             "README.md",
+            "THIRD_PARTY_NOTICES.md",
             "pyproject.toml",
             "requirements.txt",
             "run_stable_daemon.sh",
@@ -183,7 +262,9 @@ class OpenSourceHygieneTests(unittest.TestCase):
     def test_chinese_readme_toc_tracks_quick_start_sections(self) -> None:
         text = self.chinese_readme_path.read_text(encoding="utf-8")
         expected_navigation = {
-            '<a href="#api-key">快速开始</a>': ("## 从自己的想法开始：不需要 API Key"),
+            '<a href="#quick-start">快速开始</a>': (
+                "## 从自己的想法开始：不需要 API Key"
+            ),
             '<a href="#运行自主研究">自主研究</a>': "## 运行自主研究",
             '<a href="#检查审计与复现">审计复现</a>': "## 检查、审计与复现",
             '<a href="#安装方式">安装</a>': "## 安装方式",

@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from __future__ import annotations
 import argparse
 import json
@@ -683,7 +685,9 @@ def load_exp_summaries(base_folder):
         ("ablation_summary.json", "ABLATION_SUMMARY"),
     ]
     loaded_summaries = {}
-    run_dirs = list(iter_bfts_run_dirs(base_folder, logs_subdir="logs", descending=True))
+    run_dirs = list(
+        iter_bfts_run_dirs(base_folder, logs_subdir="logs", descending=True)
+    )
     for filename, key in summary_files:
         summary = {}
         for run_dir in run_dirs:
@@ -695,9 +699,7 @@ def load_exp_summaries(base_folder):
                     summary = json.load(f)
                 break
             except json.JSONDecodeError:
-                print(
-                    f"Warning: {path} is not valid JSON. Using empty data for {key}."
-                )
+                print(f"Warning: {path} is not valid JSON. Using empty data for {key}.")
                 summary = {}
                 break
             except OSError:
@@ -763,7 +765,11 @@ def filter_experiment_summaries(exp_summaries, step_name):
     return filtered_summaries
 
 
-def gather_citations(base_folder, num_cite_rounds=15, small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1")):
+def gather_citations(
+    base_folder,
+    num_cite_rounds=15,
+    small_model=os.environ.get("ZHIPU_DEFAULT_MODEL", "anthropic/glm-5.1"),
+):
     """
     Gather citations for a paper, with ability to resume from previous progress.
 
@@ -1138,12 +1144,8 @@ def perform_writeup(
                     vlm_client, vlm_model, reflection_pdf
                 )
             else:
-                review_img_cap_ref = (
-                    "VLM review unavailable because VLM client/model initialization failed."
-                )
-                analysis_duplicate_figs = (
-                    "Duplicate-figure analysis skipped because VLM client/model is unavailable."
-                )
+                review_img_cap_ref = "VLM review unavailable because VLM client/model initialization failed."
+                analysis_duplicate_figs = "Duplicate-figure analysis skipped because VLM client/model is unavailable."
 
             print(analysis_duplicate_figs)
 
@@ -1151,7 +1153,9 @@ def perform_writeup(
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
 
             check_output = run_chktex(writeup_file)
-            citation_consistency_report = build_citation_consistency_report(current_latex)
+            citation_consistency_report = build_citation_consistency_report(
+                current_latex
+            )
             submission_guardrail_report = build_submission_guardrail_report(
                 current_latex, target_venue
             )
@@ -1244,9 +1248,7 @@ Ensure proper citation usage:
                     vlm_client, vlm_model, reflection_pdf, reflection_page_info
                 )
             else:
-                review_img_selection = (
-                    "Figure-selection review skipped because VLM client/model is unavailable."
-                )
+                review_img_selection = "Figure-selection review skipped because VLM client/model is unavailable."
             img_reflection_prompt = f"""Now let's reflect on
 The following figures are currently used in the paper: {sorted(used_figs)}
 The following figures are available in the folder but not used in the LaTeX: {sorted(unused_figs)}
@@ -1362,9 +1364,7 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
         final_pdf_exists = osp.exists(reflection_pdf) or osp.exists(pdf_file)
         with open(writeup_file, "r", encoding="utf-8", errors="ignore") as f_final:
             final_latex = f_final.read()
-        final_guardrail_findings = collect_guardrail_findings(
-            final_latex, target_venue
-        )
+        final_guardrail_findings = collect_guardrail_findings(final_latex, target_venue)
         final_guardrail_report = build_submission_guardrail_report(
             final_latex, target_venue
         )
@@ -1443,7 +1443,9 @@ Hard requirements:
                     target_venue,
                 )
                 with open(
-                    osp.join(audits_dir, f"guardrail_repair_round_{repair_idx + 1}.json"),
+                    osp.join(
+                        audits_dir, f"guardrail_repair_round_{repair_idx + 1}.json"
+                    ),
                     "w",
                     encoding="utf-8",
                 ) as f_repair:
@@ -1468,7 +1470,9 @@ Hard requirements:
             "w",
             encoding="utf-8",
         ) as f_report_json:
-            json.dump(final_guardrail_findings, f_report_json, indent=2, ensure_ascii=False)
+            json.dump(
+                final_guardrail_findings, f_report_json, indent=2, ensure_ascii=False
+            )
         with open(
             osp.join(audits_dir, "final_guardrail_report.txt"),
             "w",
@@ -1552,9 +1556,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--writing-profile",
         type=str,
-        default=os.environ.get(
-            "AI_SCIENTIST_WRITING_PROFILE", DEFAULT_WRITING_PROFILE
-        ),
+        default=os.environ.get("AI_SCIENTIST_WRITING_PROFILE", DEFAULT_WRITING_PROFILE),
         choices=list_writing_profiles(),
         help="Prompt writing profile used to guide style and self-checks.",
     )

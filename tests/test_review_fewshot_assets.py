@@ -1,16 +1,35 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ai_scientist import perform_llm_review
 from ai_scientist.perform_llm_review import get_review_fewshot_examples
 
-EXPECTED_PROMPT_HASHES = {
-    1: (64285, "8ef3e83911a19217832789ab120988ea3a84aa7ea07325d9f99dbc5ff9a86537"),
-    2: (100491, "86611fbac8342ba64e3e99d6c655e1db8600c788162312e3fbd40d57a806c65c"),
-    3: (143953, "d14bc5f9599da84480f01e45697e201bef28c8560aac5632e93dec48cc52c3fc"),
+EXPECTED_STEMS = {
+    "synthetic_strong",
+    "synthetic_borderline",
+    "synthetic_negative",
+}
+EXPECTED_REVIEW_FIELDS = {
+    "Summary",
+    "Strengths",
+    "Weaknesses",
+    "Originality",
+    "Quality",
+    "Clarity",
+    "Significance",
+    "Questions",
+    "Limitations",
+    "Ethical Concerns",
+    "Soundness",
+    "Presentation",
+    "Contribution",
+    "Overall",
+    "Confidence",
+    "Decision",
 }
 
 
@@ -25,12 +44,41 @@ class ReviewFewshotAssetTests(unittest.TestCase):
         ):
             self.assertIsNone(perform_llm_review._load_pdf_layout_module())
 
-    def test_text_assets_preserve_exact_review_prompts(self) -> None:
-        for count, (expected_size, expected_hash) in EXPECTED_PROMPT_HASHES.items():
+    def test_synthetic_assets_are_small_complete_and_explicitly_fictional(self) -> None:
+        asset_dir = Path(perform_llm_review.dir_path) / "fewshot_examples"
+        self.assertEqual(
+            {path.stem for path in asset_dir.glob("*")},
+            EXPECTED_STEMS,
+        )
+
+        overall_scores = []
+        for stem in sorted(EXPECTED_STEMS):
+            with self.subTest(stem=stem):
+                paper_path = asset_dir / f"{stem}.txt"
+                review_path = asset_dir / f"{stem}.json"
+                paper = paper_path.read_text(encoding="utf-8")
+                payload = json.loads(review_path.read_text(encoding="utf-8"))
+                review = json.loads(payload["review"])
+
+                self.assertLess(paper_path.stat().st_size, 4096)
+                self.assertLess(review_path.stat().st_size, 4096)
+                self.assertIn("SYNTHETIC CALIBRATION PAPER", paper)
+                self.assertIn("fictional", payload["xscientist_asset_notice"])
+                self.assertEqual(set(review), EXPECTED_REVIEW_FIELDS)
+                overall_scores.append(review["Overall"])
+
+        self.assertEqual(sorted(overall_scores), [2, 5, 8])
+
+    def test_prompt_loader_uses_only_synthetic_xscientist_examples(self) -> None:
+        previous_size = 0
+        for count in range(1, 4):
             with self.subTest(count=count):
-                prompt = get_review_fewshot_examples(count).encode("utf-8")
-                self.assertEqual(len(prompt), expected_size)
-                self.assertEqual(hashlib.sha256(prompt).hexdigest(), expected_hash)
+                prompt = get_review_fewshot_examples(count)
+                self.assertIn("XScientist-authored synthetic papers", prompt)
+                self.assertEqual(prompt.count("SYNTHETIC CALIBRATION PAPER"), count)
+                self.assertGreater(len(prompt), previous_size)
+                self.assertNotIn("Attention Is All You Need", prompt)
+                previous_size = len(prompt)
 
 
 if __name__ == "__main__":

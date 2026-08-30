@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +8,12 @@ dynamic = ["version"]
 description = "Autonomous research with Git-like, inspectable, reproducible, and reversible evidence histories."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "Apache-2.0 AND MIT"
+license-files = [
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+  "third_party/licenses/*.txt",
+]
 authors = [
   { name = "AI Scientist Contributors" },
 ]

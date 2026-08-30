@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from AI-Scientist-v2 lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from __future__ import annotations
 import argparse
 import json
@@ -8,7 +10,11 @@ import shutil
 import subprocess
 import traceback
 
-from ai_scientist.resources import latex_template_dir
+from ai_scientist.resources import (
+    OfficialTemplateError,
+    latex_template_dir,
+    materialize_latex_template,
+)
 import unicodedata
 import uuid
 
@@ -64,6 +70,121 @@ def _ara_claim_marker_guidance() -> str:
     is free to include or omit markers without hurting the reader's experience.
     """
     return "## ARA claim markers\n" + render_claim_prompt_snippet()
+
+
+_EMBEDDED_BIBLIOGRAPHY_PATTERN = re.compile(
+    r"\\begin{filecontents}{references\.bib}(.*?)\\end{filecontents}",
+    re.DOTALL,
+)
+
+
+def _prepare_bibliography_binding(
+    latex_folder: str,
+    writeup_file: str,
+    target_venue: str | None,
+) -> dict[str, str]:
+    """Bind citation collection to embedded or external BibTeX storage."""
+
+    with open(writeup_file, "r", encoding="utf-8") as stream:
+        latex_text = stream.read()
+    if _EMBEDDED_BIBLIOGRAPHY_PATTERN.search(latex_text):
+        return {"mode": "embedded", "path": writeup_file}
+
+    references_path = osp.join(latex_folder, "references.bib")
+    normalized_target_venue = str(target_venue or "").strip().lower()
+    with open(references_path, "w", encoding="utf-8") as references:
+        references.write("")
+
+    if normalized_target_venue == "icml":
+        # The official example intentionally cites its sample bibliography. It
+        # is useful as formatting documentation, but unrelated sample citations
+        # must never leak into a generated research paper.
+        latex_text = re.sub(
+            r"^\s*\\nocite\{langley00\}\s*$",
+            "",
+            latex_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    if re.search(r"\\bibliography\{[^}]+\}", latex_text):
+        latex_text = re.sub(
+            r"\\bibliography\{[^}]+\}",
+            r"\\bibliography{references}",
+            latex_text,
+            count=1,
+        )
+    else:
+        bibliography_commands = (
+            "\\bibliographystyle{plainnat}\n" "\\bibliography{references}\n\n"
+        )
+        reference_example_pattern = re.compile(
+            r"\\section\*\{References\}.*?(?=\\appendix)",
+            re.DOTALL,
+        )
+        if reference_example_pattern.search(latex_text):
+            latex_text = reference_example_pattern.sub(
+                lambda _: bibliography_commands,
+                latex_text,
+                count=1,
+            )
+        elif "\\appendix" in latex_text:
+            latex_text = latex_text.replace(
+                "\\appendix",
+                bibliography_commands + "\\appendix",
+                1,
+            )
+        else:
+            latex_text = latex_text.replace(
+                "\\end{document}",
+                bibliography_commands + "\\end{document}",
+                1,
+            )
+    with open(writeup_file, "w", encoding="utf-8") as stream:
+        stream.write(latex_text)
+    return {"mode": "external", "path": references_path}
+
+
+def _read_bound_bibliography(binding: dict[str, str], latex_text: str) -> str:
+    if binding["mode"] == "embedded":
+        match = _EMBEDDED_BIBLIOGRAPHY_PATTERN.search(latex_text)
+        if match is None:
+            raise ValueError("No references.bib found in template.tex")
+        return match.group(1)
+    with open(binding["path"], "r", encoding="utf-8") as references:
+        return references.read()
+
+
+def _append_bound_bibliography(
+    binding: dict[str, str],
+    latex_text: str,
+    addition: str,
+) -> str:
+    if binding["mode"] == "embedded":
+        pattern_end = r"\end{filecontents}"
+        return latex_text.replace(pattern_end, f"\n{addition}{pattern_end}", 1)
+    with open(binding["path"], "a", encoding="utf-8") as references:
+        if references.tell() > 0:
+            references.write("\n")
+        references.write(addition.rstrip() + "\n")
+    return latex_text
+
+
+def _latex_with_bound_bibliography(
+    latex_text: str,
+    binding: dict[str, str],
+) -> str:
+    """Expose external BibTeX to existing citation guardrails without inlining it."""
+
+    if _EMBEDDED_BIBLIOGRAPHY_PATTERN.search(latex_text):
+        return latex_text
+    bibliography = _read_bound_bibliography(binding, latex_text)
+    return (
+        latex_text
+        + "\n\\begin{filecontents}{references.bib}\n"
+        + bibliography
+        + "\n\\end{filecontents}\n"
+    )
 
 
 def remove_accents_and_clean(s):
@@ -566,9 +687,16 @@ def perform_writeup(
 
         # Prepare a new fresh latex folder
         if not osp.exists(osp.join(latex_folder, "template.tex")):
-            shutil.copytree(
-                latex_template_dir("icml"), latex_folder, dirs_exist_ok=True
-            )
+            normalized_target_venue = str(target_venue or "").strip().lower()
+            if normalized_target_venue in {"neurips", "icml"}:
+                materialize_latex_template(normalized_target_venue, latex_folder)
+            else:
+                # Preserve the legacy generic write-up behavior for workflows
+                # without a pinned official venue. This packaged seed is not
+                # represented as an official or current conference template.
+                shutil.copytree(
+                    latex_template_dir("icml"), latex_folder, dirs_exist_ok=True
+                )
 
         writeup_file = osp.join(latex_folder, "template.tex")
         with open(writeup_file, "r") as f:
@@ -595,14 +723,25 @@ def perform_writeup(
             compile_latex(latex_folder, base_pdf_file + ".pdf")
             return osp.exists(base_pdf_file + ".pdf")
 
+        bibliography_binding = _prepare_bibliography_binding(
+            latex_folder,
+            writeup_file,
+            target_venue,
+        )
         if citations_text:
             with open(writeup_file, "r", encoding="utf-8") as f:
                 seeded_content = f.read()
-            pattern_end = r"\end{filecontents}"
-            if pattern_end in seeded_content and citations_text not in seeded_content:
-                seeded_content = seeded_content.replace(
-                    pattern_end, f"\n{citations_text}{pattern_end}"
+            existing_bibliography = _read_bound_bibliography(
+                bibliography_binding,
+                seeded_content,
+            )
+            if citations_text not in existing_bibliography:
+                seeded_content = _append_bound_bibliography(
+                    bibliography_binding,
+                    seeded_content,
+                    citations_text,
                 )
+            if bibliography_binding["mode"] == "embedded":
                 with open(writeup_file, "w", encoding="utf-8") as f:
                     f.write(seeded_content)
 
@@ -612,14 +751,10 @@ def perform_writeup(
             with open(writeup_file, "r") as f:
                 writeup_text = f.read()
             try:
-                references_bib = re.search(
-                    r"\\begin{filecontents}{references.bib}(.*?)\\end{filecontents}",
+                citations_text = _read_bound_bibliography(
+                    bibliography_binding,
                     writeup_text,
-                    re.DOTALL,
                 )
-                if references_bib is None:
-                    raise ValueError("No references.bib found in template.tex")
-                citations_text = references_bib.group(1)
                 context_for_citation = (combined_summaries_str, citations_text)
 
                 addition, done = get_citation_addition(
@@ -643,12 +778,14 @@ def perform_writeup(
                         )
                         existing_titles = [t.lower() for t in existing_titles]
                         if new_title not in existing_titles:
-                            pattern_end = r"\end{filecontents}"
-                            revised = writeup_text.replace(
-                                pattern_end, f"\n{addition}{pattern_end}"
+                            revised = _append_bound_bibliography(
+                                bibliography_binding,
+                                writeup_text,
+                                addition,
                             )
-                            with open(writeup_file, "w") as fo:
-                                fo.write(revised)
+                            if bibliography_binding["mode"] == "embedded":
+                                with open(writeup_file, "w") as fo:
+                                    fo.write(revised)
             except Exception:
                 print("EXCEPTION in perform_writeup (citation round):")
                 print(traceback.format_exc())
@@ -751,6 +888,19 @@ def perform_writeup(
             plot_descriptions=plot_descriptions_str,
             structured_context=structured_context,
         )
+        bound_bibliography = _read_bound_bibliography(
+            bibliography_binding,
+            writeup_text,
+        )
+        combined_prompt += f"""
+
+The citation collector produced the following bound bibliography file. Preserve
+the current ``\\bibliography{{references}}`` binding (or the existing embedded
+``references.bib`` contract), and cite only keys that appear here:
+```bibtex
+{bound_bibliography}
+```
+"""
 
         response, msg_history = get_response_from_llm(
             prompt=combined_prompt,
@@ -827,11 +977,16 @@ def perform_writeup(
                 reflection_page_info = "\nCould not detect 'Impact Statement' page (compilation or detection failed).\n"
 
             check_output = run_chktex(writeup_file)
+            current_latex_for_guardrails = _latex_with_bound_bibliography(
+                current_latex,
+                bibliography_binding,
+            )
             citation_consistency_report = build_citation_consistency_report(
-                current_latex
+                current_latex_for_guardrails
             )
             submission_guardrail_report = build_submission_guardrail_report(
-                current_latex, target_venue
+                current_latex_for_guardrails,
+                target_venue,
             )
 
             reflection_prompt = f"""
@@ -916,9 +1071,17 @@ If you believe you are done, simply say: "I am done".
             final_pdf_exists = osp.exists(base_pdf_file + ".pdf")
         with open(writeup_file, "r", encoding="utf-8", errors="ignore") as f_final:
             final_latex = f_final.read()
-        final_guardrail_findings = collect_guardrail_findings(final_latex, target_venue)
+        final_latex_for_guardrails = _latex_with_bound_bibliography(
+            final_latex,
+            bibliography_binding,
+        )
+        final_guardrail_findings = collect_guardrail_findings(
+            final_latex_for_guardrails,
+            target_venue,
+        )
         final_guardrail_report = build_submission_guardrail_report(
-            final_latex, target_venue
+            final_latex_for_guardrails,
+            target_venue,
         )
 
         if strict_guardrails and has_blocking_guardrail_violations(
@@ -976,11 +1139,17 @@ Hard requirements:
                     base_pdf_file + f"_guardrail_repair_{repair_idx + 1}.pdf",
                 )
                 final_latex = repaired_latex
+                final_latex_for_guardrails = _latex_with_bound_bibliography(
+                    final_latex,
+                    bibliography_binding,
+                )
                 final_guardrail_findings = collect_guardrail_findings(
-                    final_latex, target_venue
+                    final_latex_for_guardrails,
+                    target_venue,
                 )
                 final_guardrail_report = build_submission_guardrail_report(
-                    final_latex, target_venue
+                    final_latex_for_guardrails,
+                    target_venue,
                 )
                 round_reasons = list_blocking_guardrail_reasons(
                     final_guardrail_findings,
@@ -1064,6 +1233,9 @@ Hard requirements:
 
         return final_pdf_exists
 
+    except OfficialTemplateError as exc:
+        print(f"Official venue template verification failed: {exc}")
+        return False
     except Exception:
         print("EXCEPTION in perform_writeup:")
         print(traceback.format_exc())

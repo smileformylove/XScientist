@@ -1,0 +1,35 @@
+SYNTHETIC CALIBRATION PAPER — authored for XScientist; no real paper or result.
+
+Title: SplitSafe: Leakage-Resistant Evaluation for Small Tabular Studies
+
+Abstract
+We study whether fitting preprocessing on all observations inflates performance
+estimates in small tabular classification studies. SplitSafe is a lightweight
+pipeline that fits feature selection, imputation, and scaling inside each
+training fold. We preregister the primary endpoint before accessing held-out
+labels and compare SplitSafe with an otherwise identical leaky pipeline.
+
+Method and protocol
+The primary endpoint is paired test AUROC across 30 independently generated
+datasets. Each dataset has 1,200 observations, 40 informative features, 160
+noise features, and 12% missingness. The confirmatory seed list, generator
+version, exclusion rule, and Wilcoxon test were frozen before execution. A
+separate exploratory set was used to select the missingness mechanism. We also
+evaluate two public datasets as a domain-shift stress test; no tuning is
+performed on their test folds.
+
+Results
+SplitSafe reduces the median optimistic AUROC error from 0.061 to 0.006. The
+paired median improvement is 0.052 with a bootstrap 95% interval [0.044, 0.061]
+and corrected p < 0.001. The effect remains positive for all four prespecified
+sample-size strata. Ablations show that feature selection accounts for most of
+the leakage, while imputation and scaling contribute smaller effects. On the
+public stress tests the improvement is 0.037 and 0.041. An independent script,
+run in a clean environment from the artifact manifest, reproduces every table
+within the stated numerical tolerance.
+
+Limitations
+The study covers binary classification and conventional preprocessing only.
+Synthetic generators may omit dependencies found in operational data. The
+public datasets are modest in size, and the paper makes no claim about medical
+or safety-critical deployment.

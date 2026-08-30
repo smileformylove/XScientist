@@ -1,0 +1,44 @@
+{
+  "schema": "xscientist.upstream-provenance.v1",
+  "audit_date": "2026-08-30",
+  "audit_scope": "targeted_path_and_byte_identity_audit_not_legal_opinion",
+  "sources": [
+    {
+      "name": "AI-Scientist-v2",
+      "repository": "https://github.com/SakanaAI/AI-Scientist-v2",
+      "audited_ref": "defddb8174905aac3bf4f7de7650e4cbf2ac353c",
+      "relationship": "modified_derivative_code_and_retained_assets",
+      "license_at_audited_ref": "Apache-2.0",
+      "license_sha256": "0dc1811264bb76e119d3f58a8e775d79abeb1708c9486d3861354c1688062350",
+      "acquisition": {
+        "status": "maintainer_confirmation_required",
+        "actual_source_ref": null,
+        "acquired_at": null,
+        "confirmed_by": null
+      },
+      "distribution_remediation": {
+        "removed_upstream_full_paper_review_examples": true,
+        "removed_bundled_tex_packages_and_conference_styles": true,
+        "replacement_review_examples": "xscientist_authored_fictional_synthetic_assets",
+        "replacement_packaged_templates": "xscientist_authored_generic_non_venue_seeds",
+        "official_venue_templates": "runtime_download_with_pinned_sha256_and_source_receipt"
+      },
+      "future_upstream_import_requires_new_review": true
+    },
+    {
+      "name": "AIDE",
+      "repository": "https://github.com/WecoAI/aideml",
+      "audited_ref": "a4d58d94ad2035b7b458b5677c26a55e66ea8ca0",
+      "relationship": "transitive_modified_code_lineage_via_ai_scientist_v2",
+      "license_at_audited_ref": "MIT",
+      "copyright": "Copyright (c) 2024 Weco AI Ltd",
+      "acquisition": {
+        "status": "transitive_lineage_audited_actual_ref_unconfirmed",
+        "actual_source_ref": null,
+        "acquired_at": null,
+        "confirmed_by": null
+      },
+      "future_upstream_import_requires_new_review": true
+    }
+  ]
+}

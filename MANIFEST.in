@@ -4,9 +4,12 @@ include run_stable_daemon.sh
 include start_research.sh
 include CHANGELOG.md
 include CITATION.cff
+include THIRD_PARTY_NOTICES.md
 include mkdocs.yml
 graft configs
+graft provenance
 graft requirements
+graft third_party
 graft docs
 include .github/CONTRIBUTING.md
 include .github/CODE_OF_CONDUCT.md

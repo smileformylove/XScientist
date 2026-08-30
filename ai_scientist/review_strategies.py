@@ -3,6 +3,7 @@
 AI Scientist 多样化审查策略系统
 支持不同会议/期刊的审查标准和深度
 """
+
 import json
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -10,25 +11,28 @@ from typing import Dict, List, Optional, Tuple
 
 class ReviewStrategy(str, Enum):
     """审查策略类型"""
-    STANDARD = "standard"           # 标准综合审查
-    FAST = "fast"                   # 快速检查
-    DEPTH = "depth"                 # 深度审查
-    NEURIPS = "neurips"             # NeurIPS格式
-    ICLR = "iclr"                   # ICLR格式
-    CVPR = "cvpr"                   # CVPR格式
-    JOURNAL = "journal"             # 期刊审查
-    NATURE = "nature"               # Nature风格审查
+
+    STANDARD = "standard"  # 标准综合审查
+    FAST = "fast"  # 快速检查
+    DEPTH = "depth"  # 深度审查
+    NEURIPS = "neurips"  # NeurIPS格式
+    ICML = "icml"  # ICML格式
+    ICLR = "iclr"  # ICLR格式
+    CVPR = "cvpr"  # CVPR格式
+    JOURNAL = "journal"  # 期刊审查
+    NATURE = "nature"  # Nature风格审查
 
 
 class ReviewFocus(str, Enum):
     """审查焦点"""
-    QUALITY = "quality"             # 质量
-    CLARITY = "clarity"             # 清晰度
-    ORIGINALITY = "originality"     # 原创性
-    SIGNIFICANCE = "significance"   # 重要性
-    SOUNDNESS = "soundness"         # 严谨性
-    ETHICS = "ethics"               # 伦理
-    PRESENTATION = "presentation"   # 呈现
+
+    QUALITY = "quality"  # 质量
+    CLARITY = "clarity"  # 清晰度
+    ORIGINALITY = "originality"  # 原创性
+    SIGNIFICANCE = "significance"  # 重要性
+    SOUNDNESS = "soundness"  # 严谨性
+    ETHICS = "ethics"  # 伦理
+    PRESENTATION = "presentation"  # 呈现
     REPRODUCIBILITY = "reproducibility"  # 可复现性
 
 
@@ -46,11 +50,14 @@ REVIEW_STRATEGIES = {
         "review_depth": "medium",
         "expected_time": "10-15分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Overall"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Overall",
         ],
     },
-
     ReviewStrategy.FAST: {
         "name": "快速检查",
         "description": "聚焦主要问题和明显缺陷",
@@ -61,12 +68,9 @@ REVIEW_STRATEGIES = {
         ],
         "review_depth": "shallow",
         "expected_time": "5-8分钟",
-        "scoring_categories": [
-            "Soundness", "Clarity", "Overall"
-        ],
+        "scoring_categories": ["Soundness", "Clarity", "Overall"],
         "major_issues_only": True,
     },
-
     ReviewStrategy.DEPTH: {
         "name": "深度审查",
         "description": "全面深入的审查，包含所有细节",
@@ -83,13 +87,18 @@ REVIEW_STRATEGIES = {
         "review_depth": "deep",
         "expected_time": "20-30分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Presentation",
-            "Contribution", "Ethical Concerns", "Overall"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Presentation",
+            "Contribution",
+            "Ethical Concerns",
+            "Overall",
         ],
         "detailed_feedback": True,
     },
-
     ReviewStrategy.NEURIPS: {
         "name": "NeurIPS格式",
         "description": "按照NeurIPS会议标准审查",
@@ -102,14 +111,43 @@ REVIEW_STRATEGIES = {
         "review_depth": "medium",
         "expected_time": "15分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Overall",
-            "Reproducibility"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Overall",
+            "Reproducibility",
         ],
         "venue_specific": True,
         "format_template": "neurips",
     },
-
+    ReviewStrategy.ICML: {
+        "name": "ICML格式",
+        "description": "按照ICML标准审查，并显式审计claim与可复现实验证据",
+        "focus_areas": [
+            ReviewFocus.QUALITY,
+            ReviewFocus.CLARITY,
+            ReviewFocus.ORIGINALITY,
+            ReviewFocus.SIGNIFICANCE,
+            ReviewFocus.SOUNDNESS,
+            ReviewFocus.REPRODUCIBILITY,
+        ],
+        "review_depth": "deep",
+        "expected_time": "20-30分钟",
+        "scoring_categories": [
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Reproducibility",
+            "Overall",
+        ],
+        "detailed_feedback": True,
+        "venue_specific": True,
+        "format_template": "icml",
+    },
     ReviewStrategy.ICLR: {
         "name": "ICLR格式",
         "description": "按照ICLR会议标准审查",
@@ -122,13 +160,16 @@ REVIEW_STRATEGIES = {
         "review_depth": "medium",
         "expected_time": "15分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Overall"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Overall",
         ],
         "venue_specific": True,
         "format_template": "iclr",
     },
-
     ReviewStrategy.CVPR: {
         "name": "CVPR格式",
         "description": "按照CVPR会议标准审查",
@@ -142,14 +183,17 @@ REVIEW_STRATEGIES = {
         "review_depth": "medium",
         "expected_time": "15分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Overall",
-            "Reproducibility"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Overall",
+            "Reproducibility",
         ],
         "venue_specific": True,
         "format_template": "cvpr",
     },
-
     ReviewStrategy.JOURNAL: {
         "name": "期刊审查",
         "description": "按照期刊标准进行严格审查",
@@ -165,14 +209,19 @@ REVIEW_STRATEGIES = {
         "review_depth": "deep",
         "expected_time": "25-35分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Presentation",
-            "Contribution", "Reproducibility", "Overall"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Presentation",
+            "Contribution",
+            "Reproducibility",
+            "Overall",
         ],
         "detailed_feedback": True,
         "strict_standards": True,
     },
-
     ReviewStrategy.NATURE: {
         "name": "Nature风格审查",
         "description": "强调重大问题、强证据链、广泛影响与克制 claim 的高标准审查",
@@ -188,9 +237,15 @@ REVIEW_STRATEGIES = {
         "review_depth": "deep",
         "expected_time": "30-40分钟",
         "scoring_categories": [
-            "Originality", "Quality", "Clarity",
-            "Significance", "Soundness", "Presentation",
-            "Contribution", "Reproducibility", "Overall"
+            "Originality",
+            "Quality",
+            "Clarity",
+            "Significance",
+            "Soundness",
+            "Presentation",
+            "Contribution",
+            "Reproducibility",
+            "Overall",
         ],
         "detailed_feedback": True,
         "strict_standards": True,
@@ -214,7 +269,9 @@ class ReviewStrategyManager:
         Returns:
             策略配置
         """
-        return REVIEW_STRATEGIES.get(strategy, REVIEW_STRATEGIES[ReviewStrategy.STANDARD])
+        return REVIEW_STRATEGIES.get(
+            strategy, REVIEW_STRATEGIES[ReviewStrategy.STANDARD]
+        )
 
     @staticmethod
     def list_strategies() -> List[Dict]:
@@ -291,14 +348,18 @@ class ReviewStrategyManager:
 
         # 根据深度调整评分类别
         if review_depth == "shallow":
-            custom_strategy["scoring_categories"] = [
-                "Quality", "Clarity", "Overall"
-            ]
+            custom_strategy["scoring_categories"] = ["Quality", "Clarity", "Overall"]
         elif review_depth == "deep":
             custom_strategy["scoring_categories"] = [
-                "Originality", "Quality", "Clarity",
-                "Significance", "Soundness", "Presentation",
-                "Contribution", "Reproducibility", "Overall"
+                "Originality",
+                "Quality",
+                "Clarity",
+                "Significance",
+                "Soundness",
+                "Presentation",
+                "Contribution",
+                "Reproducibility",
+                "Overall",
             ]
 
         return custom_strategy
@@ -333,10 +394,12 @@ def generate_review_instruction(
     }
 
     # 构建焦点说明
-    focus_text = "\n".join([
-        f"- {focus.value}: {focus_descriptions[focus]}"
-        for focus in config["focus_areas"]
-    ])
+    focus_text = "\n".join(
+        [
+            f"- {focus.value}: {focus_descriptions[focus]}"
+            for focus in config["focus_areas"]
+        ]
+    )
 
     # 构建评分说明
     scoring_text = ", ".join(config["scoring_categories"])
@@ -459,13 +522,21 @@ class SmartIterationController:
         if current_improvement >= self.improvement_threshold:
             # 有显著改进，重置收敛计数
             self.convergence_count = 0
-            return True, f"改进显著 ({current_improvement:.2f} >= {self.improvement_threshold})，继续迭代", decision_details
+            return (
+                True,
+                f"改进显著 ({current_improvement:.2f} >= {self.improvement_threshold})，继续迭代",
+                decision_details,
+            )
 
         # 改进较小，增加收敛计数
         self.convergence_count += 1
 
         if self.convergence_count >= self.convergence_rounds:
-            return False, f"连续{self.convergence_rounds}轮改进低于阈值，已收敛", decision_details
+            return (
+                False,
+                f"连续{self.convergence_rounds}轮改进低于阈值，已收敛",
+                decision_details,
+            )
 
         # 检查总体趋势
         if len(self.improvement_history) >= 3:
@@ -476,16 +547,28 @@ class SmartIterationController:
         # 检查评分是否已经很高
         overall_score = review_scores.get("Overall", 0)
         if overall_score >= 8.0:
-            return False, f"总体评分已较高 ({overall_score:.1f}/10)，可以停止", decision_details
+            return (
+                False,
+                f"总体评分已较高 ({overall_score:.1f}/10)，可以停止",
+                decision_details,
+            )
 
-        return True, f"改进较小 ({current_improvement:.2f})，但可能继续优化", decision_details
+        return (
+            True,
+            f"改进较小 ({current_improvement:.2f})，但可能继续优化",
+            decision_details,
+        )
 
     def get_summary(self) -> Dict:
         """获取迭代总结"""
         return {
             "total_rounds": self.round_count,
             "improvement_history": self.improvement_history,
-            "average_improvement": sum(self.improvement_history) / len(self.improvement_history) if self.improvement_history else 0,
+            "average_improvement": (
+                sum(self.improvement_history) / len(self.improvement_history)
+                if self.improvement_history
+                else 0
+            ),
             "total_improvement": sum(self.improvement_history),
             "final_convergence_count": self.convergence_count,
         }

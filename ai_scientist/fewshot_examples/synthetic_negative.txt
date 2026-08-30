@@ -1,0 +1,29 @@
+SYNTHETIC CALIBRATION PAPER — authored for XScientist; no real paper or result.
+
+Title: NovaRank: Universal Ranking by Adaptive Prompt Search
+
+Abstract
+NovaRank automatically searches prompts and obtains large improvements on
+several ranking benchmarks. We claim the method is universally better than
+existing ranking systems and should replace manual prompt design.
+
+Method and protocol
+The search agent receives the test score after every candidate prompt and keeps
+the highest-scoring prompt. We run until improvement stops, using between 200
+and 2,000 test evaluations per benchmark. The number of attempts, model
+version, and prompts are not logged. We compare the selected maximum with one
+baseline run. Two benchmarks with negative results are excluded because they
+were "unstable." No validation split, frozen hypothesis, uncertainty estimate,
+or independent rerun is provided.
+
+Results
+The selected prompts exceed the baseline by 7 to 19 points on the retained
+benchmarks. A plot is reconstructed from rounded values in the manuscript; raw
+predictions and code are unavailable. The paper attributes all improvement to
+adaptive search but provides no random-search control, matched compute budget,
+or ablation. A request to rerun one benchmark produced a different score, which
+the paper dismisses without analysis.
+
+Limitations
+The paper states that benchmark exposure might matter but does not revise the
+universal claim or investigate selection bias.

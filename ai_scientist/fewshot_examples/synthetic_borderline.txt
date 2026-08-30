@@ -1,0 +1,30 @@
+SYNTHETIC CALIBRATION PAPER — authored for XScientist; no real paper or result.
+
+Title: EchoTune: Budget-Aware Early Stopping for Noisy Validation Curves
+
+Abstract
+We propose EchoTune, which smooths recent validation measurements and stops
+training when the estimated gain falls below a fixed compute cost. Across six
+image-classification settings, EchoTune uses 18% less compute than patience
+stopping while retaining similar mean accuracy.
+
+Method and protocol
+We compare with patience stopping and a fixed epoch budget using five seeds.
+The smoothing window and cost coefficient were selected on two of the six
+reported settings. The paper labels all six settings as evaluation tasks. The
+primary metric is described as accuracy per unit compute, but the threshold for
+"similar accuracy" was selected after observing the results. Error bars are
+standard deviations over seeds. Source code and raw logs are available.
+
+Results
+EchoTune reduces compute in five settings and increases it in one. Mean
+accuracy differences range from -0.8 to +0.2 percentage points. A component
+ablation removes smoothing and loses most of the compute saving. Results with
+three alternative window sizes are included, but no multiplicity correction or
+confidence interval for the aggregate claim is reported. One larger model is
+tested with two seeds and shows a similar directional result.
+
+Limitations
+The selected settings are all image classifiers. The stopping decision depends
+on noisy validation measurements, and selection of the equivalence threshold
+after inspecting results may bias the headline conclusion.

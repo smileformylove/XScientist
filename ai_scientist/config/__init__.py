@@ -1,6 +1,7 @@
 """
 AI Scientist 配置模块
 """
+
 from .paths import (
     OUTPUT_DIR,
     OUTPUT_PATH,
@@ -14,6 +15,12 @@ from .paths import (
     get_project_dir,
     resolve_output_dir_value,
     resolve_output_path,
+)
+from .venues import (
+    CONFERENCE_TARGET_VENUES,
+    DEFAULT_TARGET_VENUE,
+    TARGET_VENUES,
+    TARGET_VENUE_SET,
 )
 
 __all__ = [
@@ -29,4 +36,8 @@ __all__ = [
     "get_project_dir",
     "resolve_output_dir_value",
     "resolve_output_path",
+    "CONFERENCE_TARGET_VENUES",
+    "DEFAULT_TARGET_VENUE",
+    "TARGET_VENUES",
+    "TARGET_VENUE_SET",
 ]
