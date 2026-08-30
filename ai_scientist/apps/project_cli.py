@@ -6,6 +6,8 @@ import argparse
 import os
 from collections.abc import Sequence
 
+from ai_scientist.config.venues import TARGET_VENUES
+
 
 def _model_default(role: str, fallback: str) -> str:
     role_name = f"AI_SCIENTIST_MODEL_{role.upper()}"
@@ -242,11 +244,7 @@ Examples:
             "standard",
             "fast",
             "depth",
-            "neurips",
-            "iclr",
-            "cvpr",
-            "journal",
-            "nature",
+            *TARGET_VENUES,
         ],
         default=None,
     )
@@ -260,8 +258,12 @@ Examples:
     parser.add_argument(
         "--target-venue",
         type=str,
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         default=None,
+        help=(
+            "Venue-specific template and quality policy; this target does not "
+            "predict or guarantee acceptance."
+        ),
     )
     parser.add_argument("--quality-threshold", type=float, default=None)
     parser.add_argument("--rigor-threshold", type=float, default=None)

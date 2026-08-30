@@ -36,7 +36,10 @@
     },
     "identity_profile": {
       "type": "string",
-      "const": "xscientist.research-object-identity.v1"
+      "enum": [
+        "xscientist.research-object-identity.v1",
+        "xscientist.research-object-identity.v2"
+      ]
     },
     "kind": {
       "type": "string",
@@ -245,7 +248,49 @@
     "content_hash": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "envelope_hash": {
+      "type": "string",
+      "description": "Hash binding host ordering metadata without changing semantic object identity. Optional only for pre-envelope objects.",
+      "pattern": "^sha256:[0-9a-f]{64}$"
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["identity_profile"],
+        "properties": {
+          "identity_profile": {
+            "const": "xscientist.research-object-identity.v2"
+          }
+        }
+      },
+      "then": {
+        "required": ["envelope_hash"],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "maxLength": 40,
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["identity_profile"],
+        "properties": {
+          "identity_profile": {
+            "const": "xscientist.research-object-identity.v1"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": ["envelope_hash"]
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

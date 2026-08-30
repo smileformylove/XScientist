@@ -34,6 +34,16 @@
     "branch": {"type": "string"},
     "parent_commit": {"type": ["string", "null"]},
     "previous_checkpoint_hash": {"type": ["string", "null"]},
+    "reverts_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$",
+      "description": "Exact historical Git commit reversed by a semantic revert checkpoint."
+    },
+    "reverts_checkpoint_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Content hash of the checkpoint bound to reverts_commit."
+    },
     "parent_checkpoint_hashes": {
       "type": "array",
       "description": "Scientific parent checkpoint hashes. Merge convergence may have multiple parents; previous_checkpoint_hash remains the first-parent compatibility view.",

@@ -7,10 +7,12 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from xscientist.entrypoints import research_main
-from xscientist.research_commands import save_hypothesis
+from xscientist.research_commands import save_hypothesis, save_preregistration
 from xscientist.research_git import ResearchGitError
+from xscientist.research_lifecycle import ResearchLifecycle
 from xscientist.research_vcs import ResearchRepository
 
 
@@ -23,6 +25,75 @@ class ResearcherCliTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as output:
             returncode = research_main([*args, "--json"])
         return returncode, json.loads(output.getvalue())
+
+    def test_confirmatory_attempt_rejects_conflicting_or_advanced_frozen_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "study"
+            repository = ResearchRepository.init(root, question="Fixed question")
+            hypothesis = save_hypothesis(
+                str(root),
+                statement="Method A improves the fixed baseline",
+                falsifier="delta <= 0",
+            )
+            registration = save_preregistration(
+                str(root),
+                hypothesis_id=hypothesis["object"].object_id,
+                dataset="benchmark-v1",
+                metric="accuracy",
+                baseline="baseline-a",
+                split_hash="sha256:" + "a" * 64,
+                registered_by="lead-researcher",
+                minimum_effect=0.01,
+                minimum_seeds=3,
+            )
+            registration_id = registration["object"].object_id
+            lifecycle = ResearchLifecycle(repository)
+
+            checkpoint = repository.show(repository.status()["head"])
+            mixed_checkpoint = json.loads(json.dumps(checkpoint))
+            mixed_checkpoint["checkpoint"]["changed_paths"].append(
+                ".xscientist/objects/hypothesis/rso-post-freeze.json"
+            )
+            with mock.patch.object(repository, "show", return_value=mixed_checkpoint):
+                with self.assertRaisesRegex(
+                    ResearchGitError, "exact clean Research VCS"
+                ):
+                    lifecycle.experiment_attempt(
+                        {
+                            "study_phase": "confirmatory",
+                            "status": "completed",
+                        },
+                        preregistration_id=registration_id,
+                        commit=False,
+                    )
+
+            with self.assertRaisesRegex(ResearchGitError, "conflicts with the frozen"):
+                lifecycle.experiment_attempt(
+                    {
+                        "study_phase": "confirmatory",
+                        "status": "completed",
+                        "post_freeze_adaptation": True,
+                    },
+                    preregistration_id=registration_id,
+                    commit=False,
+                )
+
+            save_hypothesis(
+                str(root),
+                statement="A post-freeze hypothesis changes research memory",
+                falsifier="the new hypothesis is unsupported",
+            )
+            with self.assertRaisesRegex(ResearchGitError, "exact clean Research VCS"):
+                lifecycle.experiment_attempt(
+                    {
+                        "study_phase": "confirmatory",
+                        "status": "completed",
+                    },
+                    preregistration_id=registration_id,
+                    commit=False,
+                )
 
     def test_one_command_research_lifecycle_records_negative_results(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -236,6 +307,11 @@ class ResearcherCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             preregistration_id = preregistration["object"]["object_id"]
             self.assertEqual(preregistration["object"]["state"], "locked")
+            adaptive_freeze = repository.get(preregistration_id)["payload"][
+                "adaptive_state_freeze"
+            ]
+            self.assertEqual(adaptive_freeze["status"], "frozen")
+            self.assertFalse(adaptive_freeze["post_freeze_adaptation_allowed"])
             self.assertEqual(len(preregistration["related_objects"]), 1)
             plan_id = preregistration["related_objects"][0]["object_id"]
             self.assertEqual(
@@ -268,6 +344,16 @@ class ResearcherCliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             attempt_id = experiment["object"]["object_id"]
+            attempt_payload = repository.get(attempt_id)["payload"]
+            self.assertEqual(
+                attempt_payload["adaptive_state_hash"],
+                adaptive_freeze["state_hash"],
+            )
+            self.assertEqual(
+                attempt_payload["research_state_hash"],
+                adaptive_freeze["research_state_hash"],
+            )
+            self.assertFalse(attempt_payload["post_freeze_adaptation"])
 
             code, evidence = self._run_json(
                 [
@@ -306,8 +392,20 @@ class ResearcherCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             gate_id = review["object"]["object_id"]
             self.assertEqual(review["object"]["kind"], "gate_decision")
-            self.assertEqual(review["object"]["state"], "verified")
+            self.assertEqual(review["object"]["state"], "rejected")
             self.assertEqual(review["related_objects"][0]["kind"], "review")
+            gate_object = repository.get(gate_id)
+            review_object = repository.get(review["related_objects"][0]["object_id"])
+            self.assertEqual(gate_object["payload"]["decision"], "hold")
+            self.assertFalse(gate_object["payload"]["claim_promotion_allowed"])
+            self.assertEqual(review_object["state"], "completed")
+            self.assertEqual(
+                review_object["payload"]["authority_scope"], "local_advisory"
+            )
+            self.assertIn(
+                "external_authority_missing",
+                review_object["payload"]["required_failures"],
+            )
 
             code, claim = self._run_json(
                 [
@@ -322,9 +420,9 @@ class ResearcherCliTests(unittest.TestCase):
                     str(root),
                 ]
             )
-            self.assertEqual(code, 0)
-            self.assertEqual(claim["object"]["state"], "verified")
-            self.assertEqual(len(repository.log()), 7)
+            self.assertEqual(code, 2)
+            self.assertEqual(repository.objects(kind="claim"), [])
+            self.assertEqual(len(repository.log()), 6)
             self.assertTrue(repository.fsck()["ok"])
 
     def test_passing_review_rejects_declared_failure(self) -> None:

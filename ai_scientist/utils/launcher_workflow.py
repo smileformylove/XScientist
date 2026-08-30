@@ -223,7 +223,11 @@ def run_experiment_phase(
     logger: Callable[[str], None] = print,
 ) -> str | dict[str, Any]:
     idea_dir = Path(idea_dir)
-    if resume and is_stage_complete(idea_dir, "experiment") and (idea_dir / "logs").exists():
+    if (
+        resume
+        and is_stage_complete(idea_dir, "experiment")
+        and (idea_dir / "logs").exists()
+    ):
         logger(f"Resume: skipping experiment phase for {idea_dir}")
         report_json = idea_dir / "experiment_report.json"
         report_md = idea_dir / "experiment_report.md"
@@ -235,9 +239,20 @@ def run_experiment_phase(
         return str(idea_dir / "logs")
 
     resume_from = None
+    experiment_state: dict[str, Any] = {}
+    retry_plot_only = False
     if resume:
         experiment_state = (
             load_workflow_state(idea_dir).get("stages", {}).get("experiment", {})
+        )
+        retry_config = experiment_state.get("artifacts", {}).get("config_path")
+        retry_plot_only = bool(
+            experiment_state.get("status") == "stopped"
+            and experiment_state.get("reason") == "plot_aggregation_failed"
+            and experiment_state.get("metadata", {}).get("experiment_completed")
+            and retry_config
+            and Path(str(retry_config)).is_file()
+            and (idea_dir / "logs").exists()
         )
         if experiment_state.get("status") in {
             "stopped",
@@ -249,19 +264,25 @@ def run_experiment_phase(
                 resume_from = str(Path(candidate).resolve())
                 logger(f"Resume: continuing experiment from {resume_from}")
 
-    idea_config_path = edit_bfts_config_file(
-        config_path,
-        str(idea_dir),
-        str(idea_path_json),
-        resume_from=resume_from,
-    )
-
-    experiment_result = perform_experiments_bfts(idea_config_path)
-    if (
-        isinstance(experiment_result, dict)
-        and experiment_result.get("status")
-        in {"locked", "initialization_failed", "initialization_interrupted"}
-    ):
+    if retry_plot_only:
+        idea_config_path = str(
+            Path(str(experiment_state["artifacts"]["config_path"])).resolve()
+        )
+        experiment_result: Any = {"status": "completed"}
+        logger("Resume: retrying plot aggregation without rerunning BFTS experiments")
+    else:
+        idea_config_path = edit_bfts_config_file(
+            config_path,
+            str(idea_dir),
+            str(idea_path_json),
+            resume_from=resume_from,
+        )
+        experiment_result = perform_experiments_bfts(idea_config_path)
+    if isinstance(experiment_result, dict) and experiment_result.get("status") in {
+        "locked",
+        "initialization_failed",
+        "initialization_interrupted",
+    }:
         if experiment_result.get("status") in {
             "initialization_failed",
             "initialization_interrupted",
@@ -345,10 +366,51 @@ def run_experiment_phase(
     if experiment_results_dir.exists():
         shutil.copytree(experiment_results_dir, local_results_dir, dirs_exist_ok=True)
 
-    aggregate_plots(base_folder=str(idea_dir), model=model_agg_plots)
+    try:
+        aggregate_plots(
+            base_folder=str(idea_dir),
+            model=model_agg_plots,
+            execution_config_path=idea_config_path,
+        )
+    except Exception as exc:
+        from ai_scientist.perform_plotting import PlotAggregationError
 
-    if local_results_dir.exists():
-        shutil.rmtree(local_results_dir)
+        if not isinstance(exc, PlotAggregationError):
+            raise
+        save_token_tracker(idea_dir)
+        mark_stage_stopped(
+            idea_dir,
+            "experiment",
+            reason="plot_aggregation_failed",
+            artifacts={
+                "logs_dir": str(idea_dir / "logs"),
+                "config_path": str(idea_config_path),
+                "aggregator_script": str(idea_dir / "auto_plot_aggregator.py"),
+                "figures_dir": str(idea_dir / "figures"),
+            },
+            metadata={
+                "failure_error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                "resumable": True,
+                "experiment_completed": True,
+                "plot_aggregation_pending": True,
+            },
+        )
+        return {
+            "status": "failed",
+            "stage": "plot_aggregation",
+            "resumable": True,
+            "config_path": str(idea_config_path),
+            "failure_error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+        }
+    finally:
+        if local_results_dir.exists():
+            shutil.rmtree(local_results_dir)
 
     report_json, report_md = write_experiment_report(idea_dir)
     save_token_tracker(idea_dir)
@@ -360,6 +422,7 @@ def run_experiment_phase(
             "config_path": str(idea_config_path),
             "experiment_report_json": str(report_json),
             "experiment_report_md": str(report_md),
+            "plot_execution_receipt": str(idea_dir / "plot_execution_receipt.json"),
         },
     )
     return idea_config_path
@@ -420,10 +483,12 @@ def run_writeup_phase(
         strategy_feedback = writeup_plan["strategy_feedback"]
         num_cite_rounds = writeup_plan["num_cite_rounds"]
         writeup_retries = writeup_plan["writeup_retries"]
-        effective_priority_bar, effective_blocker_bar = resolve_submission_acceptance_settings(
-            venue,
-            min_submission_priority=min_submission_priority,
-            max_submission_blockers=max_submission_blockers,
+        effective_priority_bar, effective_blocker_bar = (
+            resolve_submission_acceptance_settings(
+                venue,
+                min_submission_priority=min_submission_priority,
+                max_submission_blockers=max_submission_blockers,
+            )
         )
         logger(
             f"High-quality mode venue: {venue}; budgets: num_cite_rounds={num_cite_rounds}, "
@@ -563,13 +628,31 @@ def run_writeup_phase(
             "strict_guardrails": strict_guardrails,
             "guardrail_repair_rounds": guardrail_repair_rounds,
             "target_venue": resolved_target_venue,
-            "quality_gate_passed": quality_result.get("quality_gate_passed") if high_quality_mode else None,
-            "submission_priority_score": quality_result.get("submission_priority_score") if high_quality_mode else None,
-            "blocker_count": quality_result.get("blocker_count") if high_quality_mode else None,
-            "autonomous_followup_rounds_run": quality_result.get("autonomous_followup_rounds_run") if high_quality_mode else None,
-            "pre_review_submission_acceptance_passed": acceptance.get("accepted") if high_quality_mode else None,
-            "pre_review_submission_acceptance_reasons": acceptance.get("reasons", []) if high_quality_mode else [],
-            "strategy_feedback": strategy_feedback.get("rationale") if high_quality_mode else None,
+            "quality_gate_passed": (
+                quality_result.get("quality_gate_passed") if high_quality_mode else None
+            ),
+            "submission_priority_score": (
+                quality_result.get("submission_priority_score")
+                if high_quality_mode
+                else None
+            ),
+            "blocker_count": (
+                quality_result.get("blocker_count") if high_quality_mode else None
+            ),
+            "autonomous_followup_rounds_run": (
+                quality_result.get("autonomous_followup_rounds_run")
+                if high_quality_mode
+                else None
+            ),
+            "pre_review_submission_acceptance_passed": (
+                acceptance.get("accepted") if high_quality_mode else None
+            ),
+            "pre_review_submission_acceptance_reasons": (
+                acceptance.get("reasons", []) if high_quality_mode else []
+            ),
+            "strategy_feedback": (
+                strategy_feedback.get("rationale") if high_quality_mode else None
+            ),
         },
     )
     return {
@@ -630,7 +713,12 @@ def run_review_phase(
     elif reject_on_auto_improvement_fallback is None:
         reject_on_auto_improvement_fallback = False
 
-    if resume and is_stage_complete(idea_dir, "review") and text_path.exists() and image_path.exists():
+    if (
+        resume
+        and is_stage_complete(idea_dir, "review")
+        and text_path.exists()
+        and image_path.exists()
+    ):
         submission_acceptance: dict[str, Any] = {}
         integrity_forensics = run_integrity_forensics_for_manuscript(
             root=idea_dir,
@@ -773,16 +861,18 @@ def run_review_phase(
             "review_roles": list(workflow_runtime_plan.final_review_roles),
             "critic_roles": list(workflow_runtime_plan.critic_review_roles),
             "critic_blocking_issue_count": critic_pass.get("blocking_issue_count"),
-            "submission_acceptance_passed": submission_acceptance.get("accepted")
-            if high_quality_mode
-            else None,
-            "submission_acceptance_reasons": submission_acceptance.get("reasons", [])
-            if high_quality_mode
-            else [],
+            "submission_acceptance_passed": (
+                submission_acceptance.get("accepted") if high_quality_mode else None
+            ),
+            "submission_acceptance_reasons": (
+                submission_acceptance.get("reasons", []) if high_quality_mode else []
+            ),
             **integrity_forensics_result_fields(integrity_forensics),
-            "strategy_feedback": review_plan["strategy_feedback"].get("rationale")
-            if high_quality_mode
-            else None,
+            "strategy_feedback": (
+                review_plan["strategy_feedback"].get("rationale")
+                if high_quality_mode
+                else None
+            ),
         },
     )
     return {

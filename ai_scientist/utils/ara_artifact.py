@@ -40,12 +40,14 @@ present.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import gzip
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +63,14 @@ from ai_scientist.utils.ara_graph import (
     write_exploration_graph_visualization,
 )
 from ai_scientist.utils.evaluation_binding import evaluation_hash_binding
+from ai_scientist.utils.authority_attempts import (
+    ATTEMPT_ID_RE,
+    OBJECT_HASH_RE,
+    AuthorityAttemptError,
+    canonical_authority_hash,
+    inspect_authority_attempts,
+)
+from ai_scientist.utils.safe_files import BoundedFileError, read_bounded_regular_file
 from ai_scientist.utils.ara_manifest_lock import (
     append_manifest_revision,
     write_manifest_lock,
@@ -88,6 +98,13 @@ _EXECUTION_IDENTITY_LIST_FIELDS = (
     "seeds",
     "tool_hashes",
 )
+
+_AUTHORITY_OBJECT_REF_RE = re.compile(
+    r"^authority_objects/[a-z][a-z0-9-]{0,63}/([0-9a-f]{64})\.json$"
+)
+_AUTHORITY_LEDGER_REF_RE = re.compile(r"^authority/ledgers/ledger-[0-9a-f]{16}$")
+_MAX_AUTHORITY_FILE_BYTES = 1024 * 1024
+_MAX_AUTHORITY_AUDIT_BYTES = 64 * 1024 * 1024
 
 
 def _node_execution_identity(raw: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +162,40 @@ def _safe_write_json(path: Path, payload: Any) -> None:
         encoding="utf-8",
     )
     tmp.replace(path)
+
+
+def _strict_json_bytes(payload: Any, *, canonical: bool = True) -> bytes:
+    """Serialize trust-boundary payloads without Python coercions or NaN."""
+
+    try:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=canonical,
+            separators=(",", ":") if canonical else None,
+            indent=None if canonical else 2,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ARA identity payload is not strict JSON") from exc
+
+
+def _safe_write_strict_json(
+    path: Path,
+    payload: Any,
+    *,
+    canonical: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = _strict_json_bytes(payload, canonical=canonical)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(rendered)
+    tmp.replace(path)
+
+
+def _canonical_object_hash(payload: dict[str, Any]) -> str:
+    encoded = _strict_json_bytes(payload, canonical=True)
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _sha256_of(path: Path) -> str | None:
@@ -211,6 +262,591 @@ def _load_json(path: Path) -> Any | None:
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("ARA export: failed to load %s: %s", path, exc)
         return None
+
+
+def _node_authority_binding(
+    raw: dict[str, Any],
+    *,
+    audited_terminal_hashes: dict[str, str] | None = None,
+    require_terminal: bool = True,
+) -> tuple[list[str], dict[str, str]]:
+    """Validate and normalize one node's authority-attempt commitment."""
+
+    raw_ids = raw.get("authority_attempt_ids", [])
+    raw_hashes = raw.get("authority_attempt_terminal_hashes", {})
+    if not isinstance(raw_ids, list) or any(
+        not isinstance(attempt_id, str) or ATTEMPT_ID_RE.fullmatch(attempt_id) is None
+        for attempt_id in raw_ids
+    ):
+        raise ValueError("ARA node authority attempt ids are invalid")
+    if len(raw_ids) != len(set(raw_ids)):
+        raise ValueError("ARA node authority attempt ids are not unique")
+    if not isinstance(raw_hashes, dict) or any(
+        not isinstance(attempt_id, str)
+        or attempt_id not in raw_ids
+        or not isinstance(event_hash, str)
+        or OBJECT_HASH_RE.fullmatch(event_hash) is None
+        for attempt_id, event_hash in raw_hashes.items()
+    ):
+        raise ValueError("ARA node authority terminal hashes are invalid")
+    if require_terminal and set(raw_hashes) != set(raw_ids):
+        raise ValueError("ARA node authority attempts are not all terminal")
+    normalized_hashes = {attempt_id: raw_hashes[attempt_id] for attempt_id in raw_ids}
+    if audited_terminal_hashes is not None:
+        for attempt_id in raw_ids:
+            audited_hash = audited_terminal_hashes.get(attempt_id)
+            if audited_hash is None or audited_hash != normalized_hashes[attempt_id]:
+                raise ValueError(
+                    "ARA node authority terminal hash does not match the ledger"
+                )
+    return list(raw_ids), normalized_hashes
+
+
+def _collect_authority_expectations(
+    journals: list[Path],
+) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for journal_path in journals:
+        payload = _load_json(journal_path)
+        if not isinstance(payload, dict):
+            continue
+        for raw in payload.get("nodes") or []:
+            if not isinstance(raw, dict):
+                continue
+            attempt_ids, terminal_hashes = _node_authority_binding(raw)
+            for attempt_id in attempt_ids:
+                event_hash = terminal_hashes[attempt_id]
+                prior = expected.get(attempt_id)
+                if prior is not None and prior != event_hash:
+                    raise ValueError(
+                        "ARA export refused conflicting authority terminal hashes"
+                    )
+                expected[attempt_id] = event_hash
+    return expected
+
+
+def _discover_authority_log_dirs(exp_dir: Path) -> list[Path]:
+    logs_dir = exp_dir / "logs"
+    if not logs_dir.exists():
+        return []
+    discovered: set[Path] = set()
+    for candidate in logs_dir.rglob("authority_attempts"):
+        if candidate.name == "authority_attempts":
+            discovered.add(candidate.parent)
+    return sorted(discovered, key=lambda path: str(path))
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    with path.open("xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _copy_verified_authority_ledger(
+    *,
+    source_log_dir: Path,
+    destination_log_dir: Path,
+    source_audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy only verified events and their referenced immutable objects."""
+
+    attempt_root = destination_log_dir / "authority_attempts"
+    object_root = destination_log_dir / "authority_objects"
+    attempt_root.mkdir(parents=True, mode=0o700)
+    object_root.mkdir(parents=True, mode=0o700)
+    referenced_objects: set[str] = set()
+    for row in source_audit.get("attempts") or []:
+        attempt_id = str(row.get("attempt_id") or "")
+        event_count = row.get("event_count")
+        if (
+            ATTEMPT_ID_RE.fullmatch(attempt_id) is None
+            or isinstance(event_count, bool)
+            or not isinstance(event_count, int)
+            or event_count < 1
+        ):
+            raise ValueError("authority audit contains an invalid attempt row")
+        destination_attempt = attempt_root / attempt_id
+        destination_attempt.mkdir(mode=0o700)
+        for sequence in range(event_count):
+            source_event = (
+                source_log_dir / "authority_attempts" / attempt_id / f"{sequence}.json"
+            )
+            try:
+                event_bytes = read_bounded_regular_file(
+                    source_event,
+                    maximum=_MAX_AUTHORITY_FILE_BYTES,
+                    label="authority_attempt_event",
+                )
+                event = json.loads(event_bytes.decode("utf-8"))
+            except (BoundedFileError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("authority event changed during ARA export") from exc
+            if not isinstance(event, dict):
+                raise ValueError("authority event changed during ARA export")
+            for field in ("spec_ref", "result_ref"):
+                object_ref = event.get(field)
+                if object_ref is not None:
+                    if _AUTHORITY_OBJECT_REF_RE.fullmatch(str(object_ref)) is None:
+                        raise ValueError(
+                            "authority event contains an unsafe object ref"
+                        )
+                    referenced_objects.add(str(object_ref))
+            _write_private_bytes(destination_attempt / f"{sequence}.json", event_bytes)
+
+    for object_ref in sorted(referenced_objects):
+        source_object = source_log_dir / object_ref
+        try:
+            object_bytes = read_bounded_regular_file(
+                source_object,
+                maximum=_MAX_AUTHORITY_FILE_BYTES,
+                label="authority_attempt_object",
+            )
+        except BoundedFileError as exc:
+            raise ValueError("authority object changed during ARA export") from exc
+        _write_private_bytes(destination_log_dir / object_ref, object_bytes)
+
+    try:
+        copied_audit = inspect_authority_attempts(destination_log_dir)
+    except AuthorityAttemptError as exc:
+        raise ValueError("copied authority ledger failed verification") from exc
+    if not copied_audit.get("valid"):
+        raise ValueError("copied authority ledger is incomplete or invalid")
+    if canonical_authority_hash(copied_audit) != canonical_authority_hash(source_audit):
+        raise ValueError("authority ledger changed during ARA export")
+    return copied_audit
+
+
+def _authority_artifact_payload(
+    *,
+    audits: list[tuple[str, dict[str, Any]]],
+    expected_terminal_hashes: dict[str, str],
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    terminal_hashes: dict[str, str] = {}
+    ledgers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ledger_ref, audit in audits:
+        attempt_ids: list[str] = []
+        for source_row in audit.get("attempts") or []:
+            row = dict(source_row)
+            attempt_id = str(row.get("attempt_id") or "")
+            if attempt_id in seen:
+                raise ValueError("authority attempt id appears in multiple ledgers")
+            seen.add(attempt_id)
+            attempt_ids.append(attempt_id)
+            row["ledger"] = ledger_ref
+            attempts.append(row)
+        for attempt_id, event_hash in (
+            audit.get("terminal_event_hashes") or {}
+        ).items():
+            terminal_hashes[str(attempt_id)] = str(event_hash)
+        ledgers.append(
+            {
+                "path": ledger_ref,
+                "audit_hash": canonical_authority_hash(audit),
+                "attempt_ids": sorted(attempt_ids),
+            }
+        )
+    attempts.sort(key=lambda row: str(row.get("attempt_id") or ""))
+    ledgers.sort(key=lambda row: row["path"])
+    statuses: dict[str, int] = {}
+    for row in attempts:
+        status = str(row.get("status") or "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+    return {
+        "schema": "xscientist.ara.authority-attempts.v1",
+        "valid": True,
+        "expected_attempt_ids": sorted(expected_terminal_hashes),
+        "attempts": attempts,
+        "terminal_event_hashes": dict(sorted(terminal_hashes.items())),
+        "ledgers": ledgers,
+        "counts": {
+            "attempts": len(attempts),
+            "ledgers": len(ledgers),
+            "statuses": dict(sorted(statuses.items())),
+        },
+    }
+
+
+def _snapshot_authority_attempts(
+    *,
+    ara_dir: Path,
+    exp_dir: Path,
+    expected_terminal_hashes: dict[str, str],
+) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    source_log_dirs = _discover_authority_log_dirs(exp_dir)
+    if not source_log_dirs and not expected_terminal_hashes:
+        stale_artifact = ara_dir / "authority_attempts.json"
+        if stale_artifact.exists() or stale_artifact.is_symlink():
+            if stale_artifact.is_dir() and not stale_artifact.is_symlink():
+                raise ValueError("ARA authority audit destination is unsafe")
+            stale_artifact.unlink()
+        stale_bundle = ara_dir / "authority"
+        if stale_bundle.is_symlink() or (
+            stale_bundle.exists() and not stale_bundle.is_dir()
+        ):
+            raise ValueError("ARA authority destination is unsafe")
+        if stale_bundle.exists():
+            shutil.rmtree(stale_bundle)
+        return None, {}
+    if not source_log_dirs:
+        raise ValueError("ARA export refused: authority attempt ledger is missing")
+
+    source_audits: list[tuple[Path, dict[str, Any]]] = []
+    all_terminal_hashes: dict[str, str] = {}
+    for source_log_dir in source_log_dirs:
+        try:
+            audit = inspect_authority_attempts(source_log_dir)
+        except AuthorityAttemptError as exc:
+            raise ValueError("ARA export refused an invalid authority ledger") from exc
+        if not audit.get("valid"):
+            problems = ", ".join(str(item) for item in audit.get("errors") or [])
+            raise ValueError(
+                "ARA export refused an incomplete/orphaned/invalid authority ledger"
+                + (f": {problems}" if problems else "")
+            )
+        for attempt_id, event_hash in (
+            audit.get("terminal_event_hashes") or {}
+        ).items():
+            if attempt_id in all_terminal_hashes:
+                raise ValueError("authority attempt id appears in multiple ledgers")
+            all_terminal_hashes[str(attempt_id)] = str(event_hash)
+        source_audits.append((source_log_dir, audit))
+
+    for attempt_id, expected_hash in expected_terminal_hashes.items():
+        if all_terminal_hashes.get(attempt_id) != expected_hash:
+            raise ValueError(
+                "ARA export refused a missing or mismatched node authority attempt"
+            )
+
+    authority_root = ara_dir / "authority"
+    if authority_root.is_symlink() or (
+        authority_root.exists() and not authority_root.is_dir()
+    ):
+        raise ValueError("ARA authority destination is unsafe")
+    if authority_root.exists():
+        shutil.rmtree(authority_root)
+    ledgers_root = authority_root / "ledgers"
+    ledgers_root.mkdir(parents=True, mode=0o700)
+
+    copied_audits: list[tuple[str, dict[str, Any]]] = []
+    used_names: set[str] = set()
+    for _, (source_log_dir, source_audit) in enumerate(source_audits):
+        audit_hash = canonical_authority_hash(source_audit)
+        ledger_name = f"ledger-{audit_hash.removeprefix('sha256:')[:16]}"
+        if ledger_name in used_names:
+            raise ValueError("authority ledger bundle name collision")
+        used_names.add(ledger_name)
+        ledger_ref = f"authority/ledgers/{ledger_name}"
+        copied_audit = _copy_verified_authority_ledger(
+            source_log_dir=source_log_dir,
+            destination_log_dir=ara_dir / ledger_ref,
+            source_audit=source_audit,
+        )
+        copied_audits.append((ledger_ref, copied_audit))
+
+    artifact = _authority_artifact_payload(
+        audits=copied_audits,
+        expected_terminal_hashes=expected_terminal_hashes,
+    )
+    rendered = _strict_json_bytes(artifact, canonical=True)
+    from ai_scientist.protocol import ObjectStore
+
+    object_ref = ObjectStore(ara_dir).put_bytes(rendered)
+    artifact_hash = canonical_authority_hash(artifact)
+    if object_ref.hash != artifact_hash:
+        raise ValueError("authority audit object hash is inconsistent")
+    if _read_authority_cas_object(ara_dir, object_ref.to_json()) != rendered:
+        raise ValueError("authority audit CAS object does not match its payload")
+    artifact_path = ara_dir / "authority_attempts.json"
+    _safe_write_strict_json(artifact_path, artifact, canonical=True)
+    return (
+        {
+            "schema": artifact["schema"],
+            "path": "authority_attempts.json",
+            "bundle_root": "authority/ledgers",
+            "content_hash": artifact_hash,
+            "object": object_ref.to_json(),
+        },
+        all_terminal_hashes,
+    )
+
+
+def _load_canonical_authority_artifact(path: Path) -> tuple[dict[str, Any], bytes]:
+    try:
+        raw = read_bounded_regular_file(
+            path,
+            maximum=_MAX_AUTHORITY_AUDIT_BYTES,
+            label="ara_authority_attempts",
+        )
+    except BoundedFileError as exc:
+        raise ValueError("authority audit artifact is missing or unsafe") from exc
+
+    def reject_duplicate_pairs(pairs):
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError("authority audit artifact has duplicate keys")
+            parsed[key] = value
+        return parsed
+
+    def reject_constant(value: str):
+        raise ValueError("authority audit artifact contains non-finite JSON")
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("authority audit artifact is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("authority audit artifact must be an object")
+    if _strict_json_bytes(payload, canonical=True) != raw:
+        raise ValueError("authority audit artifact is not canonical JSON")
+    return payload, raw
+
+
+def _read_authority_cas_object(
+    ara_dir: Path,
+    object_ref: Any,
+) -> bytes:
+    if not isinstance(object_ref, dict) or set(object_ref) != {"hash", "size", "gzip"}:
+        raise ValueError("authority audit object ref is invalid")
+    object_hash = object_ref.get("hash")
+    size = object_ref.get("size")
+    compressed = object_ref.get("gzip")
+    if (
+        not isinstance(object_hash, str)
+        or OBJECT_HASH_RE.fullmatch(object_hash) is None
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+        or size > _MAX_AUTHORITY_AUDIT_BYTES
+        or not isinstance(compressed, bool)
+    ):
+        raise ValueError("authority audit object ref is invalid")
+    digest = object_hash.removeprefix("sha256:")
+    object_path = ara_dir / "objects" / "sha256" / digest[:2] / digest[2:]
+    try:
+        encoded = read_bounded_regular_file(
+            object_path,
+            maximum=_MAX_AUTHORITY_AUDIT_BYTES,
+            label="ara_authority_attempt_object",
+        )
+    except BoundedFileError as exc:
+        raise ValueError("authority audit CAS object is missing or unsafe") from exc
+    is_gzip = encoded[:2] == b"\x1f\x8b"
+    if is_gzip != compressed:
+        raise ValueError("authority audit CAS compression metadata is invalid")
+    if is_gzip:
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(encoded), mode="rb") as handle:
+                decoded = handle.read(_MAX_AUTHORITY_AUDIT_BYTES + 1)
+        except (OSError, EOFError) as exc:
+            raise ValueError("authority audit CAS object is corrupt") from exc
+    else:
+        decoded = encoded
+    if len(decoded) != size or len(decoded) > _MAX_AUTHORITY_AUDIT_BYTES:
+        raise ValueError("authority audit CAS object size is invalid")
+    actual_hash = "sha256:" + hashlib.sha256(decoded).hexdigest()
+    if actual_hash != object_hash:
+        raise ValueError("authority audit CAS object hash mismatch")
+    return decoded
+
+
+def verify_ara_authority_attempts(
+    ara_dir: str | os.PathLike[str],
+    *,
+    graph: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Verify the portable authority bundle without mutating the ARA."""
+
+    root = Path(ara_dir).expanduser().resolve()
+    graph_payload = (
+        graph
+        if isinstance(graph, dict)
+        else _load_json(root / "exploration_graph.json")
+    )
+    graph_payload = graph_payload if isinstance(graph_payload, dict) else {}
+    errors: list[str] = []
+    expected_terminal_hashes: dict[str, str] = {}
+    try:
+        for node in graph_payload.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            attempt_ids, terminal_hashes = _node_authority_binding(node)
+            for attempt_id in attempt_ids:
+                event_hash = terminal_hashes[attempt_id]
+                prior = expected_terminal_hashes.get(attempt_id)
+                if prior is not None and prior != event_hash:
+                    raise ValueError("graph has conflicting authority terminal hashes")
+                expected_terminal_hashes[attempt_id] = event_hash
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    graph_ref = graph_payload.get("authority_attempts")
+    artifact_path = root / "authority_attempts.json"
+    authority_root = root / "authority"
+    applicable = bool(
+        expected_terminal_hashes
+        or graph_ref
+        or artifact_path.exists()
+        or artifact_path.is_symlink()
+        or authority_root.exists()
+        or authority_root.is_symlink()
+    )
+    if not applicable:
+        return {
+            "schema": "xscientist.ara.authority-attempt-verification.v1",
+            "applicable": False,
+            "valid": True,
+            "errors": [],
+            "attempt_count": 0,
+            "content_hash": None,
+        }
+    if not isinstance(graph_ref, dict):
+        errors.append("exploration graph authority audit reference is missing")
+        graph_ref = {}
+    expected_ref_keys = {"schema", "path", "bundle_root", "content_hash", "object"}
+    if set(graph_ref) != expected_ref_keys:
+        errors.append("exploration graph authority audit reference is malformed")
+    if graph_ref.get("schema") != "xscientist.ara.authority-attempts.v1":
+        errors.append("exploration graph authority audit schema is invalid")
+    if graph_ref.get("path") != "authority_attempts.json":
+        errors.append("exploration graph authority audit path is invalid")
+    if graph_ref.get("bundle_root") != "authority/ledgers":
+        errors.append("exploration graph authority bundle path is invalid")
+    declared_hash = graph_ref.get("content_hash")
+    if (
+        not isinstance(declared_hash, str)
+        or OBJECT_HASH_RE.fullmatch(declared_hash) is None
+    ):
+        errors.append("exploration graph authority audit hash is invalid")
+
+    artifact: dict[str, Any] = {}
+    artifact_bytes = b""
+    try:
+        artifact, artifact_bytes = _load_canonical_authority_artifact(artifact_path)
+    except ValueError as exc:
+        errors.append(str(exc))
+    computed_hash: str | None = None
+    if artifact:
+        try:
+            computed_hash = canonical_authority_hash(artifact)
+        except AuthorityAttemptError as exc:
+            errors.append(f"authority audit artifact is not strict JSON: {exc}")
+        if computed_hash != declared_hash:
+            errors.append("authority audit artifact hash mismatch")
+        try:
+            object_bytes = _read_authority_cas_object(root, graph_ref.get("object"))
+            if object_bytes != artifact_bytes:
+                errors.append(
+                    "authority audit CAS object differs from the named artifact"
+                )
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    manifest = _load_json(root / "manifest.json")
+    manifest_ref = (
+        manifest.get("references", {}).get("authority_attempts")
+        if isinstance(manifest, dict) and isinstance(manifest.get("references"), dict)
+        else None
+    )
+    if manifest_ref != graph_ref:
+        errors.append("manifest and graph authority audit references differ")
+
+    copied_audits: list[tuple[str, dict[str, Any]]] = []
+    declared_ledger_refs: set[str] = set()
+    ledgers = artifact.get("ledgers") if isinstance(artifact, dict) else None
+    if not isinstance(ledgers, list) or not ledgers:
+        errors.append("authority audit artifact has no ledgers")
+        ledgers = []
+    for ledger in ledgers:
+        if not isinstance(ledger, dict) or set(ledger) != {
+            "path",
+            "audit_hash",
+            "attempt_ids",
+        }:
+            errors.append("authority audit ledger entry is malformed")
+            continue
+        ledger_ref = ledger.get("path")
+        if (
+            not isinstance(ledger_ref, str)
+            or _AUTHORITY_LEDGER_REF_RE.fullmatch(ledger_ref) is None
+            or ledger_ref in declared_ledger_refs
+        ):
+            errors.append("authority audit ledger path is invalid or duplicated")
+            continue
+        declared_ledger_refs.add(ledger_ref)
+        try:
+            audit = inspect_authority_attempts(root / ledger_ref)
+        except AuthorityAttemptError as exc:
+            errors.append(f"authority ledger {ledger_ref} is invalid: {exc}")
+            continue
+        if not audit.get("valid"):
+            errors.append(
+                f"authority ledger {ledger_ref} is incomplete/orphaned/invalid"
+            )
+            continue
+        audit_hash = canonical_authority_hash(audit)
+        if audit_hash != ledger.get("audit_hash"):
+            errors.append(f"authority ledger {ledger_ref} audit hash mismatch")
+        attempt_ids = sorted(
+            str(row.get("attempt_id") or "") for row in audit.get("attempts") or []
+        )
+        if ledger.get("attempt_ids") != attempt_ids:
+            errors.append(f"authority ledger {ledger_ref} attempt index mismatch")
+        copied_audits.append((ledger_ref, audit))
+
+    ledgers_root = root / "authority" / "ledgers"
+    observed_ledger_refs: set[str] = set()
+    try:
+        for child in ledgers_root.iterdir():
+            observed_ledger_refs.add(f"authority/ledgers/{child.name}")
+    except OSError:
+        errors.append("authority ledger bundle root is missing or unreadable")
+    if observed_ledger_refs != declared_ledger_refs:
+        errors.append("authority ledger bundle contains missing or orphaned ledgers")
+
+    if copied_audits and artifact:
+        try:
+            reconstructed = _authority_artifact_payload(
+                audits=copied_audits,
+                expected_terminal_hashes=expected_terminal_hashes,
+            )
+            if reconstructed != artifact:
+                errors.append("authority audit artifact does not match its ledgers")
+            actual_terminal_hashes = reconstructed["terminal_event_hashes"]
+            for attempt_id, event_hash in expected_terminal_hashes.items():
+                if actual_terminal_hashes.get(attempt_id) != event_hash:
+                    errors.append(
+                        "graph node authority binding does not match the bundled ledger"
+                    )
+                    break
+        except (AuthorityAttemptError, ValueError) as exc:
+            errors.append(f"authority audit reconstruction failed: {exc}")
+
+    return {
+        "schema": "xscientist.ara.authority-attempt-verification.v1",
+        "applicable": True,
+        "valid": not errors,
+        "errors": errors,
+        "attempt_count": (
+            len(artifact.get("attempts") or []) if isinstance(artifact, dict) else 0
+        ),
+        "content_hash": computed_hash,
+    }
 
 
 def _write_node_run_bundle(
@@ -293,6 +929,7 @@ def _export_nodes_from_journal(
     *,
     exp_dir: Path,
     ara_dir: Path,
+    authority_terminal_hashes: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read one journal.json and dump per-node artifacts.
 
@@ -378,9 +1015,41 @@ def _export_nodes_from_journal(
         llm_refs = [str(r) for r in llm_refs_raw if r]
         context_refs_raw = raw.get("context_pack_refs") or []
         context_refs = [str(r) for r in context_refs_raw if r]
+        selection_refs_raw = raw.get("selection_llm_call_refs") or []
+        selection_refs = [str(r) for r in selection_refs_raw if r]
+        authority_attempt_ids, authority_attempt_terminal_hashes = (
+            _node_authority_binding(
+                raw,
+                audited_terminal_hashes=authority_terminal_hashes,
+            )
+        )
         execution_identity = _node_execution_identity(raw)
         is_seed = bool(raw.get("is_seed_node"))
         evaluation_binding = evaluation_hash_binding(raw.get("evaluation_report"))
+        implementation_spec = raw.get("implementation_spec")
+        implementation_spec_hash = raw.get("implementation_spec_hash")
+        repair_spec = raw.get("repair_spec")
+        repair_spec_hash = raw.get("repair_spec_hash")
+        parse_metrics_spec = raw.get("parse_metrics_spec")
+        parse_metrics_spec_hash = raw.get("parse_metrics_spec_hash")
+        plot_spec = raw.get("plot_spec")
+        plot_spec_hash = raw.get("plot_spec_hash")
+        for label, spec, expected_hash in (
+            ("implementation", implementation_spec, implementation_spec_hash),
+            ("repair", repair_spec, repair_spec_hash),
+            ("metric parser", parse_metrics_spec, parse_metrics_spec_hash),
+            ("plot", plot_spec, plot_spec_hash),
+        ):
+            if spec is None and expected_hash is None:
+                continue
+            if (
+                not isinstance(spec, dict)
+                or not isinstance(expected_hash, str)
+                or _canonical_object_hash(spec) != expected_hash
+            ):
+                raise ValueError(
+                    f"ARA export refused node {node_id}: {label} spec hash mismatch"
+                )
         hash_inputs = ["code", "metric"]
         if evaluation_binding:
             hash_inputs.append("evaluation")
@@ -392,19 +1061,48 @@ def _export_nodes_from_journal(
             hash_inputs.append("execution")
         if is_seed:
             hash_inputs.append("seed")
+        hash_extras: dict[str, Any] = {}
+        if evaluation_binding:
+            hash_extras["evaluation"] = evaluation_binding
+        if isinstance(implementation_spec_hash, str):
+            hash_extras["implementation_spec_hash"] = implementation_spec_hash
+            hash_inputs.append("implementation_spec")
+        if isinstance(repair_spec_hash, str):
+            hash_extras["repair_spec_hash"] = repair_spec_hash
+            hash_inputs.append("repair_spec")
+        if isinstance(parse_metrics_spec_hash, str):
+            hash_extras["parse_metrics_spec_hash"] = parse_metrics_spec_hash
+            hash_inputs.append("parse_metrics_spec")
+        if isinstance(plot_spec_hash, str):
+            hash_extras["plot_spec_hash"] = plot_spec_hash
+            hash_inputs.append("plot_spec")
+        if authority_attempt_ids:
+            hash_extras["authority_attempts"] = [
+                {
+                    "attempt_id": attempt_id,
+                    "terminal_event_hash": authority_attempt_terminal_hashes[
+                        attempt_id
+                    ],
+                }
+                for attempt_id in authority_attempt_ids
+            ]
+            hash_inputs.append("authority_attempts")
         try:
             node_content_hash = hash_node_payload(
                 code=code if isinstance(code, str) else "",
                 metric=raw.get("metric"),
-                extras=(
-                    {"evaluation": evaluation_binding} if evaluation_binding else None
-                ),
+                extras=hash_extras or None,
                 llm_call_hashes=llm_refs or None,
                 context_hashes=context_refs or None,
                 execution_identity=execution_identity or None,
                 is_seed=is_seed,
             )
-        except Exception as exc:  # pragma: no cover - defensive; hashing is best-effort
+        except Exception as exc:
+            if authority_attempt_ids:
+                raise ValueError(
+                    f"ARA export refused authority-bound node {node_id}: "
+                    "strict identity hashing failed"
+                ) from exc
             logger.warning("ARA export: hashing node %s failed: %s", node_id, exc)
         if node_content_hash:
             metrics_payload["content_hash"] = node_content_hash
@@ -414,6 +1112,22 @@ def _export_nodes_from_journal(
         _safe_write_json(node_dir / "metrics.json", metrics_payload)
         if isinstance(raw.get("evaluation_report"), dict):
             _safe_write_json(node_dir / "evaluation.json", raw["evaluation_report"])
+        if isinstance(implementation_spec, dict) and isinstance(
+            implementation_spec_hash, str
+        ):
+            _safe_write_strict_json(
+                node_dir / "implementation_spec.json", implementation_spec
+            )
+        if isinstance(repair_spec, dict) and isinstance(repair_spec_hash, str):
+            _safe_write_strict_json(node_dir / "repair_spec.json", repair_spec)
+        if isinstance(parse_metrics_spec, dict) and isinstance(
+            parse_metrics_spec_hash, str
+        ):
+            _safe_write_strict_json(
+                node_dir / "parse_metrics_spec.json", parse_metrics_spec
+            )
+        if isinstance(plot_spec, dict) and isinstance(plot_spec_hash, str):
+            _safe_write_strict_json(node_dir / "plot_spec.json", plot_spec)
 
         # 4. Plot references.
         plots_payload = {
@@ -448,6 +1162,15 @@ def _export_nodes_from_journal(
                 "execution_identity": execution_identity,
                 "llm_call_refs": llm_refs,
                 "context_pack_refs": context_refs,
+                "selection_llm_call_refs": selection_refs,
+                "authority_attempt_ids": authority_attempt_ids,
+                "authority_attempt_terminal_hashes": (
+                    authority_attempt_terminal_hashes
+                ),
+                "implementation_spec_hash": implementation_spec_hash,
+                "repair_spec_hash": repair_spec_hash,
+                "parse_metrics_spec_hash": parse_metrics_spec_hash,
+                "plot_spec_hash": plot_spec_hash,
                 "stage": stage_label,
                 "step": raw.get("step"),
                 "parent_id": str(parent_id) if parent_id else None,
@@ -995,6 +1718,12 @@ def export_ara(
     all_edges: list[dict[str, Any]] = []
     if not journals:
         missing.append("exploration_graph: no journal.json found under logs/")
+    expected_authority_hashes = _collect_authority_expectations(journals)
+    authority_ref, audited_authority_hashes = _snapshot_authority_attempts(
+        ara_dir=ara_dir,
+        exp_dir=exp_dir_path,
+        expected_terminal_hashes=expected_authority_hashes,
+    )
     for journal_path in journals:
         stage_label = journal_path.parent.name
         nodes, edges = _export_nodes_from_journal(
@@ -1003,6 +1732,7 @@ def export_ara(
             nodes_root,
             exp_dir=exp_dir_path,
             ara_dir=ara_dir,
+            authority_terminal_hashes=audited_authority_hashes,
         )
         all_nodes.extend(nodes)
         all_edges.extend(edges)
@@ -1021,15 +1751,17 @@ def export_ara(
                 "source_journals": [
                     relative_path_reference(path, base=ara_dir) for path in journals
                 ],
+                "authority_attempts": authority_ref,
                 "counts": {
                     "nodes": len(all_nodes),
                     "edges": len(all_edges),
                     "buggy": sum(1 for n in all_nodes if n.get("is_buggy")),
+                    "authority_attempts": len(audited_authority_hashes),
                 },
             },
         )
     )
-    _safe_write_json(exploration_graph_path, graph_payload)
+    _safe_write_strict_json(exploration_graph_path, graph_payload)
     graph_visualization_refs = write_exploration_graph_visualization(
         ara_dir,
         graph_payload,
@@ -1039,6 +1771,8 @@ def export_ara(
     references: dict[str, Any] = {
         "exploration_graph_visualization": graph_visualization_refs,
     }
+    if authority_ref is not None:
+        references["authority_attempts"] = authority_ref
 
     pareto_source = exp_dir_path / "pareto_pool" / "manuscript_candidate_pool.json"
     if not pareto_source.exists():
@@ -1159,6 +1893,7 @@ def export_ara(
             "edges": len(all_edges),
             "buggy_nodes": sum(1 for n in all_nodes if n.get("is_buggy")),
             "journals": len(journals),
+            "authority_attempts": len(audited_authority_hashes),
         },
         "references": references,
         "missing": missing,

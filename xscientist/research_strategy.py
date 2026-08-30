@@ -17,7 +17,12 @@ from typing import Any
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 
 from .research_authority import require_independent_evaluator
-from .research_git import CheckpointResult, ResearchGitError, ResearchObjectResult
+from .research_git import (
+    CheckpointResult,
+    ResearchGitError,
+    ResearchObjectResult,
+    research_object_introduction_order,
+)
 from .research_vcs import ResearchRepository
 
 EVIDENCE_QUALITY_DOMAINS = (
@@ -149,6 +154,17 @@ def _effective_objects(repository: ResearchRepository) -> dict[str, dict[str, An
     }
 
 
+def _object_sequences(
+    repository: ResearchRepository,
+    objects: Mapping[str, Mapping[str, Any]],
+) -> dict[str, int]:
+    committed = research_object_introduction_order(repository.path)
+    working_sequence = max(committed.values(), default=0) + 1
+    return {
+        object_id: committed.get(object_id, working_sequence) for object_id in objects
+    }
+
+
 def _latest_portfolio_object(
     repository: ResearchRepository,
     *,
@@ -161,17 +177,21 @@ def _latest_portfolio_object(
         if item.get("kind") == kind
         and (item.get("payload") or {}).get("portfolio_id") == portfolio_id
     ]
-    return (
-        max(
-            rows,
-            key=lambda item: (
-                str(item.get("created_at") or ""),
-                str(item.get("object_id") or ""),
-            ),
-        )
-        if rows
-        else None
+    if not rows:
+        return None
+    sequences = _object_sequences(
+        repository, {str(item["object_id"]): item for item in rows}
     )
+    latest_sequence = max(sequences.values())
+    latest = [
+        item for item in rows if sequences[str(item["object_id"])] == latest_sequence
+    ]
+    if len(latest) != 1:
+        raise ResearchGitError(
+            f"multiple {kind} objects for {portfolio_id} share the latest Git "
+            "checkpoint; record an explicit superseding object"
+        )
+    return latest[0]
 
 
 def _portfolio_weights(
@@ -1667,21 +1687,25 @@ def review_research_program(
     if record:
         _ensure_stage_available(repository, commit=commit)
     all_objects = repository.objects()
+    object_sequences = _object_sequences(
+        repository,
+        {str(item["object_id"]): item for item in all_objects},
+    )
     effective = _effective_objects(repository)
     objects = list(effective.values())
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for item in objects:
         by_kind.setdefault(str(item["kind"]), []).append(item)
     anomalies = scan_research_anomalies(repository.path, record=record)
-    last_review_at = max(
+    last_review_order = max(
         (
-            str(item.get("created_at") or "")
+            object_sequences[str(item["object_id"])]
             for item in by_kind.get("research_review", [])
         ),
-        default="",
+        default=0,
     )
     new_object_count = sum(
-        str(item.get("created_at") or "") > last_review_at
+        object_sequences[str(item["object_id"])] > last_review_order
         and item.get("kind") != "research_review"
         for item in all_objects
     )
@@ -2037,6 +2061,7 @@ def inspect_claim_depth(
     repository = ResearchRepository(repo)
     claim = _resolve_kind(repository, claim_id, kinds={"claim"}, label="claim")
     objects = _effective_objects(repository)
+    object_sequences = _object_sequences(repository, objects)
     resolved_claim_id = str(claim["object_id"])
     direct = _targets(claim)
     supporting = sorted(
@@ -2114,20 +2139,35 @@ def inspect_claim_depth(
             for member in (item.get("payload") or {}).get("members") or []
         )
     )
-    priorities = sorted(
-        (
-            item
-            for item in objects.values()
-            if item.get("kind") == "experiment_priority"
-            and (item.get("payload") or {}).get("portfolio_id") in portfolio_ids
-        ),
-        key=lambda item: (str(item.get("created_at") or ""), str(item["object_id"])),
-        reverse=True,
-    )
+    priorities = [
+        item
+        for item in objects.values()
+        if item.get("kind") == "experiment_priority"
+        and (item.get("payload") or {}).get("portfolio_id") in portfolio_ids
+    ]
     latest_priorities: dict[str, dict[str, Any]] = {}
-    for item in priorities:
-        portfolio_id = str((item.get("payload") or {}).get("portfolio_id") or "")
-        latest_priorities.setdefault(portfolio_id, item)
+    for portfolio_id in portfolio_ids:
+        matches = [
+            item
+            for item in priorities
+            if (item.get("payload") or {}).get("portfolio_id") == portfolio_id
+        ]
+        if not matches:
+            continue
+        latest_sequence = max(
+            object_sequences[str(item["object_id"])] for item in matches
+        )
+        latest = [
+            item
+            for item in matches
+            if object_sequences[str(item["object_id"])] == latest_sequence
+        ]
+        if len(latest) != 1:
+            raise ResearchGitError(
+                f"multiple experiment priorities for {portfolio_id} share the "
+                "latest Git checkpoint; record an explicit superseding priority"
+            )
+        latest_priorities[portfolio_id] = latest[0]
     next_experiments = []
     for portfolio_id in portfolio_ids:
         priority = latest_priorities.get(portfolio_id)

@@ -59,6 +59,30 @@ def _load_json(path: Path) -> Any | None:
         return None
 
 
+def _load_strict_json(path: Path) -> Any:
+    """Load trust-boundary JSON while rejecting duplicates and NaN/Infinity."""
+
+    def reject_duplicate_pairs(pairs):
+        parsed: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError("duplicate JSON key")
+            parsed[key] = value
+        return parsed
+
+    def reject_constant(value: str):
+        raise ValueError("non-finite JSON number")
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_constant,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid strict JSON: {path.name}") from exc
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     """Coerce ``value`` to int; return ``default`` on TypeError/ValueError.
 
@@ -90,7 +114,28 @@ def _load_node(ara_root: Path, node_id: str) -> tuple[dict[str, Any], Path]:
     node_dir = ara_root / "nodes" / node_id
     if not node_dir.exists():
         raise SystemExit(f"Node {node_id} not found under nodes/")
-    graph = _load_json(ara_root / "exploration_graph.json") or {}
+    try:
+        graph = _load_strict_json(ara_root / "exploration_graph.json")
+    except ValueError as exc:
+        return [
+            {
+                "node_id": "@exploration-graph",
+                "state": "drift",
+                "stored_hash": None,
+                "computed_hash": None,
+                "notes": str(exc),
+            }
+        ]
+    if not isinstance(graph, dict):
+        return [
+            {
+                "node_id": "@exploration-graph",
+                "state": "drift",
+                "stored_hash": None,
+                "computed_hash": None,
+                "notes": "exploration_graph.json must contain an object",
+            }
+        ]
     meta: dict[str, Any] = {}
     for node in graph.get("nodes") or []:
         if isinstance(node, dict) and str(node.get("id")) == node_id:
@@ -1053,6 +1098,17 @@ def cmd_hash_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _canonical_object_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
     """Recompute each node's content_hash from disk and return per-node states.
 
@@ -1064,9 +1120,36 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
         hash_node_payload,
     )
     from ai_scientist.utils.deterministic_evaluator import evaluation_hash_binding
+    from ai_scientist.utils.ara_artifact import verify_ara_authority_attempts
 
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     entries: list[dict[str, Any]] = []
+    authority_verification = verify_ara_authority_attempts(ara_root, graph=graph)
+    if authority_verification.get("applicable"):
+        graph_authority_ref = graph.get("authority_attempts")
+        stored_authority_hash = (
+            graph_authority_ref.get("content_hash")
+            if isinstance(graph_authority_ref, dict)
+            else None
+        )
+        entries.append(
+            {
+                "node_id": "@authority-attempts",
+                "state": ("clean" if authority_verification.get("valid") else "drift"),
+                "stored_hash": stored_authority_hash,
+                "computed_hash": authority_verification.get("content_hash"),
+                **(
+                    {
+                        "notes": "; ".join(
+                            str(item)
+                            for item in authority_verification.get("errors") or []
+                        )
+                    }
+                    if authority_verification.get("errors")
+                    else {}
+                ),
+            }
+        )
 
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
@@ -1102,6 +1185,48 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
         evaluation_binding = evaluation_hash_binding(
             metrics.get("evaluation_report") if isinstance(metrics, dict) else None
         )
+        hash_extras: dict[str, Any] = {}
+        if evaluation_binding:
+            hash_extras["evaluation"] = evaluation_binding
+        for field, filename in (
+            ("implementation_spec_hash", "implementation_spec.json"),
+            ("repair_spec_hash", "repair_spec.json"),
+            ("parse_metrics_spec_hash", "parse_metrics_spec.json"),
+            ("plot_spec_hash", "plot_spec.json"),
+        ):
+            declared_hash = node.get(field)
+            spec_path = node_dir / filename
+            try:
+                spec_payload = (
+                    _load_strict_json(spec_path) if spec_path.is_file() else None
+                )
+            except ValueError:
+                spec_payload = None
+            if isinstance(spec_payload, dict):
+                hash_extras[field] = _canonical_object_hash(spec_payload)
+            elif declared_hash is not None or spec_path.exists():
+                # A stable invalid marker guarantees a mismatch with any hash
+                # produced by the exporter while keeping verification bounded.
+                hash_extras[field] = "invalid-or-missing"
+        authority_ids = node.get("authority_attempt_ids") or []
+        authority_hashes = node.get("authority_attempt_terminal_hashes") or {}
+        if authority_ids:
+            if (
+                isinstance(authority_ids, list)
+                and len(authority_ids) == len(set(authority_ids))
+                and all(isinstance(item, str) for item in authority_ids)
+                and isinstance(authority_hashes, dict)
+                and set(authority_hashes) == set(authority_ids)
+            ):
+                hash_extras["authority_attempts"] = [
+                    {
+                        "attempt_id": attempt_id,
+                        "terminal_event_hash": authority_hashes[attempt_id],
+                    }
+                    for attempt_id in authority_ids
+                ]
+            else:
+                hash_extras["authority_attempts"] = "invalid-authority-binding"
 
         # Export skips writing code.py when the journal node's code is
         # empty/whitespace, but still stamps a content_hash computed with
@@ -1129,9 +1254,7 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             computed = hash_node_payload(
                 code=code_text,
                 metric=metric,
-                extras=(
-                    {"evaluation": evaluation_binding} if evaluation_binding else None
-                ),
+                extras=hash_extras or None,
                 llm_call_hashes=llm_refs or None,
                 context_hashes=context_refs or None,
                 execution_identity=execution_identity,

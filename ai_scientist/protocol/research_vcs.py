@@ -15,7 +15,12 @@ from .hashing import content_hash
 from .schemas import load_schema
 
 RESEARCH_OBJECT_SCHEMA = "xscientist.research-object.v1"
-RESEARCH_OBJECT_IDENTITY_PROFILE = "xscientist.research-object-identity.v1"
+LEGACY_RESEARCH_OBJECT_IDENTITY_PROFILE = "xscientist.research-object-identity.v1"
+RESEARCH_OBJECT_IDENTITY_PROFILE = "xscientist.research-object-identity.v2"
+SUPPORTED_RESEARCH_OBJECT_IDENTITY_PROFILES = (
+    LEGACY_RESEARCH_OBJECT_IDENTITY_PROFILE,
+    RESEARCH_OBJECT_IDENTITY_PROFILE,
+)
 RESEARCH_SEMANTIC_PROFILE_SCHEMA = "xscientist.research-semantic-profile.v1"
 
 CORE_RESEARCH_OBJECT_KINDS = (
@@ -135,6 +140,18 @@ RESEARCH_RELATION_TYPES = (
     "consumes",
     "produces",
 )
+# Only relations whose target semantics are unambiguous are constrained here.
+# Broad graph relations such as ``depends_on`` and ``derived_from`` intentionally
+# remain kind-polymorphic.
+RESEARCH_RELATION_TARGET_KINDS = {
+    "quotes": ("source_snapshot",),
+    "uses_context": ("context_snapshot",),
+    "uses_method": ("method",),
+    "under_assumption": ("assumption",),
+    "addresses_estimand": ("estimand",),
+    "has_effect_estimate": ("effect_estimate",),
+    "challenges_inference": ("inference",),
+}
 RESEARCH_AUTHORITIES = (
     "research_agent",
     "recorder",
@@ -1761,6 +1778,14 @@ def _normalise_relations(
             raise ResearchObjectError(
                 "extension relation types must use an absolute URI"
             )
+        if (
+            relation_type in RESEARCH_RELATION_TYPES
+            and re.fullmatch(r"rso-[0-9a-f]{16}", target) is None
+        ):
+            raise ResearchObjectError(
+                "built-in relation targets must use a canonical Research Object ID "
+                "(rso- followed by 16 lowercase hex characters)"
+            )
         row = {"type": relation_type, "target": target}
         if role:
             row["role"] = role
@@ -1772,7 +1797,7 @@ def _normalise_relations(
 
 
 def _identity_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         key: deepcopy(value)
         for key, value in payload.items()
         if key
@@ -1782,8 +1807,76 @@ def _identity_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             "identity_profile",
             "created_at",
             "content_hash",
+            "envelope_hash",
         }
     }
+    if payload.get("identity_profile") == RESEARCH_OBJECT_IDENTITY_PROFILE:
+        # v2 binds the profile into semantic identity, making removal of the
+        # envelope/profile a detectable downgrade instead of a legacy bypass.
+        result["identity_profile"] = RESEARCH_OBJECT_IDENTITY_PROFILE
+    return result
+
+
+def _envelope_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the host envelope whose hash authenticates ordering metadata.
+
+    ``created_at`` intentionally remains outside the semantic object identity so
+    retrying the same scientific write is idempotent.  It must nevertheless be
+    authenticated before any caller may use it for ``latest``/recency
+    semantics.  Keeping that second hash explicit prevents mutable wall-clock
+    metadata from silently changing scientific navigation.
+    """
+
+    return {
+        "object_id": payload.get("object_id"),
+        "qualified_id": payload.get("qualified_id"),
+        "identity_profile": payload.get("identity_profile"),
+        "created_at": payload.get("created_at"),
+        "content_hash": payload.get("content_hash"),
+    }
+
+
+def _canonical_created_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > 40:
+        raise ResearchObjectError(
+            "v2 research object created_at must be a bounded UTC RFC3339 timestamp"
+        )
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ResearchObjectError(
+            "v2 research object created_at must be a bounded UTC RFC3339 timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ResearchObjectError("v2 research object created_at must use UTC")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def research_object_order_key(payload: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Return a deterministic key that never trusts unauthenticated time.
+
+    Wall-clock values never participate in this key. Repository-aware callers
+    should prefer Git commit sequence; this immutable identity fallback keeps
+    uncommitted and legacy views deterministic without inventing chronology.
+    """
+
+    envelope_hash = str(payload.get("envelope_hash") or "")
+    identity_profile = str(payload.get("identity_profile") or "")
+    expected = content_hash(_envelope_payload(payload))
+    if envelope_hash:
+        if identity_profile != RESEARCH_OBJECT_IDENTITY_PROFILE:
+            raise ResearchObjectError(
+                "legacy research objects cannot acquire a v2 envelope"
+            )
+        if envelope_hash != expected:
+            raise ResearchObjectError("research object envelope hash mismatch")
+        _canonical_created_at(payload.get("created_at"))
+    return (
+        str(payload.get("content_hash") or ""),
+        str(payload.get("object_id") or ""),
+        envelope_hash,
+    )
 
 
 def build_research_object(
@@ -1801,6 +1894,11 @@ def build_research_object(
 
     normalized_kind = str(kind or "").strip()
     normalized_state = str(state or "").strip()
+    if normalized_kind == "experiment_attempt" and normalized_state == "running":
+        raise ResearchObjectError(
+            "immutable experiment attempts must be terminal; running attempts "
+            "belong in the mutable execution journal"
+        )
     normalized_profile = _normalise_semantic_profile(normalized_kind, semantic_profile)
     semantic_payload = validate_research_payload(
         normalized_kind, payload, normalized_profile
@@ -1834,7 +1932,9 @@ def build_research_object(
         "actor": actor_payload,
         "provenance": _mapping(provenance, label="provenance"),
     }
-    object_hash = content_hash(core)
+    object_hash = content_hash(
+        {**core, "identity_profile": RESEARCH_OBJECT_IDENTITY_PROFILE}
+    )
     result = {
         **core,
         "object_id": f"rso-{object_hash.split(':', 1)[1][:16]}",
@@ -1842,9 +1942,10 @@ def build_research_object(
             "urn:xscientist:research-object:sha256:" + object_hash.split(":", 1)[1]
         ),
         "identity_profile": RESEARCH_OBJECT_IDENTITY_PROFILE,
-        "created_at": str(created_at or _now_iso()),
+        "created_at": _canonical_created_at(created_at or _now_iso()),
         "content_hash": object_hash,
     }
+    result["envelope_hash"] = content_hash(_envelope_payload(result))
     try:
         validate_json(result, load_schema("research_object"))
     except ValidationError as exc:
@@ -1863,15 +1964,15 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
     except ValidationError as exc:
         raise ResearchObjectError(f"invalid research object: {exc.message}") from exc
     semantic_profile = result.get("semantic_profile")
+    normalized_relations = _normalise_relations(result.get("relations") or [])
     if semantic_profile is None:
         # Objects produced before semantic profiles were introduced remain
         # valid; new builders always emit an explicit, content-bound profile.
         if str(result.get("kind") or "") not in CORE_RESEARCH_OBJECT_KINDS:
             raise ResearchObjectError("research object semantic_profile is missing")
-        legacy_relations = _normalise_relations(result.get("relations") or [])
         if any(
             relation["type"] not in RESEARCH_RELATION_TYPES
-            for relation in legacy_relations
+            for relation in normalized_relations
         ):
             raise ResearchObjectError(
                 "legacy research objects cannot use extension relation types"
@@ -1883,7 +1984,7 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
         undeclared = sorted(
             {
                 str(relation.get("type") or "")
-                for relation in result.get("relations") or []
+                for relation in normalized_relations
                 if str(relation.get("type") or "")
                 not in set(normalized_profile.get("relations") or [])
             }
@@ -1898,6 +1999,14 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
         result.get("payload") or {},
         semantic_profile,
     )
+    if (
+        str(result.get("kind") or "") == "experiment_attempt"
+        and str(result.get("state") or "") == "running"
+    ):
+        raise ResearchObjectError(
+            "immutable experiment attempts must be terminal; running attempts "
+            "belong in the mutable execution journal"
+        )
     expected = content_hash(_identity_payload(result))
     if result.get("content_hash") != expected:
         raise ResearchObjectError("research object content hash mismatch")
@@ -1910,10 +2019,15 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
         expected_qualified = (
             "urn:xscientist:research-object:sha256:" + expected.split(":", 1)[1]
         )
-        if identity_profile != RESEARCH_OBJECT_IDENTITY_PROFILE:
+        if identity_profile not in SUPPORTED_RESEARCH_OBJECT_IDENTITY_PROFILES:
             raise ResearchObjectError("research object identity profile mismatch")
         if qualified_id != expected_qualified:
             raise ResearchObjectError("research object qualified identifier mismatch")
+        if identity_profile == RESEARCH_OBJECT_IDENTITY_PROFILE and not result.get(
+            "envelope_hash"
+        ):
+            raise ResearchObjectError("v2 research object envelope hash is missing")
+    research_object_order_key(result)
     return result
 
 
@@ -1922,17 +2036,21 @@ __all__ = [
     "BUILTIN_RESEARCH_PROFILES",
     "CORE_RESEARCH_OBJECT_KINDS",
     "EPISTEMIC_RESEARCH_OBJECT_KINDS",
+    "LEGACY_RESEARCH_OBJECT_IDENTITY_PROFILE",
     "RESEARCH_AUTHORITIES",
     "RESEARCH_OBJECT_KINDS",
     "RESEARCH_OBJECT_IDENTITY_PROFILE",
     "RESEARCH_OBJECT_SCHEMA",
     "RESEARCH_OBJECT_STATES",
     "RESEARCH_RELATION_TYPES",
+    "RESEARCH_RELATION_TARGET_KINDS",
     "RESEARCH_SEMANTIC_PROFILE_SCHEMA",
     "STRATEGY_RESEARCH_OBJECT_KINDS",
+    "SUPPORTED_RESEARCH_OBJECT_IDENTITY_PROFILES",
     "ROLLOUT_RESEARCH_OBJECT_KINDS",
     "ResearchObjectError",
     "build_research_object",
+    "research_object_order_key",
     "research_payload_issues",
     "research_profile_status",
     "validate_research_payload",

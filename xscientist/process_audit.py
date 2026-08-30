@@ -31,6 +31,7 @@ from .research_git import (
     list_research_branches,
     list_research_objects,
     repository_status,
+    research_object_introduction_order,
     research_log,
     show_checkpoint,
 )
@@ -1620,10 +1621,16 @@ def build_process_summary(
             )
         )
 
+    introduction_order = (
+        research_object_introduction_order(root, ref=current_head)
+        if current_head
+        else {}
+    )
+    working_sequence = max(introduction_order.values(), default=0) + 1
     ordered_objects = sorted(
         objects,
         key=lambda item: (
-            str(item.get("created_at") or ""),
+            introduction_order.get(str(item.get("object_id") or ""), working_sequence),
             str(item.get("object_id") or ""),
         ),
     )

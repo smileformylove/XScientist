@@ -11,10 +11,12 @@ COMMANDS = (
 
 RESEARCH_COMMANDS = (
     "doctor start guide hypothesis plan discovery program opportunity rollout "
-    "rollout-audit belief belief-audit literature preregister experiment evidence "
-    "estimand effect infer ingest review claim init status audit context decide tree "
-    "dag adapter fsck checkpoint record objects stage add unstage commit branch "
-    "switch restore revert tag blame merge log show diff object bundle export reproduce"
+    "rollout-audit verifier-authority belief belief-audit literature preregister confirm "
+    "trajectory-bind attempt-disposition "
+    "experiment evidence estimand effect infer ingest review claim init status audit "
+    "context decide tree dag adapter fsck checkpoint record objects stage add unstage "
+    "commit branch switch restore revert tag blame merge log trajectory show diff object bundle "
+    "export reproduce"
 )
 
 RESEARCH_SUBCOMMANDS = {
@@ -24,6 +26,7 @@ RESEARCH_SUBCOMMANDS = {
         "boundary review followup claim"
     ),
     "opportunity": "direction pool attempt judge grade allocate inspect",
+    "verifier-authority": "prepare finalize verify",
     "literature": "plan receipt source update passage",
     "adapter": "list doctor sync",
     "object": "add",

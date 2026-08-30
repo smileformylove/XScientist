@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from ai_scientist.config.venues import TARGET_VENUES
 from ai_scientist.utils.launcher_workflow import (
     LLM_BUDGET_EXIT_CODE,
     experiment_stop_exit_code,
@@ -233,7 +234,7 @@ def parse_arguments():
     parser.add_argument(
         "--target-venue",
         type=str,
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         default=None,
     )
     parser.add_argument(
@@ -314,11 +315,7 @@ def parse_arguments():
             "standard",
             "fast",
             "depth",
-            "neurips",
-            "iclr",
-            "cvpr",
-            "journal",
-            "nature",
+            *TARGET_VENUES,
         ],
         default=None,
         help="Review strategy preset",

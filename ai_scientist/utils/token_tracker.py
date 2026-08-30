@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from functools import wraps
 import inspect
 from typing import Any, Dict, Optional, List, Tuple
@@ -134,8 +136,11 @@ def _extract_usage(result: Any) -> Optional[Tuple[int, int, int, int]]:
         getattr(prompt_details, "cached_tokens", 0) if prompt_details else 0
     ) or 0
 
-    return int(prompt_tokens), int(completion_tokens), int(reasoning_tokens), int(
-        cached_tokens
+    return (
+        int(prompt_tokens),
+        int(completion_tokens),
+        int(reasoning_tokens),
+        int(cached_tokens),
     )
 
 

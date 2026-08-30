@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
+import re
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from ai_scientist.utils.research_integrity import validate_preregistration
+from ai_scientist.protocol import content_hash
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.principal_identity import canonical_principal
+from ai_scientist.utils.research_integrity import (
+    _protocol_fidelity_hash,
+    validate_preregistration,
+)
 
 from .research_git import (
     CheckpointResult,
@@ -13,8 +21,54 @@ from .research_git import (
     ResearchObjectResult,
     show_checkpoint,
 )
+from ai_scientist.utils.trajectory_binding import terminal_negative_contract_errors
 from .research_vcs import ResearchRepository
 from .research_authority import require_independent_evaluator
+
+_MAX_CONFIRMATORY_LINEAGE_COMMITS = 4096
+_MAX_CONFIRMATORY_CAMPAIGN_BYTES = 16 * 1024 * 1024
+_RESEARCH_OBJECT_PATH = re.compile(
+    r"^\.xscientist/objects/(?P<kind>[a-z][a-z0-9_-]*)/"
+    r"(?P<object_id>rso-[0-9a-f]{16})\.json$"
+)
+_CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _relation_targets(
+    research_object: Mapping[str, Any],
+    *,
+    relation_type: str,
+    role: str | None = None,
+) -> set[str]:
+    return {
+        str(item.get("target") or "").strip()
+        for item in research_object.get("relations") or []
+        if isinstance(item, Mapping)
+        and item.get("type") == relation_type
+        and (role is None or item.get("role") == role)
+        and str(item.get("target") or "").strip()
+    }
+
+
+def _registered_task_ids(preregistration: Mapping[str, Any]) -> set[str]:
+    return {
+        str(item.get("task_id") or "").strip()
+        for item in preregistration.get("outcomes") or []
+        if isinstance(item, Mapping) and str(item.get("task_id") or "").strip()
+    }
+
+
+def _safe_campaign_path(value: Any) -> str:
+    text = str(value or "").strip()
+    path = PurePosixPath(text)
+    if (
+        not text
+        or path.is_absolute()
+        or "\\" in text
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ResearchGitError("confirmatory campaign artifact path is unsafe")
+    return path.as_posix()
 
 
 class ResearchLifecycle:
@@ -100,6 +154,941 @@ class ResearchLifecycle:
             "checkpoint": checkpoint,
         }
 
+    def _validate_confirmatory_attempt_path(
+        self,
+        path: str,
+        *,
+        commit: str,
+        current_head: str,
+        preregistration_id: str,
+        preregistration: Mapping[str, Any],
+        adaptive_freeze: Mapping[str, Any],
+    ) -> str:
+        match = _RESEARCH_OBJECT_PATH.fullmatch(path)
+        if match is None or match.group("kind") != "experiment_attempt":
+            raise ResearchGitError(
+                "confirmatory experiment lineage changed a frozen research path: "
+                + path
+            )
+        object_id = match.group("object_id")
+        attempt = self.repository.get(object_id)
+        if attempt.get("kind") != "experiment_attempt":
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains a non-attempt object"
+            )
+        try:
+            origin = (
+                self.repository.blame(object_id, commit=current_head).get("origin")
+                or {}
+            )
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains an untraceable attempt"
+            ) from exc
+        if str(origin.get("commit") or "") != commit:
+            raise ResearchGitError(
+                "confirmatory experiment lineage modified an existing attempt"
+            )
+        payload = attempt.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        if str(payload.get("study_phase") or "").strip().lower() != "confirmatory":
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains an exploratory attempt"
+            )
+        if _relation_targets(
+            attempt,
+            relation_type="depends_on",
+            role="protocol",
+        ) != {preregistration_id}:
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains an attempt bound to a "
+                "different protocol"
+            )
+        expected_bindings = {
+            "adaptive_state_hash": adaptive_freeze.get("state_hash"),
+            "research_state_hash": adaptive_freeze.get("research_state_hash"),
+            "post_freeze_adaptation": False,
+            "preregistration_id": preregistration.get("preregistration_id"),
+        }
+        task_id = str(payload.get("task_id") or "").strip()
+        if task_id and task_id not in _registered_task_ids(preregistration):
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains an unregistered task"
+            )
+        data_policy = preregistration.get("data_policy")
+        data_policy = data_policy if isinstance(data_policy, Mapping) else {}
+        for field in ("data_manifest_hash", "data_snapshot_id"):
+            expected_bindings[field] = data_policy.get(field)
+        if task_id:
+            outcome = next(
+                (
+                    item
+                    for item in preregistration.get("outcomes") or []
+                    if isinstance(item, Mapping)
+                    and str(item.get("task_id") or "").strip() == task_id
+                ),
+                {},
+            )
+            for field in (
+                "evidence_role",
+                "paired_control_task_id",
+                "intervention_variant",
+                "stress_condition",
+                "transformation_contract",
+                "transformation_contract_hash",
+            ):
+                expected_bindings[field] = outcome.get(field)
+            expected_bindings["protocol_fidelity_hash"] = _protocol_fidelity_hash(
+                preregistration, task_id
+            )
+            expected_bindings["dataset_split_hash"] = (
+                data_policy.get("split_hashes") or {}
+            ).get(task_id)
+        if any(
+            payload.get(field) != expected
+            for field, expected in expected_bindings.items()
+        ):
+            raise ResearchGitError(
+                "confirmatory experiment lineage contains an attempt that changed "
+                "the frozen adaptive state, data, or task contract"
+            )
+        provenance = attempt.get("provenance")
+        provenance = provenance if isinstance(provenance, Mapping) else {}
+        code_commit = str(provenance.get("code_commit") or "").strip()
+        if code_commit != str(adaptive_freeze.get("research_vcs_head") or "").strip():
+            raise ResearchGitError(
+                "confirmatory experiment lineage is missing or changed the frozen "
+                "code state"
+            )
+        return object_id
+
+    def _validate_confirmatory_gate_path(
+        self,
+        path: str,
+        *,
+        commit: str,
+        current_head: str,
+        preregistration_id: str,
+    ) -> tuple[str, str]:
+        """Validate a post-freeze trajectory binding/disposition decision."""
+
+        match = _RESEARCH_OBJECT_PATH.fullmatch(path)
+        if match is None or match.group("kind") != "gate_decision":
+            raise ResearchGitError(
+                "confirmatory lineage contains a non-attempt/non-gate object"
+            )
+        object_id = match.group("object_id")
+        decision = self.repository.get(object_id)
+        if decision.get("kind") != "gate_decision" or decision.get("state") not in {
+            "completed",
+            "verified",
+        }:
+            raise ResearchGitError(
+                "confirmatory lineage contains an invalid gate decision"
+            )
+        try:
+            origin = (
+                self.repository.blame(object_id, commit=current_head).get("origin")
+                or {}
+            )
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                "confirmatory lineage contains an untraceable gate decision"
+            ) from exc
+        if str(origin.get("commit") or "") != commit:
+            raise ResearchGitError(
+                "confirmatory lineage modified an existing gate decision"
+            )
+        payload = decision.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        protocol_kind = str(payload.get("protocol_kind") or "").strip()
+        if protocol_kind not in {
+            "xscientist.trajectory-binding.v1",
+            "xscientist.attempt-disposition.v1",
+        }:
+            raise ResearchGitError(
+                "confirmatory lineage contains an unrecognized gate decision"
+            )
+        actor = decision.get("actor")
+        actor = actor if isinstance(actor, Mapping) else {}
+        expected_authority = (
+            "deterministic_gate"
+            if protocol_kind == "xscientist.trajectory-binding.v1"
+            else "recorder"
+        )
+        if (
+            actor.get("authority") != expected_authority
+            or not str(actor.get("actor_id") or "").strip()
+        ):
+            raise ResearchGitError(
+                "confirmatory gate decision actor authority is invalid"
+            )
+        hash_field = (
+            "binding_hash"
+            if protocol_kind == "xscientist.trajectory-binding.v1"
+            else "disposition_hash"
+        )
+        payload_core = {
+            key: value for key, value in payload.items() if key != hash_field
+        }
+        if payload.get(hash_field) != canonical_content_hash(payload_core):
+            raise ResearchGitError(
+                "confirmatory gate decision integrity hash is invalid"
+            )
+        expected_decision = (
+            "bind_registry_record_to_research_trajectory"
+            if protocol_kind == "xscientist.trajectory-binding.v1"
+            else "record_attempt_disposition"
+        )
+        if payload.get("decision") != expected_decision:
+            raise ResearchGitError("confirmatory gate decision action is invalid")
+        if _relation_targets(decision, relation_type="depends_on", role="protocol") != {
+            preregistration_id
+        }:
+            raise ResearchGitError(
+                "confirmatory gate decision is bound to a different protocol"
+            )
+        attempt_targets = _relation_targets(decision, relation_type="attests")
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        if attempt_targets != {attempt_id}:
+            raise ResearchGitError(
+                "confirmatory gate decision does not attest its declared attempt"
+            )
+        attempt = self.repository.get(attempt_id)
+        if (
+            attempt.get("kind") != "experiment_attempt"
+            or (attempt.get("payload") or {}).get("study_phase") != "confirmatory"
+            or _relation_targets(attempt, relation_type="depends_on", role="protocol")
+            != {preregistration_id}
+            or payload.get("attempt_content_hash") != attempt.get("content_hash")
+        ):
+            raise ResearchGitError(
+                "confirmatory gate decision attempt binding is invalid"
+            )
+        if protocol_kind == "xscientist.trajectory-binding.v1":
+            required_text_fields = (
+                "record_id",
+                "registry_row_hash",
+                "attempt_origin_commit",
+                "attempt_checkpoint_hash",
+            )
+            if any(
+                not str(payload.get(field) or "").strip()
+                for field in required_text_fields
+            ) or any(
+                _CONTENT_HASH_RE.fullmatch(str(payload.get(field) or "")) is None
+                for field in (
+                    "registry_row_hash",
+                    "attempt_content_hash",
+                    "attempt_checkpoint_hash",
+                    "binding_hash",
+                )
+            ):
+                raise ResearchGitError(
+                    "confirmatory trajectory binding payload is incomplete"
+                )
+            if _relation_targets(
+                decision,
+                relation_type="depends_on",
+                role="retry",
+            ):
+                raise ResearchGitError(
+                    "confirmatory trajectory binding has an invalid retry relation"
+                )
+            attempt_origin = (
+                self.repository.blame(attempt_id, commit=current_head).get("origin")
+                or {}
+            )
+            attempt_origin_commit = str(attempt_origin.get("commit") or "").strip()
+            try:
+                attempt_checkpoint = self.repository.show(attempt_origin_commit)
+            except ResearchGitError as exc:
+                raise ResearchGitError(
+                    "confirmatory trajectory binding attempt checkpoint is invalid"
+                ) from exc
+            if (
+                payload.get("attempt_origin_commit") != attempt_origin_commit
+                or attempt_checkpoint.get("checkpoint_hash_valid") is not True
+                or payload.get("attempt_checkpoint_hash")
+                != (attempt_checkpoint.get("checkpoint") or {}).get("content_hash")
+            ):
+                raise ResearchGitError(
+                    "confirmatory trajectory binding attempt checkpoint is invalid"
+                )
+        else:
+            disposition = str(payload.get("disposition") or "").strip()
+            if (
+                disposition
+                not in {
+                    "terminal_negative",
+                    "technical_failure_retried",
+                    "approved_deviation",
+                    "excluded_with_reason",
+                }
+                or not str(payload.get("attempt_record_id") or "").strip()
+                or not str(payload.get("reason") or "").strip()
+                or _CONTENT_HASH_RE.fullmatch(
+                    str(payload.get("attempt_record_hash") or "")
+                )
+                is None
+                or _CONTENT_HASH_RE.fullmatch(
+                    str(payload.get("attempt_content_hash") or "")
+                )
+                is None
+                or not isinstance(payload.get("approved_before_unblinding"), bool)
+                or not isinstance(payload.get("negative_result_preserved"), bool)
+            ):
+                raise ResearchGitError(
+                    "confirmatory attempt disposition payload is incomplete"
+                )
+            retry_targets = _relation_targets(
+                decision,
+                relation_type="depends_on",
+                role="retry",
+            )
+            retry_attempt_id = str(payload.get("retry_attempt_id") or "").strip()
+            retry_record_id = str(payload.get("retry_record_id") or "").strip()
+            if disposition == "technical_failure_retried":
+                if (
+                    not retry_record_id
+                    or not retry_attempt_id
+                    or retry_targets != {retry_attempt_id}
+                ):
+                    raise ResearchGitError(
+                        "confirmatory attempt disposition retry binding is invalid"
+                    )
+                retry_attempt = self.repository.get(retry_attempt_id)
+                retry_payload = retry_attempt.get("payload") or {}
+                attempt_payload = attempt.get("payload") or {}
+                if (
+                    retry_attempt.get("kind") != "experiment_attempt"
+                    or retry_attempt.get("state") != "completed"
+                    or retry_payload.get("study_phase") != "confirmatory"
+                    or _relation_targets(
+                        retry_attempt,
+                        relation_type="depends_on",
+                        role="protocol",
+                    )
+                    != {preregistration_id}
+                    or retry_payload.get("task_id") != attempt_payload.get("task_id")
+                    or retry_payload.get("preregistration_id")
+                    != attempt_payload.get("preregistration_id")
+                ):
+                    raise ResearchGitError(
+                        "confirmatory attempt disposition retry attempt is invalid"
+                    )
+            elif retry_record_id or retry_attempt_id or retry_targets:
+                raise ResearchGitError(
+                    "confirmatory attempt disposition has an unexpected retry binding"
+                )
+            if (
+                disposition == "approved_deviation"
+                and payload.get("approved_before_unblinding") is not True
+            ):
+                raise ResearchGitError(
+                    "confirmatory attempt disposition approval is invalid"
+                )
+            if disposition == "terminal_negative":
+                terminal_errors = terminal_negative_contract_errors(
+                    self.repository,
+                    decision,
+                    attempt,
+                )
+                if terminal_errors:
+                    raise ResearchGitError(
+                        "confirmatory attempt disposition negative result is not "
+                        "host-verifiable: " + ", ".join(terminal_errors)
+                    )
+        return object_id, protocol_kind
+
+    def _validate_confirmatory_negative_evidence_path(
+        self,
+        path: str,
+        *,
+        commit: str,
+        current_head: str,
+        preregistration_id: str,
+    ) -> str:
+        """Admit only a metric-bearing assessment of one scientific failure."""
+
+        match = _RESEARCH_OBJECT_PATH.fullmatch(path)
+        if match is None or match.group("kind") != "evidence":
+            raise ResearchGitError(
+                "confirmatory lineage contains an unsupported evidence object"
+            )
+        object_id = match.group("object_id")
+        evidence = self.repository.get(object_id)
+        try:
+            origin = (
+                self.repository.blame(object_id, commit=current_head).get("origin")
+                or {}
+            )
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                "confirmatory lineage contains untraceable negative evidence"
+            ) from exc
+        payload = evidence.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        attempt_ids = _relation_targets(
+            evidence,
+            relation_type="derived_from",
+        )
+        if len(attempt_ids) != 1:
+            raise ResearchGitError(
+                "confirmatory negative evidence must derive from exactly one attempt"
+            )
+        attempt = self.repository.get(next(iter(attempt_ids)))
+        attempt_payload = attempt.get("payload")
+        attempt_payload = (
+            attempt_payload if isinstance(attempt_payload, Mapping) else {}
+        )
+        expected_measurement_hash = content_hash(
+            {
+                "result": payload.get("result"),
+                "metrics": payload.get("metrics") or {},
+            }
+        )
+        if (
+            evidence.get("kind") != "evidence"
+            or evidence.get("state") not in {"completed", "verified"}
+            or str(origin.get("commit") or "") != commit
+            or attempt.get("kind") != "experiment_attempt"
+            or attempt.get("state") != "failed"
+            or attempt_payload.get("study_phase") != "confirmatory"
+            or str(attempt_payload.get("failure_class") or "").strip().lower()
+            != "scientific_negative_result"
+            or _relation_targets(
+                attempt,
+                relation_type="depends_on",
+                role="protocol",
+            )
+            != {preregistration_id}
+            or not str(payload.get("result") or "").strip()
+            or not isinstance(payload.get("metrics"), Mapping)
+            or not payload.get("metrics")
+            or payload.get("measurement_hash") != expected_measurement_hash
+        ):
+            raise ResearchGitError(
+                "confirmatory negative evidence is not bound to one host-verifiable "
+                "scientific negative attempt"
+            )
+        return object_id
+
+    def _confirmatory_lineage_attestation(
+        self,
+        *,
+        registration: Mapping[str, Any],
+        preregistration_id: str,
+        preregistration: Mapping[str, Any],
+        adaptive_freeze: Mapping[str, Any],
+        allowed_pending_paths: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Prove every post-freeze path is a protocol-bound immutable attempt.
+
+        Merely checking that ``HEAD`` descends from the frozen commit is unsafe:
+        a descendant could change the hypothesis, method, code, memory, protocol,
+        or evaluator.  This verifier walks the first-parent checkpoint chain and
+        accepts only the exact preregistration transition followed by newly added
+        confirmatory-attempt objects bound to this registration.
+        """
+
+        current_state = self.repository.status()
+        pending_paths = {
+            *list(current_state.get("staged_paths") or []),
+            *list(current_state.get("tracked_changes") or []),
+            *list(current_state.get("eligible_changes") or []),
+        }
+        pending_allowed = bool(allowed_pending_paths) and not (
+            pending_paths - set(allowed_pending_paths or set())
+        )
+        if current_state.get("worktree_clean") is not True and not pending_allowed:
+            raise ResearchGitError(
+                "confirmatory experiment requires the exact clean Research VCS "
+                "lineage frozen at preregistration"
+            )
+        frozen_head = str(adaptive_freeze.get("research_vcs_head") or "").strip()
+        current_head = str(current_state.get("head") or "").strip()
+        if not frozen_head or not current_head:
+            raise ResearchGitError(
+                "confirmatory experiment requires a committed Research VCS freeze"
+            )
+
+        registration_object_id = str(
+            registration.get("object_id") or preregistration_id or ""
+        ).strip()
+        plan_ids = []
+        for target in sorted(
+            _relation_targets(registration, relation_type="depends_on")
+        ):
+            try:
+                dependency = self.repository.get(target)
+            except ResearchGitError:
+                continue
+            if dependency.get("kind") == "research_plan":
+                plan_ids.append(str(dependency.get("object_id") or ""))
+        if not registration_object_id or len(plan_ids) != 1:
+            raise ResearchGitError(
+                "confirmatory experiment requires one committed locked research plan"
+            )
+        plan_object_id = plan_ids[0]
+        try:
+            registration_origin = (
+                self.repository.blame(
+                    registration_object_id,
+                    commit=current_head,
+                ).get("origin")
+                or {}
+            )
+            plan_origin = (
+                self.repository.blame(
+                    plan_object_id,
+                    commit=current_head,
+                ).get("origin")
+                or {}
+            )
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                "confirmatory experiment requires a committed preregistration "
+                "transition"
+            ) from exc
+        registration_commit = str(registration_origin.get("commit") or "").strip()
+        if (
+            not registration_commit
+            or str(plan_origin.get("commit") or "").strip() != registration_commit
+        ):
+            raise ResearchGitError(
+                "confirmatory experiment requires the plan and preregistration in "
+                "one committed transition"
+            )
+
+        expected_registration_paths = {
+            ".xscientist/objects/preregistration/" f"{registration_object_id}.json",
+            ".xscientist/objects/research_plan/" f"{plan_object_id}.json",
+        }
+        campaign = preregistration.get("confirmatory_campaign")
+        campaign = campaign if isinstance(campaign, Mapping) else {}
+        expected_campaign_paths: set[str] = set()
+        allowed_registry_paths: set[str] = set()
+        if campaign:
+            if campaign.get("schema") != "xscientist.confirmatory-campaign.v1":
+                raise ResearchGitError("confirmatory campaign schema is invalid")
+            queue_contract = campaign.get("queue_contract")
+            queue_contract = (
+                queue_contract if isinstance(queue_contract, Mapping) else {}
+            )
+            queue_contract_core = {
+                key: value
+                for key, value in queue_contract.items()
+                if key != "queue_contract_hash"
+            }
+            queue_contract_hash = canonical_content_hash(queue_contract_core)
+            if (
+                queue_contract.get("schema")
+                != "xscientist.confirmatory-queue-contract.v1"
+                or queue_contract.get("queue_contract_hash") != queue_contract_hash
+                or campaign.get("queue_contract_hash") != queue_contract_hash
+            ):
+                raise ResearchGitError(
+                    "confirmatory campaign queue contract is missing or hash-invalid"
+                )
+            expected_campaign_paths = {
+                _safe_campaign_path(campaign.get("preregistration_path")),
+                _safe_campaign_path(campaign.get("queue_path")),
+            }
+            if len(expected_campaign_paths) != 2:
+                raise ResearchGitError(
+                    "confirmatory campaign requires distinct registration and queue "
+                    "artifacts"
+                )
+            paper_prefix = PurePosixPath(
+                _safe_campaign_path(campaign.get("preregistration_path"))
+            ).parent
+            allowed_registry_paths = {
+                (paper_prefix / filename).as_posix()
+                for filename in (
+                    "experiment_registry.jsonl",
+                    "experiment_registry.integrity.json",
+                    "experiment_registry.history.jsonl",
+                    "pipeline_manifest.json",
+                    "stage_standards.json",
+                    "process_alignment.json",
+                )
+            }
+        cursor = current_head
+        visited: set[str] = set()
+        checked_paths: list[dict[str, str]] = []
+        prior_attempt_ids: list[str] = []
+        prior_gate_decision_ids: list[str] = []
+        registration_seen = False
+        campaign_seen = not expected_campaign_paths
+        for _ in range(_MAX_CONFIRMATORY_LINEAGE_COMMITS):
+            if cursor == frozen_head:
+                break
+            if not cursor or cursor in visited:
+                raise ResearchGitError(
+                    "confirmatory experiment Research VCS lineage is cyclic or broken"
+                )
+            visited.add(cursor)
+            try:
+                shown = self.repository.show(cursor)
+            except ResearchGitError as exc:
+                raise ResearchGitError(
+                    "confirmatory experiment Research VCS lineage is not fully "
+                    "checkpoint-attested"
+                ) from exc
+            if shown.get("checkpoint_hash_valid") is not True:
+                raise ResearchGitError(
+                    "confirmatory experiment Research VCS lineage has an invalid "
+                    "checkpoint hash"
+                )
+            checkpoint = shown.get("checkpoint")
+            checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+            changed_paths = {
+                str(path) for path in checkpoint.get("changed_paths") or []
+            }
+            parent = str(checkpoint.get("parent_commit") or "").strip()
+            if cursor == registration_commit:
+                if (
+                    registration_seen
+                    or checkpoint.get("stage") != "preregister"
+                    or parent != frozen_head
+                    or changed_paths != expected_registration_paths
+                ):
+                    raise ResearchGitError(
+                        "confirmatory experiment requires the exact clean Research "
+                        "VCS preregistration transition"
+                    )
+                registration_seen = True
+                checked_paths.extend(
+                    {
+                        "commit": cursor,
+                        "path": path,
+                        "classification": "frozen_contract",
+                    }
+                    for path in sorted(changed_paths)
+                )
+            else:
+                if expected_campaign_paths and checkpoint.get("stage") == "preregister":
+                    if (
+                        campaign_seen
+                        or parent != registration_commit
+                        or changed_paths != expected_campaign_paths
+                    ):
+                        raise ResearchGitError(
+                            "confirmatory campaign artifacts are not the exact "
+                            "post-registration materialization transition"
+                        )
+                    preregistration_path = self.repository.path / _safe_campaign_path(
+                        campaign.get("preregistration_path")
+                    )
+                    queue_path = self.repository.path / _safe_campaign_path(
+                        campaign.get("queue_path")
+                    )
+                    try:
+                        if (
+                            preregistration_path.is_symlink()
+                            or queue_path.is_symlink()
+                            or not preregistration_path.is_file()
+                            or not queue_path.is_file()
+                            or preregistration_path.stat().st_size
+                            > _MAX_CONFIRMATORY_CAMPAIGN_BYTES
+                            or queue_path.stat().st_size
+                            > _MAX_CONFIRMATORY_CAMPAIGN_BYTES
+                        ):
+                            raise ValueError("campaign artifact boundary violation")
+                        saved_registration = json.loads(
+                            preregistration_path.read_text(encoding="utf-8")
+                        )
+                        saved_queue = json.loads(queue_path.read_text(encoding="utf-8"))
+                    except (
+                        OSError,
+                        UnicodeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise ResearchGitError(
+                            "confirmatory campaign artifacts are unreadable or unsafe"
+                        ) from exc
+                    if saved_registration != preregistration:
+                        raise ResearchGitError(
+                            "confirmatory campaign registration artifact differs from "
+                            "the locked Research VCS object"
+                        )
+                    if not isinstance(saved_queue, Mapping):
+                        raise ResearchGitError(
+                            "confirmatory campaign queue must be a JSON object"
+                        )
+                    queue_core = {
+                        key: value
+                        for key, value in saved_queue.items()
+                        if key != "queue_hash"
+                    }
+                    queue_valid = bool(
+                        saved_queue.get("schema") == "xscientist.confirmatory-queue.v1"
+                        and saved_queue.get("preregistration_object_id")
+                        == registration_object_id
+                        and saved_queue.get("plan_object_id") == plan_object_id
+                        and saved_queue.get("registration_hash")
+                        == preregistration.get("registration_hash")
+                        and saved_queue.get("frozen_state_hash")
+                        == adaptive_freeze.get("state_hash")
+                        and saved_queue.get("data_manifest_hash")
+                        == (preregistration.get("data_policy") or {}).get(
+                            "data_manifest_hash"
+                        )
+                        and saved_queue.get("data_snapshot_id")
+                        == (preregistration.get("data_policy") or {}).get(
+                            "data_snapshot_id"
+                        )
+                        and saved_queue.get("queue_hash")
+                        == canonical_content_hash(queue_core)
+                    )
+                    queued_task_ids = {
+                        str(item.get("task_id") or "").strip()
+                        for item in saved_queue.get("tasks") or []
+                        if isinstance(item, Mapping)
+                    }
+                    queue_tasks = {
+                        str(item.get("task_id") or "").strip(): item
+                        for item in saved_queue.get("tasks") or []
+                        if isinstance(item, Mapping)
+                        and str(item.get("task_id") or "").strip()
+                    }
+                    data_policy = preregistration.get("data_policy")
+                    data_policy = (
+                        data_policy if isinstance(data_policy, Mapping) else {}
+                    )
+                    outcome_contracts_valid = True
+                    for outcome in preregistration.get("outcomes") or []:
+                        if not isinstance(outcome, Mapping):
+                            outcome_contracts_valid = False
+                            continue
+                        task_id = str(outcome.get("task_id") or "").strip()
+                        queued = queue_tasks.get(task_id) or {}
+                        expected_fields = {
+                            "dataset": outcome.get("dataset"),
+                            "metric": outcome.get("metric"),
+                            "baseline": outcome.get("baseline"),
+                            "evidence_role": outcome.get("evidence_role"),
+                            "paired_control_task_id": outcome.get(
+                                "paired_control_task_id"
+                            ),
+                            "intervention_variant": outcome.get("intervention_variant"),
+                            "stress_condition": outcome.get("stress_condition"),
+                            "transformation_contract": outcome.get(
+                                "transformation_contract"
+                            ),
+                            "transformation_contract_hash": outcome.get(
+                                "transformation_contract_hash"
+                            ),
+                            "split_hash": (data_policy.get("split_hashes") or {}).get(
+                                task_id
+                            ),
+                            "data_manifest_hash": data_policy.get("data_manifest_hash"),
+                            "data_snapshot_id": data_policy.get("data_snapshot_id"),
+                        }
+                        if any(
+                            queued.get(field) != expected
+                            for field, expected in expected_fields.items()
+                        ):
+                            outcome_contracts_valid = False
+                    contract_tasks = {
+                        str(item.get("task_id") or "").strip(): item
+                        for item in queue_contract.get("tasks") or []
+                        if isinstance(item, Mapping)
+                        and str(item.get("task_id") or "").strip()
+                    }
+                    materialized_contract_valid = set(contract_tasks) == set(
+                        queue_tasks
+                    )
+                    for task_id, contract_task in contract_tasks.items():
+                        queued = queue_tasks.get(task_id) or {}
+                        contract_core = {
+                            key: value
+                            for key, value in contract_task.items()
+                            if key != "task_contract_hash"
+                        }
+                        expected_prefix = [
+                            "xscientist",
+                            "research",
+                            "experiment",
+                            "{RESULT_SUMMARY}",
+                            "--study-phase",
+                            "confirmatory",
+                            "--task",
+                            task_id,
+                            "--plan",
+                            plan_object_id,
+                            "--preregistration",
+                            registration_object_id,
+                            "--repo",
+                            ".",
+                        ]
+                        if (
+                            contract_task.get("task_contract_hash")
+                            != canonical_content_hash(contract_core)
+                            or any(
+                                queued.get(field) != value
+                                for field, value in contract_task.items()
+                            )
+                            or queued.get("record_command_prefix") != expected_prefix
+                            or queued.get("bound_object_ids")
+                            != {
+                                "plan": plan_object_id,
+                                "preregistration": registration_object_id,
+                            }
+                            or queued.get("status") != "queued"
+                            or queued.get("study_phase") != "confirmatory"
+                            or queued.get("adaptive_state_hash")
+                            != adaptive_freeze.get("state_hash")
+                            or queued.get("research_state_hash")
+                            != adaptive_freeze.get("research_state_hash")
+                            or queued.get("post_freeze_adaptation") is not False
+                        ):
+                            materialized_contract_valid = False
+                    if (
+                        not queue_valid
+                        or saved_queue.get("queue_contract_hash") != queue_contract_hash
+                        or queued_task_ids != _registered_task_ids(preregistration)
+                        or len(queue_tasks)
+                        != len(_registered_task_ids(preregistration))
+                        or not outcome_contracts_valid
+                        or not materialized_contract_valid
+                    ):
+                        raise ResearchGitError(
+                            "confirmatory campaign queue is not bound to the locked "
+                            "plan, data, and adaptive state"
+                        )
+                    campaign_seen = True
+                    checked_paths.extend(
+                        {
+                            "commit": cursor,
+                            "path": path,
+                            "classification": "derived_campaign_artifact",
+                        }
+                        for path in sorted(changed_paths)
+                    )
+                    cursor = parent
+                    continue
+                if registration_seen or checkpoint.get("stage") not in {
+                    "experiment",
+                    "failed",
+                    "evidence",
+                    "review",
+                }:
+                    raise ResearchGitError(
+                        "confirmatory experiment requires the exact clean Research "
+                        "VCS lineage; found a non-confirmatory post-freeze transition"
+                    )
+                if not changed_paths:
+                    raise ResearchGitError(
+                        "confirmatory experiment lineage contains an empty transition"
+                    )
+                registry_artifact_paths = changed_paths & allowed_registry_paths
+                object_paths = changed_paths - registry_artifact_paths
+                if registry_artifact_paths and checkpoint.get("stage") != "review":
+                    raise ResearchGitError(
+                        "confirmatory registry artifacts must be admitted with a "
+                        "trajectory-binding review transition"
+                    )
+                if registry_artifact_paths and not object_paths:
+                    raise ResearchGitError(
+                        "confirmatory registry artifact transition has no binding object"
+                    )
+                for path in sorted(object_paths):
+                    match = _RESEARCH_OBJECT_PATH.fullmatch(path)
+                    if (
+                        match is not None
+                        and match.group("kind") == "experiment_attempt"
+                    ):
+                        object_id = self._validate_confirmatory_attempt_path(
+                            path,
+                            commit=cursor,
+                            current_head=current_head,
+                            preregistration_id=registration_object_id,
+                            preregistration=preregistration,
+                            adaptive_freeze=adaptive_freeze,
+                        )
+                        prior_attempt_ids.append(object_id)
+                        classification = "confirmatory_attempt"
+                    elif match is not None and match.group("kind") == "evidence":
+                        object_id = self._validate_confirmatory_negative_evidence_path(
+                            path,
+                            commit=cursor,
+                            current_head=current_head,
+                            preregistration_id=registration_object_id,
+                        )
+                        classification = "terminal_negative_evidence"
+                    else:
+                        object_id, protocol_kind = (
+                            self._validate_confirmatory_gate_path(
+                                path,
+                                commit=cursor,
+                                current_head=current_head,
+                                preregistration_id=registration_object_id,
+                            )
+                        )
+                        prior_gate_decision_ids.append(object_id)
+                        classification = protocol_kind
+                    checked_paths.append(
+                        {
+                            "commit": cursor,
+                            "path": path,
+                            "classification": classification,
+                        }
+                    )
+                checked_paths.extend(
+                    {
+                        "commit": cursor,
+                        "path": path,
+                        "classification": "derived_registry_artifact",
+                    }
+                    for path in sorted(registry_artifact_paths)
+                )
+            cursor = parent
+        else:
+            raise ResearchGitError(
+                "confirmatory experiment lineage exceeds the bounded audit limit"
+            )
+        if cursor != frozen_head or not registration_seen or not campaign_seen:
+            raise ResearchGitError(
+                "confirmatory experiment requires the exact clean Research VCS "
+                "lineage frozen at preregistration"
+            )
+
+        component_fields = {
+            "hypothesis": "hypothesis_hash",
+            "method": "method_hash",
+            "code": "code_state_hash",
+            "memory": "memory_state_hash",
+            "protocol": "protocol_hash",
+            "evaluator": "evaluator_spec_hash",
+        }
+        return {
+            "schema": "xscientist.confirmatory-lineage-attestation.v1",
+            "status": "verified",
+            "frozen_head": frozen_head,
+            "lineage_head": current_head,
+            "registration_commit": registration_commit,
+            "registration_object_id": registration_object_id,
+            "plan_object_id": plan_object_id,
+            "prior_confirmatory_attempt_ids": list(reversed(prior_attempt_ids)),
+            "prior_gate_decision_ids": list(reversed(prior_gate_decision_ids)),
+            "checked_paths": list(reversed(checked_paths)),
+            "path_policy": (
+                "exact_preregistration_transition_then_new_protocol_bound_"
+                "confirmatory_attempt_objects_only"
+            ),
+            "frozen_components": {
+                component: {
+                    "hash": adaptive_freeze.get(field),
+                    "unchanged": True,
+                    "proof": "no_post_freeze_path_can_mutate_frozen_tree",
+                }
+                for component, field in component_fields.items()
+            },
+        }
+
     def experiment_attempt(
         self,
         attempt: Mapping[str, Any],
@@ -131,9 +1120,18 @@ class ResearchLifecycle:
             "timed_out": "timed_out",
             "cancelled": "cancelled",
             "canceled": "cancelled",
-            "running": "running",
+            "rejected": "rejected",
+            "orphan": "failed",
+            "orphaned": "failed",
         }.get(raw_status)
         if state is None:
+            if raw_status == "running":
+                raise ResearchGitError(
+                    "running attempts are mutable execution state and cannot be "
+                    "persisted as immutable Research VCS objects; record a terminal "
+                    "completed, failed, timed_out, cancelled, rejected, or orphaned "
+                    "receipt"
+                )
             raise ResearchGitError(
                 f"unsupported experiment attempt status: {raw_status}"
             )
@@ -144,6 +1142,7 @@ class ResearchLifecycle:
         relations = []
         if preregistration_id:
             registration = self.repository.get(preregistration_id)
+            preregistration_id = str(registration.get("object_id") or "").strip()
             if registration["kind"] != "preregistration":
                 raise ResearchGitError(
                     "experiment preregistration reference has wrong kind"
@@ -156,14 +1155,151 @@ class ResearchLifecycle:
                     "confirmatory experiment requires a locked preregistration"
                 )
             if payload.get("study_phase") == "confirmatory":
+                registration_payload = registration.get("payload") or {}
                 registration_validation = validate_preregistration(
-                    registration.get("payload") or {},
+                    registration_payload,
                     require_locked=True,
                 )
                 if not registration_validation["ok"]:
                     raise ResearchGitError(
                         "confirmatory experiment preregistration failed integrity "
                         "validation: " + ", ".join(registration_validation["errors"])
+                    )
+                adaptive_freeze = registration_payload.get("adaptive_state_freeze")
+                freeze_validation = registration_validation.get("adaptive_state_freeze")
+                if isinstance(adaptive_freeze, dict) and isinstance(
+                    freeze_validation, dict
+                ):
+                    lineage_attestation = self._confirmatory_lineage_attestation(
+                        registration=registration,
+                        preregistration_id=preregistration_id,
+                        preregistration=registration_payload,
+                        adaptive_freeze=adaptive_freeze,
+                    )
+                    task_id = str(payload.get("task_id") or "").strip()
+                    registered_task_ids = _registered_task_ids(registration_payload)
+                    if len(registered_task_ids) > 1 and not task_id:
+                        raise ResearchGitError(
+                            "multi-task confirmatory experiment requires a locked "
+                            "task id"
+                        )
+                    if task_id and task_id not in _registered_task_ids(
+                        registration_payload
+                    ):
+                        raise ResearchGitError(
+                            "confirmatory experiment task is not in the locked "
+                            "preregistration"
+                        )
+                    expected_bindings = {
+                        "adaptive_state_hash": adaptive_freeze.get("state_hash"),
+                        "research_state_hash": adaptive_freeze.get(
+                            "research_state_hash"
+                        ),
+                        "post_freeze_adaptation": False,
+                        "preregistration_id": registration_payload.get(
+                            "preregistration_id"
+                        ),
+                    }
+                    data_policy = registration_payload.get("data_policy")
+                    data_policy = (
+                        data_policy if isinstance(data_policy, Mapping) else {}
+                    )
+                    for field in ("data_manifest_hash", "data_snapshot_id"):
+                        expected_bindings[field] = data_policy.get(field)
+                    if task_id:
+                        outcome = next(
+                            (
+                                item
+                                for item in registration_payload.get("outcomes") or []
+                                if isinstance(item, Mapping)
+                                and str(item.get("task_id") or "").strip() == task_id
+                            ),
+                            {},
+                        )
+                        for field in (
+                            "evidence_role",
+                            "paired_control_task_id",
+                            "intervention_variant",
+                            "stress_condition",
+                            "transformation_contract",
+                            "transformation_contract_hash",
+                        ):
+                            expected_bindings[field] = outcome.get(field)
+                        expected_bindings["protocol_fidelity_hash"] = (
+                            _protocol_fidelity_hash(registration_payload, task_id)
+                        )
+                        expected_bindings["dataset_split_hash"] = (
+                            data_policy.get("split_hashes") or {}
+                        ).get(task_id)
+                    campaign = registration_payload.get("confirmatory_campaign")
+                    campaign = campaign if isinstance(campaign, Mapping) else {}
+                    if campaign.get("schema") == "xscientist.confirmatory-campaign.v1":
+                        if not str(payload.get("producer_id") or "").strip():
+                            raise ResearchGitError(
+                                "campaign experiment requires an explicit producer id"
+                            )
+                        if state == "completed":
+                            if not isinstance(payload.get("configuration"), Mapping):
+                                raise ResearchGitError(
+                                    "completed campaign experiment requires its exact "
+                                    "configuration"
+                                )
+                            if payload.get(
+                                "configuration_hash"
+                            ) != canonical_content_hash(dict(payload["configuration"])):
+                                raise ResearchGitError(
+                                    "completed campaign experiment configuration hash "
+                                    "is invalid"
+                                )
+                            artifact_hashes = payload.get("result_artifact_hashes")
+                            if (
+                                not isinstance(artifact_hashes, Mapping)
+                                or not artifact_hashes
+                            ):
+                                raise ResearchGitError(
+                                    "completed campaign experiment requires at least one "
+                                    "content-addressed result artifact"
+                                )
+                        elif (
+                            state in {"failed", "timed_out", "cancelled", "rejected"}
+                            and not str(payload.get("failure_class") or "").strip()
+                        ):
+                            raise ResearchGitError(
+                                "unsuccessful campaign experiment requires a failure class"
+                            )
+                    conflicts = [
+                        field
+                        for field, expected in expected_bindings.items()
+                        if field in payload and payload.get(field) != expected
+                    ]
+                    if conflicts:
+                        raise ResearchGitError(
+                            "confirmatory experiment conflicts with the frozen "
+                            "research state: " + ", ".join(sorted(conflicts))
+                        )
+                    payload.update(expected_bindings)
+                    payload["frozen_path_attestation"] = lineage_attestation
+                    provenance_payload = dict(provenance or {})
+                    frozen_code_commit = str(
+                        adaptive_freeze.get("research_vcs_head") or ""
+                    ).strip()
+                    supplied_code_commit = str(
+                        provenance_payload.get("code_commit") or ""
+                    ).strip()
+                    if (
+                        supplied_code_commit
+                        and supplied_code_commit != frozen_code_commit
+                    ):
+                        raise ResearchGitError(
+                            "confirmatory experiment conflicts with the frozen code "
+                            "state: code_commit"
+                        )
+                    provenance_payload["code_commit"] = frozen_code_commit
+                    provenance = provenance_payload
+                else:
+                    raise ResearchGitError(
+                        "confirmatory experiment requires a host-attested adaptive "
+                        "state freeze"
                     )
             relations.append(
                 {"type": "depends_on", "target": preregistration_id, "role": "protocol"}
@@ -209,11 +1345,28 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 "experiment priority requires a selected plan/design"
             )
+        producer_id = str(payload.get("producer_id") or "").strip()
+        producer_actor = None
+        if producer_id:
+            try:
+                canonical_principal(producer_id, label="experiment producer_id")
+            except ValueError as exc:
+                raise ResearchGitError(
+                    "experiment producer_id is not a valid principal"
+                ) from exc
+            # Bind the immutable object's actor to the producer declared in the
+            # scientific payload.  Role labels remain metadata; independence is
+            # evaluated on the canonical principal.
+            producer_actor = {
+                "actor_id": producer_id,
+                "authority": "research_agent",
+            }
         result = self.repository.record(
             "experiment_attempt",
             payload,
             state=state,
             relations=relations,
+            actor=producer_actor,
             provenance=provenance,
         )
         checkpoint = (
@@ -303,7 +1456,7 @@ class ResearchLifecycle:
         if not verifier_id.strip():
             raise ResearchGitError("independent verifier_id is required")
         report_payload = dict(report)
-        verified = (
+        requested_verified = (
             report_payload.get("status") == "verified"
             and report_payload.get("claim_promotion_allowed") is True
             and not report_payload.get("required_failures")
@@ -322,7 +1475,24 @@ class ResearchLifecycle:
         )
         from .research_context import record_research_context_snapshot
 
-        selected_option = "promote" if verified else "hold"
+        # This API records an in-workspace, declared-identity review.  It is
+        # useful scientific criticism, but it is not an externally signed
+        # authority receipt and therefore cannot authorize claim promotion.
+        # Preserve what the reviewer requested for audit while forcing the
+        # effective decision to hold.
+        report_payload["requested_status"] = report_payload.get("status")
+        report_payload["requested_claim_promotion_allowed"] = (
+            report_payload.get("claim_promotion_allowed") is True
+        )
+        report_payload["status"] = "completed"
+        report_payload["claim_promotion_allowed"] = False
+        report_payload["authority_scope"] = "local_advisory"
+        report_payload["external_authority_required"] = True
+        advisory_failures = list(report_payload.get("required_failures") or [])
+        if requested_verified and "external_authority_missing" not in advisory_failures:
+            advisory_failures.append("external_authority_missing")
+        report_payload["required_failures"] = advisory_failures
+        selected_option = "hold"
         context = record_research_context_snapshot(
             self.repository,
             target_ids=list(evaluates),
@@ -332,18 +1502,12 @@ class ResearchLifecycle:
                 {
                     "option": "promote",
                     "rejected_because": (
-                        "review is not verified or retains required failures"
-                        if not verified
-                        else ""
+                        "local declared-identity review has advisory scope only"
                     ),
                 },
                 {
                     "option": "hold",
-                    "rejected_because": (
-                        "independent review passed every required gate"
-                        if verified
-                        else ""
-                    ),
+                    "rejected_because": (""),
                 },
             ],
             rationale=[
@@ -361,7 +1525,7 @@ class ResearchLifecycle:
         review = self.repository.record(
             "review",
             report_payload,
-            state="verified" if verified else "rejected",
+            state="completed",
             relations=[
                 *relations,
                 {
@@ -372,14 +1536,14 @@ class ResearchLifecycle:
             ],
             actor={
                 "actor_id": verifier_id,
-                "authority": "independent_evaluator",
+                "authority": "recorder",
             },
         )
         gate = self.repository.record(
             "gate_decision",
             {
-                "decision": "promote" if verified else "hold",
-                "claim_promotion_allowed": verified,
+                "decision": "hold",
+                "claim_promotion_allowed": False,
                 "required_failures": list(
                     report_payload.get("required_failures") or []
                 ),
@@ -387,7 +1551,7 @@ class ResearchLifecycle:
                 "context_required": True,
                 "context_hash": context_payload["context_hash"],
             },
-            state="verified" if verified else "rejected",
+            state="rejected",
             relations=[
                 {"type": "evaluates", "target": review.object_id},
                 {

@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from typing import List, Optional, Dict, Callable, Any, Mapping, Tuple
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -10,9 +12,11 @@ import stat
 import statistics
 from .parallel_agent import (
     ParallelAgent,
+    _assert_glm53_authority_boundary,
     _ablation_component_was_transformed,
     _configured_multi_seed_values,
     _inject_seed_bootstrap,
+    _is_glm53_stage,
     _semantic_code_hash,
     _stage_max_tokens,
     _validate_confirmation_seed_set,
@@ -35,6 +39,10 @@ from ai_scientist.utils.llm_budget import is_llm_budget_exception
 from ai_scientist.utils.privacy import portable_path
 from ai_scientist.utils.evaluation_binding import evaluation_hash_binding
 from ai_scientist.utils.deterministic_evaluator import evaluate_experiment_data
+from ai_scientist.utils.authority_attempts import (
+    AuthorityAttemptError,
+    inspect_authority_attempts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +92,57 @@ STUDENT_T_95_CRITICAL_BY_DF = {
     30: 2.042,
     31: 2.040,
 }
+
+
+def _validate_restored_authority_ledger(
+    journals: Mapping[str, Journal],
+    *,
+    log_dir: Path,
+) -> None:
+    """Fail closed when checkpointed Node commitments and ledger diverge."""
+
+    expected_hashes: dict[str, str] = {}
+    for journal in journals.values():
+        for node in journal.nodes:
+            attempt_ids = list(node.authority_attempt_ids or [])
+            terminal_hashes = dict(node.authority_attempt_terminal_hashes or {})
+            if set(terminal_hashes) != set(attempt_ids):
+                raise ValueError(
+                    "BFTS checkpoint contains incomplete authority attempt bindings"
+                )
+            for attempt_id in attempt_ids:
+                event_hash = terminal_hashes[attempt_id]
+                prior = expected_hashes.get(attempt_id)
+                if prior is not None and prior != event_hash:
+                    raise ValueError(
+                        "BFTS checkpoint contains conflicting authority terminal hashes"
+                    )
+                expected_hashes[attempt_id] = event_hash
+
+    attempt_root = log_dir / "authority_attempts"
+    ledger_present = os.path.lexists(attempt_root)
+    if not expected_hashes and not ledger_present:
+        return
+    try:
+        audit = inspect_authority_attempts(
+            log_dir,
+            expected_attempt_ids=expected_hashes,
+        )
+    except AuthorityAttemptError as exc:
+        raise ValueError("BFTS checkpoint authority attempt ledger is invalid") from exc
+    if not audit.get("valid") or not audit.get("expected_valid"):
+        raise ValueError(
+            "BFTS checkpoint authority attempt ledger is incomplete, orphaned, "
+            "tampered, or missing"
+        )
+    audited_hashes = audit.get("terminal_event_hashes") or {}
+    if any(
+        audited_hashes.get(attempt_id) != event_hash
+        for attempt_id, event_hash in expected_hashes.items()
+    ):
+        raise ValueError(
+            "BFTS checkpoint authority terminal hashes do not match the ledger"
+        )
 
 
 def _student_t_95_critical(sample_count: int) -> float:
@@ -1176,6 +1235,7 @@ def _multi_seed_improvement_count(
 
 class AgentManager:
     def __init__(self, task_desc: str, cfg: Any, workspace_dir: Path):
+        _assert_glm53_authority_boundary(cfg)
         self.task_desc = json.loads(task_desc)
         for k in [
             "Title",
@@ -1611,6 +1671,29 @@ Your research idea:\n\n
             )
             for name, payload in journals_payload.items()
         }
+        _validate_restored_authority_ledger(
+            manager.journals,
+            log_dir=checkpoint_artifact_root,
+        )
+        if _is_glm53_stage(cfg.agent.code):
+            unsafe_nodes = sorted(
+                node.id
+                for journal in manager.journals.values()
+                for node in journal.nodes
+                if isinstance(node.code, str)
+                and node.code.strip()
+                and not node.is_seed_agg_node
+                and (
+                    not isinstance(node.implementation_spec, dict)
+                    or not isinstance(node.implementation_spec_hash, str)
+                )
+            )
+            if unsafe_nodes:
+                raise ValueError(
+                    "GLM-5.3 checkpoint contains executable nodes without a "
+                    "locked judgment spec; start a new run instead of resuming: "
+                    + ", ".join(unsafe_nodes[:10])
+                )
         manager.stages = [
             stage if isinstance(stage, Stage) else Stage(**stage)
             for stage in stages_payload

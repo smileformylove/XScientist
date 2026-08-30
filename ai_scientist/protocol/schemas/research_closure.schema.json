@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://xscientist.io/protocol/research-closure.v2/research_closure.schema.json",
+  "$id": "https://xscientist.io/protocol/research-closure.v3/research_closure.schema.json",
   "title": "XScientist Scientific Closure Audit",
   "description": "A payload-free audit view linking claims to evidence, attempts, plans, preregistrations, gates, and reproductions.",
   "type": "object",
-  "required": ["schema_version", "ref", "commit", "target_level", "status", "complete", "counts", "superseded_claim_ids", "claims", "blockers", "warnings", "closure_levels", "integrity", "payloads_disclosed", "content_hash"],
+  "required": ["schema_version", "ref", "commit", "target_level", "status", "complete", "counts", "superseded_claim_ids", "claims", "blockers", "warnings", "closure_levels", "integrity", "trajectory", "payloads_disclosed", "content_hash"],
   "properties": {
-    "schema_version": {"type": "string", "const": "xscientist.research-closure.v2"},
+    "schema_version": {"type": "string", "const": "xscientist.research-closure.v3"},
     "ref": {"type": "string", "minLength": 1},
     "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
     "target_level": {"type": "string", "enum": ["trace", "replay", "verify"]},
@@ -75,6 +75,7 @@
       "additionalProperties": false
     },
     "integrity": {"type": "object"},
+    "trajectory": {"$ref": "#/$defs/trajectory"},
     "payloads_disclosed": {"type": "boolean", "const": false},
     "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
   },
@@ -120,6 +121,72 @@
         "warning_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
       },
       "additionalProperties": false
+    },
+    "trajectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "schema_version", "projection_hash", "resolved_head", "complete", "truncated", "checkpoint_count", "boundary_parent_edges", "boundary_rollback_edges", "errors"],
+      "properties": {
+        "ok": {"type": "boolean"},
+        "schema_version": {
+          "anyOf": [
+            {"const": "xscientist.structured-trajectory-projection.v1"},
+            {"type": "null"}
+          ]
+        },
+        "projection_hash": {
+          "anyOf": [
+            {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        },
+        "resolved_head": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+            {"type": "null"}
+          ]
+        },
+        "complete": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "checkpoint_count": {"type": "integer", "minimum": 0, "maximum": 127},
+        "boundary_parent_edges": {
+          "type": "array",
+          "maxItems": 127,
+          "items": {"$ref": "#/$defs/parentBoundary"}
+        },
+        "boundary_rollback_edges": {
+          "type": "array",
+          "maxItems": 127,
+          "items": {"$ref": "#/$defs/rollbackBoundary"}
+        },
+        "errors": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 8192}
+        }
+      }
+    },
+    "parentBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["child_commit", "parent_commit", "parent_checkpoint_hash"],
+      "properties": {
+        "child_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "parent_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "parent_checkpoint_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "rollbackBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revert_commit", "revert_checkpoint_hash", "target_commit", "target_checkpoint_hash"],
+      "properties": {
+        "revert_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "revert_checkpoint_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "target_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "target_checkpoint_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
     }
   },
   "additionalProperties": false

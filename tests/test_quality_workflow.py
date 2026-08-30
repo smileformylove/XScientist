@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ai_scientist.utils.high_quality_pipeline import (
     evaluate_submission_acceptance,
@@ -48,6 +49,47 @@ def _write_ready_submission_contracts(project_root: Path) -> None:
 
 
 class QualityWorkflowTests(unittest.TestCase):
+    def test_fresh_evidence_recheck_preserves_the_assessed_top_venue(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "demo_project"
+            project_root.mkdir(parents=True, exist_ok=True)
+            with (
+                mock.patch(
+                    "ai_scientist.utils.quality_workflow.verify_evidence_snapshot",
+                    return_value={
+                        "ok": True,
+                        "mismatches": [],
+                        "current_hash": "snapshot-hash",
+                        "current": {"manuscript_hash": "manuscript-hash"},
+                    },
+                ),
+                mock.patch(
+                    "ai_scientist.utils.high_quality_pipeline.build_scientific_evidence_gate",
+                    return_value={"status": "verified", "hard_failures": []},
+                ) as evidence_gate,
+            ):
+                evaluate_final_submission_readiness(
+                    run_dir=project_root,
+                    quality_result={
+                        "target_venue": "icml",
+                        "artifact_snapshot_hash": "snapshot-hash",
+                        "manuscript_hash": "manuscript-hash",
+                        "quality_gate_passed": True,
+                        "submission_priority_score": 92.0,
+                        "submission_priority_tier": "high",
+                        "blocker_count": 0,
+                    },
+                    require_quality_gate=True,
+                    min_submission_priority=85.0,
+                    max_submission_blockers=0,
+                    require_review_artifacts=False,
+                )
+
+            evidence_gate.assert_called_once_with(
+                project_root,
+                target_venue="icml",
+            )
+
     def test_evaluate_submission_acceptance_should_reject_strict_quality_fallback(
         self,
     ) -> None:
@@ -66,6 +108,28 @@ class QualityWorkflowTests(unittest.TestCase):
 
         self.assertFalse(acceptance["accepted"])
         self.assertIn("strict submission discipline", " ".join(acceptance["reasons"]))
+
+    def test_top_venue_acceptance_cannot_override_blocked_readiness(self) -> None:
+        acceptance = evaluate_submission_acceptance(
+            {
+                "target_venue": "neurips",
+                "quality_gate_passed": True,
+                "submission_priority_score": 100.0,
+                "blocker_count": 1,
+                "submission_readiness": {
+                    "ready": False,
+                    "decision": "blocked",
+                    "blocker_count": 1,
+                },
+            },
+            require_quality_gate=True,
+            min_submission_priority=75.0,
+            max_submission_blockers=2,
+        )
+
+        self.assertFalse(acceptance["accepted"])
+        self.assertIn("readiness gate", " ".join(acceptance["reasons"]))
+        self.assertIn("zero open blockers", " ".join(acceptance["reasons"]))
 
     def test_execute_quality_workflow_should_pass_fallback_policy_to_runner(
         self,

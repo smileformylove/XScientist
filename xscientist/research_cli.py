@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -45,6 +46,7 @@ from .research_git import (
     revert_research_checkpoint,
     research_diff,
     research_log,
+    research_trajectory,
     research_stage,
     research_unstage,
     show_checkpoint,
@@ -158,6 +160,40 @@ def _parse_assignments(values: Sequence[str], *, label: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             parsed[name] = raw.strip()
     return parsed
+
+
+def _parse_path_assignments(values: Sequence[str], *, label: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        name, separator, raw = str(value).partition("=")
+        name = name.strip()
+        path = raw.strip()
+        if not separator or not name or not path:
+            raise ResearchGitError(f"{label} must use NAME=PATH")
+        if name in parsed:
+            raise ResearchGitError(f"duplicate {label} name: {name}")
+        parsed[name] = path
+    return parsed
+
+
+def _parse_confirmatory_splits(
+    digest_values: Sequence[str], file_values: Sequence[str]
+) -> dict[str, str]:
+    splits = {
+        key: str(value).strip()
+        for key, value in _parse_assignments(
+            digest_values, label="confirmatory split"
+        ).items()
+    }
+    for value in file_values:
+        task_id, separator, path = str(value).partition("=")
+        task_id = task_id.strip()
+        if not separator or not task_id or not path.strip():
+            raise ResearchGitError("confirmatory split file must use TASK_ID=PATH")
+        if task_id in splits:
+            raise ResearchGitError(f"duplicate confirmatory split task: {task_id}")
+        splits[task_id] = _hash_local_file(path.strip())
+    return splits
 
 
 def _parse_context_options(
@@ -695,6 +731,54 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     rollout_audit_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    verifier_authority_parser = subparsers.add_parser(
+        "verifier-authority",
+        help=(
+            "Prepare, finalize, or verify the external Ed25519 authority "
+            "receipt required by top-venue publication gates."
+        ),
+    )
+    verifier_authority_subparsers = verifier_authority_parser.add_subparsers(
+        dest="verifier_authority_command", required=True
+    )
+    verifier_authority_prepare = verifier_authority_subparsers.add_parser(
+        "prepare",
+        help="Build the exact hash-only payload an external verifier must sign.",
+    )
+    verifier_authority_prepare.add_argument("--paper-dir", default=".")
+    verifier_authority_prepare.add_argument("--identity", required=True)
+    verifier_authority_prepare.add_argument("--output", required=True)
+    verifier_authority_prepare.add_argument("--force", action="store_true")
+    verifier_authority_prepare.add_argument(
+        "--json", action="store_true", dest="as_json"
+    )
+    verifier_authority_finalize = verifier_authority_subparsers.add_parser(
+        "finalize",
+        help="Bind an external Ed25519 attestation to the current report.",
+    )
+    verifier_authority_finalize.add_argument("--paper-dir", default=".")
+    verifier_authority_finalize.add_argument("--identity", required=True)
+    verifier_authority_finalize.add_argument("--attestation", required=True)
+    verifier_authority_finalize.add_argument("--output")
+    verifier_authority_finalize.add_argument("--force", action="store_true")
+    verifier_authority_finalize.add_argument(
+        "--json", action="store_true", dest="as_json"
+    )
+    verifier_authority_verify = verifier_authority_subparsers.add_parser(
+        "verify",
+        help=(
+            "Verify only the receipt/signature binding against an explicit "
+            "external trust store; submission readiness remains unknown until "
+            "the complete evidence gate runs."
+        ),
+    )
+    verifier_authority_verify.add_argument("--paper-dir", default=".")
+    verifier_authority_verify.add_argument("--receipt")
+    verifier_authority_verify.add_argument("--trust-store", required=True)
+    verifier_authority_verify.add_argument(
+        "--json", action="store_true", dest="as_json"
+    )
+
     belief_parser = subparsers.add_parser(
         "belief",
         help=(
@@ -866,9 +950,127 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     preregistration_parser.add_argument("--no-commit", action="store_true")
     preregistration_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    confirm_parser = subparsers.add_parser(
+        "confirm",
+        help=(
+            "Host-lock a generated multi-task paper plan, empirical snapshot, "
+            "splits, and confirmatory execution queue."
+        ),
+    )
+    confirm_parser.add_argument("--paper-dir", default=".")
+    confirm_parser.add_argument(
+        "--registered-by",
+        default="recorder:xscientist-user",
+        help=(
+            "Self-reported recorder identity for provenance; this does not grant "
+            "human or independent-verifier authority."
+        ),
+    )
+    confirm_parser.add_argument(
+        "--split",
+        action="append",
+        default=[],
+        metavar="TASK_ID=SHA256",
+        help="Frozen split digest for one planned task; repeat for every task.",
+    )
+    confirm_parser.add_argument(
+        "--split-file",
+        action="append",
+        default=[],
+        metavar="TASK_ID=PATH",
+        help="Hash a local split definition for one task without storing its path.",
+    )
+    confirm_parser.add_argument(
+        "--data-manifest-hash",
+        help="Optional expected hash; must equal the host-verified data manifest.",
+    )
+    confirm_parser.add_argument(
+        "--data-snapshot-id",
+        help="Optional expected ID; must equal the host-verified read-only snapshot.",
+    )
+    confirm_parser.add_argument("-m", "--message")
+    confirm_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    trajectory_bind_parser = subparsers.add_parser(
+        "trajectory-bind",
+        help=(
+            "Bind one immutable experiment-registry row to its typed Research VCS "
+            "attempt and origin checkpoint."
+        ),
+    )
+    trajectory_bind_parser.add_argument("--paper-dir", default=".")
+    trajectory_bind_parser.add_argument("--record-id", required=True)
+    trajectory_bind_parser.add_argument("--attempt", required=True)
+    trajectory_bind_parser.add_argument("-m", "--message")
+    trajectory_bind_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    disposition_parser = subparsers.add_parser(
+        "attempt-disposition",
+        help=(
+            "Preserve a failed/timed-out/cancelled attempt and append its explicit "
+            "auditable disposition; the host independently decides whether it "
+            "resolves a publication blocker."
+        ),
+    )
+    disposition_parser.add_argument("--paper-dir", default=".")
+    disposition_parser.add_argument("--record-id", required=True)
+    disposition_parser.add_argument(
+        "--disposition",
+        required=True,
+        choices=[
+            "terminal_negative",
+            "technical_failure_retried",
+            "approved_deviation",
+            "excluded_with_reason",
+        ],
+        help=(
+            "Typed audit outcome. Only terminal_negative and a valid "
+            "technical_failure_retried resolve the publication blocker."
+        ),
+    )
+    disposition_parser.add_argument("--reason", required=True)
+    disposition_parser.add_argument("--retry-record-id")
+    disposition_parser.add_argument(
+        "--approved-before-unblinding",
+        action="store_true",
+        help=(
+            "Record the caller's timing assertion for audit only; it does not "
+            "establish independent approval or publication authority."
+        ),
+    )
+    disposition_parser.add_argument(
+        "--negative-result-artifact",
+        metavar="PATH",
+        help=(
+            "Repository-contained result file for terminal_negative. The host "
+            "reads it as a bounded regular file and recomputes its SHA-256."
+        ),
+    )
+    disposition_parser.add_argument(
+        "--negative-result-evidence",
+        metavar="OBJECT",
+        help=(
+            "Evidence object derived only from the failed attempt, containing a "
+            "hash-valid metric assessment of the negative result."
+        ),
+    )
+    disposition_parser.add_argument(
+        "--recorded-by",
+        default="recorder:xscientist-user",
+        help=(
+            "Self-reported recorder for this disposition; publication resolution "
+            "is recomputed independently by the host attestor."
+        ),
+    )
+    disposition_parser.add_argument("-m", "--message")
+    disposition_parser.add_argument("--json", action="store_true", dest="as_json")
+
     experiment_parser = subparsers.add_parser(
         "experiment",
-        help="Record one successful, failed, timed-out, or cancelled experiment.",
+        help=(
+            "Record one terminal successful, failed, timed-out, cancelled, "
+            "rejected, or orphaned experiment."
+        ),
     )
     experiment_parser.add_argument("summary")
     experiment_parser.add_argument(
@@ -883,13 +1085,19 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
             "timed_out",
             "cancelled",
             "canceled",
-            "running",
+            "rejected",
+            "orphan",
+            "orphaned",
         ],
     )
     experiment_parser.add_argument(
         "--study-phase",
         choices=["exploratory", "confirmatory"],
         default="exploratory",
+    )
+    experiment_parser.add_argument(
+        "--task",
+        help="Locked research-plan task id; required by multi-task confirmation.",
     )
     experiment_parser.add_argument("--plan")
     experiment_parser.add_argument(
@@ -905,6 +1113,23 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     experiment_parser.add_argument(
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
+    )
+    experiment_parser.add_argument(
+        "--config",
+        action="append",
+        default=[],
+        help="Exact executed configuration as NAME=VALUE (repeatable).",
+    )
+    experiment_parser.add_argument(
+        "--producer-id",
+        help="Actor/service that actually produced this result.",
+    )
+    experiment_parser.add_argument(
+        "--result-artifact",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Hash one durable result artifact (repeatable; required for a completed campaign task).",
     )
     experiment_parser.add_argument("--seed", action="append", type=int, default=[])
     experiment_parser.add_argument("--environment-hash")
@@ -1012,12 +1237,23 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
 
     review_parser = subparsers.add_parser(
         "review",
-        help="Record an independent review and compute its promotion gate.",
+        help=(
+            "Record a local advisory review. Declared local identities cannot grant "
+            "external publication authority or promote a verified claim."
+        ),
     )
     review_parser.add_argument("summary")
     review_parser.add_argument("--evaluates", action="append", required=True)
     review_parser.add_argument("--verifier", required=True)
-    review_parser.add_argument("--decision", choices=["pass", "hold"], required=True)
+    review_parser.add_argument(
+        "--decision",
+        choices=["pass", "hold"],
+        required=True,
+        help=(
+            "Local advisory recommendation. 'pass' is retained as requested but "
+            "cannot promote a claim or grant publication authority."
+        ),
+    )
     review_parser.add_argument("--failure", action="append", default=[])
     review_parser.add_argument("--repo", default=".")
     review_parser.add_argument("-m", "--message")
@@ -1161,6 +1397,17 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     decide_parser.add_argument("--contradictory-evidence", action="store_true")
     decide_parser.add_argument("--protocol-change", action="store_true")
     decide_parser.add_argument("--independent-replication", action="store_true")
+    decide_parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Adopt the preview as a context-bound Research VCS decision object.",
+    )
+    decide_parser.add_argument(
+        "--actor",
+        default="research-transition-policy",
+        help="Recorder identity for an adopted deterministic policy decision.",
+    )
+    decide_parser.add_argument("--no-commit", action="store_true")
     decide_parser.add_argument("--json", action="store_true", dest="as_json")
 
     tree_parser = subparsers.add_parser(
@@ -1427,6 +1674,42 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     log_parser.add_argument("--repo", default=".")
     log_parser.add_argument("--limit", type=int, default=20)
     log_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    trajectory_parser = subparsers.add_parser(
+        "trajectory",
+        help=(
+            "Show the bounded, payload-free structured trajectory of typed "
+            "objects and hash-valid checkpoints."
+        ),
+        description=(
+            "Inspect the structured object-and-checkpoint history that makes "
+            "Git-like scientific operations possible. The projection validates "
+            "checkpoint hashes and parent edges, includes additions and legal "
+            "revert removals, and never exposes object payloads or hidden reasoning."
+        ),
+    )
+    trajectory_parser.add_argument(
+        "--repo",
+        default=".",
+        help="research repository or a path inside it (default: current directory)",
+    )
+    trajectory_parser.add_argument(
+        "--ref",
+        default="HEAD",
+        help="research branch, tag, or commit to project (default: HEAD)",
+    )
+    trajectory_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="maximum checkpoints to inspect, from 1 to 127 (default: 50)",
+    )
+    trajectory_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="emit the complete machine-readable projection",
+    )
 
     show_parser = subparsers.add_parser("show", help="Show a checkpoint at a commit.")
     show_parser.add_argument("commit", nargs="?", default="HEAD")
@@ -2201,6 +2484,118 @@ def main(
                     print(f"Warnings: {len(audit['warnings'])}")
             return 0 if audit["verification_allowed"] else 1
 
+        if args.command == "verifier-authority":
+            from ai_scientist.protocol.canonical_json import canonical_content_hash
+            from ai_scientist.utils.verifier_authority import (
+                VERIFIER_AUTHORITY_PURPOSE,
+            )
+
+            from .publication_authority import (
+                PublicationAuthorityError,
+                finalize_verifier_authority_receipt,
+                prepare_verifier_authority_payload,
+                verify_publication_authority,
+                write_publication_authority_json,
+            )
+
+            try:
+                if args.verifier_authority_command == "prepare":
+                    payload = prepare_verifier_authority_payload(
+                        args.paper_dir,
+                        verifier_identity=args.identity,
+                    )
+                    output_path = write_publication_authority_json(
+                        args.output,
+                        payload,
+                        force=args.force,
+                    )
+                    result = {
+                        "schema_version": "xscientist.verifier-authority-cli.v1",
+                        "status": "prepared",
+                        "purpose": VERIFIER_AUTHORITY_PURPOSE,
+                        "output": _display_path(output_path),
+                        "payload_hash": canonical_content_hash(payload),
+                        "next_command": shlex.join(
+                            [
+                                "xscientist",
+                                "evolution",
+                                "attest",
+                                "sign",
+                                "--payload",
+                                _display_path(output_path),
+                                "--purpose",
+                                VERIFIER_AUTHORITY_PURPOSE,
+                                "--identity",
+                                str(payload.get("verifier_identity") or args.identity),
+                                "--key-id",
+                                "KEY_ID",
+                                "--private-key",
+                                "VERIFIER_PRIVATE_KEY",
+                                "--out",
+                                "attestation.json",
+                            ]
+                        ),
+                    }
+                    if args.as_json:
+                        _print_json(result)
+                    else:
+                        print(f"Authority payload: {_display_path(output_path)}")
+                        print(f"Next: {result['next_command']}")
+                    return 0
+
+                if args.verifier_authority_command == "finalize":
+                    attestation = _read_json_mapping(
+                        args.attestation,
+                        label="external verifier attestation",
+                    )
+                    receipt = finalize_verifier_authority_receipt(
+                        args.paper_dir,
+                        verifier_identity=args.identity,
+                        attestation=attestation,
+                    )
+                    output_value = args.output or str(
+                        Path(args.paper_dir).expanduser()
+                        / "verifier_authority_receipt.json"
+                    )
+                    output_path = write_publication_authority_json(
+                        output_value,
+                        receipt,
+                        force=args.force,
+                    )
+                    result = {
+                        "schema_version": "xscientist.verifier-authority-cli.v1",
+                        "status": "finalized",
+                        "output": _display_path(output_path),
+                        "receipt_hash": receipt.get("receipt_hash"),
+                    }
+                    if args.as_json:
+                        _print_json(result)
+                    else:
+                        print(f"Authority receipt: {_display_path(output_path)}")
+                        print(f"Receipt hash:      {receipt.get('receipt_hash')}")
+                    return 0
+
+                result = verify_publication_authority(
+                    args.paper_dir,
+                    trust_store=args.trust_store,
+                    receipt_path=args.receipt,
+                )
+                if args.as_json:
+                    _print_json(result)
+                else:
+                    print(f"Signature binding: {result['status']}")
+                    print(
+                        "Submission ready:  unknown "
+                        "(run the complete scientific evidence gate)"
+                        if result.get("signature_binding_verified") is True
+                        else "Submission ready:  false"
+                    )
+                    for error in result.get("errors") or []:
+                        print(f"  {_display_text(error)}")
+                return 0 if result.get("ok") is True else 1
+            except PublicationAuthorityError as exc:
+                raise ResearchGitError(str(exc)) from exc
+
         if args.command == "belief":
             from .research_context import build_research_context_snapshot
 
@@ -2388,18 +2783,104 @@ def main(
             _print_saved_object("passage evidence", result, as_json=args.as_json)
             return 0
 
+        if args.command == "confirm":
+            from .research_commands import confirm_paper_research
+
+            result = confirm_paper_research(
+                args.paper_dir,
+                registered_by=args.registered_by,
+                split_hashes=_parse_confirmatory_splits(
+                    args.split,
+                    args.split_file,
+                ),
+                data_manifest_hash=args.data_manifest_hash,
+                data_snapshot_id=args.data_snapshot_id,
+                message=args.message,
+            )
+            if args.as_json:
+                payload = _saved_object_json(result)
+                payload.update(
+                    {
+                        "hypothesis_checkpoint": (
+                            result["hypothesis_checkpoint"].to_dict()
+                            if result.get("hypothesis_checkpoint") is not None
+                            else None
+                        ),
+                        "campaign_checkpoint": result["campaign_checkpoint"].to_dict(),
+                        "preregistration_path": result["preregistration_path"],
+                        "queue_path": result["queue_path"],
+                        "queue": result["queue"],
+                        "validation": result["validation"],
+                    }
+                )
+                _print_json(payload)
+            else:
+                print("Locked preregistration: " f"{result['object'].object_id}")
+                print(f"Plan object:            {result['related'][0].object_id}")
+                print(
+                    "Freeze checkpoint:      " f"{result['checkpoint'].checkpoint_id}"
+                )
+                print(
+                    "Queue checkpoint:       "
+                    f"{result['campaign_checkpoint'].checkpoint_id}"
+                )
+                print(f"Queued tasks:           {len(result['queue']['tasks'])}")
+                print(f"Queue:                  {_display_path(result['queue_path'])}")
+            return 0
+
+        if args.command == "trajectory-bind":
+            from .research_commands import bind_experiment_trajectory
+
+            result = bind_experiment_trajectory(
+                args.paper_dir,
+                record_id=args.record_id,
+                attempt_id=args.attempt,
+                message=args.message,
+            )
+            _print_saved_object("trajectory binding", result, as_json=args.as_json)
+            return 0
+
+        if args.command == "attempt-disposition":
+            from .research_commands import record_attempt_disposition
+
+            result = record_attempt_disposition(
+                args.paper_dir,
+                record_id=args.record_id,
+                disposition=args.disposition,
+                reason=args.reason,
+                retry_record_id=args.retry_record_id,
+                approved_before_unblinding=args.approved_before_unblinding,
+                negative_result_artifact=args.negative_result_artifact,
+                negative_result_evidence_id=args.negative_result_evidence,
+                recorded_by=args.recorded_by,
+                message=args.message,
+            )
+            _print_saved_object("attempt disposition", result, as_json=args.as_json)
+            return 0
+
         if args.command == "experiment":
             from .research_commands import save_experiment
+
+            result_artifact_paths = _parse_path_assignments(
+                args.result_artifact, label="result artifact"
+            )
 
             result = save_experiment(
                 args.repo,
                 summary=args.summary,
                 status=args.status,
                 study_phase=args.study_phase,
+                task_id=args.task,
                 plan_id=args.plan,
                 priority_id=args.priority,
                 preregistration_id=args.preregistration,
                 metrics=_parse_assignments(args.metric, label="metric"),
+                configuration=_parse_assignments(args.config, label="configuration"),
+                producer_id=args.producer_id,
+                result_artifact_hashes={
+                    label: _hash_local_file(path)
+                    for label, path in result_artifact_paths.items()
+                },
                 seeds=args.seed,
                 environment_hash=args.environment_hash,
                 dependency_lock_hashes=[
@@ -2738,26 +3219,80 @@ def main(
             return 0 if context["complete"] else 1
 
         if args.command == "decide":
-            from .research_policy import decide_research_transition
-
-            payload = decide_research_transition(
-                args.repo,
-                event=args.event,
-                name=args.name,
-                state=args.state,
-                source_branch=args.source_branch,
-                competing_hypothesis=args.competing_hypothesis,
-                contradictory_evidence=args.contradictory_evidence,
-                protocol_change=args.protocol_change,
-                independent_replication=args.independent_replication,
+            from .research_policy import (
+                decide_research_transition,
+                record_research_transition_decision,
             )
+
+            decision_args = {
+                "event": args.event,
+                "name": args.name,
+                "state": args.state,
+                "source_branch": args.source_branch,
+                "competing_hypothesis": args.competing_hypothesis,
+                "contradictory_evidence": args.contradictory_evidence,
+                "protocol_change": args.protocol_change,
+                "independent_replication": args.independent_replication,
+            }
+            checkpoint = None
+            if args.record:
+                recorded = record_research_transition_decision(
+                    args.repo,
+                    **decision_args,
+                    actor_id=args.actor,
+                )
+                decision_payload = recorded["decision"]
+                decision_object = recorded["decision_object"]
+                context_object = recorded["context_object"]
+                if not args.no_commit:
+                    repository_root = Path(
+                        repository_status(args.repo)["repository"]
+                    ).resolve()
+                    selected_paths = [
+                        decision_object.path.relative_to(repository_root).as_posix()
+                    ]
+                    if context_object is not None:
+                        selected_paths.append(
+                            context_object.path.relative_to(repository_root).as_posix()
+                        )
+                        context_payload = load_research_object(
+                            args.repo, context_object.object_id
+                        )["payload"]
+                        selected_paths.extend(
+                            f".xscientist/objects/{item['kind']}/"
+                            f"{item['object_id']}.json"
+                            for item in context_payload.get("source_objects") or []
+                        )
+                    checkpoint = create_checkpoint(
+                        args.repo,
+                        stage="decision",
+                        subject=f"adopt {args.event} transition decision",
+                        only_paths=sorted(set(selected_paths)),
+                    )
+                payload = {
+                    "decision": decision_payload,
+                    "object": decision_object.to_dict(),
+                    "context_object": (
+                        context_object.to_dict() if context_object is not None else None
+                    ),
+                    "checkpoint": checkpoint.to_dict() if checkpoint else None,
+                }
+            else:
+                if args.no_commit:
+                    raise ResearchGitError("--no-commit requires --record")
+                payload = decide_research_transition(args.repo, **decision_args)
             if args.as_json:
                 _print_json(payload)
             else:
-                print(f"Decision: {payload['decision_id']}")
-                print(f"Event:    {payload['event']}")
-                print(f"Branch:   {payload['branch']}")
-                for action in payload["actions"]:
+                decision = payload.get("decision") or payload
+                print(f"Decision: {decision['decision_id']}")
+                print(f"Event:    {decision['event']}")
+                print(f"Branch:   {decision['branch']}")
+                if payload.get("object"):
+                    print(f"Recorded: {payload['object']['object_id']}")
+                if payload.get("checkpoint"):
+                    print(f"Commit:   {payload['checkpoint']['commit']}")
+                for action in decision["actions"]:
                     print(f"{action['action']}: {_display_text(action['reason'])}")
                     for command in action["commands"]:
                         print(f"  {command}")
@@ -3231,6 +3766,71 @@ def main(
                         f"{entry['short_commit']} {entry['authored_at']} "
                         f"[{stage}] {entry['subject']}"
                     )
+            return 0
+
+        if args.command == "trajectory":
+            payload = research_trajectory(
+                args.repo,
+                limit=args.limit,
+                ref=args.ref,
+            )
+            if args.as_json:
+                _print_json(payload)
+            else:
+                scope = "complete" if payload["complete"] else "truncated"
+                print(
+                    f"Structured trajectory: {scope}; "
+                    f"{payload['checkpoint_count']} checkpoints, "
+                    f"{payload['object_count']} typed objects, "
+                    f"{payload['object_transition_count']} object transitions"
+                )
+                print(f"Projection hash:      {payload['projection_hash']}")
+                for entry in payload["entries"]:
+                    print(
+                        f"{entry['sequence']:04d} {entry['commit'][:12]} "
+                        f"[{entry['stage']}/{entry['status']}] {entry['subject']}"
+                    )
+                    parent_commits = [
+                        str(parent)[:12] for parent in entry["parent_commits"]
+                    ]
+                    print(
+                        "     "
+                        f"checkpoint={entry['checkpoint_hash']} "
+                        f"parents={','.join(parent_commits) or '-'} "
+                        f"actor={entry['actor'] or '-'}"
+                    )
+                    if entry.get("stage") == "revert":
+                        print(
+                            "     "
+                            f"rollback={str(entry.get('reverts_commit') or '')[:12]} "
+                            f"checkpoint={entry.get('reverts_checkpoint_hash')}"
+                        )
+                    for research_object in entry["objects"]:
+                        print(
+                            "     "
+                            f"{research_object['object_id']} "
+                            f"{research_object['kind']} "
+                            f"[{research_object['state']}; "
+                            f"{research_object['change']}]"
+                        )
+                if payload["boundary_parent_edges"]:
+                    print("Boundary parent edges (projection is truncated):")
+                    for edge in payload["boundary_parent_edges"]:
+                        print(
+                            "     "
+                            f"{edge['parent_commit'][:12]} -> "
+                            f"{edge['child_commit'][:12]} "
+                            f"checkpoint={edge['parent_checkpoint_hash']}"
+                        )
+                if payload["boundary_rollback_edges"]:
+                    print("Boundary rollback edges (projection is truncated):")
+                    for edge in payload["boundary_rollback_edges"]:
+                        print(
+                            "     "
+                            f"{edge['target_commit'][:12]} <- "
+                            f"{edge['revert_commit'][:12]} "
+                            f"checkpoint={edge['target_checkpoint_hash']}"
+                        )
             return 0
 
         if args.command == "show":

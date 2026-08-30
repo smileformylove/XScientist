@@ -157,7 +157,9 @@ def test_agent_reported_metric_cannot_win_or_supply_a_best_node() -> None:
     assert advisory_only.get_best_node_by_metric() is None
 
 
-def test_advisory_metrics_are_separate_from_verified_success_reporting() -> None:
+def test_advisory_metrics_are_separate_from_verified_success_reporting(
+    tmp_path,
+) -> None:
     from ai_scientist.treesearch import journal as journal_module
 
     journal = Journal()
@@ -175,7 +177,13 @@ def test_advisory_metrics_are_separate_from_verified_success_reporting() -> None
 
     metrics = manager._gather_stage_metrics(journal)
     with mock.patch.object(journal_module, "query", return_value="summary") as query:
-        assert journal.generate_summary(model="test/report-model") == "summary"
+        assert (
+            journal.generate_summary(
+                model="test/report-model",
+                log_dir=tmp_path / "logs",
+            )
+            == "summary"
+        )
 
     prompt = query.call_args.kwargs["system_message"]
     assert metrics["good_nodes"] == 1

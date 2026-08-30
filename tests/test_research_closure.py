@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -281,6 +282,45 @@ class ResearchClosureTests(unittest.TestCase):
                 audit["closure_levels"]["verify"]["blocker_count"], 1
             )
             validate(audit, load_schema("research_closure"))
+
+    def test_all_audit_levels_bind_and_reject_an_incomplete_raw_git_trajectory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            raw_path = repository.path / "raw-history.txt"
+            raw_path.write_text("unattested backend transition\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "--", raw_path.name],
+                cwd=repository.path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "raw transition without checkpoint"],
+                cwd=repository.path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self._record_lineage(repository)
+            repository.commit(
+                stage="migration",
+                subject="explicitly retain legacy history for audit",
+            )
+
+            for level in ("trace", "replay", "verify"):
+                with self.subTest(level=level):
+                    audit = repository.audit(level=level)
+                    self.assertFalse(audit["complete"])
+                    self.assertFalse(audit["trajectory"]["ok"])
+                    self.assertIsNone(audit["trajectory"]["projection_hash"])
+                    self.assertIn(
+                        "structured_trajectory_invalid",
+                        audit["closure_levels"][level]["blocker_codes"],
+                    )
+                    validate(audit, load_schema("research_closure"))
 
     def test_replay_audit_distinguishes_saved_from_replay_ready(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1872,7 +1912,7 @@ class ResearchClosureTests(unittest.TestCase):
             self.assertIn("Overall scientific closure: pending", rendered)
             self.assertNotIn("Scientific closure: complete", rendered)
 
-    def test_complete_high_level_cli_journey_reaches_verified_closure(self) -> None:
+    def test_local_advisory_review_cannot_reach_verified_closure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             root = base / "research"
@@ -1983,7 +2023,7 @@ class ResearchClosureTests(unittest.TestCase):
                 "--repo",
                 str(root),
             )
-            claim = run_json(
+            refused_claim = run_json(
                 "claim",
                 "H1 improves accuracy",
                 "--evidence",
@@ -1993,42 +2033,18 @@ class ResearchClosureTests(unittest.TestCase):
                 "--verified",
                 "--repo",
                 str(root),
-            )["object"]
-            reproduction_checkpoint = run_json(
-                "checkpoint",
-                "--repo",
-                str(root),
-                "--stage",
-                "review",
-                "--subject",
-                "bind the verified claim reproduction",
-                "--reproduce",
-                "python .xscientist/verify.py",
-                "--allow-checkpoint-only",
-            )["commit"]
-
-            replay = run_json("audit", "--repo", str(root), "--level", "replay")
-            self.assertTrue(replay["complete"], replay["blockers"])
-            run_json(
-                "reproduce",
-                reproduction_checkpoint,
-                "--repo",
-                str(root),
-                "--dest",
-                str(base / "reproduction"),
-                "--execute",
-                "--record",
-                "--reproduces",
-                attempt["object_id"],
-                "--reproduces",
-                claim["object_id"],
-                "--verifier",
-                "independent-reproducer",
-                "--verified",
+                expected=2,
             )
-            verified = run_json("audit", "--repo", str(root), "--level", "verify")
-            self.assertTrue(verified["complete"], verified["blockers"])
-            self.assertEqual(verified["claims"][0]["claim_id"], claim["object_id"])
+            self.assertIn("passing gate decision", refused_claim["error"]["message"])
+            self.assertNotIn(
+                "claim", {item["kind"] for item in ResearchRepository(root).objects()}
+            )
+            verified = run_json(
+                "audit", "--repo", str(root), "--level", "verify", expected=1
+            )
+            self.assertFalse(verified["complete"])
+            self.assertTrue(verified["blockers"])
+            self.assertEqual(attempt["kind"], "experiment_attempt")
             self.assertEqual(evidence["kind"], "evidence")
 
 

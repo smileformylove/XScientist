@@ -62,17 +62,25 @@ agent:
     temp: 1.0
     max_tokens: 8192
   feedback:
-    model: openai_compat/glm-5.3
+    model: __xscientist_non_glm_judgment_model_required__
     temp: 0.5
     max_tokens: 4096
   vlm_feedback:
-    model: openai_compat/glm-5.3
+    model: __xscientist_non_glm_judgment_model_required__
     temp: 0.5
     max_tokens: null
   summary:
-    model: openai_compat/glm-5.3
+    model: __xscientist_non_glm_judgment_model_required__
     temp: 1.0
     max_tokens: null
+  judgment:
+    model: __xscientist_non_glm_judgment_model_required__
+    temp: 0.2
+    max_tokens: 4096
+  select_node:
+    model: __xscientist_non_glm_judgment_model_required__
+    temp: 0.2
+    max_tokens: 4096
   search:
     max_debug_depth: 2
     debug_prob: 0.3

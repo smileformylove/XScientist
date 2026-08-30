@@ -7,12 +7,16 @@ import shlex
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.privacy import redact_sensitive_payload
 
-from .research_git import ResearchGitError, init_repository
+from .research_git import (
+    ResearchGitError,
+    init_repository,
+    research_object_introduction_order,
+)
 from .research_vcs import ResearchRepository
 
 GUIDE_SCHEMA = "xscientist.research-guide.v1"
@@ -425,13 +429,36 @@ def _primary_action(
     }
 
 
-def _created_at(item: dict[str, Any]) -> str:
-    return str(item.get("created_at") or "")
+def _object_sequences(
+    repository: ResearchRepository,
+    items: list[dict[str, Any]],
+) -> dict[str, int]:
+    committed = research_object_introduction_order(repository.path)
+    working_sequence = max(committed.values(), default=0) + 1
+    return {
+        str(item["object_id"]): committed.get(str(item["object_id"]), working_sequence)
+        for item in items
+    }
 
 
-def _latest(items: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+def _latest(
+    items: list[dict[str, Any]],
+    kind: str,
+    sequences: Mapping[str, int],
+) -> dict[str, Any] | None:
     matches = [item for item in items if item.get("kind") == kind]
-    return max(matches, key=_created_at) if matches else None
+    if not matches:
+        return None
+    latest_sequence = max(sequences[str(item["object_id"])] for item in matches)
+    latest = [
+        item for item in matches if sequences[str(item["object_id"])] == latest_sequence
+    ]
+    if len(latest) != 1:
+        raise ResearchGitError(
+            f"multiple {kind} objects share the latest Git checkpoint; use an "
+            "explicit object ID or record a superseding object"
+        )
+    return latest[0]
 
 
 def inspect_idea_research(path: str | Path) -> dict[str, Any]:
@@ -439,14 +466,15 @@ def inspect_idea_research(path: str | Path) -> dict[str, Any]:
 
     repository = ResearchRepository(path)
     objects = repository.objects()
-    question = _latest(objects, "question")
+    sequences = _object_sequences(repository, objects)
+    question = _latest(objects, "question", sequences)
     if question is None:
         raise ResearchGitError(
             "research repository has no recorded question; use a new directory or "
             "record a question first"
         )
-    hypothesis = _latest(objects, "hypothesis")
-    plan = _latest(objects, "research_plan")
+    hypothesis = _latest(objects, "hypothesis", sequences)
+    plan = _latest(objects, "research_plan", sequences)
     question_payload = question.get("payload") or {}
     hypothesis_payload = (hypothesis or {}).get("payload") or {}
     plan_payload = (plan or {}).get("payload") or {}
@@ -466,14 +494,19 @@ def inspect_idea_research(path: str | Path) -> dict[str, Any]:
 
 
 def _latest_after(
-    items: list[dict[str, Any]], kind: str, created_at: str
+    items: list[dict[str, Any]],
+    kind: str,
+    predecessor: Mapping[str, Any],
+    sequences: Mapping[str, int],
 ) -> dict[str, Any] | None:
+    predecessor_order = sequences[str(predecessor["object_id"])]
     matches = [
         item
         for item in items
-        if item.get("kind") == kind and _created_at(item) > created_at
+        if item.get("kind") == kind
+        and sequences[str(item["object_id"])] > predecessor_order
     ]
-    return max(matches, key=_created_at) if matches else None
+    return _latest(matches, kind, sequences)
 
 
 def build_research_guide(
@@ -487,6 +520,7 @@ def build_research_guide(
     selected_language = _language(language)
     repository = ResearchRepository(repo)
     objects = repository.objects()
+    sequences = _object_sequences(repository, objects)
     counts = Counter(str(item["kind"]) for item in objects)
     user_idea_entry = any(
         item.get("kind") == "question"
@@ -498,14 +532,71 @@ def build_research_guide(
         for item in objects
         for relation in item.get("relations") or []
     ]
-    latest_claim = _latest(objects, "claim")
-    latest_hypothesis = _latest(objects, "hypothesis")
-    latest_plan = _latest(objects, "research_plan")
-    latest_attempt = _latest(objects, "experiment_attempt")
-    latest_evidence = _latest(objects, "evidence") or _latest(
-        objects, "passage_evidence"
-    )
-    latest_inference = _latest(objects, "inference")
+    ambiguous_latest: dict[str, list[str]] = {}
+
+    def guide_latest(kind: str) -> dict[str, Any] | None:
+        """Resolve an advisory target without inventing order inside a checkpoint.
+
+        The public ``@latest`` selector remains fail-closed.  A guide, however,
+        must still be renderable when a checkpoint intentionally introduces a
+        portfolio or several attempts.  In that case it records the ambiguity
+        and emits an explicit placeholder instead of choosing by timestamp or
+        object hash.
+        """
+
+        matches = [item for item in objects if item.get("kind") == kind]
+        if not matches:
+            return None
+        latest_sequence = max(sequences[str(item["object_id"])] for item in matches)
+        candidates = [
+            item
+            for item in matches
+            if sequences[str(item["object_id"])] == latest_sequence
+        ]
+        if len(candidates) != 1:
+            ambiguous_latest[kind] = sorted(
+                str(item["object_id"]) for item in candidates
+            )
+            return None
+        return candidates[0]
+
+    latest_claim = guide_latest("claim")
+    latest_hypothesis = guide_latest("hypothesis")
+    latest_plan = guide_latest("research_plan")
+    latest_attempt = guide_latest("experiment_attempt")
+    latest_evidence = guide_latest("evidence") or guide_latest("passage_evidence")
+    latest_inference = guide_latest("inference")
+
+    if latest_hypothesis is None and ambiguous_latest.get("hypothesis"):
+        portfolios = [
+            item for item in objects if item.get("kind") == "hypothesis_portfolio"
+        ]
+        if portfolios:
+            portfolio_sequence = max(
+                sequences[str(item["object_id"])] for item in portfolios
+            )
+            current_portfolios = [
+                item
+                for item in portfolios
+                if sequences[str(item["object_id"])] == portfolio_sequence
+            ]
+            primary_ids = {
+                str(member.get("hypothesis_id"))
+                for portfolio in current_portfolios
+                for member in (portfolio.get("payload") or {}).get("members") or []
+                if member.get("role") == "primary" and member.get("hypothesis_id")
+            }
+            if len(primary_ids) == 1:
+                primary_id = next(iter(primary_ids))
+                latest_hypothesis = next(
+                    (
+                        item
+                        for item in objects
+                        if str(item.get("object_id")) == primary_id
+                        and item.get("kind") == "hypothesis"
+                    ),
+                    None,
+                )
     contested_claim = (
         latest_claim
         if latest_claim is not None
@@ -521,6 +612,26 @@ def build_research_guide(
     )
     next_steps: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
+
+    for kind, object_ids in sorted(ambiguous_latest.items()):
+        warnings.append(
+            {
+                "code": f"ambiguous_latest_{kind}",
+                "message": _text(
+                    selected_language,
+                    (
+                        f"The latest checkpoint contains {len(object_ids)} {kind} "
+                        "objects. The guide will not invent an order; select an "
+                        "explicit object ID when that kind is the next input."
+                    ),
+                    (
+                        f"最新 checkpoint 同时包含 {len(object_ids)} 个 {kind} 对象。"
+                        "指南不会虚构先后顺序；需要使用该类型时，请显式选择对象 ID。"
+                    ),
+                ),
+                "object_ids": object_ids,
+            }
+        )
 
     if not counts["hypothesis"]:
         next_steps.append(
@@ -555,7 +666,10 @@ def build_research_guide(
     elif not counts["research_plan"]:
         hypotheses = sorted(
             (item for item in objects if item.get("kind") == "hypothesis"),
-            key=lambda item: (_created_at(item), str(item.get("object_id") or "")),
+            key=lambda item: (
+                sequences[str(item["object_id"])],
+                str(item["object_id"]),
+            ),
         )
         primary_hypothesis_id = str(hypotheses[0]["object_id"])
         if len(hypotheses) == 1:
@@ -676,8 +790,11 @@ def build_research_guide(
             )
         )
     elif not counts["experiment_attempt"]:
-        if latest_plan is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError("research guide cannot resolve the active plan")
+        plan_selector = (
+            str(latest_plan["object_id"])
+            if latest_plan is not None
+            else "RESEARCH_PLAN_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -688,14 +805,17 @@ def build_research_guide(
                 why_zh="成功、失败和超时都属于研究路径中的有效信息。",
                 command=(
                     'xscientist research experiment "WHAT YOU RAN" --status completed '
-                    f"--plan {shlex.quote(str(latest_plan['object_id']))} "
+                    f"--plan {shlex.quote(plan_selector)} "
                     "--metric NAME=VALUE --seed 1"
                 ),
             )
         )
     elif not (counts["evidence"] or counts["passage_evidence"]):
-        if latest_attempt is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError("research guide cannot resolve the active attempt")
+        attempt_selector = (
+            str(latest_attempt["object_id"])
+            if latest_attempt is not None
+            else "EXPERIMENT_ATTEMPT_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -712,13 +832,16 @@ def build_research_guide(
                 ),
                 command=(
                     'xscientist research evidence "WHAT THE RESULT SHOWS" '
-                    f"--attempt {shlex.quote(str(latest_attempt['object_id']))}"
+                    f"--attempt {shlex.quote(attempt_selector)}"
                 ),
             )
         )
     elif not counts["inference"]:
-        if latest_evidence is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError("research guide cannot resolve the active evidence")
+        evidence_selector = (
+            str(latest_evidence["object_id"])
+            if latest_evidence is not None
+            else "EVIDENCE_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -732,14 +855,17 @@ def build_research_guide(
                 why_zh="把证据和推理依据分开，才能暴露隐藏假设并让科学论证可审查。",
                 command=(
                     'xscientist research infer "BOUNDED CONCLUSION" '
-                    f"--premise {shlex.quote(str(latest_evidence['object_id']))} "
+                    f"--premise {shlex.quote(evidence_selector)} "
                     '--warrant "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION"'
                 ),
             )
         )
     elif not counts["review"]:
-        if latest_inference is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError("research guide cannot resolve the active inference")
+        inference_selector = (
+            str(latest_inference["object_id"])
+            if latest_inference is not None
+            else "INFERENCE_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -750,16 +876,17 @@ def build_research_guide(
                 why_zh="证据生产者不能同时成为判断证据是否通过的唯一裁判。",
                 command=(
                     'xscientist research review "REVIEW SUMMARY" '
-                    f"--evaluates {shlex.quote(str(latest_inference['object_id']))} "
+                    f"--evaluates {shlex.quote(inference_selector)} "
                     "--verifier human:REVIEWER --decision hold"
                 ),
             )
         )
     elif not counts["claim"]:
-        if latest_inference is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError(
-                "research guide cannot resolve the reviewed inference"
-            )
+        inference_selector = (
+            str(latest_inference["object_id"])
+            if latest_inference is not None
+            else "INFERENCE_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -770,38 +897,41 @@ def build_research_guide(
                 why_zh="结论范围不能超过实际检验的数据、指标和条件。",
                 command=(
                     'xscientist research claim "BOUNDED CLAIM" '
-                    f"--evidence {shlex.quote(str(latest_inference['object_id']))} "
+                    f"--evidence {shlex.quote(inference_selector)} "
                     '--scope "TESTED CONDITIONS"'
                 ),
             )
         )
     elif contested_claim is not None:
         resolution_plan = _latest_after(
-            objects, "research_plan", _created_at(contested_claim)
+            objects, "research_plan", contested_claim, sequences
         )
         resolution_attempt = (
-            _latest_after(objects, "experiment_attempt", _created_at(resolution_plan))
+            _latest_after(objects, "experiment_attempt", resolution_plan, sequences)
             if resolution_plan is not None
             else None
         )
         resolution_evidence = (
-            _latest_after(objects, "evidence", _created_at(resolution_attempt))
+            _latest_after(objects, "evidence", resolution_attempt, sequences)
             if resolution_attempt is not None
             else None
         )
         resolution_inference = (
-            _latest_after(objects, "inference", _created_at(resolution_evidence))
+            _latest_after(objects, "inference", resolution_evidence, sequences)
             if resolution_evidence is not None
             else None
         )
         resolution_review = (
-            _latest_after(objects, "review", _created_at(resolution_inference))
+            _latest_after(objects, "review", resolution_inference, sequences)
             if resolution_inference is not None
             else None
         )
         if resolution_plan is None:
-            if latest_hypothesis is None:  # pragma: no cover - a claim needs lineage
-                raise ResearchGitError("research guide cannot resolve a hypothesis")
+            hypothesis_selector = (
+                str(latest_hypothesis["object_id"])
+                if latest_hypothesis is not None
+                else "HYPOTHESIS_ID"
+            )
             step = _step(
                 selected_language,
                 code="resolve_contested_claim",
@@ -816,7 +946,7 @@ def build_research_guide(
                 why_zh="被暂缓或反驳的结论，需要先增加有区分度的条件检验。",
                 command=(
                     "xscientist research plan "
-                    f"{shlex.quote(str(latest_hypothesis['object_id']))} "
+                    f"{shlex.quote(hypothesis_selector)} "
                     '"TEST THE CONTESTED BOUNDARY" '
                     '--test "WHAT RESULT WOULD RESOLVE THE CONFLICT"'
                 ),
@@ -894,8 +1024,9 @@ def build_research_guide(
             )
         next_steps.append(step)
     elif not counts["reproduction"]:
-        if latest_claim is None:  # pragma: no cover - guarded by the branch above
-            raise ResearchGitError("research guide cannot resolve the active claim")
+        claim_selector = (
+            str(latest_claim["object_id"]) if latest_claim is not None else "CLAIM_ID"
+        )
         next_steps.append(
             _step(
                 selected_language,
@@ -906,7 +1037,7 @@ def build_research_guide(
                 why_zh="已保存的结论只是可追踪；独立重跑成功后才具备更强的可验证性。",
                 command=(
                     "xscientist research reproduce HEAD --execute --record "
-                    f"--reproduces {shlex.quote(str(latest_claim['object_id']))} "
+                    f"--reproduces {shlex.quote(claim_selector)} "
                     "--verifier human:REPRODUCER"
                 ),
             )
@@ -1168,7 +1299,12 @@ def explore_research_idea(
                 "before continuing this guided exploration"
             )
         question_id = str(current["question_id"])
-        goal = _latest(repository.objects(), "research_goal")
+        existing_objects = repository.objects()
+        goal = _latest(
+            existing_objects,
+            "research_goal",
+            _object_sequences(repository, existing_objects),
+        )
         goal_id = str(goal["object_id"]) if goal is not None else None
         hypothesis_id = (
             str(current["hypothesis_id"]) if current["hypothesis_id"] else None

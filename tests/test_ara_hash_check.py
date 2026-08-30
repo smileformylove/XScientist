@@ -9,6 +9,7 @@ codes, state classification, and the JSON shape.
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import tempfile
 import unittest
@@ -16,8 +17,18 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from ai_scientist.apps import ara as run_ara_fork
+from ai_scientist.protocol import validate_ara
 
 from ai_scientist.utils.ara_artifact import export_ara
+from ai_scientist.utils.authority_attempts import (
+    begin_authority_attempt,
+    persist_authority_object,
+    record_authority_attempt_result,
+)
+from ai_scientist.treesearch.agent_manager import (
+    _validate_restored_authority_ledger,
+)
+from ai_scientist.treesearch.journal import Journal, Node
 
 
 def _write_journal(logs_dir: Path, nodes: list[dict]) -> None:
@@ -55,14 +66,73 @@ def _run(*argv: str) -> tuple[int, str, str]:
     return rc, out.getvalue(), err.getvalue()
 
 
-def _default_node(nid: str, *, code: str = "print('ok')",
-                  metric_val: float = 0.5) -> dict:
+def _default_node(
+    nid: str, *, code: str = "print('ok')", metric_val: float = 0.5
+) -> dict:
     return {
-        "id": nid, "step": 0, "code": code,
+        "id": nid,
+        "step": 0,
+        "code": code,
         "_term_out": [],
         "metric": {"value": metric_val, "maximize": True, "name": "acc"},
-        "is_buggy": False, "parent_id": None, "children": [],
+        "is_buggy": False,
+        "parent_id": None,
+        "children": [],
     }
+
+
+def _create_authority_attempt(
+    log_dir: Path,
+    *,
+    parent_node_id: str | None,
+    status: str = "accepted",
+) -> tuple[str, str]:
+    spec_hash, spec_ref = persist_authority_object(
+        log_dir,
+        category="implementation-spec",
+        payload={"schema": "test.authority-spec.v1", "objective": "bounded"},
+    )
+    attempt_id = begin_authority_attempt(
+        log_dir,
+        spec_hash=spec_hash,
+        spec_ref=spec_ref,
+        parent_node_id=parent_node_id,
+        role="execution",
+        model="test-executor",
+        task_kind="implementation",
+    )
+    assert attempt_id is not None
+    terminal_hash = record_authority_attempt_result(
+        log_dir,
+        attempt_id,
+        status=status,
+        result_payload={"produced": parent_node_id} if status != "failed" else None,
+        error_type="SyntheticFailure" if status == "failed" else None,
+    )
+    assert terminal_hash is not None
+    return attempt_id, terminal_hash
+
+
+def _make_authority_ara(tmp: Path, *, metric_val: float = 0.5) -> tuple[Path, Path]:
+    project = tmp / "authority_project"
+    exp = project / "02_experiments" / "20260710_authority"
+    log_dir = exp / "logs" / "0-run"
+    node = _default_node("n1", metric_val=metric_val)
+    attempt_id, terminal_hash = _create_authority_attempt(
+        log_dir,
+        parent_node_id="n1",
+    )
+    node["authority_attempt_ids"] = [attempt_id]
+    node["authority_attempt_terminal_hashes"] = {attempt_id: terminal_hash}
+    # A failed attempt creates no Node, but remains part of the top-level audit.
+    _create_authority_attempt(log_dir, parent_node_id="discarded", status="failed")
+    _write_journal(exp / "logs", [node])
+    result = export_ara(
+        project_dir=project,
+        exp_dir=exp,
+        idea={"Name": "authority"},
+    )
+    return Path(result.root), log_dir
 
 
 class HashCheckCLITests(unittest.TestCase):
@@ -72,9 +142,14 @@ class HashCheckCLITests(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
 
     def test_hash_check_clean_ara_returns_zero(self) -> None:
-        ara = _make_ara(self.tmp, "clean", [
-            _default_node("n1"), _default_node("n2", metric_val=0.7),
-        ])
+        ara = _make_ara(
+            self.tmp,
+            "clean",
+            [
+                _default_node("n1"),
+                _default_node("n2", metric_val=0.7),
+            ],
+        )
         rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
         self.assertEqual(rc, 0, msg=err)
         payload = json.loads(out)
@@ -109,6 +184,35 @@ class HashCheckCLITests(unittest.TestCase):
         self.assertEqual(entry["state"], "drift")
         self.assertIn("metric", entry.get("notes", "").lower())
 
+    def test_hash_check_detects_locked_spec_drift(self) -> None:
+        spec = {
+            "schema": "xscientist.locked-experiment-spec.v1",
+            "primary_metric": "accuracy",
+            "objective": "bounded",
+        }
+        encoded = json.dumps(
+            spec,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        node = _default_node("n1")
+        node["implementation_spec"] = spec
+        node["implementation_spec_hash"] = (
+            "sha256:" + hashlib.sha256(encoded).hexdigest()
+        )
+        ara = _make_ara(self.tmp, "spec_drift", [node])
+        spec_path = ara / "nodes" / "n1" / "implementation_spec.json"
+        tampered = json.loads(spec_path.read_text(encoding="utf-8"))
+        tampered["objective"] = "tampered"
+        spec_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 1, msg=err)
+        payload = json.loads(out)
+        [entry] = [e for e in payload if e["node_id"] == "n1"]
+        self.assertEqual(entry["state"], "drift")
+
     def test_hash_check_missing_code_returns_rc2(self) -> None:
         ara = _make_ara(self.tmp, "no_code", [_default_node("n1")])
         (ara / "nodes" / "n1" / "code.py").unlink()
@@ -134,9 +238,14 @@ class HashCheckCLITests(unittest.TestCase):
         self.assertEqual(entry["stored_hash"], entry["computed_hash"])
 
     def test_hash_check_drift_beats_missing_code(self) -> None:
-        ara = _make_ara(self.tmp, "drift_wins", [
-            _default_node("n1"), _default_node("n2"),
-        ])
+        ara = _make_ara(
+            self.tmp,
+            "drift_wins",
+            [
+                _default_node("n1"),
+                _default_node("n2"),
+            ],
+        )
         # n1 gets code drift; n2 gets its code deleted.
         (ara / "nodes" / "n1" / "code.py").write_text(
             "print('tampered')\n", encoding="utf-8"
@@ -185,6 +294,156 @@ class HashCheckCLITests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("NODE"))
         # Truncated hash form uses the ellipsis character.
         self.assertIn("n1", out)
+
+    def test_authority_attempts_are_portable_hash_bound_and_complete(self) -> None:
+        ara, _ = _make_authority_ara(self.tmp)
+        self.assertTrue(validate_ara(ara).ok)
+        artifact_path = ara / "authority_attempts.json"
+        artifact_bytes = artifact_path.read_bytes()
+        artifact = json.loads(artifact_bytes)
+        self.assertEqual(
+            artifact_bytes,
+            json.dumps(
+                artifact,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8"),
+        )
+        self.assertEqual(artifact["schema"], "xscientist.ara.authority-attempts.v1")
+        self.assertEqual(artifact["counts"]["attempts"], 2)
+        self.assertEqual(
+            {row["status"] for row in artifact["attempts"]},
+            {"accepted", "failed"},
+        )
+        graph = json.loads((ara / "exploration_graph.json").read_text())
+        [node] = graph["nodes"]
+        self.assertEqual(len(node["authority_attempt_ids"]), 1)
+        self.assertEqual(
+            set(node["authority_attempt_terminal_hashes"]),
+            set(node["authority_attempt_ids"]),
+        )
+        self.assertIn("authority_attempts", node["content_hash_inputs"])
+        self.assertEqual(
+            graph["authority_attempts"],
+            json.loads((ara / "manifest.json").read_text())["references"][
+                "authority_attempts"
+            ],
+        )
+
+        rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 0, msg=err)
+        entries = json.loads(out)
+        self.assertEqual(
+            next(row for row in entries if row["node_id"] == "@authority-attempts")[
+                "state"
+            ],
+            "clean",
+        )
+
+    def test_hash_check_detects_bundled_authority_event_tamper(self) -> None:
+        ara, _ = _make_authority_ara(self.tmp)
+        artifact = json.loads((ara / "authority_attempts.json").read_text())
+        ledger = ara / artifact["ledgers"][0]["path"]
+        attempt_id = artifact["ledgers"][0]["attempt_ids"][0]
+        event_path = ledger / "authority_attempts" / attempt_id / "1.json"
+        event = json.loads(event_path.read_text())
+        event["status"] = "rejected"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+
+        rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 1, msg=err)
+        entries = json.loads(out)
+        authority = next(
+            row for row in entries if row["node_id"] == "@authority-attempts"
+        )
+        self.assertEqual(authority["state"], "drift")
+        self.assertIn("invalid", authority["notes"])
+
+    def test_hash_check_detects_missing_authority_artifact(self) -> None:
+        ara, _ = _make_authority_ara(self.tmp)
+        (ara / "authority_attempts.json").unlink()
+
+        rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 1, msg=err)
+        entries = json.loads(out)
+        authority = next(
+            row for row in entries if row["node_id"] == "@authority-attempts"
+        )
+        self.assertEqual(authority["state"], "drift")
+        self.assertIn("missing", authority["notes"])
+
+    def test_hash_check_detects_orphaned_bundled_attempt(self) -> None:
+        ara, _ = _make_authority_ara(self.tmp)
+        artifact = json.loads((ara / "authority_attempts.json").read_text())
+        ledger = ara / artifact["ledgers"][0]["path"]
+        orphan = ledger / "authority_attempts" / ("attempt-" + "f" * 32)
+        orphan.mkdir(mode=0o700)
+
+        rc, out, err = _run("hash-check", "--ara", str(ara), "--json")
+        self.assertEqual(rc, 1, msg=err)
+        entries = json.loads(out)
+        authority = next(
+            row for row in entries if row["node_id"] == "@authority-attempts"
+        )
+        self.assertEqual(authority["state"], "drift")
+        self.assertIn("orphan", authority["notes"])
+
+    def test_export_refuses_incomplete_authority_ledger(self) -> None:
+        project = self.tmp / "incomplete_project"
+        exp = project / "02_experiments" / "20260710_incomplete"
+        log_dir = exp / "logs" / "0-run"
+        spec_hash, spec_ref = persist_authority_object(
+            log_dir,
+            category="implementation-spec",
+            payload={"schema": "test.authority-spec.v1"},
+        )
+        begin_authority_attempt(
+            log_dir,
+            spec_hash=spec_hash,
+            spec_ref=spec_ref,
+            parent_node_id="n1",
+            role="execution",
+            model="test-executor",
+            task_kind="implementation",
+        )
+        _write_journal(exp / "logs", [_default_node("n1")])
+
+        with self.assertRaisesRegex(ValueError, "incomplete/orphaned/invalid"):
+            export_ara(
+                project_dir=project,
+                exp_dir=exp,
+                idea={"Name": "incomplete"},
+            )
+
+    def test_authority_bound_node_hash_failure_aborts_export(self) -> None:
+        with self.assertRaisesRegex(ValueError, "strict identity hashing failed"):
+            _make_authority_ara(self.tmp, metric_val=float("nan"))
+
+    def test_checkpoint_restore_authority_validation_is_fail_closed(self) -> None:
+        log_dir = self.tmp / "restore-ledger"
+        attempt_id, terminal_hash = _create_authority_attempt(
+            log_dir,
+            parent_node_id="n1",
+        )
+        node = Node(
+            id="n1",
+            code="print('ok')",
+            plan="bounded",
+            authority_attempt_ids=[attempt_id],
+            authority_attempt_terminal_hashes={attempt_id: terminal_hash},
+        )
+        journal = Journal()
+        journal.append(node)
+        _validate_restored_authority_ledger({"stage": journal}, log_dir=log_dir)
+
+        event_path = log_dir / "authority_attempts" / attempt_id / "1.json"
+        event = json.loads(event_path.read_text())
+        event["error_type"] = "Tampered"
+        event_path.write_text(json.dumps(event), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "ledger"):
+            _validate_restored_authority_ledger({"stage": journal}, log_dir=log_dir)
 
 
 class HashCheckAllCLITests(unittest.TestCase):
@@ -282,8 +541,12 @@ class HashCheckAllCLITests(unittest.TestCase):
         ara = _make_ara_in(self.project, "idea_a", [_default_node("n1")])
         with self.assertRaises(SystemExit):
             _run(
-                "hash-check", "--ara", str(ara),
-                "--all", "--project", str(self.project),
+                "hash-check",
+                "--ara",
+                str(ara),
+                "--all",
+                "--project",
+                str(self.project),
             )
 
 

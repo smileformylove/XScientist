@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ai_scientist.config.paths import resolve_output_path
+from ai_scientist.config.venues import DEFAULT_TARGET_VENUE, TARGET_VENUE_SET
+from ai_scientist.resources import verify_latex_template_source
 from ai_scientist.utils.pipeline_helpers import (
     compile_latex,
     find_best_pdf_path,
@@ -16,11 +18,11 @@ from ai_scientist.utils.pipeline_helpers import (
 )
 from ai_scientist.utils.pipeline_contracts import (
     load_jsonl_artifact,
-    load_jsonl_artifact_with_errors,
 )
 from ai_scientist.utils.evidence_snapshot import (
     SNAPSHOT_FILENAME,
     build_evidence_snapshot,
+    canonical_hash,
     save_evidence_snapshot,
     verify_evidence_snapshot,
 )
@@ -38,9 +40,24 @@ from ai_scientist.utils.research_integrity import (
     _verification_metric_matches,
     _verification_output_matches,
     _protocol_fidelity_hash,
+    attest_adaptive_state_freeze,
     build_verification_report,
+    validate_adaptive_state_freeze,
+    validate_empirical_data_manifest,
     validate_preregistration,
 )
+from ai_scientist.utils.safe_files import (
+    BoundedFileError,
+    read_bounded_regular_file,
+)
+from ai_scientist.utils.verifier_authority import (
+    canonical_principal,
+    verify_verifier_authority_receipt,
+)
+
+_MAX_GATE_ARTIFACT_BYTES = 16 * 1024 * 1024
+_MAX_GATE_REGISTRY_BYTES = 64 * 1024 * 1024
+_MAX_GATE_REGISTRY_ROWS = 100_000
 
 QUALITY_PRESETS = {
     "balanced": {
@@ -83,7 +100,31 @@ VENUE_PRESETS = {
             "Numerical takeaways in abstract and conclusion",
         ],
         "submission_priority_threshold": 75.0,
-        "max_submission_blockers": 2,
+        "max_submission_blockers": 0,
+    },
+    "icml": {
+        "template": "icml",
+        "quality_threshold": 4.2,
+        "rigor_threshold": 3.8,
+        "claim_support_threshold": 3.6,
+        "style_guidance": (
+            "强调清晰且有边界的新颖性、强 baseline、完整消融、统计可靠性、"
+            "负结果与可复现性；所有核心 claim 必须绑定可核查证据。"
+        ),
+        "min_cite_rounds": 20,
+        "min_writeup_retries": 4,
+        "candidate_boost": 0,
+        "min_review_reflections": 2,
+        "min_review_ensemble": 3,
+        "min_review_fewshot": 2,
+        "checklist": [
+            "Novelty is explicit, scoped, and separated from prior work",
+            "Strong baselines, ablations, and robustness checks are complete",
+            "Statistical reporting supports every central empirical claim",
+            "Reproduction instructions, limitations, and negative results are visible",
+        ],
+        "submission_priority_threshold": 75.0,
+        "max_submission_blockers": 0,
     },
     "iclr": {
         "template": "iclr",
@@ -257,7 +298,7 @@ def _get_section_priority_notes(title: str) -> list[str]:
 
 
 def map_paper_type_to_template(paper_type: str) -> str:
-    return TEMPLATE_MAP.get(paper_type, "neurips")
+    return TEMPLATE_MAP.get(paper_type, DEFAULT_TARGET_VENUE)
 
 
 def recommend_target_venue_from_idea(idea: dict | None, paper_type: str) -> str:
@@ -266,7 +307,7 @@ def recommend_target_venue_from_idea(idea: dict | None, paper_type: str) -> str:
         "icbinb": "iclr",
         "journal": "nature",
         "extended": "iclr",
-    }.get(paper_type, "neurips")
+    }.get(paper_type, DEFAULT_TARGET_VENUE)
     if idea is None:
         return default_venue
 
@@ -311,6 +352,7 @@ def recommend_target_venue_from_idea(idea: dict | None, paper_type: str) -> str:
 def is_paper_type_fit_for_venue(paper_type: str, target_venue: str) -> bool:
     venue_fit = {
         "neurips": {"normal"},
+        "icml": {"normal"},
         "iclr": {"normal", "icbinb", "extended"},
         "cvpr": {"normal"},
         "journal": {"journal", "normal"},
@@ -322,6 +364,7 @@ def is_paper_type_fit_for_venue(paper_type: str, target_venue: str) -> bool:
 def recommend_paper_type_for_venue(target_venue: str) -> str:
     return {
         "neurips": "normal",
+        "icml": "normal",
         "iclr": "normal",
         "cvpr": "normal",
         "journal": "journal",
@@ -330,9 +373,16 @@ def recommend_paper_type_for_venue(target_venue: str) -> str:
 
 
 def resolve_target_venue(paper_type: str, target_venue: Optional[str] = None) -> str:
-    if target_venue is not None:
-        return target_venue
-    return recommend_target_venue_from_idea(None, paper_type)
+    resolved = (
+        target_venue
+        if target_venue is not None
+        else recommend_target_venue_from_idea(None, paper_type)
+    )
+    normalized = str(resolved or "").strip().lower()
+    if normalized not in TARGET_VENUE_SET:
+        choices = ", ".join(sorted(TARGET_VENUE_SET))
+        raise ValueError(f"target_venue must be one of: {choices}; got {resolved!r}")
+    return normalized
 
 
 def resolve_submission_acceptance_settings(
@@ -341,7 +391,7 @@ def resolve_submission_acceptance_settings(
     min_submission_priority: Optional[float] = None,
     max_submission_blockers: Optional[int] = None,
 ) -> tuple[Optional[float], Optional[int]]:
-    venue_config = VENUE_PRESETS.get(target_venue, VENUE_PRESETS["neurips"])
+    venue_config = VENUE_PRESETS.get(target_venue, VENUE_PRESETS[DEFAULT_TARGET_VENUE])
     return (
         (
             min_submission_priority
@@ -369,6 +419,26 @@ def evaluate_submission_acceptance(
     if require_quality_gate and quality_result.get("quality_gate_passed") is not True:
         accepted = False
         reasons.append("required quality gate not met")
+    target_venue = str(quality_result.get("target_venue") or "").strip().lower()
+    if target_venue in {"neurips", "icml"}:
+        readiness = quality_result.get("submission_readiness")
+        if not isinstance(readiness, dict):
+            accepted = False
+            reasons.append(f"{target_venue} submission readiness receipt is missing")
+        elif (
+            readiness.get("ready") is not True
+            or readiness.get("decision") != "submission_package_ready"
+            or readiness.get("blocker_count") != 0
+        ):
+            accepted = False
+            reasons.append(
+                f"{target_venue} submission package is blocked by the readiness gate"
+            )
+        if quality_result.get("blocker_count") != 0:
+            accepted = False
+            reasons.append(
+                f"{target_venue} submission candidates require zero open blockers"
+            )
     if (
         reject_on_auto_improvement_fallback
         and quality_result.get("auto_improvement_fallback_used") is True
@@ -2900,6 +2970,145 @@ def _load_latex(base_folder: str | Path) -> tuple[Optional[Path], str]:
         return latex_path, f.read()
 
 
+_NUMERIC_RESULT_KEY_MARKERS = (
+    "metric",
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "auc",
+    "loss",
+    "error",
+    "score",
+    "effect",
+    "delta",
+    "improvement",
+    "outcome",
+    "measurement",
+    "value",
+    "mean",
+)
+_STATISTICAL_RESULT_KEY_MARKERS = (
+    "confidence_interval",
+    "bootstrap_interval",
+    "credible_interval",
+    "p_value",
+    "pvalue",
+    "standard_error",
+    "standard_deviation",
+    "variance",
+    "stderr",
+    "stdev",
+)
+
+
+def _normalise_result_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _result_key_has_marker(key: str, markers: tuple[str, ...]) -> bool:
+    return any(
+        key == marker
+        or key.startswith(f"{marker}_")
+        or key.endswith(f"_{marker}")
+        or f"_{marker}_" in key
+        for marker in markers
+    )
+
+
+def _finite_numbers(value: Any) -> list[float]:
+    if _is_number(value):
+        return [float(value)]
+    if isinstance(value, dict):
+        numbers: list[float] = []
+        for child in value.values():
+            numbers.extend(_finite_numbers(child))
+        return numbers
+    if isinstance(value, (list, tuple)):
+        numbers = []
+        for child in value:
+            numbers.extend(_finite_numbers(child))
+        return numbers
+    return []
+
+
+def _contains_numeric_result(value: Any) -> bool:
+    """Require a number under an explicit result/metric key, not metadata."""
+
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        key_normalised = _normalise_result_key(key)
+        if (
+            key_normalised not in {"seed", "seeds", "epoch", "epochs", "step", "steps"}
+            and _result_key_has_marker(key_normalised, _NUMERIC_RESULT_KEY_MARKERS)
+            and _finite_numbers(child)
+        ):
+            return True
+        if isinstance(child, dict) and _contains_numeric_result(child):
+            return True
+    return False
+
+
+def _contains_statistical_result(value: Any) -> bool:
+    """Accept only structured, numeric uncertainty/statistical evidence."""
+
+    if not isinstance(value, dict):
+        return False
+    for key, child in value.items():
+        key_normalised = _normalise_result_key(key)
+        numbers = _finite_numbers(child)
+        is_interval = _result_key_has_marker(
+            key_normalised,
+            ("confidence_interval", "bootstrap_interval", "credible_interval"),
+        ) or key_normalised in {
+            "ci",
+            "ci95",
+            "ci_95",
+        }
+        if is_interval and len(numbers) >= 2 and numbers[0] <= numbers[1]:
+            return True
+        if _result_key_has_marker(key_normalised, ("p_value", "pvalue")):
+            if any(0 <= number <= 1 for number in numbers):
+                return True
+        dispersion_key = (
+            _result_key_has_marker(
+                key_normalised,
+                (
+                    "standard_error",
+                    "standard_deviation",
+                    "variance",
+                    "stderr",
+                    "stdev",
+                ),
+            )
+            or key_normalised == "std"
+            or key_normalised.endswith(("_std", "_sem"))
+        )
+        if dispersion_key and any(number >= 0 for number in numbers):
+            return True
+        if (
+            key_normalised
+            in {
+                "replicate_values",
+                "replicates",
+                "run_values",
+                "sample_values",
+            }
+            and len(numbers) >= 2
+        ):
+            return True
+        if isinstance(child, dict) and _contains_statistical_result(child):
+            return True
+    return False
+
+
+def _same_registry_field(left: dict, right: dict, field: str) -> bool:
+    left_value = str(left.get(field) or "").strip().lower()
+    right_value = str(right.get(field) or "").strip().lower()
+    return bool(left_value and right_value and left_value == right_value)
+
+
 def assess_experiment_rigor(
     base_folder: str | Path, latex_content: Optional[str] = None
 ) -> dict:
@@ -2941,6 +3150,15 @@ def assess_experiment_rigor(
             "standard deviation",
             "seed",
         ],
+        "robustness": [
+            "robustness",
+            "sensitivity",
+            "out-of-distribution",
+            "out of distribution",
+            "ood",
+            "stress test",
+            "boundary condition",
+        ],
         "reproducibility": [
             "hyperparameter",
             "implementation details",
@@ -2965,43 +3183,255 @@ def assess_experiment_rigor(
             records = load_jsonl_artifact(registry_path)
         except (OSError, ValueError, TypeError):
             records = []
-        completed = [
+        all_completed = [
             item
             for item in records
             if isinstance(item, dict)
             and str(item.get("status") or "").lower() in {"completed", "verified"}
         ]
 
-        def _contains_statistical_result(value: Any) -> bool:
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    key_lower = str(key).lower().replace("-", "_")
-                    if key_lower in {
-                        "confidence_interval",
-                        "ci",
-                        "effect_size",
-                        "p_value",
-                        "pvalue",
-                        "standard_error",
-                    }:
-                        return True
-                    if _contains_statistical_result(child):
-                        return True
-            elif isinstance(value, list):
-                return any(_contains_statistical_result(item) for item in value)
-            return False
+        portfolio_contract: dict[str, Any] = {}
+        task_contracts: dict[str, dict[str, Any]] = {}
+        research_plan_path = base_folder / "research_plan.json"
+        if research_plan_path.exists():
+            try:
+                research_plan = json.loads(
+                    research_plan_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, TypeError):
+                research_plan = {}
+            if isinstance(research_plan, dict) and isinstance(
+                research_plan.get("evidence_portfolio"), dict
+            ):
+                portfolio_contract = dict(research_plan["evidence_portfolio"])
+            if isinstance(research_plan, dict):
+                task_contracts = {
+                    str(item.get("task_id") or "").strip(): item
+                    for item in research_plan.get("tasks") or []
+                    if isinstance(item, dict) and str(item.get("task_id") or "").strip()
+                }
+
+        portfolio_required = bool(portfolio_contract.get("required"))
+        # Exploratory runs may inform planning, but only preregistered
+        # confirmatory records can satisfy a required publication portfolio.
+        completed = [
+            item
+            for item in all_completed
+            if not portfolio_required
+            or str(item.get("study_phase") or "").strip().lower() == "confirmatory"
+        ]
+
+        completed_by_role: dict[str, list[dict[str, Any]]] = {}
+        for record in completed:
+            role = str(record.get("evidence_role") or "unassigned").strip().lower()
+            completed_by_role.setdefault(role, []).append(record)
+
+        primary_records = completed_by_role.get("primary", [])
+        invalid_relationships: list[dict[str, str]] = []
+
+        def _record_configuration_hash(record: dict[str, Any]) -> str | None:
+            config = record.get("config")
+            if not isinstance(config, dict):
+                return None
+            expected = canonical_hash(config)
+            return expected if record.get("configuration_hash") == expected else None
+
+        def _valid_changed_factors(manifest: dict[str, Any]) -> bool:
+            changes = manifest.get("changed_factors")
+            if not isinstance(changes, dict) or not changes:
+                return False
+            for change in changes.values():
+                if (
+                    not isinstance(change, dict)
+                    or "before" not in change
+                    or "after" not in change
+                    or change.get("before") == change.get("after")
+                ):
+                    return False
+            return True
+
+        def _transformation_manifest_matches(
+            record: dict[str, Any], control: dict[str, Any], role: str
+        ) -> bool:
+            manifest = record.get("transformation_manifest")
+            if not isinstance(manifest, dict) or not manifest:
+                return False
+            if record.get("transformation_manifest_hash") != canonical_hash(manifest):
+                return False
+            record_config_hash = _record_configuration_hash(record)
+            control_config_hash = _record_configuration_hash(control)
+            if not record_config_hash or not control_config_hash:
+                return False
+            if record_config_hash == control_config_hash:
+                return False
+            expected = {
+                "evidence_role": role,
+                "paired_control_task_id": str(
+                    record.get("paired_control_task_id") or ""
+                ).strip(),
+                "intervention_variant": str(
+                    record.get("intervention_variant") or ""
+                ).strip()
+                or None,
+                "stress_condition": str(record.get("stress_condition") or "").strip()
+                or None,
+                "base_configuration_hash": control_config_hash,
+                "resulting_configuration_hash": record_config_hash,
+            }
+            if any(manifest.get(key) != value for key, value in expected.items()):
+                return False
+            return _valid_changed_factors(manifest)
+
+        def _matches_registered_task(record: dict[str, Any], role: str) -> bool:
+            if not portfolio_required:
+                return True
+            task_id = str(record.get("task_id") or "").strip()
+            contract = task_contracts.get(task_id)
+            if not contract:
+                return False
+            for field in (
+                "evidence_role",
+                "paired_control_task_id",
+                "intervention_variant",
+                "stress_condition",
+            ):
+                expected = str(contract.get(field) or "").strip()
+                actual = str(record.get(field) or "").strip()
+                if actual != expected:
+                    return False
+            return str(contract.get("evidence_role") or "").strip().lower() == role
+
+        validated_primary_records: list[dict[str, Any]] = []
+        validated_primary_by_task_id: dict[str, list[dict[str, Any]]] = {}
+        for record in primary_records:
+            task_id = str(record.get("task_id") or "").strip()
+            reason = ""
+            if not task_id:
+                reason = "task_id_missing"
+            elif not _matches_registered_task(record, "primary"):
+                reason = "registered_task_contract_mismatch"
+            elif not _record_configuration_hash(record):
+                reason = "configuration_hash_invalid"
+            if reason:
+                invalid_relationships.append(
+                    {
+                        "task_id": task_id or "unknown",
+                        "evidence_role": "primary",
+                        "paired_control_task_id": "not_applicable",
+                        "reason": reason,
+                    }
+                )
+                continue
+            validated_primary_records.append(record)
+            validated_primary_by_task_id.setdefault(task_id, []).append(record)
+        primary_records = validated_primary_records
+        primary_by_task_id = validated_primary_by_task_id
+
+        def _valid_paired_records(role: str) -> list[dict[str, Any]]:
+            valid: list[dict[str, Any]] = []
+            for record in completed_by_role.get(role, []):
+                task_id = str(record.get("task_id") or "").strip()
+                pair_id = str(record.get("paired_control_task_id") or "").strip()
+                reason = ""
+                controls = primary_by_task_id.get(pair_id, [])
+                if not task_id:
+                    reason = "task_id_missing"
+                elif not pair_id:
+                    reason = "paired_control_task_id_missing"
+                elif pair_id == task_id:
+                    reason = "self_pairing_disallowed"
+                elif not controls:
+                    reason = "completed_primary_control_missing"
+                elif (
+                    role == "ablation"
+                    and not str(record.get("intervention_variant") or "").strip()
+                ):
+                    reason = "intervention_variant_missing"
+                elif (
+                    role == "robustness"
+                    and not str(record.get("stress_condition") or "").strip()
+                ):
+                    reason = "stress_condition_missing"
+                elif not _matches_registered_task(record, role):
+                    reason = "registered_task_contract_mismatch"
+                elif not _record_configuration_hash(record):
+                    reason = "configuration_hash_invalid"
+                elif not _contains_numeric_result(record.get("result_summary", {})):
+                    reason = "numeric_result_missing"
+                else:
+                    comparable_controls = [
+                        control
+                        for control in controls
+                        if _contains_numeric_result(control.get("result_summary", {}))
+                        and _same_registry_field(record, control, "metric")
+                        and _same_registry_field(record, control, "baseline_ref")
+                        and (
+                            role == "robustness"
+                            or _same_registry_field(record, control, "dataset")
+                        )
+                    ]
+                    if not comparable_controls:
+                        reason = "comparable_numeric_primary_control_missing"
+                    elif not any(
+                        _transformation_manifest_matches(record, control, role)
+                        for control in comparable_controls
+                    ):
+                        reason = "transformation_manifest_invalid_or_unchanged"
+                if reason:
+                    invalid_relationships.append(
+                        {
+                            "task_id": task_id or "unknown",
+                            "evidence_role": role,
+                            "paired_control_task_id": pair_id or "missing",
+                            "reason": reason,
+                        }
+                    )
+                else:
+                    valid.append(record)
+            return valid
+
+        valid_ablations = _valid_paired_records("ablation")
+        valid_robustness = _valid_paired_records("robustness")
+        explicit_portfolio = bool(
+            primary_records
+            or completed_by_role.get("ablation")
+            or completed_by_role.get("robustness")
+        )
+        baseline_candidates = (
+            primary_records
+            if explicit_portfolio or portfolio_required
+            else [
+                item
+                for item in completed
+                if not str(item.get("paired_control_task_id") or "").strip()
+            ]
+        )
+        statistical_candidates = (
+            primary_records + valid_ablations + valid_robustness
+            if explicit_portfolio or portfolio_required
+            else completed
+        )
+        statistical_records = [
+            record
+            for record in statistical_candidates
+            if _contains_statistical_result(record.get("result_summary", {}))
+        ]
 
         findings = {
-            "baseline": bool(completed)
-            and all(str(item.get("baseline_ref") or "").strip() for item in completed),
-            "ablation": any(
-                "ablation" in json.dumps(item, ensure_ascii=False).lower()
-                for item in completed
+            "baseline": bool(baseline_candidates)
+            and all(
+                str(item.get("baseline_ref") or "").strip()
+                and _contains_numeric_result(item.get("result_summary", {}))
+                for item in baseline_candidates
             ),
-            "statistics": any(
-                _contains_statistical_result(item.get("result_summary", {}))
-                for item in completed
+            "ablation": bool(valid_ablations),
+            "statistics": bool(statistical_candidates)
+            and (
+                len(statistical_records) == len(statistical_candidates)
+                if portfolio_required
+                else bool(statistical_records)
             ),
+            "robustness": bool(valid_robustness),
             "reproducibility": bool(completed)
             and all(
                 item.get("dataset_split_hash")
@@ -3017,6 +3447,38 @@ def assess_experiment_rigor(
             if not passed
         ]
         source = "experiment_registry"
+        evidence_portfolio = {
+            "required": portfolio_required,
+            "completed_record_count": len(completed),
+            "ignored_exploratory_record_count": len(all_completed) - len(completed),
+            "completed_by_role": {
+                role: len(role_records)
+                for role, role_records in sorted(completed_by_role.items())
+            },
+            "primary_task_ids": sorted(primary_by_task_id),
+            "valid_ablation_task_ids": sorted(
+                {
+                    str(record.get("task_id"))
+                    for record in valid_ablations
+                    if record.get("task_id")
+                }
+            ),
+            "valid_robustness_task_ids": sorted(
+                {
+                    str(record.get("task_id"))
+                    for record in valid_robustness
+                    if record.get("task_id")
+                }
+            ),
+            "statistical_task_ids": sorted(
+                {
+                    str(record.get("task_id"))
+                    for record in statistical_records
+                    if record.get("task_id")
+                }
+            ),
+            "invalid_relationships": invalid_relationships,
+        }
     else:
         # A paper without a registry must never receive a strong rigor score
         # from prose alone. Keep the textual signals for diagnostics only.
@@ -3024,6 +3486,16 @@ def assess_experiment_rigor(
         score = 1.0
         hard_failures = ["experiment_registry_missing"]
         source = "textual_advisory_only"
+        evidence_portfolio = {
+            "required": False,
+            "completed_record_count": 0,
+            "completed_by_role": {},
+            "primary_task_ids": [],
+            "valid_ablation_task_ids": [],
+            "valid_robustness_task_ids": [],
+            "statistical_task_ids": [],
+            "invalid_relationships": [],
+        }
 
     recommendations = []
     if not findings["baseline"]:
@@ -3032,6 +3504,8 @@ def assess_experiment_rigor(
         recommendations.append("增加 ablation 分析，解释关键模块贡献。")
     if not findings["statistics"]:
         recommendations.append("补充多次运行、置信区间或显著性检验。")
+    if not findings["robustness"]:
+        recommendations.append("增加稳健性、敏感性、OOD 或边界条件实验。")
     if not findings["reproducibility"]:
         recommendations.append("补充实现细节、超参数与复现实验设置。")
 
@@ -3039,6 +3513,7 @@ def assess_experiment_rigor(
         "score": min(5.0, float(score)),
         "checks": findings,
         "textual_signals": textual_findings,
+        "evidence_portfolio": evidence_portfolio,
         "hard_failures": hard_failures,
         "source": source,
         "recommendations": recommendations,
@@ -3080,7 +3555,11 @@ def _claim_numeric_occurrences(text: str) -> list[dict[str, Any]]:
             continue
         context = value[max(0, match.start() - 20) : suffix_end + 20]
         label_context = value[max(0, match.start() - 16) : suffix_end + 8]
-        if re.search(r"(?:figure|fig\.|table|tab\.|section|page)\s*$", label_context[: len(label_context) // 2], re.IGNORECASE):
+        if re.search(
+            r"(?:figure|fig\.|table|tab\.|section|page)\s*$",
+            label_context[: len(label_context) // 2],
+            re.IGNORECASE,
+        ):
             continue
         if (
             not is_percent
@@ -3132,9 +3611,7 @@ def _numeric_values_match(
     """Compare displayed values with unit conversion and bounded rounding error."""
 
     claim_normalized = claim_value / 100.0 if claim_percent else claim_value
-    artifact_normalized = (
-        artifact_value / 100.0 if artifact_percent else artifact_value
-    )
+    artifact_normalized = artifact_value / 100.0 if artifact_percent else artifact_value
     claim_quantum = 10.0 ** (-_numeric_precision(claim_raw))
     artifact_quantum = 10.0 ** (-_numeric_precision(artifact_raw))
     if claim_percent:
@@ -3349,9 +3826,16 @@ def _numeric_evidence_groups(
         for value in payload.get("values") or []
         if str(value).strip()
     }
-    return [
-        [{"value": value, "group_id": "flat_artifact_values"} for value in flat_values]
-    ] if flat_values else []
+    return (
+        [
+            [
+                {"value": value, "group_id": "flat_artifact_values"}
+                for value in flat_values
+            ]
+        ]
+        if flat_values
+        else []
+    )
 
 
 def _claim_token_metric_hint(
@@ -3420,9 +3904,14 @@ def _numeric_evidence_matches(
             for field in ("task_id", "dataset", "baseline", "split_hash")
         )
         explicit_metadata = [
-            value for values in known_metadata.values() for value in values if value in claim_lower
+            value
+            for values in known_metadata.values()
+            for value in values
+            if value in claim_lower
         ]
-        if explicit_metadata and not all(value in group_text for value in explicit_metadata):
+        if explicit_metadata and not all(
+            value in group_text for value in explicit_metadata
+        ):
             continue
 
         group_values = {
@@ -3431,9 +3920,7 @@ def _numeric_evidence_matches(
             if str(item.get("value") or "").strip()
         }
         group_metrics = {
-            metric
-            for item in group
-            for metric in _metric_aliases(item.get("metric"))
+            metric for item in group for metric in _metric_aliases(item.get("metric"))
         }
         matched_all = True
         for index, token in enumerate(claim_tokens):
@@ -3459,7 +3946,9 @@ def _numeric_evidence_matches(
         if matched_all:
             return True, {
                 "matched": True,
-                "group_id": str(group[0].get("record_id") or group[0].get("group_id") or ""),
+                "group_id": str(
+                    group[0].get("record_id") or group[0].get("group_id") or ""
+                ),
                 "record_id": str(group[0].get("record_id") or ""),
                 "task_id": str(group[0].get("task_id") or ""),
                 "matched_values": sorted(group_values),
@@ -3471,12 +3960,9 @@ def _numeric_evidence_matches(
 
 
 _CITATION_COMMAND_RE = re.compile(r"\\(?P<command>cite[a-zA-Z]*|nocite)\*?")
-_CLAIM_REF_TOKEN_PATTERN = (
-    r"\\claimref\s*(?:\[[^\]]*\])?\s*\{\s*[^{}\s,]+\s*\}"
-)
+_CLAIM_REF_TOKEN_PATTERN = r"\\claimref\s*(?:\[[^\]]*\])?\s*\{\s*[^{}\s,]+\s*\}"
 _CLAIM_REF_RE = re.compile(
-    r"\\claimref\s*(?:\[(?P<opts>[^\]]*)\])?\s*"
-    r"\{\s*(?P<target>[^{}\s,]+)\s*\}",
+    r"\\claimref\s*(?:\[(?P<opts>[^\]]*)\])?\s*" r"\{\s*(?P<target>[^{}\s,]+)\s*\}",
     re.MULTILINE,
 )
 _TRAILING_CLAIM_REF_RE = re.compile(
@@ -3489,8 +3975,7 @@ _BIB_DECLARATION_RE = re.compile(
     re.IGNORECASE,
 )
 _FILECONTENTS_RE = re.compile(
-    r"\\begin\{filecontents\*?\}\s*\{([^{}]+)\}(.*?)"
-    r"\\end\{filecontents\*?\}",
+    r"\\begin\{filecontents\*?\}\s*\{([^{}]+)\}(.*?)" r"\\end\{filecontents\*?\}",
     re.IGNORECASE | re.DOTALL,
 )
 _BIB_ENTRY_START_RE = re.compile(r"@\s*([A-Za-z][\w-]*)\s*([\{\(])")
@@ -3582,7 +4067,9 @@ def _extract_citation_keys(latex_content: str) -> dict[str, Any]:
         while cursor < len(cleaned) and cleaned[cursor] == "[":
             _, cursor = _consume_balanced_delimiter(cleaned, cursor, "[", "]")
             if cursor >= len(cleaned) or cleaned[cursor - 1] != "]":
-                parse_errors.append(f"{match.group('command')}:unclosed_optional_argument")
+                parse_errors.append(
+                    f"{match.group('command')}:unclosed_optional_argument"
+                )
                 break
             while cursor < len(cleaned) and cleaned[cursor].isspace():
                 cursor += 1
@@ -3611,7 +4098,9 @@ def _extract_citation_keys(latex_content: str) -> dict[str, Any]:
     }
 
 
-def _parse_bib_entries(content: str, source_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+def _parse_bib_entries(
+    content: str, source_name: str
+) -> tuple[list[dict[str, Any]], list[str]]:
     entries: list[dict[str, Any]] = []
     errors: list[str] = []
     text = str(content or "")
@@ -3685,7 +4174,9 @@ def _citation_integrity_report(
     def add_embedded(filename: str) -> None:
         normalized = Path(filename).name.lower()
         if normalized in embedded_sources and normalized not in loaded_names:
-            sources.append((f"embedded:{Path(filename).name}", embedded_sources[normalized]))
+            sources.append(
+                (f"embedded:{Path(filename).name}", embedded_sources[normalized])
+            )
             loaded_names.add(normalized)
 
     def add_path(path: Path) -> None:
@@ -3713,8 +4204,15 @@ def _citation_integrity_report(
             if root is None:
                 missing_sources.append(filename)
                 continue
-            candidates = [root / "latex" / raw_name, root / "latex" / filename, root / raw_name, root / filename]
-            existing = next((candidate for candidate in candidates if candidate.is_file()), None)
+            candidates = [
+                root / "latex" / raw_name,
+                root / "latex" / filename,
+                root / raw_name,
+                root / filename,
+            ]
+            existing = next(
+                (candidate for candidate in candidates if candidate.is_file()), None
+            )
             if existing is None:
                 missing_sources.append(filename)
             else:
@@ -3740,12 +4238,12 @@ def _citation_integrity_report(
     key_sources: dict[str, list[str]] = {}
     for entry in entries:
         key_sources.setdefault(str(entry["key"]), []).append(str(entry["source"]))
-    duplicate_keys = sorted(key for key, values in key_sources.items() if len(values) > 1)
+    duplicate_keys = sorted(
+        key for key, values in key_sources.items() if len(values) > 1
+    )
     duplicate_case_keys = sorted(
         key
-        for key in {
-            item.lower() for item in key_sources
-        }
+        for key in {item.lower() for item in key_sources}
         if sum(1 for item in key_sources if item.lower() == key) > 1
     )
     bib_keys = sorted(key_sources)
@@ -3818,7 +4316,9 @@ def _claim_graph_binding_report(
         and len(node_ids) == len(nodes)
         and all(node_ids)
         and len(edge_keys) == len(set(edge_keys))
-        and all(source and target and edge_type for source, target, edge_type in edge_keys)
+        and all(
+            source and target and edge_type for source, target, edge_type in edge_keys
+        )
         and all(source in nodes and target in nodes for source, target, _ in edge_keys)
         and all(
             (
@@ -3850,14 +4350,10 @@ def _claim_graph_binding_report(
             records_by_task.setdefault(task_id, []).append(record)
 
     claim_nodes = {
-        node_id: node
-        for node_id, node in nodes.items()
-        if node.get("type") == "claim"
+        node_id: node for node_id, node in nodes.items() if node.get("type") == "claim"
     }
     metric_nodes = {
-        node_id: node
-        for node_id, node in nodes.items()
-        if node.get("type") == "metric"
+        node_id: node for node_id, node in nodes.items() if node.get("type") == "metric"
     }
     task_nodes = {
         node_id: node
@@ -3865,7 +4361,9 @@ def _claim_graph_binding_report(
         if node.get("type") == "experiment"
     }
 
-    def _metadata_matches(node: dict[str, Any], candidates: list[dict[str, Any]]) -> bool:
+    def _metadata_matches(
+        node: dict[str, Any], candidates: list[dict[str, Any]]
+    ) -> bool:
         if not candidates:
             return False
         field_aliases = {
@@ -3892,6 +4390,7 @@ def _claim_graph_binding_report(
                 for field in record_fields
             ):
                 return False
+
         def collect_hashes(value: Any) -> set[str]:
             found: set[str] = set()
             if isinstance(value, dict):
@@ -3915,7 +4414,9 @@ def _claim_graph_binding_report(
         ):
             node_hashes.update(collect_hashes(node.get(field)))
         if node_hashes:
-            record_hashes = set().union(*(collect_hashes(record) for record in candidates))
+            record_hashes = set().union(
+                *(collect_hashes(record) for record in candidates)
+            )
             if not node_hashes.issubset(record_hashes):
                 return False
         return True
@@ -3924,7 +4425,9 @@ def _claim_graph_binding_report(
     claim_paths: dict[str, set[str]] = {claim_id: set() for claim_id in claim_nodes}
     path_details: list[dict[str, Any]] = []
     for task_id, candidates in records_by_task.items():
-        if task_id not in task_nodes or not _metadata_matches(task_nodes[task_id], candidates):
+        if task_id not in task_nodes or not _metadata_matches(
+            task_nodes[task_id], candidates
+        ):
             task_paths[task_id] = set()
             continue
         metric_ids = {
@@ -3962,8 +4465,12 @@ def _claim_graph_binding_report(
                 )
 
     completed_task_ids = set(records_by_task)
-    unbound_tasks = sorted(task_id for task_id in completed_task_ids if not task_paths.get(task_id))
-    unbound_claims = sorted(claim_id for claim_id, tasks in claim_paths.items() if not tasks)
+    unbound_tasks = sorted(
+        task_id for task_id in completed_task_ids if not task_paths.get(task_id)
+    )
+    unbound_claims = sorted(
+        claim_id for claim_id, tasks in claim_paths.items() if not tasks
+    )
     return {
         "graph_present": bool(nodes),
         "graph_structure_ok": graph_structure_ok,
@@ -3972,13 +4479,23 @@ def _claim_graph_binding_report(
         "metric_count": len(metric_nodes),
         "task_node_count": len(task_nodes),
         "completed_task_count": len(completed_task_ids),
-        "bound_task_count": sum(bool(task_paths.get(task_id)) for task_id in completed_task_ids),
-        "bound_claim_count": sum(bool(claim_paths.get(claim_id)) for claim_id in claim_nodes),
-        "bound_claim_ids": sorted(claim_id for claim_id, tasks in claim_paths.items() if tasks),
+        "bound_task_count": sum(
+            bool(task_paths.get(task_id)) for task_id in completed_task_ids
+        ),
+        "bound_claim_count": sum(
+            bool(claim_paths.get(claim_id)) for claim_id in claim_nodes
+        ),
+        "bound_claim_ids": sorted(
+            claim_id for claim_id, tasks in claim_paths.items() if tasks
+        ),
         "unbound_claim_ids": unbound_claims,
         "unbound_task_ids": unbound_tasks,
-        "task_paths": {task_id: sorted(claims) for task_id, claims in task_paths.items()},
-        "claim_paths": {claim_id: sorted(tasks) for claim_id, tasks in claim_paths.items()},
+        "task_paths": {
+            task_id: sorted(claims) for task_id, claims in task_paths.items()
+        },
+        "claim_paths": {
+            claim_id: sorted(tasks) for claim_id, tasks in claim_paths.items()
+        },
         "path_details": path_details,
         "status": (
             "ready"
@@ -4073,7 +4590,9 @@ def _manuscript_claim_binding_report(
             reasons.append("unknown_graph_claim_ref")
         if numbers:
             if not numeric_matched:
-                reasons.append(str(numeric_detail.get("reason") or "numeric_evidence_unbound"))
+                reasons.append(
+                    str(numeric_detail.get("reason") or "numeric_evidence_unbound")
+                )
             elif not numeric_path_claim_ids:
                 reasons.append("numeric_record_has_no_graph_claim_path")
             elif graph_claim_refs:
@@ -4125,13 +4644,17 @@ def _manuscript_claim_binding_report(
         "issues": (
             []
             if status == "ready"
-            else (["no_manuscript_claims_detected"] if not ledger else sorted(
-                {
-                    reason
-                    for claim in unbound
-                    for reason in claim.get("reasons") or []
-                }
-            ))
+            else (
+                ["no_manuscript_claims_detected"]
+                if not ledger
+                else sorted(
+                    {
+                        reason
+                        for claim in unbound
+                        for reason in claim.get("reasons") or []
+                    }
+                )
+            )
         ),
     }
 
@@ -4271,7 +4794,9 @@ def assess_claim_support(
             artifact_binding.update(
                 {
                     "status": "ready" if binding_ready else "blocked",
-                    "completed_task_count": graph_binding.get("completed_task_count", 0),
+                    "completed_task_count": graph_binding.get(
+                        "completed_task_count", 0
+                    ),
                     "bound_task_count": graph_binding.get("bound_task_count", 0),
                     "bound_claim_count": graph_binding.get("bound_claim_count", 0),
                     "bound_manuscript_claim_count": manuscript_binding.get(
@@ -4291,18 +4816,30 @@ def assess_claim_support(
                                     else []
                                 )
                                 + [
-                                    "unbound_claims="
-                                    + ",".join(graph_binding.get("unbound_claim_ids") or [])
-                                    if graph_binding.get("unbound_claim_ids")
-                                    else "",
-                                    "unbound_tasks="
-                                    + ",".join(graph_binding.get("unbound_task_ids") or [])
-                                    if graph_binding.get("unbound_task_ids")
-                                    else "",
-                                    "manuscript_claim_issues="
-                                    + ",".join(manuscript_binding.get("issues") or [])
-                                    if manuscript_binding.get("issues")
-                                    else "",
+                                    (
+                                        "unbound_claims="
+                                        + ",".join(
+                                            graph_binding.get("unbound_claim_ids") or []
+                                        )
+                                        if graph_binding.get("unbound_claim_ids")
+                                        else ""
+                                    ),
+                                    (
+                                        "unbound_tasks="
+                                        + ",".join(
+                                            graph_binding.get("unbound_task_ids") or []
+                                        )
+                                        if graph_binding.get("unbound_task_ids")
+                                        else ""
+                                    ),
+                                    (
+                                        "manuscript_claim_issues="
+                                        + ",".join(
+                                            manuscript_binding.get("issues") or []
+                                        )
+                                        if manuscript_binding.get("issues")
+                                        else ""
+                                    ),
                                 ]
                                 if str(item)
                             ]
@@ -4335,7 +4872,95 @@ def assess_claim_support(
     }
 
 
-def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
+def _read_optional_gate_artifact(
+    path: Path,
+    *,
+    label: str,
+    maximum: int,
+) -> tuple[bytes | None, str | None]:
+    """Return stable bytes and a boundary error for one optional artifact."""
+
+    try:
+        return (
+            read_bounded_regular_file(path, maximum=maximum, label=label),
+            None,
+        )
+    except BoundedFileError as exc:
+        if exc.reason == "missing":
+            return None, None
+        return None, exc.code
+
+
+def _decode_gate_mapping(
+    encoded: bytes | None,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], str | None]:
+    if encoded is None:
+        return {}, None
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return {}, f"{label}_invalid_json"
+    if not isinstance(payload, dict):
+        return {}, f"{label}_not_object"
+    return payload, None
+
+
+def _decode_gate_registry(
+    encoded: bytes | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if encoded is None:
+        return [], []
+    try:
+        lines = encoded.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        return [], [{"line": None, "error": "invalid_utf8", "detail": str(exc)}]
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if line_number > _MAX_GATE_REGISTRY_ROWS:
+            errors.append(
+                {
+                    "line": line_number,
+                    "error": "row_limit_exceeded",
+                    "detail": str(_MAX_GATE_REGISTRY_ROWS),
+                }
+            )
+            break
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            errors.append(
+                {
+                    "line": line_number,
+                    "error": "invalid_json",
+                    "detail": str(exc),
+                }
+            )
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+        else:
+            errors.append(
+                {
+                    "line": line_number,
+                    "error": "row_not_object",
+                    "detail": type(payload).__name__,
+                }
+            )
+    return rows, errors
+
+
+def build_scientific_evidence_gate(
+    base_folder: str | Path,
+    *,
+    target_venue: str | None = None,
+    verifier_trust_store: str | Path | None = None,
+) -> dict:
     """Build a deterministic, artifact-bound publication gate.
 
     This gate deliberately does not inspect prose quality. A manuscript can be
@@ -4367,33 +4992,81 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
     registry_path = root / "experiment_registry.jsonl"
     graph_path = root / "claim_evidence_graph.json"
     verification_path = root / "verification_report.json"
+    verifier_authority_path = root / "verifier_authority_receipt.json"
     snapshot_path = root / SNAPSHOT_FILENAME
     latex_path = root / "latex" / "template.tex"
-    snapshot_required = snapshot_path.exists() or (root / "latex" / "template.tex").is_file()
+    latex_bytes, latex_boundary_error = _read_optional_gate_artifact(
+        latex_path,
+        label="latex_manuscript",
+        maximum=_MAX_GATE_ARTIFACT_BYTES,
+    )
+    preregistration_bytes, preregistration_boundary_error = (
+        _read_optional_gate_artifact(
+            preregistration_path,
+            label="preregistration",
+            maximum=_MAX_GATE_ARTIFACT_BYTES,
+        )
+    )
+    registry_bytes, registry_boundary_error = _read_optional_gate_artifact(
+        registry_path,
+        label="experiment_registry",
+        maximum=_MAX_GATE_REGISTRY_BYTES,
+    )
+    graph_bytes, graph_boundary_error = _read_optional_gate_artifact(
+        graph_path,
+        label="claim_graph",
+        maximum=_MAX_GATE_ARTIFACT_BYTES,
+    )
+    verification_bytes, verification_boundary_error = _read_optional_gate_artifact(
+        verification_path,
+        label="verification_report",
+        maximum=_MAX_GATE_ARTIFACT_BYTES,
+    )
+    snapshot_bytes, snapshot_boundary_error = _read_optional_gate_artifact(
+        snapshot_path,
+        label="evidence_snapshot",
+        maximum=_MAX_GATE_ARTIFACT_BYTES,
+    )
+    boundary_errors = {
+        "latex_artifact_boundary": latex_boundary_error,
+        "preregistration_artifact_boundary": preregistration_boundary_error,
+        "experiment_registry_artifact_boundary": registry_boundary_error,
+        "claim_graph_artifact_boundary": graph_boundary_error,
+        "verification_report_artifact_boundary": verification_boundary_error,
+        "evidence_snapshot_artifact_boundary": snapshot_boundary_error,
+    }
+    for check_id, error in boundary_errors.items():
+        check(
+            check_id,
+            error is None,
+            error or "missing is handled by the artifact's semantic gate",
+        )
+    snapshot_required = bool(
+        snapshot_bytes is not None
+        or snapshot_boundary_error
+        or latex_bytes is not None
+        or latex_boundary_error
+    )
 
     citation_report: dict[str, Any]
     latex_content: str | None = None
-    if latex_path.is_file():
-        try:
-            latex_content = latex_path.read_text(
-                encoding="utf-8", errors="replace"
-            )
-            citation_report = _citation_integrity_report(
-                latex_content, root
-            )
-        except OSError:
-            latex_content = ""
-            citation_report = {
-                "ok": False,
-                "status": "blocked",
-                "issues": ["latex_read_failed"],
-            }
+    if latex_bytes is not None:
+        latex_content = latex_bytes.decode("utf-8", errors="replace")
+        citation_report = _citation_integrity_report(latex_content, root)
         check(
             "citation_integrity",
             citation_report.get("ok") is True,
             ", ".join(citation_report.get("issues") or [])
             or "all in-text citation keys resolve to unique, used BibTeX entries",
         )
+    elif latex_boundary_error:
+        latex_content = ""
+        citation_report = {
+            "ok": False,
+            "status": "blocked",
+            "issues": [latex_boundary_error],
+        }
+        check("citation_integrity", False, latex_boundary_error)
     else:
         citation_report = {
             "ok": True,
@@ -4402,15 +5075,15 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "has_citations": False,
         }
 
-    preregistration: dict[str, Any] = {}
-    if preregistration_path.exists():
-        try:
-            payload = json.loads(preregistration_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                preregistration = payload
-        except (OSError, ValueError, TypeError):
-            preregistration = {}
-    check("preregistration_present", bool(preregistration), "preregistration.json")
+    preregistration, preregistration_decode_error = _decode_gate_mapping(
+        preregistration_bytes,
+        label="preregistration",
+    )
+    check(
+        "preregistration_present",
+        bool(preregistration),
+        preregistration_decode_error or "preregistration.json",
+    )
 
     preregistration_report = (
         validate_preregistration(preregistration, require_locked=True)
@@ -4423,6 +5096,111 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         ", ".join(preregistration_report.get("errors") or [])
         or "locked and hash-valid",
     )
+    normalized_venue = str(target_venue or "").strip().lower()
+    venue_valid = not normalized_venue or normalized_venue in TARGET_VENUE_SET
+    check(
+        "target_venue_valid",
+        venue_valid,
+        (
+            f"target_venue={normalized_venue or 'unspecified'}; allowed="
+            + ",".join(sorted(TARGET_VENUE_SET))
+        ),
+    )
+    freeze_required = normalized_venue in {"neurips", "icml"}
+    adaptive_freeze = preregistration.get("adaptive_state_freeze")
+    adaptive_freeze_report = validate_adaptive_state_freeze(
+        adaptive_freeze,
+        preregistration=preregistration,
+    )
+    check(
+        "adaptive_exploration_state_freeze",
+        adaptive_freeze_report.get("ok") is True,
+        ", ".join(adaptive_freeze_report.get("errors") or [])
+        or "hypothesis, method, code, memory, protocol, and evaluator are frozen",
+        required=freeze_required,
+    )
+    if freeze_required:
+        try:
+            research_vcs_attestation = attest_adaptive_state_freeze(
+                root,
+                adaptive_freeze,
+                preregistration=preregistration,
+            )
+        except Exception:
+            research_vcs_attestation = {
+                "ok": False,
+                "errors": ["research_vcs_attestation_failed_closed"],
+            }
+        try:
+            empirical_data_attestation = validate_empirical_data_manifest(root)
+        except Exception:
+            empirical_data_attestation = {
+                "ok": False,
+                "errors": ["empirical_data_attestation_failed_closed"],
+            }
+        try:
+            venue_template_attestation = verify_latex_template_source(
+                normalized_venue,
+                root / "latex",
+            )
+        except Exception:
+            venue_template_attestation = {
+                "ok": False,
+                "errors": ["venue_template_attestation_failed_closed"],
+            }
+        research_root = str(
+            research_vcs_attestation.get("repository_root") or ""
+        ).strip()
+        data_root = str(empirical_data_attestation.get("project_root") or "").strip()
+        if research_root and data_root and research_root != data_root:
+            empirical_data_attestation = {
+                **empirical_data_attestation,
+                "ok": False,
+                "status": "blocked",
+                "errors": sorted(
+                    {
+                        *(empirical_data_attestation.get("errors") or []),
+                        "data_manifest_research_vcs_root_mismatch",
+                    }
+                ),
+            }
+    else:
+        research_vcs_attestation = {
+            "ok": True,
+            "status": "not_required",
+            "errors": [],
+        }
+        empirical_data_attestation = {
+            "ok": True,
+            "status": "not_required",
+            "errors": [],
+        }
+        venue_template_attestation = {
+            "ok": True,
+            "status": "not_required",
+            "errors": [],
+        }
+    check(
+        "research_vcs_attestation",
+        research_vcs_attestation.get("ok") is True,
+        ", ".join(research_vcs_attestation.get("errors") or [])
+        or "frozen Research VCS commit and checkpoint binding are host-verified",
+        required=freeze_required,
+    )
+    check(
+        "empirical_data_attestation",
+        empirical_data_attestation.get("ok") is True,
+        ", ".join(empirical_data_attestation.get("errors") or [])
+        or "content-addressed read-only empirical snapshot is byte-verified",
+        required=freeze_required,
+    )
+    check(
+        "venue_template_attestation",
+        venue_template_attestation.get("ok") is True,
+        ", ".join(venue_template_attestation.get("errors") or [])
+        or "official venue/year source bytes and manuscript style are verified",
+        required=freeze_required,
+    )
     raw_external_validity = preregistration.get("external_validity")
     external_validity = (
         raw_external_validity if isinstance(raw_external_validity, dict) else {}
@@ -4430,8 +5208,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
     external_required = external_validity.get("required") is True
     external_evidence = external_validity.get("evidence_artifacts")
     external_assessed = (
-        str(external_validity.get("status") or "").strip()
-        in {"assessed", "verified"}
+        str(external_validity.get("status") or "").strip() in {"assessed", "verified"}
         and bool(str(external_validity.get("assessment_method") or "").strip())
         and isinstance(external_evidence, list)
         and bool(external_evidence)
@@ -4447,23 +5224,31 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         required=external_required,
     )
 
-    if registry_path.exists():
-        try:
-            records, registry_parse_errors = load_jsonl_artifact_with_errors(
-                registry_path
-            )
-        except (OSError, ValueError, TypeError):
-            records, registry_parse_errors = [], [{"error": "registry_read_failed"}]
-    else:
-        records, registry_parse_errors = [], []
+    records, registry_parse_errors = _decode_gate_registry(registry_bytes)
+    if registry_boundary_error:
+        registry_parse_errors.insert(
+            0,
+            {
+                "line": None,
+                "error": registry_boundary_error,
+                "detail": str(registry_path),
+            },
+        )
     check(
         "registry_parse_integrity",
         not registry_parse_errors,
-        "experiment_registry.jsonl contains only valid object rows",
+        (
+            ", ".join(str(item.get("error") or "") for item in registry_parse_errors)
+            or "experiment_registry.jsonl contains only valid object rows"
+        ),
     )
     registry_integrity = None
     if snapshot_required or (root / "experiment_registry.integrity.json").exists():
-        registry_integrity = check_experiment_registry_integrity(root)
+        registry_integrity = (
+            check_experiment_registry_integrity(root)
+            if registry_boundary_error is None
+            else {"ok": False, "errors": [registry_boundary_error]}
+        )
         check(
             "registry_append_only_integrity",
             registry_integrity.get("ok") is True,
@@ -4474,18 +5259,71 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         item
         for item in records
         if isinstance(item, dict)
+        and item.get("record_type") != "attempt_disposition"
         and str(item.get("study_phase") or "").lower() == "confirmatory"
-    ]
-    incomplete_confirmatory = [
-        item
-        for item in confirmatory
-        if str(item.get("status") or "").lower() not in {"completed", "verified"}
     ]
     completed = [
         item
         for item in confirmatory
         if str(item.get("status") or "").lower() in {"completed", "verified"}
     ]
+    # Integrity flags are JSON booleans, not truthy labels.  In particular,
+    # ``"false"`` must not turn an ordinary record into a reproduction.
+    reproduction_records = [
+        item
+        for item in records
+        if item.get("record_type") != "attempt_disposition"
+        and item.get("independent_reproduction") is True
+    ]
+    publication_attempts = [
+        item
+        for item in records
+        if isinstance(item, dict)
+        and item.get("record_type") != "attempt_disposition"
+        and (
+            str(item.get("study_phase") or "").lower() == "confirmatory"
+            or item.get("independent_reproduction") is True
+        )
+    ]
+    incomplete_publication_attempts = [
+        item
+        for item in publication_attempts
+        if str(item.get("status") or "").lower() not in {"completed", "verified"}
+    ]
+    if freeze_required:
+        try:
+            from ai_scientist.utils.trajectory_binding import (
+                attest_structured_trajectory,
+            )
+
+            trajectory_attestation = attest_structured_trajectory(
+                root,
+                preregistration,
+                records,
+            )
+        except Exception as exc:
+            trajectory_attestation = {
+                "ok": False,
+                "errors": [str(exc) or "structured_trajectory_attestation_failed"],
+            }
+    else:
+        trajectory_attestation = {
+            "ok": True,
+            "errors": [],
+            "disposed_attempt_record_ids": [],
+            "publication_blocking_attempt_record_ids": [],
+            "publication_ready": True,
+        }
+    publication_blocking_attempt_ids = set(
+        trajectory_attestation.get("publication_blocking_attempt_record_ids") or []
+    )
+    publication_attempts_complete = (
+        trajectory_attestation.get("ok") is True
+        and trajectory_attestation.get("publication_ready") is True
+        and not publication_blocking_attempt_ids
+        if freeze_required
+        else not incomplete_publication_attempts
+    )
     check(
         "confirmatory_registry_records",
         bool(completed),
@@ -4493,20 +5331,54 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
     )
     check(
         "confirmatory_attempt_completeness",
-        not incomplete_confirmatory,
-        "all confirmatory attempts are completed or verified",
+        publication_attempts_complete,
+        (
+            "every confirmatory/reproduction attempt remains in the trajectory, "
+            "and audit-only exclusions or deviations cannot clear its blocker"
+            if freeze_required
+            else "all confirmatory/reproduction attempts are completed or verified"
+        ),
+    )
+    check(
+        "trajectory_binding",
+        trajectory_attestation.get("ok") is True
+        and trajectory_attestation.get("publication_ready") is True
+        and not publication_blocking_attempt_ids,
+        ", ".join(trajectory_attestation.get("errors") or [])
+        or (
+            "publication blockers=" + ",".join(sorted(publication_blocking_attempt_ids))
+            if publication_blocking_attempt_ids
+            else "registry evidence is bijectively bound to typed attempts/checkpoints"
+        ),
+        required=freeze_required,
     )
 
     completed_record_ids = [
         str(item.get("record_id") or "").strip() for item in completed
     ]
-    # Integrity flags are JSON booleans, not truthy labels.  In particular,
-    # ``"false"`` must not turn an ordinary record into a reproduction.
-    reproduction_records = [
-        item for item in records if item.get("independent_reproduction") is True
-    ]
-    relevant_record_ids = completed_record_ids + [
-        str(item.get("record_id") or "").strip() for item in reproduction_records
+    phase_bound_records = publication_attempts
+    confirmatory_state_fidelity = (
+        bool(phase_bound_records)
+        and bool(adaptive_freeze_report.get("ok"))
+        and all(
+            record.get("adaptive_state_hash") == adaptive_freeze.get("state_hash")
+            and record.get("research_state_hash")
+            == adaptive_freeze.get("research_state_hash")
+            and record.get("post_freeze_adaptation") is False
+            for record in phase_bound_records
+        )
+    )
+    check(
+        "confirmatory_frozen_state_fidelity",
+        confirmatory_state_fidelity,
+        (
+            "confirmatory and reproduction records bind the frozen state and "
+            "explicitly disable post-freeze adaptation"
+        ),
+        required=freeze_required,
+    )
+    relevant_record_ids = [
+        str(item.get("record_id") or "").strip() for item in publication_attempts
     ]
     check(
         "registry_record_id_integrity",
@@ -4518,8 +5390,10 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
     check(
         "registry_producer_identity",
         bool(completed)
-        and all(str(item.get("producer_id") or "").strip() for item in completed),
-        "completed records identify their producer",
+        and all(
+            str(item.get("producer_id") or "").strip() for item in publication_attempts
+        ),
+        "every confirmatory/reproduction attempt identifies its producer",
     )
 
     def _has_durable_result_artifact(record: dict[str, Any]) -> bool:
@@ -4719,16 +5593,34 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             or float(payload.get("standard_error")) < 0
         ):
             return False
-        for key in ("effect_size", "p_value", "standard_error"):
+        for key in ("p_value", "standard_error"):
             value = payload.get(key)
             if _is_number(value):
                 return True
         interval = payload.get("confidence_interval")
-        return (
+        if (
             isinstance(interval, (list, tuple))
             and len(interval) == 2
             and all(_is_number(value) for value in interval)
             and float(interval[0]) <= float(interval[1])
+        ):
+            return True
+        if any(
+            _is_number(payload.get(key)) and float(payload.get(key)) >= 0
+            for key in (
+                "standard_deviation",
+                "metric_std",
+                "std",
+                "variance",
+                "dispersion",
+            )
+        ):
+            return True
+        replicates = payload.get("replicate_values")
+        return (
+            isinstance(replicates, (list, tuple))
+            and len(replicates) >= 2
+            and all(_is_number(value) for value in replicates)
         )
 
     measured = bool(completed) and all(
@@ -4750,7 +5642,9 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         "metric values found in result cards",
     )
     check(
-        "inferential_statistics_present", inferential, "CI/effect size/p-value/SE found"
+        "inferential_statistics_present",
+        inferential,
+        "CI, p-value, SE, dispersion, or replicate uncertainty found",
     )
     check(
         "baseline_comparison_present",
@@ -4793,20 +5687,16 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         "record split hashes match preregistration",
     )
 
-    graph: dict[str, Any] = {}
-    if graph_path.exists():
-        try:
-            payload = json.loads(graph_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                graph = payload
-        except (OSError, ValueError, TypeError):
-            graph = {}
+    graph, graph_decode_error = _decode_gate_mapping(
+        graph_bytes,
+        label="claim_graph",
+    )
     graph_binding = _claim_graph_binding_report(confirmatory, graph)
     graph_bound = graph_binding.get("status") == "ready"
     check(
         "claim_graph_present",
         graph_binding.get("graph_present") is True,
-        "claim_evidence_graph.json",
+        graph_decode_error or "claim_evidence_graph.json",
     )
     check(
         "claim_graph_integrity",
@@ -4851,14 +5741,10 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "issues": [],
         }
 
-    verification: dict[str, Any] = {}
-    if verification_path.exists():
-        try:
-            payload = json.loads(verification_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                verification = payload
-        except (OSError, ValueError, TypeError):
-            verification = {}
+    verification, verification_decode_error = _decode_gate_mapping(
+        verification_bytes,
+        label="verification_report",
+    )
     conclusion_interpretation = verification.get("conclusion_interpretation")
     if not isinstance(conclusion_interpretation, dict):
         conclusion_interpretation = {}
@@ -4873,13 +5759,24 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         (
             f"conclusion status={conclusion_status or 'missing'}; "
             "inconclusive results cannot promote a no-effect or effect claim"
+            + (f"; {verification_decode_error}" if verification_decode_error else "")
         ),
     )
     producer_ids = {
         str(record.get("producer_id") or "").strip()
-        for record in completed
+        for record in publication_attempts
         if str(record.get("producer_id") or "").strip()
     }
+    try:
+        producer_principals = {
+            canonical_principal(item, label="producer_id") for item in producer_ids
+        }
+        verifier_principal = canonical_principal(
+            verification.get("verifier_id"), label="verifier_id"
+        )
+        verifier_principal_independent = verifier_principal not in producer_principals
+    except (TypeError, ValueError):
+        verifier_principal_independent = False
     completed_record_id_set = {
         record_id for record_id in completed_record_ids if record_id
     }
@@ -4936,7 +5833,12 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         bool(str(verification.get("report_hash") or "").strip())
         and verification.get("report_hash") == expected_verification_hash
     )
+    unsafe_recompute_inputs = [
+        error for error in boundary_errors.values() if error is not None
+    ]
     try:
+        if unsafe_recompute_inputs:
+            raise ValueError(",".join(unsafe_recompute_inputs))
         recomputed_verification = build_verification_report(
             preregistration,
             records,
@@ -4965,10 +5867,16 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         and verification.get("reproduction_record_ids")
         == recomputed_verification.get("reproduction_record_ids")
         and verification.get("report_hash") == recomputed_report_hash
-        and verification.get("records_hash") == recomputed_verification.get("records_hash")
-        and verification.get("registry_hash") == recomputed_verification.get("registry_hash")
+        and verification.get("records_hash")
+        == recomputed_verification.get("records_hash")
+        and verification.get("registry_hash")
+        == recomputed_verification.get("registry_hash")
         and verification.get("evidence_snapshot_hash")
         == recomputed_verification.get("evidence_snapshot_hash")
+        and verification.get("data_manifest_hash")
+        == recomputed_verification.get("data_manifest_hash")
+        and verification.get("data_snapshot_id")
+        == recomputed_verification.get("data_snapshot_id")
     )
     verified = (
         verification.get("schema_version") == SCHEMA_VERSION
@@ -4981,9 +5889,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         and bool(str(verification.get("verifier_id") or "").strip())
         and bool(verification.get("clean_room") is True)
         and criteria_all_passed
-        and not producer_ids.intersection(
-            {str(verification.get("verifier_id") or "").strip()}
-        )
+        and verifier_principal_independent
         and verification_record_ids_exact
         and verification_hash_ok
         and verification_matches_registry
@@ -5014,36 +5920,95 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         verification_hash_ok and verification_matches_registry,
         "verification report hash and semantics match a fresh registry recomputation",
     )
-    snapshot_report = verify_evidence_snapshot(root) if snapshot_required else {
-        "ok": True,
-        "current": {},
-        "expected_hash": None,
-        "current_hash": None,
-        "mismatches": [],
-    }
+    expected_snapshot, snapshot_decode_error = _decode_gate_mapping(
+        snapshot_bytes,
+        label="evidence_snapshot",
+    )
+    if snapshot_required and (unsafe_recompute_inputs or snapshot_decode_error):
+        snapshot_report = {
+            "ok": False,
+            "current": {},
+            "expected_hash": None,
+            "current_hash": None,
+            "mismatches": sorted(
+                {
+                    *unsafe_recompute_inputs,
+                    *([snapshot_decode_error] if snapshot_decode_error else []),
+                }
+            ),
+        }
+    elif snapshot_required:
+        snapshot_report = verify_evidence_snapshot(root, expected=expected_snapshot)
+    else:
+        snapshot_report = {
+            "ok": True,
+            "current": {},
+            "expected_hash": None,
+            "current_hash": None,
+            "mismatches": [],
+        }
     check(
         "evidence_snapshot_integrity",
         snapshot_report.get("ok") is True if snapshot_required else True,
         ", ".join(snapshot_report.get("mismatches") or [])
-        or ("final manuscript and evidence files are unchanged" if snapshot_required else "not required for low-level registry audit"),
-    )
-    snapshot_binding_ok = (
-        not snapshot_required
         or (
-            snapshot_report.get("ok") is True
-            and bool(verification.get("evidence_snapshot_hash"))
-            and verification.get("evidence_snapshot_hash")
-            == snapshot_report.get("current_hash")
-            and verification.get("manuscript_hash")
-            == snapshot_report.get("current", {}).get("manuscript_hash")
-            and verification.get("registry_hash")
-            == snapshot_report.get("current", {}).get("registry_hash")
-        )
+            "final manuscript and evidence files are unchanged"
+            if snapshot_required
+            else "not required for low-level registry audit"
+        ),
+    )
+    snapshot_binding_ok = not snapshot_required or (
+        snapshot_report.get("ok") is True
+        and bool(verification.get("evidence_snapshot_hash"))
+        and verification.get("evidence_snapshot_hash")
+        == snapshot_report.get("current_hash")
+        and verification.get("manuscript_hash")
+        == snapshot_report.get("current", {}).get("manuscript_hash")
+        and verification.get("registry_hash")
+        == snapshot_report.get("current", {}).get("registry_hash")
     )
     check(
         "verification_snapshot_binding",
         snapshot_binding_ok,
         "verification report is bound to the current final manuscript snapshot",
+    )
+    host_manifest_hash = str(
+        empirical_data_attestation.get("manifest_hash") or ""
+    ).strip()
+    host_snapshot_id = str(empirical_data_attestation.get("snapshot_id") or "").strip()
+    data_bound_records = [
+        record
+        for record in records
+        if str(record.get("study_phase") or "").strip().lower() == "confirmatory"
+        or record.get("independent_reproduction") is True
+    ]
+    data_criterion = verification_criteria.get("data_contract_binding") or {}
+    data_contract_chain_ok = (
+        empirical_data_attestation.get("ok") is True
+        and _is_content_hash(host_manifest_hash)
+        and _is_content_hash(host_snapshot_id)
+        and data_policy.get("data_manifest_hash") == host_manifest_hash
+        and data_policy.get("data_snapshot_id") == host_snapshot_id
+        and bool(data_bound_records)
+        and all(
+            record.get("data_manifest_hash") == host_manifest_hash
+            and record.get("data_snapshot_id") == host_snapshot_id
+            for record in data_bound_records
+        )
+        and verification.get("data_manifest_hash") == host_manifest_hash
+        and verification.get("data_snapshot_id") == host_snapshot_id
+        and data_criterion.get("passed") is True
+        and data_criterion.get("required") is True
+    )
+    check(
+        "data_contract_chain_binding",
+        data_contract_chain_ok,
+        (
+            "locked preregistration, every confirmatory/reproduction record, "
+            "verification report, and authority input bind the same host-verified "
+            "data manifest and snapshot"
+        ),
+        required=freeze_required,
     )
     check(
         "independent_verification",
@@ -5052,10 +6017,106 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             verification.get("status") or "verification_report.json missing or blocked"
         ),
     )
+    if freeze_required:
+        authority_bytes, authority_boundary_error = _read_optional_gate_artifact(
+            verifier_authority_path,
+            label="verifier_authority_receipt",
+            maximum=_MAX_GATE_ARTIFACT_BYTES,
+        )
+        check(
+            "verifier_authority_artifact_boundary",
+            authority_boundary_error is None,
+            authority_boundary_error
+            or "missing is handled by the independent authority gate",
+        )
+        if authority_boundary_error:
+            verifier_authority = {
+                "ok": False,
+                "status": "blocked",
+                "errors": [authority_boundary_error],
+            }
+        elif authority_bytes is None:
+            verifier_authority = {
+                "ok": False,
+                "status": "blocked",
+                "errors": ["verifier_authority_receipt_missing"],
+            }
+        else:
+            try:
+                authority_payload = json.loads(authority_bytes.decode("utf-8"))
+                trust_boundaries: list[Path] = [root]
+                for boundary_value in (
+                    research_vcs_attestation.get("repository_root"),
+                    empirical_data_attestation.get("project_root"),
+                ):
+                    boundary_text = str(boundary_value or "").strip()
+                    if boundary_text:
+                        trust_boundaries.append(
+                            Path(boundary_text).expanduser().resolve()
+                        )
+                for candidate in (root, *root.parents):
+                    if (candidate / ".git").exists() or (
+                        candidate / ".xscientist"
+                    ).is_dir():
+                        trust_boundaries.append(candidate.resolve())
+                        break
+                verifier_authority = verify_verifier_authority_receipt(
+                    authority_payload,
+                    verification,
+                    producer_ids,
+                    verifier_trust_store,
+                    data_manifest_hash=str(
+                        empirical_data_attestation.get("manifest_hash") or ""
+                    ),
+                    data_snapshot_id=str(
+                        empirical_data_attestation.get("snapshot_id") or ""
+                    ),
+                    forbidden_trust_roots=tuple(dict.fromkeys(trust_boundaries)),
+                )
+            except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                verifier_authority = {
+                    "ok": False,
+                    "status": "blocked",
+                    "errors": [str(exc) or "verifier_authority_receipt_unreadable"],
+                }
+    else:
+        check(
+            "verifier_authority_artifact_boundary",
+            True,
+            "not required for this target venue",
+            required=False,
+        )
+        verifier_authority = {
+            "ok": True,
+            "status": "not_required",
+            "errors": [],
+        }
+    check(
+        "independent_verifier_authority",
+        verifier_authority.get("ok") is True,
+        ", ".join(verifier_authority.get("errors") or [])
+        or "external Ed25519 authority binds the verifier and complete report",
+        required=freeze_required,
+    )
 
     recovery_actions = {
         "preregistration_present": "Create a preregistration before interpreting confirmatory results.",
+        "target_venue_valid": "Select one supported target venue exactly; an unknown or misspelled venue cannot relax publication requirements.",
         "locked_preregistration": "Resolve placeholders, hash every split, and lock the preregistration.",
+        "adaptive_exploration_state_freeze": "Freeze the hypothesis, method, code/Research VCS state, memory, protocol, split, metric, and evaluator before confirmation.",
+        "research_vcs_attestation": "Create the freeze through the host Research VCS workflow and retain its hash-valid checkpoint; invented or missing commits cannot support a top-venue claim.",
+        "empirical_data_attestation": "Provide a content-addressed read-only empirical data snapshot whose manifest and every stored file pass byte-level verification.",
+        "data_contract_chain_binding": "Regenerate the locked preregistration and every confirmatory/reproduction record against the same host-verified data manifest_hash and snapshot_id, then regenerate the verification report and authority receipt.",
+        "trajectory_binding": "For every confirmatory and reproduction registry row, record the typed Research VCS attempt, run `xscientist research trajectory-bind`, and append an explicit disposition for each unsuccessful attempt; then regenerate the report and authority receipt.",
+        "venue_template_attestation": "Regenerate the manuscript from the pinned official venue/year archive; preserve its verified style declaration and template_source.json receipt.",
+        "latex_artifact_boundary": "Replace latex/template.tex with a bounded regular file owned by the paper workspace; symbolic links and concurrent mutation are rejected.",
+        "preregistration_artifact_boundary": "Replace preregistration.json with a bounded regular file owned by the paper workspace; symbolic links and concurrent mutation are rejected.",
+        "experiment_registry_artifact_boundary": "Replace experiment_registry.jsonl with a bounded regular file owned by the paper workspace and keep it below the gate size limit.",
+        "claim_graph_artifact_boundary": "Replace claim_evidence_graph.json with a bounded regular file owned by the paper workspace.",
+        "verification_report_artifact_boundary": "Replace verification_report.json with a bounded regular file owned by the paper workspace.",
+        "evidence_snapshot_artifact_boundary": "Replace evidence_snapshot.json with a bounded regular file owned by the paper workspace.",
+        "verifier_authority_artifact_boundary": "Replace verifier_authority_receipt.json with a bounded regular file owned by the paper workspace.",
+        "confirmatory_frozen_state_fidelity": "Re-run confirmation and independent reproduction against the frozen state; do not update memory or method from held-out outcomes.",
         "estimand_specification": "Declare the population, intervention, comparator, outcome, measure, and endpoint in the preregistration.",
         "missing_data_policy": "Record the primary and sensitivity missing-data rules and report missing counts.",
         "null_result_interpretation": "Mark a near-zero result inconclusive, or preregister an equivalence margin/precision target and satisfy it.",
@@ -5063,7 +6124,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         "external_validity_assessment": "Assess the declared transfer conditions with independent data or explicitly keep the claim local.",
         "registry_parse_integrity": "Repair or quarantine malformed experiment_registry.jsonl rows before auditing.",
         "confirmatory_registry_records": "Run and record an explicit confirmatory phase for each registered task.",
-        "confirmatory_attempt_completeness": "Resolve or explicitly quarantine every failed/running confirmatory attempt before publication; incomplete attempts cannot be silently ignored.",
+        "confirmatory_attempt_completeness": "Keep every failed, timed-out, or cancelled attempt and append an immutable attempt-disposition decision; running attempts must reach a terminal state and cannot be hidden.",
         "durable_result_artifacts": "Persist non-empty result/input artifacts inside the study root.",
         "record_recomputation_evidence": "Run the clean-room verifier and record its command plus matching hashes.",
         "protocol_fidelity_hash": "Re-run the confirmatory task against the locked analysis/data/control protocol and record its protocol hash.",
@@ -5076,6 +6137,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         "verification_report_hash": "Regenerate verification_report.json from the current registry; do not hand-edit it.",
         "verification_criteria_integrity": "Regenerate the verification report so every criterion ID is unique and complete.",
         "independent_verification": "Use a verifier identity distinct from producers and complete clean-room reproduction.",
+        "independent_verifier_authority": "Have an externally trusted verifier sign the final verification report with Ed25519, place verifier_authority_receipt.json beside it, and configure XSCIENTIST_VERIFIER_TRUST_STORE outside the research workspace.",
     }
     next_actions = [
         recovery_actions.get(
@@ -5089,7 +6151,14 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
     dimension_check_ids = {
         "protocol_integrity": [
             "preregistration_present",
+            "target_venue_valid",
             "locked_preregistration",
+            "adaptive_exploration_state_freeze",
+            "research_vcs_attestation",
+            "empirical_data_attestation",
+            "data_contract_chain_binding",
+            "trajectory_binding",
+            "venue_template_attestation",
             "estimand_specification",
             "missing_data_policy",
             "confirmatory_registry_records",
@@ -5101,6 +6170,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "locked_split_fidelity",
             "blind_holdout_boundary",
             "independent_seed_coverage",
+            "confirmatory_frozen_state_fidelity",
         ],
         "computational_replayability": [
             "registry_parse_integrity",
@@ -5112,6 +6182,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "verification_snapshot_binding",
             "verification_report_hash",
             "independent_verification",
+            "independent_verifier_authority",
         ],
         "statistical_evidence": [
             "numeric_results_are_artifact_bound",
@@ -5119,6 +6190,7 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "baseline_comparison_present",
             "conclusion_interpretation",
             "independent_verification",
+            "independent_verifier_authority",
         ],
         "external_validity": ["external_validity_assessment"],
     }
@@ -5129,8 +6201,10 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         required_rows = [item for item in rows if item.get("required") is True]
         if failed_ids and any(item.get("required") is True for item in rows):
             dimension_status = "blocked"
-        elif rows and any(item.get("passed") is True for item in rows) and all(
-            item.get("passed") is True for item in required_rows
+        elif (
+            rows
+            and any(item.get("passed") is True for item in rows)
+            and all(item.get("passed") is True for item in required_rows)
         ):
             dimension_status = "verified"
         else:
@@ -5154,10 +6228,27 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
         "external_validity": "researcher",
     }
     inputs_for_dimension = {
-        "protocol_integrity": ["locked preregistration", "split hashes", "protocol hash"],
-        "computational_replayability": ["code", "data artifacts", "environment", "replay command"],
-        "statistical_evidence": ["result summaries", "uncertainty estimates", "null-result interpretation"],
-        "external_validity": ["target transfer conditions", "assessment data", "independent validation"],
+        "protocol_integrity": [
+            "locked preregistration",
+            "split hashes",
+            "protocol hash",
+        ],
+        "computational_replayability": [
+            "code",
+            "data artifacts",
+            "environment",
+            "replay command",
+        ],
+        "statistical_evidence": [
+            "result summaries",
+            "uncertainty estimates",
+            "null-result interpretation",
+        ],
+        "external_validity": [
+            "target transfer conditions",
+            "assessment data",
+            "independent validation",
+        ],
     }
     recovery_plan: list[dict[str, Any]] = []
     for failure in failures:
@@ -5230,10 +6321,15 @@ def build_scientific_evidence_gate(base_folder: str | Path) -> dict:
             "experiment_registry": str(registry_path),
             "claim_evidence_graph": str(graph_path),
             "verification_report": str(verification_path),
+            "verifier_authority_receipt": str(verifier_authority_path),
             "evidence_snapshot": str(snapshot_path),
             "registry_integrity": str(root / "experiment_registry.integrity.json"),
         },
         "evidence_snapshot": snapshot_report,
+        "research_vcs_attestation": research_vcs_attestation,
+        "empirical_data_attestation": empirical_data_attestation,
+        "venue_template_attestation": venue_template_attestation,
+        "verifier_authority": verifier_authority,
         "registry_integrity": registry_integrity,
         "citation_integrity": citation_report,
         "claim_graph_binding": graph_binding,
@@ -5429,7 +6525,10 @@ def build_claim_evidence_ledger(latex_content: str) -> list[dict]:
             result_claim = bool(_claim_numeric_tokens(sentence)) and bool(
                 _RESULT_CONTEXT_RE.search(sentence)
             )
-            if not any(marker in lowered for marker in claim_markers) and not result_claim:
+            if (
+                not any(marker in lowered for marker in claim_markers)
+                and not result_claim
+            ):
                 continue
             normalized_claim = claim_sentence_key(sentence)
             if normalized_claim in seen_claims:
@@ -5793,9 +6892,7 @@ def extract_key_results(base_folder: str | Path, latex_content: str) -> dict:
             registry_records, require_confirmatory=True
         )
         confirmed_record_ids = {
-            str(group[0].get("record_id") or "")
-            for group in evidence_groups
-            if group
+            str(group[0].get("record_id") or "") for group in evidence_groups if group
         }
         values = [str(item["value"]) for group in evidence_groups for item in group]
         structured_results = []
@@ -5908,7 +7005,7 @@ def evaluate_quality_bundle(
         return {"status": "failed", "reason": "latex/template.tex not found"}
 
     venue = target_venue or recommend_target_venue_from_idea(idea, paper_type)
-    venue_config = VENUE_PRESETS.get(venue, VENUE_PRESETS["neurips"])
+    venue_config = VENUE_PRESETS.get(venue, VENUE_PRESETS[DEFAULT_TARGET_VENUE])
     template = venue_config["template"]
     evaluator = ProfessionalPaperEvaluator(template=template, model=quality_model)
     professional = evaluator.evaluate_paper_quality(latex_content, idea)
@@ -5928,7 +7025,10 @@ def evaluate_quality_bundle(
     # that describes an earlier manuscript.
     snapshot = build_evidence_snapshot(base_folder)
     save_evidence_snapshot(base_folder, snapshot)
-    scientific_evidence = build_scientific_evidence_gate(base_folder)
+    scientific_evidence = build_scientific_evidence_gate(
+        base_folder,
+        target_venue=venue,
+    )
     contribution_map = build_contribution_map(
         {
             "claim_ledger": claim_ledger,
@@ -6409,6 +7509,8 @@ def _build_submission_readiness(
         blockers.append(
             f"rigor below target ({rigor_score:.2f} < {rigor_threshold:.2f})"
         )
+    for failure in report.get("rigor", {}).get("hard_failures") or []:
+        blockers.append(f"rigor gate: {failure}")
     if claim_support_score < claim_support_threshold:
         blockers.append(
             f"claim support below target ({claim_support_score:.2f} < {claim_support_threshold:.2f})"
@@ -6449,6 +7551,7 @@ def _build_submission_readiness(
 
     venue_fit = {
         "neurips": {"normal"},
+        "icml": {"normal"},
         "iclr": {"normal", "icbinb", "extended"},
         "cvpr": {"normal"},
         "journal": {"journal", "normal"},
@@ -6508,9 +7611,14 @@ def _build_submission_readiness(
     }
     ready = len(blockers) == 0
     return {
+        "schema": "xscientist.submission-readiness.v2",
         "target_venue": target_venue,
         "ready": ready,
         "status": "ready" if ready else "needs_work",
+        "decision": "submission_package_ready" if ready else "blocked",
+        "decision_scope": "local_artifact_and_review_gates",
+        "acceptance_guaranteed": False,
+        "scientific_truth_guaranteed": False,
         "blockers": blockers,
         "blocker_count": len(blockers),
         "top_blockers": top_blockers,
@@ -6540,6 +7648,7 @@ def _quality_gate_passed(
         and report.get("claim_support", {}).get("score", 0) >= claim_support_threshold
         and report.get("claim_alignment", {}).get("score", 0) >= 3.5
         and report.get("numeric_coverage", {}).get("score", 0) >= 3.5
+        and not report.get("rigor", {}).get("hard_failures")
         and report.get("scientific_evidence", {}).get("status") == "verified"
     )
 
@@ -6571,7 +7680,7 @@ def run_high_quality_pass(
     venue = target_venue or recommend_target_venue_from_idea(
         _load_idea(base_folder), paper_type
     )
-    venue_config = VENUE_PRESETS.get(venue, VENUE_PRESETS["neurips"])
+    venue_config = VENUE_PRESETS.get(venue, VENUE_PRESETS[DEFAULT_TARGET_VENUE])
 
     quality_threshold = max(quality_threshold, venue_config["quality_threshold"])
     rigor_threshold = max(rigor_threshold, venue_config["rigor_threshold"])
@@ -6593,11 +7702,10 @@ def run_high_quality_pass(
             rigor_threshold=rigor_threshold,
         ):
             current_snapshot = build_evidence_snapshot(base_folder)
-            if (
-                existing_result.get("artifact_snapshot_hash")
-                == current_snapshot.get("snapshot_hash")
-                and existing_result.get("manuscript_hash")
-                == current_snapshot.get("manuscript_hash")
+            if existing_result.get("artifact_snapshot_hash") == current_snapshot.get(
+                "snapshot_hash"
+            ) and existing_result.get("manuscript_hash") == current_snapshot.get(
+                "manuscript_hash"
             ):
                 return existing_result
             logger(

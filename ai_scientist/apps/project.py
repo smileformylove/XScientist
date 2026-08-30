@@ -539,6 +539,7 @@ def _write_autopilot_receipt(
         "profile": args.autopilot,
         "topic_hash": canonical_content_hash(topic_text),
         "resolved_controls": {
+            "target_venue": args.target_venue,
             "workflow_mode": args.workflow_mode,
             "num_ideas": args.num_ideas,
             "top_k_ideas": args.top_k_ideas,
@@ -1426,6 +1427,11 @@ def _record_local_research_handoff_objects(
                     "submission_acceptance_passed": result.get(
                         "submission_acceptance_passed"
                     ),
+                    "local_submission_ready": result.get(
+                        "local_submission_ready",
+                        result.get("submission_acceptance_passed"),
+                    ),
+                    "acceptance_guaranteed": False,
                     "context_required": True,
                     "context_hash": context_payload["context_hash"],
                 },
@@ -1912,6 +1918,10 @@ def _build_experiment_registry_rows(
                         "source": "experiment_registry_builder",
                     },
                     budget_status="within_budget" if status == "completed" else None,
+                    evidence_role=task.get("evidence_role"),
+                    paired_control_task_id=task.get("paired_control_task_id"),
+                    intervention_variant=task.get("intervention_variant"),
+                    stress_condition=task.get("stress_condition"),
                 )
             )
     return rows
@@ -2160,6 +2170,7 @@ def process_single_idea(args):
         integrity_forensics_enabled,
     ) = args
     requested_workflow_mode = requested_workflow_mode or workflow_mode
+    current_stage = "initialization"
 
     try:
         strict_writing_guardrails = bool(strict_writing_guardrails or high_quality_mode)
@@ -2404,8 +2415,14 @@ def process_single_idea(args):
         )
 
         # ========== 步骤2: 生成论文 ==========
+        current_stage = "plot_aggregation"
         print(f"\n📝 [想法 #{idea_idx}] 步骤 2/4: 生成论文")
-        aggregate_plots(base_folder=exp_dir, model=model_agg_plots)
+        aggregate_plots(
+            base_folder=exp_dir,
+            model=model_agg_plots,
+            execution_config_path=idea_config_path,
+        )
+        current_stage = "writeup"
         _save_manuscript_contract_state(
             exp_dir=exp_dir,
             writeup_type=writeup_type,
@@ -3201,6 +3218,9 @@ def process_single_idea(args):
                 Path(exp_dir) / "experiment_registry.jsonl"
             ),
             "figure_spec_file": str(Path(exp_dir) / "figure_spec.json"),
+            "plot_execution_receipt_file": str(
+                Path(exp_dir) / "plot_execution_receipt.json"
+            ),
             "manuscript_state_file": str(Path(exp_dir) / "manuscript_state.json"),
             "review_state_file": str(Path(exp_dir) / "review_state.json"),
             "repair_plan_file": str(Path(exp_dir) / "repair_plan.json"),
@@ -3249,6 +3269,10 @@ def process_single_idea(args):
             "submission_acceptance_passed": (
                 final_submission_gate.get("accepted") if high_quality_mode else None
             ),
+            "local_submission_ready": (
+                final_submission_gate.get("accepted") if high_quality_mode else None
+            ),
+            "acceptance_guaranteed": False,
             "submission_acceptance_reasons": (
                 final_submission_gate.get("reasons", []) if high_quality_mode else []
             ),
@@ -3344,6 +3368,7 @@ def process_single_idea(args):
         return {
             "idea_idx": idea_idx,
             "status": "failed",
+            "stage": current_stage,
             "error": str(e),
             "pause_reason": (
                 "unsatisfiable_gate" if isinstance(e, UnsatisfiableGateError) else None
@@ -3721,7 +3746,8 @@ def save_project_summary(
                 f"- Quality: {result.get('quality_score')}",
                 f"- Rigor: {result.get('rigor_score')}",
                 f"- Gate Passed: {result.get('quality_gate_passed')}",
-                f"- Accepted: {result.get('submission_acceptance_passed')}",
+                "- Local submission-ready: "
+                f"{result.get('local_submission_ready', result.get('submission_acceptance_passed'))}",
                 f"- Integrity Forensics: {integrity.get('verdict')} "
                 f"({integrity.get('status')}, findings={integrity.get('findings')})",
                 f"- Integrity Report: {integrity.get('report_file')}",
@@ -3750,6 +3776,14 @@ def main(argv=None):
         workflow_modes=list_workflow_modes(),
     )
     args = parser.parse_args(argv)
+    from ai_scientist.utils.research_model_roles import (
+        enforce_glm53_project_role_boundary,
+    )
+
+    try:
+        enforce_glm53_project_role_boundary(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if sum(bool(value) for value in (args.question, args.topic, args.ideas)) > 1:
         parser.error("--question, --topic, and --ideas are mutually exclusive")
     apply_project_autopilot_profile(args)
@@ -4244,7 +4278,7 @@ def main(argv=None):
                 result.get("submission_acceptance_passed") is True for result in results
             )
             if not passed:
-                print("❌ 没有任何项目论文达到当前投稿接受标准，任务视为失败")
+                print("❌ 没有任何项目论文通过当前本地投稿准备度门禁，任务视为失败")
                 sys.exit(1)
         if args.strict_writing_guardrails or args.high_quality_mode:
             any_guardrail_pass = any(

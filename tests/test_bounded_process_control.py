@@ -12,11 +12,18 @@ from xscientist.client import XScientist
 class BoundedProcessControlTests(unittest.TestCase):
     def test_cancellation_terminates_and_preserves_bounded_output_flags(self) -> None:
         polls = 0
+        started = False
 
         def cancel() -> bool:
             nonlocal polls
             polls += 1
-            return polls >= 3
+            return started or polls >= 500
+
+        def observe(
+            stdout: str, _stderr: str, _out_truncated: bool, _err_truncated: bool
+        ) -> None:
+            nonlocal started
+            started = "started" in stdout
 
         with self.assertRaises(ProcessCancelled) as captured:
             run_process_bounded(
@@ -26,6 +33,7 @@ class BoundedProcessControlTests(unittest.TestCase):
                     "import time; print('started', flush=True); time.sleep(30)",
                 ],
                 cancel_check=cancel,
+                output_callback=observe,
                 max_output_chars=100,
                 poll_interval=0.01,
             )

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_scientist.utils.high_quality_pipeline import (
+    _build_submission_readiness,
     _citation_integrity_report,
     _claim_graph_binding_report,
     _claim_numeric_tokens,
@@ -22,8 +25,10 @@ from ai_scientist.utils.high_quality_pipeline import (
 )
 from ai_scientist.utils.evidence_snapshot import (
     build_evidence_snapshot,
+    canonical_hash,
     save_evidence_snapshot,
 )
+from ai_scientist.utils.data_readiness import prepare_data_contract
 from ai_scientist.utils.experiment_registry import save_experiment_registry
 from ai_scientist.utils.claim_registry import render_claim_prompt_snippet
 from ai_scientist.utils.research_integrity import (
@@ -33,8 +38,14 @@ from ai_scientist.utils.research_integrity import (
     _verification_output_matches,
     build_verification_report,
     build_preregistration,
+    derive_adaptive_state_hashes,
     lock_preregistration,
 )
+from xscientist.research_commands import (
+    save_hypothesis as save_research_hypothesis,
+    save_preregistration as save_research_preregistration,
+)
+from xscientist.research_vcs import ResearchRepository
 
 
 def _digest(char: str) -> str:
@@ -71,6 +82,42 @@ def _plan() -> dict:
 
 
 class ScientificEvidenceGateTests(unittest.TestCase):
+    def _host_attested_preregistration(
+        self, root: Path
+    ) -> tuple[Path, dict[str, object]]:
+        if shutil.which("git") is None:
+            self.skipTest("Git is not installed")
+        repository = ResearchRepository.init(root, question="Fixed question")
+        hypothesis = save_research_hypothesis(
+            str(root),
+            statement="Method A improves the fixed baseline",
+            falsifier="delta <= 0",
+        )
+        registration = save_research_preregistration(
+            str(root),
+            hypothesis_id=hypothesis["object"].object_id,
+            dataset="benchmark-v1",
+            metric="accuracy",
+            baseline="baseline-a",
+            split_hash=_digest("a"),
+            registered_by="lead-researcher",
+            minimum_effect=0.01,
+            minimum_seeds=3,
+        )
+        locked = repository.get(registration["object"].object_id)["payload"]
+        paper_root = root / "03_papers" / "candidate"
+        paper_root.mkdir(parents=True)
+        (paper_root / "preregistration.json").write_text(
+            json.dumps(locked), encoding="utf-8"
+        )
+        return paper_root, locked
+
+    def _prepare_empirical_data(self, root: Path) -> dict[str, object]:
+        source = root.parent / f"{root.name}-private-data"
+        source.mkdir()
+        (source / "observations.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        return prepare_data_contract(root, data_dir=source, required=True)
+
     def test_numeric_claim_requires_every_reported_metric(self) -> None:
         latex = r"""
         \begin{abstract}
@@ -118,7 +165,9 @@ class ScientificEvidenceGateTests(unittest.TestCase):
         report = assess_claim_support(latex, key_results=key_results)
         self.assertEqual(report["numeric_unbound_claims"], [])
 
-    def test_numeric_match_accepts_percent_conversion_but_rejects_wrong_rounding(self) -> None:
+    def test_numeric_match_accepts_percent_conversion_but_rejects_wrong_rounding(
+        self,
+    ) -> None:
         self.assertTrue(
             _numeric_token_matches(
                 _claim_numeric_tokens(r"accuracy is 12.3\%"), ["0.123"]
@@ -276,9 +325,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
 
         self.assertEqual(len(ledger), 1)
         self.assertEqual(ledger[0]["claim_refs"], ["tree-node-7"])
-        self.assertEqual(
-            ledger[0]["claim_markers"][0]["options"]["claim"], "claim-a"
-        )
+        self.assertEqual(ledger[0]["claim_markers"][0]["options"]["claim"], "claim-a")
 
     def test_marked_latex_fragment_is_scanned_without_full_template(self) -> None:
         latex = r"Our method improves accuracy to 80.0\%\claimref{claim-a}."
@@ -440,6 +487,101 @@ class ScientificEvidenceGateTests(unittest.TestCase):
             gate = build_scientific_evidence_gate(root)
         self.assertIn("registry_parse_integrity", gate["hard_failures"])
 
+    def test_gate_rejects_symlinked_critical_artifact_leaves(self) -> None:
+        cases = [
+            (
+                Path("latex") / "template.tex",
+                "latex_artifact_boundary",
+                None,
+                b"\\documentclass{article}\n",
+            ),
+            (
+                Path("preregistration.json"),
+                "preregistration_artifact_boundary",
+                None,
+                b"{}",
+            ),
+            (
+                Path("experiment_registry.jsonl"),
+                "experiment_registry_artifact_boundary",
+                None,
+                b"{}\n",
+            ),
+            (
+                Path("claim_evidence_graph.json"),
+                "claim_graph_artifact_boundary",
+                None,
+                b"{}",
+            ),
+            (
+                Path("verification_report.json"),
+                "verification_report_artifact_boundary",
+                None,
+                b"{}",
+            ),
+            (
+                Path("evidence_snapshot.json"),
+                "evidence_snapshot_artifact_boundary",
+                None,
+                b"{}",
+            ),
+            (
+                Path("verifier_authority_receipt.json"),
+                "verifier_authority_artifact_boundary",
+                "neurips",
+                b"{}",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for index, (relative, check_id, venue, content) in enumerate(cases):
+                with self.subTest(relative=relative):
+                    paper_root = base / f"paper-{index}"
+                    paper_root.mkdir()
+                    outside = base / f"outside-{index}"
+                    outside.write_bytes(content)
+                    linked = paper_root / relative
+                    linked.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        linked.symlink_to(outside)
+                    except OSError as exc:  # pragma: no cover - platform capability
+                        self.skipTest(f"file symlinks unavailable: {exc}")
+
+                    gate = build_scientific_evidence_gate(
+                        paper_root,
+                        target_venue=venue,
+                    )
+                    checks = {item["id"]: item for item in gate["checks"]}
+                    self.assertFalse(checks[check_id]["passed"])
+                    self.assertIn(check_id, gate["hard_failures"])
+                    self.assertIn("symlink_rejected", checks[check_id]["detail"])
+
+    def test_gate_rejects_oversized_artifact_and_registry_row_flood(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            oversized_root = Path(td) / "oversized"
+            oversized_root.mkdir()
+            with (oversized_root / "preregistration.json").open("wb") as handle:
+                handle.truncate(16 * 1024 * 1024 + 1)
+            oversized_gate = build_scientific_evidence_gate(oversized_root)
+
+            row_root = Path(td) / "rows"
+            row_root.mkdir()
+            (row_root / "experiment_registry.jsonl").write_text(
+                "{}\n" * 100_001,
+                encoding="utf-8",
+            )
+            row_gate = build_scientific_evidence_gate(row_root)
+
+        self.assertIn(
+            "preregistration_artifact_boundary",
+            oversized_gate["hard_failures"],
+        )
+        self.assertIn("registry_parse_integrity", row_gate["hard_failures"])
+        row_check = {item["id"]: item for item in row_gate["checks"]}[
+            "registry_parse_integrity"
+        ]
+        self.assertIn("row_limit_exceeded", row_check["detail"])
+
     def test_registry_numeric_results_include_zero_without_scraping_ids(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -488,6 +630,46 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                 rigor_threshold=3.5,
                 claim_support_threshold=3.5,
             )
+        )
+
+    def test_high_scores_cannot_hide_missing_ablation_or_robustness_evidence(
+        self,
+    ) -> None:
+        report = {
+            "professional": {"overall": {"score": 5.0}},
+            "rigor": {
+                "score": 5.0,
+                "hard_failures": [
+                    "registry_ablation_missing",
+                    "registry_robustness_missing",
+                ],
+            },
+            "claim_support": {"score": 5.0},
+            "claim_alignment": {"score": 5.0},
+            "numeric_coverage": {"score": 5.0},
+            "scientific_evidence": {"status": "verified", "hard_failures": []},
+        }
+        self.assertFalse(
+            _quality_gate_passed(
+                report,
+                quality_threshold=4.0,
+                rigor_threshold=3.5,
+                claim_support_threshold=3.5,
+            )
+        )
+        readiness = _build_submission_readiness(
+            report,
+            paper_type="normal",
+            target_venue="icml",
+            quality_threshold=4.0,
+            rigor_threshold=3.5,
+            claim_support_threshold=3.5,
+        )
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["decision"], "blocked")
+        self.assertIn(
+            "rigor gate: registry_ablation_missing",
+            readiness["blockers"],
         )
 
     def test_prose_cannot_pass_rigor_without_registry(self) -> None:
@@ -568,6 +750,291 @@ class ScientificEvidenceGateTests(unittest.TestCase):
         self.assertIn("preregistration_present", gate["hard_failures"])
         self.assertIn("independent_verification", gate["hard_failures"])
 
+    def test_publication_gate_rejects_unanchored_legacy_registry_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            save_experiment_registry(
+                root,
+                [{"record_id": "legacy-run", "status": "completed"}],
+            )
+            integrity = json.loads(
+                (root / "experiment_registry.integrity.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            core = {
+                "record_count": integrity["row_count"],
+                "records_hash": integrity["records_hash"],
+                "raw_hash": integrity["raw_hash"],
+                "chain_tip": integrity["chain_tip"],
+            }
+            legacy_row = {
+                "version": 1,
+                **core,
+                "audit_hash": canonical_hash(core),
+            }
+            (root / "experiment_registry.history.jsonl").write_text(
+                json.dumps(legacy_row) + "\n",
+                encoding="utf-8",
+            )
+
+            gate = build_scientific_evidence_gate(root)
+
+        checks = {item["id"]: item for item in gate["checks"]}
+        self.assertFalse(checks["registry_append_only_integrity"]["passed"])
+        self.assertIn(
+            "legacy_history_unanchored",
+            checks["registry_append_only_integrity"]["detail"],
+        )
+        self.assertIn("registry_append_only_integrity", gate["hard_failures"])
+
+    def test_unknown_target_venue_cannot_relax_publication_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            gate = build_scientific_evidence_gate(
+                Path(td),
+                target_venue="neuripss",
+            )
+
+        self.assertIn("target_venue_valid", gate["hard_failures"])
+        checks = {item["id"]: item for item in gate["checks"]}
+        self.assertFalse(checks["target_venue_valid"]["passed"])
+
+    def test_top_conference_gate_requires_exploration_confirmation_isolation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            locked = lock_preregistration(
+                build_preregistration(_idea(), _plan()),
+                split_hashes={"task_0": _digest("a")},
+                registered_by="planner",
+            )
+            (root / "preregistration.json").write_text(
+                json.dumps(locked), encoding="utf-8"
+            )
+
+            general_gate = build_scientific_evidence_gate(root)
+            top_gate = build_scientific_evidence_gate(root, target_venue="icml")
+
+        self.assertNotIn(
+            "adaptive_exploration_state_freeze", general_gate["hard_failures"]
+        )
+        self.assertNotIn(
+            "confirmatory_frozen_state_fidelity", general_gate["hard_failures"]
+        )
+        self.assertIn("adaptive_exploration_state_freeze", top_gate["hard_failures"])
+        self.assertIn("confirmatory_frozen_state_fidelity", top_gate["hard_failures"])
+        self.assertIn("venue_template_attestation", top_gate["hard_failures"])
+        self.assertIn("independent_verifier_authority", top_gate["hard_failures"])
+        self.assertNotIn(
+            "independent_verifier_authority", general_gate["hard_failures"]
+        )
+
+    def test_top_conference_gate_invokes_external_verifier_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "verifier_authority_receipt.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            with patch(
+                "ai_scientist.utils.high_quality_pipeline."
+                "verify_verifier_authority_receipt",
+                return_value={
+                    "ok": True,
+                    "status": "verified",
+                    "errors": [],
+                    "verifier_identity": "human:external-reviewer",
+                },
+            ) as verifier:
+                gate = build_scientific_evidence_gate(
+                    root,
+                    target_venue="neurips",
+                    verifier_trust_store="/outside/workspace/trust.json",
+                )
+
+        checks = {item["id"]: item for item in gate["checks"]}
+        self.assertTrue(checks["independent_verifier_authority"]["passed"])
+        verifier.assert_called_once()
+        self.assertEqual(verifier.call_args.args[3], "/outside/workspace/trust.json")
+
+    def test_top_conference_gate_accepts_valid_host_state_freeze_contract(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            paper_root, _locked = self._host_attested_preregistration(project_root)
+            self._prepare_empirical_data(project_root)
+            gate = build_scientific_evidence_gate(paper_root, target_venue="neurips")
+
+        checks = {item["id"]: item for item in gate["checks"]}
+        self.assertTrue(checks["adaptive_exploration_state_freeze"]["passed"])
+        self.assertTrue(checks["research_vcs_attestation"]["passed"])
+        self.assertTrue(checks["empirical_data_attestation"]["passed"])
+        self.assertNotIn("adaptive_exploration_state_freeze", gate["hard_failures"])
+        self.assertNotIn("research_vcs_attestation", gate["hard_failures"])
+        self.assertNotIn("empirical_data_attestation", gate["hard_failures"])
+        self.assertIn("confirmatory_frozen_state_fidelity", gate["hard_failures"])
+
+    def test_top_conference_gate_rejects_nonexistent_research_vcs_head(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            ResearchRepository.init(project_root, question="Fixed question")
+            paper_root = project_root / "03_papers" / "candidate"
+            paper_root.mkdir(parents=True)
+            draft = build_preregistration(_idea(), _plan())
+            draft["data_policy"]["split_hashes"] = {"task_0": _digest("a")}
+            fake_head = "f" * 40
+            locked = lock_preregistration(
+                draft,
+                split_hashes={"task_0": _digest("a")},
+                registered_by="planner",
+                freeze_inputs={
+                    "research_vcs_head": fake_head,
+                    **derive_adaptive_state_hashes(draft, research_vcs_head=fake_head),
+                },
+            )
+            (paper_root / "preregistration.json").write_text(
+                json.dumps(locked), encoding="utf-8"
+            )
+            self._prepare_empirical_data(project_root)
+            gate = build_scientific_evidence_gate(paper_root, target_venue="icml")
+
+        checks = {item["id"]: item for item in gate["checks"]}
+        self.assertTrue(checks["adaptive_exploration_state_freeze"]["passed"])
+        self.assertFalse(checks["research_vcs_attestation"]["passed"])
+        self.assertIn("research_vcs_attestation", gate["hard_failures"])
+        self.assertIn(
+            "research_vcs_head_not_resolvable",
+            gate["research_vcs_attestation"]["errors"],
+        )
+
+    def test_top_conference_gate_requires_committed_preregistration_transition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            repository = ResearchRepository.init(
+                project_root, question="Fixed question"
+            )
+            paper_root = project_root / "03_papers" / "candidate"
+            paper_root.mkdir(parents=True)
+            draft = build_preregistration(_idea(), _plan())
+            draft["data_policy"]["split_hashes"] = {"task_0": _digest("a")}
+            real_head = str(repository.status()["head"])
+            locked = lock_preregistration(
+                draft,
+                split_hashes={"task_0": _digest("a")},
+                registered_by="planner",
+                freeze_inputs={
+                    "research_vcs_head": real_head,
+                    **derive_adaptive_state_hashes(
+                        draft,
+                        research_vcs_head=real_head,
+                    ),
+                },
+            )
+            (paper_root / "preregistration.json").write_text(
+                json.dumps(locked), encoding="utf-8"
+            )
+            self._prepare_empirical_data(project_root)
+            gate = build_scientific_evidence_gate(
+                paper_root,
+                target_venue="neurips",
+            )
+
+        self.assertIn("research_vcs_attestation", gate["hard_failures"])
+        self.assertIn(
+            "research_vcs_preregistration_object_missing_or_ambiguous",
+            gate["research_vcs_attestation"]["errors"],
+        )
+
+    def test_top_conference_gate_recomputes_component_hashes_from_host_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            repository = ResearchRepository.init(
+                project_root, question="Fixed question"
+            )
+            paper_root = project_root / "03_papers" / "candidate"
+            paper_root.mkdir(parents=True)
+            draft = build_preregistration(_idea(), _plan())
+            draft["data_policy"]["split_hashes"] = {"task_0": _digest("a")}
+            real_head = str(repository.status()["head"])
+            derived = derive_adaptive_state_hashes(
+                draft,
+                research_vcs_head=real_head,
+            )
+            invented = {
+                "code_state_hash": _digest("b"),
+                "memory_state_hash": _digest("c"),
+                "evaluator_spec_hash": _digest("d"),
+            }
+            invented["research_state_hash"] = _canonical_hash(
+                {"kind": "confirmatory_research_state", **invented}
+            )
+            locked = lock_preregistration(
+                draft,
+                split_hashes={"task_0": _digest("a")},
+                registered_by="planner",
+                freeze_inputs={
+                    "research_vcs_head": real_head,
+                    **derived,
+                },
+            )
+            locked["adaptive_state_freeze"].update(invented)
+            locked["adaptive_state_freeze"]["research_state_hash"] = invented[
+                "research_state_hash"
+            ]
+            (paper_root / "preregistration.json").write_text(
+                json.dumps(locked), encoding="utf-8"
+            )
+            self._prepare_empirical_data(project_root)
+            gate = build_scientific_evidence_gate(paper_root, target_venue="neurips")
+
+        self.assertIn("research_vcs_attestation", gate["hard_failures"])
+        self.assertIn(
+            "research_vcs_code_state_hash_mismatch",
+            gate["research_vcs_attestation"]["errors"],
+        )
+
+    def test_top_conference_gate_rejects_explicit_synthetic_data(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            paper_root, _locked = self._host_attested_preregistration(project_root)
+            prepare_data_contract(project_root, allow_synthetic=True, required=True)
+            gate = build_scientific_evidence_gate(paper_root, target_venue="neurips")
+
+        self.assertIn("empirical_data_attestation", gate["hard_failures"])
+        self.assertIn(
+            "synthetic_data_not_empirical",
+            gate["empirical_data_attestation"]["errors"],
+        )
+
+    def test_top_conference_gate_rejects_tampered_data_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "study"
+            paper_root, _locked = self._host_attested_preregistration(project_root)
+            manifest = self._prepare_empirical_data(project_root)
+            snapshot_file = (
+                project_root
+                / ".ara-store"
+                / "datasets"
+                / str(manifest["snapshot_id"]).removeprefix("sha256:")
+                / "observations.csv"
+            )
+            snapshot_file.chmod(0o644)
+            snapshot_file.write_text("x,y\n9,9\n", encoding="utf-8")
+            gate = build_scientific_evidence_gate(paper_root, target_venue="icml")
+
+        self.assertIn("empirical_data_attestation", gate["hard_failures"])
+        self.assertIn(
+            "data_snapshot_file_hash_mismatch",
+            gate["empirical_data_attestation"]["errors"],
+        )
+
     def test_malformed_preregistration_is_reported_as_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -602,6 +1069,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                 result_summary = {
                     "metric_mean": 0.82,
                     "effect_size": 0.12,
+                    "standard_error": 0.01,
                     "baseline_metric_mean": 0.70,
                     "delta_vs_baseline": 0.12,
                 }
@@ -648,10 +1116,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                         "verification_command": "python verify_results.py",
                     }
                 )
-            (root / "experiment_registry.jsonl").write_text(
-                "".join(json.dumps(item) + "\n" for item in records),
-                encoding="utf-8",
-            )
+            save_experiment_registry(root, records)
             (root / "claim_evidence_graph.json").write_text(
                 json.dumps(
                     {
@@ -681,6 +1146,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                 "baseline_metric_mean": 0.70,
                 "delta_vs_baseline": 0.11,
                 "effect_size": 0.11,
+                "confidence_interval": [0.08, 0.14],
             }
             reproduction_input_hash = _write_hashed_json(
                 root / "reproduction-input.json", {"seed": 44}
@@ -723,10 +1189,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                     "verification_command": "python verify_results.py",
                 }
             )
-            (root / "experiment_registry.jsonl").write_text(
-                "".join(json.dumps(item) + "\n" for item in records),
-                encoding="utf-8",
-            )
+            save_experiment_registry(root, records)
             (root / "latex").mkdir()
             (root / "latex" / "template.tex").write_text(
                 r"""
@@ -742,9 +1205,7 @@ class ScientificEvidenceGateTests(unittest.TestCase):
                 "@article{ref, title={A reference}}\n", encoding="utf-8"
             )
             save_experiment_registry(root, records)
-            save_evidence_snapshot(
-                root, build_evidence_snapshot(root, records=records)
-            )
+            save_evidence_snapshot(root, build_evidence_snapshot(root, records=records))
             verification = build_verification_report(
                 locked,
                 records,

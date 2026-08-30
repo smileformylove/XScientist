@@ -14,6 +14,22 @@ Producers MUST NOT introduce new required fields without bumping
 `PROTOCOL_VERSION`. Consumers MUST ignore unknown optional fields — the
 protocol is designed to be additive.
 
+## 0. Structured Trajectory Invariant
+
+ARA and Research VCS operate on an externalized structured research trajectory,
+not an opaque transcript. Observable hypotheses, actions, tool executions,
+artifacts, measurements, decisions, failures, recoveries, reviews and gates are
+represented by typed nodes/objects and explicit relations. Content hashes bind
+the durable state; provenance identifies producers and inputs; failed or
+contrary branches remain inspectable rather than being rewritten away.
+
+This invariant is what makes Git-like scientific operations meaningful: a
+checkpoint can identify a scientific transition, a diff can explain changed
+meaning, a branch can preserve a competing line, and a required check can bind
+evidence to promotion. Implementations MUST NOT require or claim to persist
+hidden chain-of-thought. Free-form logs may be retained as artifacts, but they
+cannot replace the structured decision/evidence trail.
+
 ## 1. Directory Layout
 
 An ARA is a directory rooted at `manifest.json`:
@@ -47,6 +63,9 @@ An ARA is a directory rooted at `manifest.json`:
 
     objects/sha256/<h>/<rest>    OPTIONAL. Content-addressable object store (§10).
     llm/calls.jsonl              OPTIONAL. One row per LLM invocation (§11).
+    authority_attempts.json      REQUIRED for authority-bound runs (§11.2).
+    authority/ledgers/<id>/      REQUIRED portable attempt ledger bundle when
+                                `authority_attempts.json` is present (§11.2).
     seed/ara_seed.json           OPTIONAL. Snapshot of consumed seed (§12).
     pipeline/<artifact>.json     OPTIONAL. Mirrored pipeline stage state (§13).
     manifest.lock                OPTIONAL. Base manifest hash + created_at (§14).
@@ -55,9 +74,12 @@ An ARA is a directory rooted at `manifest.json`:
     refs/<name>                  OPTIONAL. Local caller-writable bookmarks (§15).
 ```
 
-The **only** files a validator requires are `manifest.json` and
-`exploration_graph.json`. Everything else is best-effort: absent pieces MUST
-be listed in `manifest.missing`.
+Every validator requires `manifest.json` and `exploration_graph.json`. For a
+legacy graph with no authority binding, other absent pieces remain best-effort
+and MUST be listed in `manifest.missing`. For an authority-bound run, the
+authority-attempt artifact, its CAS object, and every indexed portable ledger
+are required; missing, incomplete, orphaned, non-canonical, or hash-mismatched
+state MUST fail validation, export, and restore.
 
 ## 2. Required File: `manifest.json`
 
@@ -375,8 +397,10 @@ unavailable) portable view, so existing consumers require no resolver change.
 
 ## 11. LLM Call Log (`llm/calls.jsonl`)
 
-Every model invocation is logged as one JSON line under
-`<ara>/llm/calls.jsonl`. Required fields:
+When optional telemetry is enabled, every model invocation is logged as one
+JSON line under `<ara>/llm/calls.jsonl`. This digest telemetry supplements, but
+does not replace, the mandatory authority-attempt ledger for consequential
+scientific calls (§11.2). Required row fields are:
 
 ```json
 {
@@ -419,8 +443,8 @@ Two additive node-level fields make LLM provenance first-class:
 
 - **`llm_call_refs`** on `exploration_graph.nodes[]` — array of
   `call_receipt_ref.hash` strings pointing back into `llm/calls.jsonl`. Legacy
-  graphs may contain `messages_ref.hash` values. Purely informational; not
-  required by the validator.
+  graphs may contain `messages_ref.hash` values. These telemetry refs remain
+  informational; scientific authority is enforced through §11.2.
 - **`content_hash_inputs`** on both `exploration_graph.nodes[]` and
   `nodes/<id>/metrics.json` — array declaring which categories fed the
   hash. Older ARAs omit this and are treated as `["code","metric"]`. Add
@@ -446,6 +470,27 @@ safely ignore them.
 
 Schemas: `schemas/exploration_graph.schema.json`,
 `schemas/node.schema.json`, `schemas/llm_call.schema.json`.
+
+### 11.2 Scientific-authority attempt ledger
+
+Every model invocation that can change a scientific decision, implementation,
+evidence interpretation, candidate selection, review, or trajectory state MUST
+first append one durable `planned` event and MUST append exactly one terminal
+`accepted`, `rejected`, `failed`, or `timeout` event. Events and referenced
+specification/result objects use strict canonical JSON and an append-only hash
+chain. A successful Node binds its directly attributable
+`authority_attempt_ids` and matching `authority_attempt_terminal_hashes`; those
+bindings are inputs to the Node content hash. The two key sets MUST be equal for
+terminal Nodes. Ancestor attempts are reached through parent edges rather than
+copied into descendants.
+
+Attempts that fail or are rejected before producing a Node remain first-class
+top-level ledger entries. Export writes canonical `authority_attempts.json`,
+hash-binds its reference in both the exploration graph and manifest, and copies
+the verified ledgers and immutable objects beneath `authority/ledgers/`.
+Validators and checkpoint restore MUST fail closed on a missing expected ID,
+incomplete/orphaned chain, duplicate-key or non-canonical JSON, result/spec
+hash mismatch, terminal-hash mismatch, or an unindexed ledger artifact.
 
 ## 12. Seed Snapshot (`seed/`)
 
@@ -912,9 +957,11 @@ pipelines never break on a no-hit case.
 ## 21. Local Research Git Binding
 
 ARA scientific state may be bound to an ordinary local Git history without a
-server. The binding is additive: ARA remains the scientific source of truth,
-while Git supplies checkout, branch, diff, tag, and chronological commit
-semantics.
+server. The binding is additive: one ARA is the execution-artifact source of
+truth for one bound run. Across runs, Research VCS immutable objects,
+checkpoints, and refs are authoritative for scientific state and history. Git
+is the persistence adapter that supplies checkout, branch, diff, and tag
+mechanics; Git commits alone do not define scientific meaning or authority.
 
 A research repository declares `research.yaml` conforming to
 `research_repository.schema.json`. Every admitted Git checkpoint adds one
@@ -1012,3 +1059,74 @@ checkpoint. Branches represent genuine scientific divergence; commits
 represent state transitions within a branch. Implementations SHOULD serialize
 repository mutations and MUST leave caller files and the pre-existing Git
 index intact when checkpoint creation fails.
+
+## 22. External Publication Authority
+
+Generic in-workspace reviews have `local_advisory` scope. A caller-requested
+pass MUST be retained only as the requested outcome and MUST produce an
+effective hold gate; declared local identities cannot mint a verified claim or
+external publication authority.
+
+`verifier_authority.schema.json` defines the final external authority receipt
+used by NeurIPS/ICML publication gates. Its signed payload binds the verifier
+principal, every confirmatory/reproduction producer principal including failed
+attempt producers, the locked registration,
+registry and record-set hashes, the host-verified data-manifest hash and
+content-addressed data-snapshot ID, the evidence snapshot, manuscript,
+verification report, exact confirmatory/reproduction record identifiers, the
+structured-trajectory attestation hash, frozen and lineage heads, and the
+complete attempt, binding, disposition and origin-checkpoint identifier sets.
+
+For every confirmatory or independent-reproduction registry row, a publication
+consumer MUST resolve exactly one `experiment_attempt`, one verified
+`xscientist.trajectory-binding.v1` gate object and the attempt's hash-valid
+origin checkpoint. The live attempt payload MUST match the row's frozen task,
+protocol, data, producer, terminal status, configuration and result-artifact
+commitments. The registry rows and lineage attempts MUST form a bijection:
+missing, duplicate, extra or orphan bindings fail closed. Failed, timed-out or
+cancelled attempts remain in that bijection and additionally require exactly
+one typed `xscientist.attempt-disposition.v1` decision. A terminal negative
+resolves the local trajectory blocker only when its failure class is exactly
+`scientific_negative_result`, its non-empty registry/attempt result hashes
+match a bounded host-rehashed repository artifact, and its hash-valid metric
+assessment is an `evidence` object derived from that exact attempt. These
+artifact/evidence identities MUST be covered by the disposition and trajectory
+hashes. A completed, same-task, trajectory-bound technical retry is the other
+resolving disposition. Deviation/exclusion decisions remain immutable audit
+evidence; caller-supplied timing, preservation or approval flags MUST NOT grant
+publication authority.
+
+The same `data_manifest_hash` and `data_snapshot_id` MUST appear in the locked
+preregistration data policy, every confirmatory and reproduction record, and
+the final verification report. A consumer MUST byte-verify the current data
+snapshot and recompute this entire chain before accepting an authority receipt.
+Replacing the data with another internally valid snapshot after signing MUST
+invalidate the authority binding. Rewriting a registry row, attempt, binding,
+disposition or checkpoint MUST likewise invalidate the trajectory and authority
+bindings.
+
+The signing principal MUST match the verification report's verifier identity
+and MUST be disjoint from all confirmatory producers after NFKC normalization,
+case folding, and recursive removal of known workflow-role prefixes, including
+`agent:`, `service:`, `human:`, `executor:`, `verifier:`, `reviewer:`,
+`recorder:`, `model:`, and `tool:`. Thus `agent:executor`, `executor`, and
+`human:executor` are one principal, not independent identities. The external
+signer identity itself MUST remain in the schema-defined `agent:`, `service:`,
+or `human:` namespace. Only Ed25519 is admitted at this
+boundary. A receipt MUST NOT choose its own trust root, carry key material, or
+convert a shared-secret HMAC into an independence claim. Consumers MUST obtain
+the trust store explicitly from outside the paper directory, Research VCS
+repository, and enclosing workspace; keys created inside any of those
+boundaries cannot establish external authority. Consumers MUST recompute all
+live report bindings and fail closed on missing, revoked, symlinked,
+out-of-store, in-boundary, or invalid keys.
+
+The standalone verifier-authority command establishes only a cryptographic
+`signature_binding_verified` result. Its `submission_ready` value remains
+false and its submission-readiness status remains unknown until the complete
+scientific evidence gate succeeds.
+
+For a pinned official venue template, the archive digest and every extracted
+source-file digest are independent verifier constants. A mutable
+`template_source.json` receipt is audit evidence, not its own trust root;
+changing both a style file and the receipt MUST still fail source verification.

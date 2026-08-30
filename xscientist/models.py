@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ai_scientist.config.venues import TARGET_VENUES
+
 
 def _path_text(value: str | Path | None) -> str | None:
     if value is None:
@@ -68,6 +70,8 @@ class ProjectRequest:
             raise ValueError(
                 "autopilot must be balanced, discovery, publication, or None"
             )
+        if self.target_venue is not None and self.target_venue not in TARGET_VENUES:
+            raise ValueError("target_venue must be one of: " + ", ".join(TARGET_VENUES))
         if self.data_dir is not None and self.allow_synthetic_data:
             raise ValueError("data_dir and allow_synthetic_data are mutually exclusive")
         for label, value in (

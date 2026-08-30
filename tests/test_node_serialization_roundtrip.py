@@ -15,24 +15,22 @@ path.
 from __future__ import annotations
 
 import dataclasses
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from ai_scientist.treesearch.journal import Journal, Node
+from ai_scientist.utils.authority_attempts import canonical_authority_hash
 
 
 class JournalGraphValidationTests(unittest.TestCase):
     def _node_payload(self, node_id: str, parent_id: str | None = None) -> dict:
-        return Node(id=node_id, code="c", plan="p").to_dict() | {
-            "parent_id": parent_id
-        }
+        return Node(id=node_id, code="c", plan="p").to_dict() | {"parent_id": parent_id}
 
     def test_rejects_duplicate_node_ids(self) -> None:
-        payload = {
-            "nodes": [self._node_payload("same"), self._node_payload("same")]
-        }
+        payload = {"nodes": [self._node_payload("same"), self._node_payload("same")]}
 
         with self.assertRaisesRegex(ValueError, "duplicate node id"):
             Journal.from_dict(payload)
@@ -93,9 +91,13 @@ class NodeSerializationRoundTripTests(unittest.TestCase):
         )
         d = n.to_dict()
         self.assertIn("llm_call_refs", d)
-        self.assertEqual(d["llm_call_refs"], [
-            "sha256:" + "a" * 64, "sha256:" + "b" * 64,
-        ])
+        self.assertEqual(
+            d["llm_call_refs"],
+            [
+                "sha256:" + "a" * 64,
+                "sha256:" + "b" * 64,
+            ],
+        )
 
     def test_from_dict_restores_llm_call_refs(self) -> None:
         n = Node(
@@ -119,7 +121,8 @@ class NodeSerializationRoundTripTests(unittest.TestCase):
         # Full JSON pipeline check — the actual failure mode was that
         # writing to disk and reading back dropped the field.
         n = Node(
-            code="c", plan="p",
+            code="c",
+            plan="p",
             llm_call_refs=["sha256:" + "d" * 64],
         )
         serialised = json.dumps(n.to_dict(), default=str)
@@ -127,8 +130,7 @@ class NodeSerializationRoundTripTests(unittest.TestCase):
             path = Path(tmp) / "journal.json"
             path.write_text(serialised, encoding="utf-8")
             reloaded = json.loads(path.read_text())
-        self.assertEqual(reloaded.get("llm_call_refs"),
-                         ["sha256:" + "d" * 64])
+        self.assertEqual(reloaded.get("llm_call_refs"), ["sha256:" + "d" * 64])
 
 
 class NodePlotExecSerializationTests(unittest.TestCase):
@@ -165,7 +167,8 @@ class NodePlotExecSerializationTests(unittest.TestCase):
         n2 = Node.from_dict(self._make_node().to_dict())
         for attr, expected in self._DISTINCTIVE.items():
             self.assertEqual(
-                getattr(n2, attr), expected,
+                getattr(n2, attr),
+                expected,
                 f"round-trip lost {attr}",
             )
 
@@ -202,9 +205,87 @@ class NodeToDictCoverageGuardTests(unittest.TestCase):
             if expected_key not in d:
                 missing.append(f"{f.name} (expected key {expected_key!r})")
         self.assertEqual(
-            missing, [],
-            "Node.to_dict() drops declared fields: "
-            + ", ".join(missing),
+            missing,
+            [],
+            "Node.to_dict() drops declared fields: " + ", ".join(missing),
+        )
+
+
+class NodeImplementationSpecBindingTests(unittest.TestCase):
+    def test_locked_specs_round_trip_and_tamper_fails_closed(self) -> None:
+        import hashlib
+
+        spec = {
+            "schema": "xscientist.locked-experiment-spec.v1",
+            "primary_metric": "accuracy",
+            "objective": "bounded",
+        }
+        encoded = json.dumps(
+            spec,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        spec_hash = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        payload = Node(
+            code="print('ok')",
+            plan="bounded",
+            implementation_spec=spec,
+            implementation_spec_hash=spec_hash,
+        ).to_dict()
+
+        restored = Node.from_dict(copy.deepcopy(payload))
+        self.assertEqual(restored.implementation_spec, spec)
+        self.assertEqual(restored.implementation_spec_hash, spec_hash)
+
+        payload["implementation_spec"]["objective"] = "tampered"
+        with self.assertRaisesRegex(ValueError, "spec hash"):
+            Node.from_dict(payload)
+
+    def test_locked_spec_rejects_nonfinite_json(self) -> None:
+        spec = {
+            "schema": "xscientist.locked-experiment-spec.v1",
+            "primary_metric": "accuracy",
+            "value": float("nan"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "strict JSON"):
+            Node(
+                code="print('ok')",
+                plan="bounded",
+                implementation_spec=spec,
+                implementation_spec_hash="sha256:" + "a" * 64,
+            )
+
+
+class NodeAuthorityAttemptBindingTests(unittest.TestCase):
+    def test_terminal_serialization_requires_every_attempt_hash(self) -> None:
+        attempt_id = "attempt-" + "a" * 32
+        node = Node(
+            authority_attempt_ids=[attempt_id],
+            authority_attempt_terminal_hashes={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "must all be complete"):
+            node.to_dict()
+
+        prepared = node.to_dict(allow_incomplete_authority_attempts=True)
+        self.assertEqual(prepared["authority_attempt_ids"], [attempt_id])
+
+    def test_complete_authority_binding_round_trips(self) -> None:
+        attempt_id = "attempt-" + "b" * 32
+        terminal_hash = canonical_authority_hash({"terminal": "accepted"})
+        node = Node(
+            authority_attempt_ids=[attempt_id],
+            authority_attempt_terminal_hashes={attempt_id: terminal_hash},
+        )
+
+        restored = Node.from_dict(node.to_dict())
+
+        self.assertEqual(restored.authority_attempt_ids, [attempt_id])
+        self.assertEqual(
+            restored.authority_attempt_terminal_hashes,
+            {attempt_id: terminal_hash},
         )
 
 

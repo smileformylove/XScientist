@@ -85,21 +85,241 @@ class ManagedEnvironmentTransactionTests(unittest.TestCase):
             shared_value = "same-visible-value"
             transaction = provider_config.begin_managed_environment_transaction()
             provider_config.mark_managed_environment(first, key, shared_value)
+            post_state = transaction.post_state()
+
+            def embedded_write() -> None:
+                embedded = provider_config.begin_managed_environment_transaction()
+                provider_config.mark_managed_environment(second, key, shared_value)
+                embedded.commit()
 
             writer = threading.Thread(
-                target=provider_config.mark_managed_environment,
-                args=(second, key, shared_value),
+                target=embedded_write,
+            )
+            writer.start()
+            writer.join(timeout=2)
+            self.assertFalse(writer.is_alive())
+
+            self.assertEqual(
+                transaction.rollback(expected_post_state=post_state),
+                (key,),
+            )
+            self.assertEqual(os.environ[key], shared_value)
+            self.assertEqual(
+                provider_config._MANAGED_ENV_VALUES[key],
+                (str(second.resolve()), shared_value),
+            )
+
+    def test_transaction_refuses_a_stale_post_state_token(self) -> None:
+        key = "GOOGLE_API_KEY"
+        with _isolated_managed_environment(key), tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            transaction = provider_config.begin_managed_environment_transaction()
+            provider_config.mark_managed_environment(workspace, key, "first-value")
+            stale_post_state = transaction.post_state()
+            provider_config.mark_managed_environment(workspace, key, "second-value")
+
+            self.assertEqual(
+                transaction.rollback(expected_post_state=stale_post_state),
+                (key,),
+            )
+            self.assertEqual(os.environ[key], "second-value")
+            self.assertEqual(
+                provider_config._MANAGED_ENV_VALUES[key],
+                (str(workspace.resolve()), "second-value"),
+            )
+
+    def test_transaction_preserves_raw_process_write_and_drops_stale_ownership(
+        self,
+    ) -> None:
+        key = "GOOGLE_API_KEY"
+        with _isolated_managed_environment(key), tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            transaction = provider_config.begin_managed_environment_transaction()
+            provider_config.mark_managed_environment(
+                workspace,
+                key,
+                "transaction-value",
+            )
+
+            writer = threading.Thread(
+                target=os.environ.__setitem__,
+                args=(key, "external-process-value"),
             )
             writer.start()
             writer.join(timeout=2)
             self.assertFalse(writer.is_alive())
 
             self.assertEqual(transaction.rollback(), (key,))
-            self.assertEqual(os.environ[key], shared_value)
-            self.assertEqual(
-                provider_config._MANAGED_ENV_VALUES[key],
-                (str(second.resolve()), shared_value),
+            self.assertEqual(os.environ[key], "external-process-value")
+            self.assertNotIn(key, provider_config._MANAGED_ENV_VALUES)
+            self.assertNotIn(key, provider_config._ENVIRONMENT_GENERATIONS)
+
+    def test_setup_and_start_preserve_raw_external_environment_writes(self) -> None:
+        key = "ZHIPU_API_KEY"
+        with _isolated_managed_environment(key), tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            commands = (
+                (
+                    "setup",
+                    [
+                        "setup",
+                        str(root / "setup-raw-write"),
+                        "--task",
+                        "research",
+                        "--provider",
+                        "zhipu",
+                    ],
+                    root / "setup-raw-write",
+                ),
+                (
+                    "start",
+                    [
+                        "start",
+                        str(root / "start-raw-write"),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "zhipu",
+                        "--prepare-only",
+                    ],
+                    root / "start-raw-write",
+                ),
             )
+            for command_name, argv, workspace in commands:
+                with self.subTest(command=command_name):
+                    os.environ.pop(key, None)
+                    provider_config._MANAGED_ENV_VALUES.pop(key, None)
+                    provider_config._ENVIRONMENT_GENERATIONS.pop(key, None)
+                    external_value = f"external-{command_name}-value"
+
+                    def concurrent_write_then_fail(
+                        *_args: object, **_kwargs: object
+                    ) -> None:
+                        writer = threading.Thread(
+                            target=os.environ.__setitem__,
+                            args=(key, external_value),
+                        )
+                        writer.start()
+                        writer.join(timeout=2)
+                        self.assertFalse(writer.is_alive())
+                        raise RuntimeError("forced failure after external write")
+
+                    output = io.StringIO()
+                    with (
+                        mock.patch(
+                            "ai_scientist.utils.auth_session.validate_session",
+                            return_value=(True, "ok", {"username": "tester"}),
+                        ),
+                        mock.patch(
+                            "xscientist.cli.sys.stdin.isatty", return_value=True
+                        ),
+                        mock.patch("getpass.getpass", return_value="transaction-value"),
+                        mock.patch(
+                            "xscientist.diagnostics.diagnose",
+                            side_effect=concurrent_write_then_fail,
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        code = cli_main(argv)
+
+                    self.assertEqual(code, 2, output.getvalue())
+                    self.assertEqual(os.environ.get(key), external_value)
+                    self.assertNotIn(key, provider_config._MANAGED_ENV_VALUES)
+                    self.assertNotIn(key, provider_config._ENVIRONMENT_GENERATIONS)
+                    self.assertFalse(workspace.exists())
+
+    def test_setup_and_start_preserve_same_value_reowned_after_post_state(
+        self,
+    ) -> None:
+        key = "ZHIPU_API_KEY"
+        with _isolated_managed_environment(key), tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            commands = (
+                (
+                    "setup",
+                    [
+                        "setup",
+                        str(root / "setup-reowned"),
+                        "--task",
+                        "research",
+                        "--provider",
+                        "zhipu",
+                    ],
+                    root / "setup-reowned",
+                ),
+                (
+                    "start",
+                    [
+                        "start",
+                        str(root / "start-reowned"),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "zhipu",
+                        "--prepare-only",
+                    ],
+                    root / "start-reowned",
+                ),
+            )
+            for command_name, argv, workspace in commands:
+                with self.subTest(command=command_name):
+                    os.environ.pop(key, None)
+                    provider_config._MANAGED_ENV_VALUES.pop(key, None)
+                    provider_config._ENVIRONMENT_GENERATIONS.pop(key, None)
+                    shared_value = "same-visible-value"
+                    concurrent_workspace = root / f"concurrent-{command_name}"
+
+                    def reown_after_post_state_then_fail(
+                        *_args: object, **_kwargs: object
+                    ) -> None:
+                        # Diagnostics run after setup/start recorded their latest
+                        # transaction post-state. Reusing the same visible value
+                        # is an ABA case: value-only rollback would clear it.
+                        def embedded_write() -> None:
+                            embedded = (
+                                provider_config.begin_managed_environment_transaction()
+                            )
+                            provider_config.mark_managed_environment(
+                                concurrent_workspace,
+                                key,
+                                shared_value,
+                            )
+                            embedded.commit()
+
+                        writer = threading.Thread(target=embedded_write)
+                        writer.start()
+                        writer.join(timeout=2)
+                        self.assertFalse(writer.is_alive())
+                        raise RuntimeError("forced failure after concurrent re-owner")
+
+                    output = io.StringIO()
+                    with (
+                        mock.patch(
+                            "ai_scientist.utils.auth_session.validate_session",
+                            return_value=(True, "ok", {"username": "tester"}),
+                        ),
+                        mock.patch(
+                            "xscientist.cli.sys.stdin.isatty", return_value=True
+                        ),
+                        mock.patch("getpass.getpass", return_value=shared_value),
+                        mock.patch(
+                            "xscientist.diagnostics.diagnose",
+                            side_effect=reown_after_post_state_then_fail,
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        code = cli_main(argv)
+
+                    self.assertEqual(code, 2, output.getvalue())
+                    self.assertEqual(os.environ.get(key), shared_value)
+                    self.assertEqual(
+                        provider_config._MANAGED_ENV_VALUES.get(key),
+                        (str(concurrent_workspace.resolve()), shared_value),
+                    )
+                    self.assertIn(key, provider_config._ENVIRONMENT_GENERATIONS)
+                    self.assertFalse(workspace.exists())
 
     def test_setup_and_start_do_not_absorb_a_write_before_post_state_capture(
         self,

@@ -28,6 +28,7 @@ from .research_git import (
     ResearchGitError,
     ResearchObjectResult,
     list_research_objects_at_ref,
+    research_object_introduction_order,
     show_checkpoint,
 )
 from .research_vcs import ResearchRepository
@@ -391,6 +392,7 @@ def _resolve_at_snapshot(
     selector: str,
     *,
     objects: Mapping[str, Mapping[str, Any]],
+    introduction_order: Mapping[str, int],
 ) -> str:
     """Resolve the same friendly selectors without consulting the worktree."""
 
@@ -406,12 +408,27 @@ def _resolve_at_snapshot(
             raise ResearchGitError(
                 f"no research objects found for historical selector: {normalized}"
             )
-        return str(
-            max(
-                candidates,
-                key=lambda item: (str(item.get("created_at") or ""), item["object_id"]),
-            )["object_id"]
+        candidate_orders = [
+            (str(item["object_id"]), introduction_order.get(str(item["object_id"])))
+            for item in candidates
+        ]
+        if any(sequence is None for _object_id, sequence in candidate_orders):
+            raise ResearchGitError(
+                "historical latest selector lacks verifiable Git introduction order"
+            )
+        latest_sequence = max(
+            int(sequence or 0) for _object_id, sequence in candidate_orders
         )
+        latest_ids = [
+            object_id
+            for object_id, sequence in candidate_orders
+            if sequence == latest_sequence
+        ]
+        if len(latest_ids) != 1:
+            raise ResearchGitError(
+                f"historical selector is ambiguous at one Git checkpoint: {normalized}"
+            )
+        return latest_ids[0]
     if re.fullmatch(r"rso-[0-9a-f]{16}", normalized):
         return normalized
     if re.fullmatch(r"rso-[0-9a-f]{6,15}", normalized):
@@ -458,6 +475,25 @@ def build_research_context_snapshot(
         raise ResearchGitError("research context budget must be at least 128 tokens")
     rows, as_of = _repository_rows(repository, ref)
     objects = {str(item["object_id"]): item for item in rows}
+    introduction_order = (
+        research_object_introduction_order(
+            repository.path,
+            ref=str(as_of.get("commit") or "HEAD"),
+        )
+        if as_of.get("commit")
+        else {}
+    )
+    max_committed_order = max(introduction_order.values(), default=0)
+    object_sequence: dict[str, int] = {}
+    for object_id in objects:
+        sequence = introduction_order.get(object_id)
+        if sequence is None:
+            if not as_of["worktree"]:
+                raise ResearchGitError(
+                    f"historical object lacks Git introduction order: {object_id}"
+                )
+            sequence = max_committed_order + 1
+        object_sequence[object_id] = sequence
     resolved_targets: list[str] = []
     for raw in target_ids:
         selector = str(raw or "").strip()
@@ -466,7 +502,11 @@ def build_research_context_snapshot(
         object_id = (
             repository.resolve(selector)
             if as_of["worktree"]
-            else _resolve_at_snapshot(selector, objects=objects)
+            else _resolve_at_snapshot(
+                selector,
+                objects=objects,
+                introduction_order=introduction_order,
+            )
         )
         if object_id not in objects:
             raise ResearchGitError(
@@ -524,17 +564,51 @@ def build_research_context_snapshot(
         if item.get("kind") == "context_snapshot"
         and set((item.get("payload") or {}).get("source_object_ids") or []) & closure
     ]
-    latest_prior_context_id = (
-        max(
-            related_contexts,
-            key=lambda object_id: (
-                str(objects[object_id].get("created_at") or ""),
-                object_id,
-            ),
+    latest_prior_context_id = None
+    if related_contexts:
+        related_context_set = set(related_contexts)
+        superseded_context_ids: set[str] = set()
+        for object_id in related_contexts:
+            item = objects[object_id]
+            superseded_context_ids.update(
+                target
+                for target in _relation_targets(item, {"supersedes"})
+                if target in related_context_set
+            )
+            # Context snapshots written before the explicit relation was added
+            # still carry a content-bound predecessor in their payload.  Treat
+            # that predecessor as an ordering edge, never wall-clock recency.
+            previous_id = str(
+                ((item.get("payload") or {}).get("context_chain") or {}).get(
+                    "previous_context_id"
+                )
+                or ""
+            )
+            if previous_id in related_context_set:
+                superseded_context_ids.add(previous_id)
+        context_frontier = [
+            object_id
+            for object_id in related_contexts
+            if object_id not in superseded_context_ids
+        ]
+        if not context_frontier:
+            raise ResearchGitError(
+                "prior context snapshots contain a cyclic supersedes chain"
+            )
+        latest_sequence = max(
+            object_sequence[object_id] for object_id in context_frontier
         )
-        if related_contexts
-        else None
-    )
+        latest_context_ids = [
+            object_id
+            for object_id in context_frontier
+            if object_sequence[object_id] == latest_sequence
+        ]
+        if len(latest_context_ids) != 1:
+            raise ResearchGitError(
+                "multiple prior context snapshots share the latest Git checkpoint; "
+                "record an explicit superseding context before continuing"
+            )
+        latest_prior_context_id = latest_context_ids[0]
     prior_context_ids = (
         {latest_prior_context_id} if latest_prior_context_id is not None else set()
     )
@@ -583,16 +657,10 @@ def build_research_context_snapshot(
         rationale=rationale,
         constraints=constraints,
     )
-    recency_order = sorted(
-        source_object_ids,
-        key=lambda object_id: (
-            str(objects[object_id].get("created_at") or ""),
-            object_id,
-        ),
-    )
     recency_rank = {
-        object_id: index for index, object_id in enumerate(recency_order, start=1)
+        object_id: object_sequence[object_id] for object_id in source_object_ids
     }
+    max_recency_rank = max(recency_rank.values(), default=1)
 
     source_objects = []
     for object_id in source_object_ids:
@@ -649,9 +717,7 @@ def build_research_context_snapshot(
             "recorder": 0,
         }.get(authority, 0)
         distance_score = max(0, 14 - (2 * int(distances.get(object_id, 7))))
-        recency_score = round(
-            10 * recency_rank.get(object_id, 0) / max(1, len(recency_order)), 3
-        )
+        recency_score = round(10 * recency_rank.get(object_id, 0) / max_recency_rank, 3)
         role = str(source.get("role") or "lineage")
         components = {
             "role": _ROLE_BASE_SCORES.get(role, 0),
@@ -1155,14 +1221,26 @@ def record_research_context_snapshot(
         raise ResearchGitError(
             "invalid research context snapshot: " + "; ".join(issues)
         )
+    previous_context_id = str(
+        (payload.get("context_chain") or {}).get("previous_context_id") or ""
+    )
+    relations = [
+        {"type": "depends_on", "target": object_id, "role": "context_source"}
+        for object_id in payload["source_object_ids"]
+    ]
+    if previous_context_id:
+        relations.append(
+            {
+                "type": "supersedes",
+                "target": previous_context_id,
+                "role": "context_chain",
+            }
+        )
     return repository.record(
         "context_snapshot",
         payload,
         state="completed" if payload["complete"] else "rejected",
-        relations=[
-            {"type": "depends_on", "target": object_id, "role": "context_source"}
-            for object_id in payload["source_object_ids"]
-        ],
+        relations=relations,
         actor={"actor_id": actor_id, "authority": "recorder"},
         provenance={
             "context_hashes": [payload["context_hash"]],

@@ -11,6 +11,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from ai_scientist.config.venues import DEFAULT_TARGET_VENUE, TARGET_VENUES
+
 from ._version import __version__
 from .entrypoints import (
     ara_main,
@@ -27,6 +29,11 @@ from .entrypoints import (
     research_main,
     validate_main,
     zhipu_main,
+)
+from .file_transactions import (
+    ManagedFileState,
+    capture_managed_file_state,
+    restore_managed_file_state,
 )
 
 _DELEGATES = {
@@ -61,15 +68,27 @@ _PROVIDER_CHOICES = [
     "custom",
 ]
 
-_RESEARCH_MODEL_FLAGS = (
-    ("ideation", "--model-ideation"),
-    ("agg_plots", "--model-agg-plots"),
-    ("writeup", "--model-writeup"),
-    ("writeup_small", "--model-writeup-small"),
-    ("citation", "--model-citation"),
-    ("review", "--model-review"),
-    ("idea_ranking", "--idea-rank-model"),
-    ("quality", "--quality-model"),
+_RESEARCH_MODEL_ROUTES = (
+    ("ideation", "--model-ideation", "judgment"),
+    # Choosing which evidence becomes a final figure is scientific judgment;
+    # the resulting script is executed separately by the isolated host runner.
+    ("agg_plots", "--model-agg-plots", "judgment"),
+    ("writeup", "--model-writeup", "execution"),
+    ("writeup_small", "--model-writeup-small", "execution"),
+    # Source selection and attribution affect evidentiary truth, not just prose.
+    ("citation", "--model-citation", "judgment"),
+    ("review", "--model-review", "judgment"),
+    ("idea_ranking", "--idea-rank-model", "judgment"),
+    ("quality", "--quality-model", "judgment"),
+)
+_RESEARCH_MODEL_FLAGS = tuple(
+    (role, flag) for role, flag, _route in _RESEARCH_MODEL_ROUTES
+)
+_EXECUTION_RESEARCH_ROLES = tuple(
+    role for role, _flag, route in _RESEARCH_MODEL_ROUTES if route == "execution"
+)
+_JUDGMENT_RESEARCH_ROLES = tuple(
+    role for role, _flag, route in _RESEARCH_MODEL_ROUTES if route == "judgment"
 )
 
 _TASK_CHOICES = [
@@ -557,7 +576,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     provider_parser = subparsers.add_parser(
         "provider",
-        help="Add, inspect, and switch model providers without exposing API keys.",
+        help=(
+            "Configure, explain, check, and switch model providers without "
+            "exposing API keys."
+        ),
     )
     provider_subparsers = provider_parser.add_subparsers(
         dest="provider_command", required=True
@@ -579,6 +601,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also show providers that are neither configured nor locally detected",
     )
     provider_list.add_argument("--json", action="store_true", dest="as_json")
+    provider_explain = provider_subparsers.add_parser(
+        "explain",
+        help=(
+            "Explain the effective model, credential sources, and next steps "
+            "without changing files or making a network request."
+        ),
+    )
+    provider_explain.add_argument(
+        "name", nargs="?", choices=_PROVIDER_CHOICES, help="default: active provider"
+    )
+    provider_explain.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace root (default: discover from the current directory)",
+    )
+    provider_explain.add_argument("--json", action="store_true", dest="as_json")
     provider_check = provider_subparsers.add_parser(
         "check",
         help=(
@@ -783,6 +821,15 @@ def _build_start_parser() -> argparse.ArgumentParser:
         help="research behavior (default: balanced)",
     )
     study.add_argument(
+        "--target-venue",
+        choices=list(TARGET_VENUES),
+        default=DEFAULT_TARGET_VENUE,
+        help=(
+            "venue-specific research, writeup, and review policy (default: "
+            "neurips); this is not an acceptance prediction or guarantee"
+        ),
+    )
+    study.add_argument(
         "--task",
         choices=["research", "paper", "pdf-review", "ml-study"],
         default=None,
@@ -800,7 +847,19 @@ def _build_start_parser() -> argparse.ArgumentParser:
     study.add_argument(
         "--model",
         default=None,
-        help="provider-compatible model ID; prompted when needed",
+        help=(
+            "execution/drafting model ID; prompted when needed (GLM-5.3 is "
+            "restricted to this route)"
+        ),
+    )
+    study.add_argument(
+        "--judgment-model",
+        default=None,
+        help=(
+            "advisory model for ideation, figure/source selection, candidate "
+            "ranking, quality checks, and paper review; required and non-GLM when "
+            "--model resolves to GLM-5.3; never grants publication-verifier authority"
+        ),
     )
     study.add_argument(
         "--base-url",
@@ -918,7 +977,7 @@ def _print_curated_help(*, include_advanced: bool = False) -> None:
     print()
     print("Configure:")
     print("  setup      Create and diagnose a workspace")
-    print("  provider   Add, check, and switch model providers")
+    print("  provider   Configure, explain, check, and switch model providers")
     print("  capability Explain task-specific optional dependencies")
     print("  executor   Check, cache, build, or update the isolated executor")
     print("  upgrade    Check package and workspace compatibility (read-only)")
@@ -1052,6 +1111,8 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     if command in {"xscientist explore .", "xscientist explore . --lang zh"}:
         suffix = " --lang zh" if command.endswith("--lang zh") else ""
         return f"xscientist explore {quoted}{suffix}"
+    if command == "xscientist setup .":
+        return f"xscientist setup {quoted}"
     if "--workspace ." in command:
         return command.replace("--workspace .", f"--workspace {quoted}")
     if "--repo ." in command:
@@ -1352,32 +1413,156 @@ def _interactive_start_inputs(
             parsed.max_cost_usd = float(answer)
 
 
-def _research_model_contract(model: str, *, source: str) -> dict[str, object]:
-    """Describe the exact model contract shared by an autonomous study."""
+class _ResearchModelRoleError(ValueError):
+    """Raised when a model would cross a declared scientific role boundary."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        next_actions: Sequence[str] = (),
+    ) -> None:
+        super().__init__(message)
+        self.next_actions = tuple(str(action) for action in next_actions)
+
+
+def _validated_research_role_model(model: str, *, label: str) -> tuple[str, object]:
+    from ai_scientist.utils.privacy import redact_sensitive_text
     from ai_scientist.utils.provider_registry import resolve_model_provider
 
-    spec = resolve_model_provider(model)
-    roles = {role: model for role, _flag in _RESEARCH_MODEL_FLAGS}
+    selected = str(model or "").strip()
+    if (
+        not selected
+        or len(selected) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in selected)
+        or redact_sensitive_text(selected) != selected
+    ):
+        raise _ResearchModelRoleError(f"{label} is invalid or contains private data")
+    try:
+        spec = resolve_model_provider(selected)
+    except ValueError as exc:
+        raise _ResearchModelRoleError(f"{label} is invalid: {exc}") from exc
+    return selected, spec
+
+
+def _is_glm53_model(model: str) -> bool:
+    try:
+        _selected, spec = _validated_research_role_model(
+            model,
+            label="execution model",
+        )
+    except _ResearchModelRoleError:
+        return False
+    return str(getattr(spec, "client_model", "")).casefold() == "glm-5.3"
+
+
+def _research_model_contract(
+    model: str,
+    *,
+    source: str,
+    judgment_model: str | None = None,
+    judgment_source: str | None = None,
+) -> dict[str, object]:
+    """Describe explicit execution and internal scientific-judgment routes."""
+
+    execution_model, execution_spec = _validated_research_role_model(
+        model,
+        label="execution model",
+    )
+    execution_is_glm53 = (
+        str(getattr(execution_spec, "client_model", "")).casefold() == "glm-5.3"
+    )
+    selected_judgment_model = str(judgment_model or "").strip()
+    if execution_is_glm53 and not selected_judgment_model:
+        raise _ResearchModelRoleError(
+            "GLM-5.3 is restricted to locked-task implementation and drafting in "
+            "`xscientist start`; pass a non-GLM --judgment-model for ideation, "
+            "figure and source selection, candidate "
+            "ranking, internal quality decisions, and paper review",
+            next_actions=(
+                "xscientist start WORKSPACE --model glm-5.3 "
+                "--judgment-model PROVIDER/MODEL [the same study options]",
+                "xscientist provider add PROVIDER --workspace WORKSPACE --model "
+                "PROVIDER/MODEL --no-activate --no-update-bfts",
+            ),
+        )
+    if not selected_judgment_model:
+        selected_judgment_model = execution_model
+        judgment_source = judgment_source or "execution_model_compatibility_default"
+    judgment_model_value, judgment_spec = _validated_research_role_model(
+        selected_judgment_model,
+        label="judgment model",
+    )
+    if execution_is_glm53 and (
+        str(getattr(judgment_spec, "client_model", "")).casefold() == "glm-5.3"
+    ):
+        raise _ResearchModelRoleError(
+            "--judgment-model must not resolve to GLM-5.3 when GLM-5.3 is the "
+            "execution model",
+            next_actions=("rerun with --judgment-model PROVIDER/NON_GLM_MODEL",),
+        )
+
+    routes = {
+        "execution": execution_model,
+        "judgment": judgment_model_value,
+    }
+    roles = {role: routes[route] for role, _flag, route in _RESEARCH_MODEL_ROUTES}
     return {
-        "selected_model": model,
-        "provider": spec.provider,
-        "provider_display_name": spec.display_name,
-        "client_family": spec.client_family,
-        "client_model": spec.client_model,
-        "request_style": spec.request_style,
+        # ``selected_model`` and the flat provider fields are retained for API
+        # compatibility; they now describe only the execution route.
+        "selected_model": execution_model,
+        "execution_model": execution_model,
+        "judgment_model": judgment_model_value,
+        "provider": execution_spec.provider,
+        "provider_display_name": execution_spec.display_name,
+        "client_family": execution_spec.client_family,
+        "client_model": execution_spec.client_model,
+        "request_style": execution_spec.request_style,
         "selection_source": source,
+        "judgment_selection_source": judgment_source or "start_argument",
+        "execution": {
+            "model": execution_model,
+            "provider": execution_spec.provider,
+            "client_model": execution_spec.client_model,
+            "roles": list(_EXECUTION_RESEARCH_ROLES),
+        },
+        "judgment": {
+            "model": judgment_model_value,
+            "provider": judgment_spec.provider,
+            "client_model": judgment_spec.client_model,
+            "roles": list(_JUDGMENT_RESEARCH_ROLES),
+            "authority": "internal_scientific_decision_and_conformance",
+            "publication_verifier": False,
+        },
         "roles": roles,
         "all_roles_explicit": True,
+        "glm53_execution_only": execution_is_glm53,
+        "glm53_scope": "locked_task_implementation_raw_execution_outputs_logs_and_drafting",
+        "project_judgment_roles_excluded": execution_is_glm53,
+        "role_separation_enforced": execution_model != judgment_model_value,
+        "independent_review_claimed": False,
+        "internal_scientific_authority": "judgment_model",
+        "scientific_feedback_authority": "judgment_model",
+        "publication_authority": "external_signed_verifier",
     }
 
 
-def _research_model_arguments(model: str) -> list[str]:
-    """Pass the selected model explicitly through every project role."""
+def _research_model_arguments(
+    model: str,
+    *,
+    judgment_model: str | None = None,
+) -> list[str]:
+    """Pass explicit execution/judgment routes through every project role."""
 
+    execution_model = str(model)
+    selected_judgment_model = str(judgment_model or execution_model)
+    routes = {
+        "execution": execution_model,
+        "judgment": selected_judgment_model,
+    }
     arguments: list[str] = []
-    for _role, flag in _RESEARCH_MODEL_FLAGS:
-        arguments.extend([flag, model])
+    for _role, flag, route in _RESEARCH_MODEL_ROUTES:
+        arguments.extend([flag, routes[route]])
     return arguments
 
 
@@ -1619,6 +1804,7 @@ def _configure_provider(
         PROVIDER_FIELDS,
         ProviderConfigError,
         configured_field_value,
+        explain_provider_configuration,
         load_provider_config,
         mark_managed_environment,
         normalize_provider_name,
@@ -1701,6 +1887,7 @@ def _configure_provider(
     if update_bfts and saved.get("active_provider") == provider:
         bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
     payload: dict[str, object] = {
+        "schema": "xscientist.provider-add.v1",
         "ok": True,
         "workspace": ".",
         "provider": provider,
@@ -1752,6 +1939,25 @@ def _configure_provider(
             "install_command": status["install_command"],
         }
     )
+    explanation = explain_provider_configuration(workspace, provider)
+    credential_fields = [
+        field for field in explanation["fields"] if bool(field["secret"])
+    ]
+    payload["credential_storage"] = {
+        "workspace_env_file": env_path.relative_to(workspace).as_posix(),
+        "written_to_workspace": bool(payload["credentials_written"]),
+        "workspace_field_names": sorted(
+            str(field["source_name"] or field["name"])
+            for field in credential_fields
+            if field["source"] == "workspace_env_file"
+        ),
+        "process_field_names": sorted(
+            str(field["source_name"] or field["name"])
+            for field in credential_fields
+            if field["source"] == "process_environment"
+        ),
+        "secret_values_returned": False,
+    }
     return payload
 
 
@@ -1767,6 +1973,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
         begin_managed_environment_transaction,
         begin_provider_file_transaction,
         discover_workspace_root,
+        explain_provider_configuration,
         load_provider_config,
         normalize_provider_name,
         provider_statuses,
@@ -1808,11 +2015,28 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 )
             )
             workspace_label = (workspace.name or "workspace") if initialized else None
+            configured_rows = [row for row in rows if row["configured"]]
+            active_row = next((row for row in rows if row["active"]), None)
+            if active_row is not None:
+                list_next_actions = [
+                    f"xscientist provider explain {active_row['provider']} --workspace ."
+                ]
+            elif configured_rows:
+                list_next_actions = [
+                    "xscientist provider activate "
+                    f"{configured_rows[0]['provider']} --workspace ."
+                ]
+            else:
+                list_next_actions = ["xscientist setup my-research"]
             payload = {
+                "schema": "xscientist.provider-list.v1",
+                "ok": True,
                 "workspace": workspace_label,
                 "workspace_initialized": initialized,
                 "discovery_only": discovery_only,
                 "providers": rows,
+                "next_actions": list_next_actions,
+                "network_request_made": False,
             }
             if parsed.as_json:
                 print(
@@ -1872,6 +2096,122 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 hidden_count = len(rows) - len(visible_rows)
                 if hidden_count:
                     print(f"Other providers hidden: {hidden_count} (use --all)")
+                print(
+                    "Next: "
+                    + _contextual_action(list_next_actions[0], parsed.workspace)
+                )
+            return 0
+
+        if parsed.provider_command == "explain":
+            explanation = explain_provider_configuration(
+                workspace,
+                parsed.name,
+            )
+            provider = str(explanation["provider"])
+            next_actions: list[dict[str, object]] = []
+            if not explanation["metadata_configured"]:
+                next_actions.append(
+                    {
+                        "code": "configure_provider",
+                        "command": f"xscientist provider add {provider} --workspace .",
+                        "network_request": False,
+                    }
+                )
+            elif explanation["missing_required_fields"]:
+                next_actions.append(
+                    {
+                        "code": "configure_credentials",
+                        "command": f"xscientist provider add {provider} --workspace .",
+                        "network_request": False,
+                    }
+                )
+            if not explanation["client_available"]:
+                next_actions.append(
+                    {
+                        "code": "install_provider_client",
+                        "command": str(explanation["install_command"]),
+                        "network_request": True,
+                    }
+                )
+            if explanation["metadata_configured"] and not explanation["active"]:
+                next_actions.append(
+                    {
+                        "code": "activate_provider",
+                        "command": (
+                            f"xscientist provider activate {provider} --workspace ."
+                        ),
+                        "network_request": False,
+                    }
+                )
+            if explanation["configuration_ready"] and explanation["active"]:
+                next_actions.append(
+                    {
+                        "code": "audit_workspace_readiness",
+                        "command": "xscientist doctor --workspace .",
+                        "network_request": False,
+                    }
+                )
+            payload = {
+                "schema": "xscientist.provider-explain.v1",
+                "ok": True,
+                "workspace": ".",
+                "verification_scope": "configuration_only",
+                "configuration": explanation,
+                "next_actions": next_actions,
+                "optional_live_check": {
+                    "command": f"xscientist provider test {provider} --workspace .",
+                    "network_request": True,
+                    "may_incur_cost": provider != "ollama",
+                },
+            }
+            if parsed.as_json:
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(payload),
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print(f"Provider: {provider}")
+                print(f"Active: {explanation['active']}")
+                print(f"Model: {explanation['model'] or '-'}")
+                print(
+                    "Configuration: "
+                    + (
+                        "ready (not live-verified)"
+                        if explanation["configuration_ready"]
+                        else "not ready"
+                    )
+                )
+                print("Credential and endpoint sources (values are never shown):")
+                for field in explanation["fields"]:
+                    requirement = "required" if field["required"] else "optional"
+                    print(f"  {field['name']}: {field['source']} ({requirement})")
+                print("Network request: none")
+                print("Files changed: none")
+                for action in next_actions:
+                    print(
+                        "Next: "
+                        + _contextual_action(
+                            str(action["command"]),
+                            parsed.workspace,
+                        )
+                    )
+                live_note = (
+                    " (may incur provider cost)"
+                    if payload["optional_live_check"]["may_incur_cost"]
+                    else ""
+                )
+                print(
+                    "Optional live verification"
+                    + live_note
+                    + ": "
+                    + _contextual_action(
+                        str(payload["optional_live_check"]["command"]),
+                        parsed.workspace,
+                    )
+                )
             return 0
 
         if parsed.provider_command == "test":
@@ -2277,6 +2617,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                     workspace / "bfts_config.yaml", str(active_entry["model"])
                 )
             payload = {
+                "schema": "xscientist.provider-remove.v1",
                 "ok": True,
                 "removed": parsed.name,
                 "active_provider": active_provider,
@@ -2299,6 +2640,7 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             if not parsed.no_update_bfts:
                 bfts_updated = update_bfts_models(workspace / "bfts_config.yaml", model)
             payload = {
+                "schema": "xscientist.provider-activate.v1",
                 "ok": True,
                 "active_provider": provider_name,
                 "model": model,
@@ -2356,7 +2698,16 @@ def _run_provider(parsed: argparse.Namespace) -> int:
             if payload["credentials_written"]:
                 print("Credentials saved securely to: " f"{payload['env_file']}")
             else:
-                print("Credentials: using existing environment or local env file")
+                storage = payload["credential_storage"]
+                if storage["process_field_names"]:
+                    print(
+                        "Credentials: using the current process environment; "
+                        "no secret was copied into the workspace env file"
+                    )
+                elif storage["workspace_field_names"]:
+                    print("Credentials: using the existing private workspace env file")
+                else:
+                    print("Credentials: not required for this provider")
             print(f"Active: {payload['active']}")
             print(f"BFTS config updated: {payload['bfts_updated']}")
             if payload.get("settings_written"):
@@ -2369,20 +2720,49 @@ def _run_provider(parsed: argparse.Namespace) -> int:
                 print(f"Install: {payload['install_command']}")
         return 0
     except (OSError, ProviderConfigError) as exc:
+        from ai_scientist.utils.privacy import redact_sensitive_text
+
+        safe_error = redact_sensitive_text(str(exc))
+        if "configuration not found" in safe_error:
+            error_code = "workspace_not_initialized"
+            next_actions = ["xscientist setup ."]
+        elif "broad permissions" in safe_error:
+            error_code = "credential_file_permissions_unsafe"
+            next_actions = ["restrict the configured workspace env file to mode 600"]
+        elif safe_error.startswith("missing ") or " is required" in safe_error:
+            error_code = "provider_configuration_missing"
+            provider_name = str(getattr(parsed, "name", "") or "NAME")
+            next_actions = [f"xscientist provider add {provider_name} --workspace ."]
+        elif "symlink" in safe_error or "unsafe" in safe_error:
+            error_code = "unsafe_workspace_path"
+            next_actions = []
+        else:
+            error_code = "provider_configuration_error"
+            next_actions = ["xscientist provider list --workspace . --json"]
+        error_payload = {
+            "schema": "xscientist.provider-error.v1",
+            "ok": False,
+            "command": str(getattr(parsed, "provider_command", "") or "provider"),
+            "error_code": error_code,
+            "error": safe_error,
+            "next_actions": next_actions,
+            "host_paths_disclosed": False,
+        }
         if getattr(parsed, "as_json", False):
             print(
                 json.dumps(
-                    {
-                        "schema": "xscientist.provider-error.v1",
-                        "ok": False,
-                        "error": str(exc),
-                    },
+                    _safe_public_json_payload(error_payload),
                     ensure_ascii=False,
                 ),
                 file=sys.stderr,
             )
         else:
-            print(f"xscientist provider: {exc}", file=sys.stderr)
+            print(f"xscientist provider: {safe_error}", file=sys.stderr)
+            for action in next_actions:
+                print(
+                    "Next: " + _contextual_action(action, parsed.workspace),
+                    file=sys.stderr,
+                )
         return 2
 
 
@@ -2490,7 +2870,7 @@ def _validated_existing_research_question(
     repository = ResearchRepository(workspace)
     question_objects = repository.objects(kind="question")
     latest_question = (
-        max(question_objects, key=lambda item: str(item.get("created_at") or ""))
+        repository.get(repository.resolve("@latest:question"))
         if question_objects
         else None
     )
@@ -2735,17 +3115,10 @@ def _setup_workspace_snapshot(
     from . import provider_config as provider_config_module
 
     workspace_existed = workspace.exists()
-    files: dict[str, dict[str, object] | None] = {}
+    files: dict[str, ManagedFileState | None] = {}
     for relative in _SETUP_TRANSACTION_FILES:
-        target = _validated_workspace_file(workspace, relative)
-        files[relative] = (
-            {
-                "content": target.read_bytes(),
-                "mode": target.stat().st_mode & 0o7777,
-            }
-            if target is not None
-            else None
-        )
+        _validated_workspace_file(workspace, relative)
+        files[relative] = capture_managed_file_state(workspace / relative)
     directories: dict[str, dict[str, object]] = {}
     for relative in _SETUP_TRANSACTION_DIRS:
         target = workspace / relative
@@ -2754,10 +3127,12 @@ def _setup_workspace_snapshot(
         elif target.is_dir():
             directories[relative] = {"kind": "directory"}
         elif target.is_file():
+            state = capture_managed_file_state(target)
+            if state is None:  # pragma: no cover - concurrent disappearance guard
+                raise OSError("managed setup file changed while being snapshotted")
             directories[relative] = {
                 "kind": "file",
-                "content": target.read_bytes(),
-                "mode": target.stat().st_mode & 0o7777,
+                "state": state,
             }
         else:
             directories[relative] = {"kind": "absent"}
@@ -2766,18 +3141,11 @@ def _setup_workspace_snapshot(
         if directories["checkpoints"]["kind"] == "directory"
         else set()
     )
-    extra_file_state: dict[str, dict[str, object] | None] = {}
+    extra_file_state: dict[str, ManagedFileState | None] = {}
     extra_parent_state: dict[str, bool] = {}
     for relative in extra_files:
-        target = _validated_workspace_file(workspace, relative)
-        extra_file_state[relative] = (
-            {
-                "content": target.read_bytes(),
-                "mode": target.stat().st_mode & 0o7777,
-            }
-            if target is not None
-            else None
-        )
+        _validated_workspace_file(workspace, relative)
+        extra_file_state[relative] = capture_managed_file_state(workspace / relative)
         parent = Path(relative).parent
         while parent != Path("."):
             extra_parent_state[parent.as_posix()] = (workspace / parent).is_dir()
@@ -2826,6 +3194,7 @@ def _setup_workspace_snapshot(
         "symbolic_ref": symbolic_ref,
         "git_identity": git_identity,
         "post_files": {},
+        "post_directory_files": {},
     }
     # Begin attribution only after every fallible snapshot read completed.  All
     # deeper calls in this thread (including diagnostics) inherit the context,
@@ -2839,25 +3208,40 @@ def _setup_workspace_snapshot(
 def _record_setup_post_state(workspace: Path, snapshot: dict[str, object]) -> None:
     """Record exact transaction-owned leaf states before calling external checks."""
 
+    # Do not sample ``os.environ`` here.  Another in-process invocation may
+    # have replaced a value after this transaction wrote it, and sampling the
+    # live mapping would incorrectly absorb that concurrent value into our
+    # rollback post-state.  The managed transaction journals the exact process,
+    # ownership, and generation values produced by each of *our* writes; keep a
+    # copy of those expected states alongside the file post-state instead.
+    snapshot["post_environment"] = _setup_environment_transaction_post_state(snapshot)
     selected = set(_SETUP_TRANSACTION_FILES)
     extra_files = snapshot.get("extra_files")
     if isinstance(extra_files, dict):
         selected.update(str(path) for path in extra_files)
-    post_files: dict[str, dict[str, object]] = {}
+    post_files: dict[str, ManagedFileState | None] = {}
     for relative in sorted(selected):
         try:
-            target = _validated_workspace_file(workspace, relative)
+            _validated_workspace_file(workspace, relative)
+            post_files[relative] = capture_managed_file_state(workspace / relative)
         except ValueError as exc:
             raise OSError("managed transaction path changed identity") from exc
-        if target is None:
-            post_files[relative] = {"kind": "absent"}
-        else:
-            post_files[relative] = {
-                "kind": "file",
-                "content": target.read_bytes(),
-                "mode": target.stat().st_mode & 0o7777,
-            }
     snapshot["post_files"] = post_files
+    directory_states = snapshot.get("directories")
+    post_directory_files: dict[str, ManagedFileState] = {}
+    if isinstance(directory_states, dict):
+        for relative, state in directory_states.items():
+            if not isinstance(state, dict) or state.get("kind") != "file":
+                continue
+            try:
+                _validated_workspace_file(workspace, str(relative))
+                captured = capture_managed_file_state(workspace / str(relative))
+            except ValueError as exc:
+                raise OSError("managed setup file changed identity") from exc
+            if captured is None:
+                raise OSError("managed setup file disappeared during setup")
+            post_directory_files[str(relative)] = captured
+    snapshot["post_directory_files"] = post_directory_files
     checkpoint_root = workspace / "checkpoints"
     snapshot["post_checkpoint_entries"] = (
         {path.name for path in checkpoint_root.iterdir()}
@@ -2876,6 +3260,55 @@ def _commit_setup_environment(snapshot: dict[str, object]) -> None:
     if not callable(commit):  # pragma: no cover - internal invariant guard
         raise OSError("managed environment transaction snapshot is invalid")
     commit()
+
+
+def _setup_environment_transaction_post_state(
+    snapshot: dict[str, object],
+) -> dict[str, tuple[object, object, int]]:
+    """Return the last journaled state for each transaction-owned env field.
+
+    The values intentionally remain opaque.  In particular, this helper does
+    not stringify credential values or copy them into a user-visible artifact.
+    Rollback uses the transaction's compare-and-swap implementation; this
+    snapshot makes that ownership boundary explicit at the CLI transaction
+    layer and prevents later live-environment sampling from becoming rollback
+    authority.
+    """
+
+    transaction = snapshot.get("environment_transaction")
+    capture = getattr(transaction, "post_state", None)
+    if not callable(capture):
+        return {}
+    captured = capture()
+    if not isinstance(captured, dict):
+        return {}
+    return {
+        name: state
+        for name, state in captured.items()
+        if isinstance(name, str)
+        and isinstance(state, tuple)
+        and len(state) == 3
+        and isinstance(state[2], int)
+    }
+
+
+def _rollback_setup_environment(snapshot: dict[str, object]) -> tuple[str, ...]:
+    """CAS-rollback only environment fields still owned by this transaction."""
+
+    transaction = snapshot.get("environment_transaction")
+    rollback = getattr(transaction, "rollback", None)
+    if not callable(rollback):
+        return ("<invalid-transaction>",)
+
+    # Refresh only from the immutable mutation journal, never from live process
+    # state.  This also covers an exception raised after an environment write
+    # but before the next file post-state capture.
+    post_state = _setup_environment_transaction_post_state(snapshot)
+    snapshot["post_environment"] = post_state
+    conflicts = rollback(expected_post_state=post_state)
+    if not isinstance(conflicts, tuple):  # pragma: no cover - invariant guard
+        return ("<invalid-rollback-result>",)
+    return tuple(str(name) for name in conflicts)
 
 
 def _setup_git_control_state(
@@ -2972,41 +3405,23 @@ def _setup_git_control_state(
     }
 
 
-def _setup_leaf_matches_post_state(
-    workspace: Path,
-    relative: str,
-    post_files: object,
-) -> bool:
-    if not isinstance(post_files, dict) or relative not in post_files:
-        return True
-    expected = post_files[relative]
-    if not isinstance(expected, dict):
-        return False
-    try:
-        target = _validated_workspace_file(workspace, relative)
-    except ValueError:
-        return False
-    if expected.get("kind") == "absent":
-        return target is None
-    return bool(
-        target is not None
-        and expected.get("kind") == "file"
-        and isinstance(expected.get("content"), bytes)
-        and target.read_bytes() == expected["content"]
-        and target.stat().st_mode & 0o7777 == int(expected.get("mode") or 0)
-    )
-
-
 def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> None:
     """Undo only paths created or changed by one failed setup invocation."""
 
     rollback_failed = False
 
-    environment_transaction = snapshot.get("environment_transaction")
-    rollback_environment = getattr(environment_transaction, "rollback", None)
-    if not callable(rollback_environment):
-        rollback_failed = True
-    elif rollback_environment():
+    def unchanged_without_post_state(
+        target: Path,
+        original: ManagedFileState | None,
+    ) -> bool:
+        """Prove an early-failure leaf still has its immutable pre-state."""
+
+        try:
+            return capture_managed_file_state(target) == original
+        except OSError:
+            return False
+
+    if _rollback_setup_environment(snapshot):
         rollback_failed = True
 
     post_git = snapshot.get("post_git")
@@ -3104,45 +3519,45 @@ def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> N
     post_files = snapshot.get("post_files")
     for relative, original in files.items():
         target = workspace / relative
-        if not _setup_leaf_matches_post_state(workspace, relative, post_files):
+        if original is not None and not isinstance(original, ManagedFileState):
             rollback_failed = True
             continue
-        if original is None:
-            if target.is_file() and not target.is_symlink():
-                target.unlink(missing_ok=True)
+        if not isinstance(post_files, dict) or relative not in post_files:
+            if not unchanged_without_post_state(target, original):
+                rollback_failed = True
             continue
-        if not isinstance(original, dict) or not isinstance(
-            original.get("content"), bytes
-        ):  # pragma: no cover - invariant guard
-            raise OSError("invalid setup rollback snapshot")
-        if target.is_symlink():
+        expected = post_files[relative]
+        if expected is not None and not isinstance(expected, ManagedFileState):
             rollback_failed = True
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(original["content"])
-        target.chmod(int(original.get("mode") or 0o600))
+        if not restore_managed_file_state(
+            target,
+            expected=expected,
+            original=original,
+        ):
+            rollback_failed = True
 
     extra_files = snapshot.get("extra_files")
     if isinstance(extra_files, dict):
         for relative, original in extra_files.items():
             target = workspace / relative
-            if not _setup_leaf_matches_post_state(workspace, relative, post_files):
+            if original is not None and not isinstance(original, ManagedFileState):
                 rollback_failed = True
                 continue
-            if original is None:
-                if target.is_file() and not target.is_symlink():
-                    target.unlink(missing_ok=True)
+            if not isinstance(post_files, dict) or relative not in post_files:
+                if not unchanged_without_post_state(target, original):
+                    rollback_failed = True
                 continue
-            if not isinstance(original, dict) or not isinstance(
-                original.get("content"), bytes
+            expected = post_files[relative]
+            if expected is not None and not isinstance(expected, ManagedFileState):
+                rollback_failed = True
+                continue
+            if not restore_managed_file_state(
+                target,
+                expected=expected,
+                original=original,
             ):
-                raise OSError("invalid setup environment rollback snapshot")
-            if target.is_symlink():
                 rollback_failed = True
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(original["content"])
-            target.chmod(int(original.get("mode") or 0o600))
     extra_parents = snapshot.get("extra_parents")
     if isinstance(extra_parents, dict):
         for relative, existed in sorted(
@@ -3182,6 +3597,7 @@ def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> N
 
     directories = snapshot["directories"]
     assert isinstance(directories, dict)
+    post_directory_files = snapshot.get("post_directory_files")
     for relative in sorted(_SETUP_TRANSACTION_DIRS, key=len, reverse=True):
         target = workspace / relative
         state = directories[relative]
@@ -3205,17 +3621,24 @@ def _rollback_setup_workspace(workspace: Path, snapshot: dict[str, object]) -> N
             else:
                 rollback_failed = True
         elif kind == "file":
-            content = state.get("content")
-            if not isinstance(content, bytes):
+            original = state.get("state")
+            expected = (
+                post_directory_files.get(relative)
+                if isinstance(post_directory_files, dict)
+                else None
+            )
+            if not isinstance(original, ManagedFileState):
                 raise OSError("invalid setup gitfile rollback snapshot")
-            if target.is_symlink():
-                target.unlink()
-            elif target.is_dir():
-                raise OSError(
-                    "setup replaced a pre-existing managed file with a directory"
-                )
-            target.write_bytes(content)
-            target.chmod(int(state.get("mode") or 0o600))
+            if not isinstance(expected, ManagedFileState):
+                if not unchanged_without_post_state(target, original):
+                    rollback_failed = True
+                continue
+            if not restore_managed_file_state(
+                target,
+                expected=expected,
+                original=original,
+            ):
+                rollback_failed = True
 
     if not bool(snapshot["workspace_existed"]):
         if (
@@ -3369,6 +3792,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         load_provider_config,
         load_workspace_environment,
         normalize_provider_name,
+        update_bfts_models,
         validate_provider_model,
     )
     from .research_git import ResearchGitError, create_checkpoint, repository_status
@@ -3558,7 +3982,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 "start refused unsafe managed directories: "
                 + ", ".join(sorted(unsafe_managed_directories))
             )
-        _had_git, start_staged, _tracked = _workspace_git_changes(
+        _had_git, start_staged, start_tracked = _workspace_git_changes(
             workspace,
             required=True,
         )
@@ -3573,6 +3997,18 @@ def _run_start(parsed: argparse.Namespace) -> int:
         if start_staged:
             raise WorkspaceInitError(
                 "start refused because the existing Git index contains staged work"
+            )
+        preexisting_runtime_edits = sorted(
+            start_tracked
+            & {
+                ".xscientist/providers.json",
+                "bfts_config.yaml",
+            }
+        )
+        if preexisting_runtime_edits:
+            raise WorkspaceInitError(
+                "start refused to overwrite existing edits to managed runtime "
+                "configuration: " + ", ".join(preexisting_runtime_edits)
             )
         start_env_file = _setup_env_file_relative(workspace)
         start_snapshot = _setup_workspace_snapshot(
@@ -3646,12 +4082,22 @@ def _run_start(parsed: argparse.Namespace) -> int:
         selected_provider, selected_model = validate_provider_model(
             selected_provider, selected_model
         )
+        selected_judgment_model = str(parsed.judgment_model or "").strip()
+        judgment_model_source = "start_argument" if selected_judgment_model else None
+        if _is_glm53_model(selected_model) and not selected_judgment_model:
+            if not parsed.non_interactive and sys.stdin.isatty():
+                selected_judgment_model = input(
+                    "Judgment model for ideation/ranking/internal scientific review "
+                    "(PROVIDER/MODEL; must not be GLM-5.3): "
+                ).strip()
+                judgment_model_source = "interactive_prompt"
         for label, value in (
             ("provider", selected_provider),
             ("model", selected_model),
+            ("judgment model", selected_judgment_model),
             ("task", selected_task),
         ):
-            if redact_sensitive_text(value) != value:
+            if value and redact_sensitive_text(value) != value:
                 raise ProviderConfigError(
                     f"{label} contains a credential or private literal; refusing "
                     "to persist it"
@@ -3659,6 +4105,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
         model_contract = _research_model_contract(
             selected_model,
             source=model_source,
+            judgment_model=selected_judgment_model or None,
+            judgment_source=judgment_model_source,
         )
         workspace_creation: dict[str, object] | None = None
         if not config_exists:
@@ -3792,9 +4240,51 @@ def _run_start(parsed: argparse.Namespace) -> int:
             raise ProviderConfigError(str(load_result["error"]))
         _record_setup_post_state(workspace, start_snapshot)
 
+        judgment_model = str(model_contract["judgment_model"])
+        if judgment_model != selected_model:
+            from ai_scientist.utils.provider_registry import (
+                missing_model_credentials,
+                resolve_model_provider,
+            )
+            from .dependency_profiles import (
+                installation_command,
+                missing_provider_modules,
+            )
+
+            missing_judgment = missing_model_credentials(
+                [judgment_model],
+                env=os.environ,
+            )
+            if missing_judgment:
+                judgment_spec = resolve_model_provider(judgment_model)
+                missing_names = str(missing_judgment[0].get("missing") or "")
+                raise _ResearchModelRoleError(
+                    "judgment-model configuration is incomplete; missing "
+                    f"{missing_names}",
+                    next_actions=(
+                        "xscientist provider add "
+                        f"{judgment_spec.provider} --workspace WORKSPACE --model "
+                        f"{judgment_model} --no-activate --no-update-bfts",
+                        "or export the listed variables before rerunning start",
+                    ),
+                )
+            judgment_spec = resolve_model_provider(judgment_model)
+            missing_clients = missing_provider_modules(judgment_spec.provider)
+            if missing_clients:
+                raise _ResearchModelRoleError(
+                    "judgment-model client support is not installed",
+                    next_actions=(installation_command(judgment_spec.provider),),
+                )
+
         budget_path = _validated_workspace_file(workspace, "bfts_config.yaml")
         if budget_path is None:
             raise ProviderConfigError("workspace is missing bfts_config.yaml")
+        update_bfts_models(
+            budget_path,
+            selected_model,
+            judgment_model=judgment_model,
+        )
+        _record_setup_post_state(workspace, start_snapshot)
         budget_original = budget_path.read_text(encoding="utf-8")
         budget_payload = yaml.safe_load(budget_original)
         if not isinstance(budget_payload, dict):
@@ -3825,12 +4315,20 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 generated_header
                 + yaml.safe_dump(budget_payload, sort_keys=False, allow_unicode=True),
             )
-        price = resolve_model_price(
-            selected_model,
-            prices_per_million=custom_prices,
+        contract_models = tuple(dict.fromkeys(model_contract["roles"].values()))
+        model_prices = {
+            contract_model: resolve_model_price(
+                contract_model,
+                prices_per_million=custom_prices,
+            )
+            for contract_model in contract_models
+        }
+        price = model_prices[selected_model]
+        unknown_price_models = sorted(
+            model for model, model_price in model_prices.items() if model_price is None
         )
         phases["budget"] = {
-            "ok": parsed.max_cost_usd is None or price is not None,
+            "ok": parsed.max_cost_usd is None or not unknown_price_models,
             "cost_limit_enabled": parsed.max_cost_usd is not None,
             "model": selected_model,
             "price_configured": price is not None,
@@ -3839,27 +4337,45 @@ def _run_start(parsed: argparse.Namespace) -> int:
                 if selected_model in custom_prices
                 else ("bundled" if price is not None else None)
             ),
+            "models": {
+                model: {
+                    "price_configured": model_price is not None,
+                    "price_source": (
+                        "workspace"
+                        if model in custom_prices
+                        else ("bundled" if model_price is not None else None)
+                    ),
+                }
+                for model, model_price in model_prices.items()
+            },
+            "unknown_models": unknown_price_models,
         }
         pending_runtime_paths: list[str] = []
+        runtime_candidates = {
+            ".xscientist/providers.json",
+            "bfts_config.yaml",
+        }
         if workspace_creation is not None:
             repository = ResearchRepository(workspace)
-            generated_paths = (
+            runtime_candidates.update(
                 set(workspace_creation["files"]) - start_checkpoint_protected_paths
             )
-            pending_runtime_paths = [
-                path
-                for path in repository.status()["eligible_changes"]
-                if path in generated_paths
-            ]
+        repository = ResearchRepository(workspace)
+        pending_runtime_paths = [
+            path
+            for path in repository.status()["eligible_changes"]
+            if path in runtime_candidates
+        ]
         _record_setup_post_state(workspace, start_snapshot)
-        if parsed.max_cost_usd is not None and price is None:
+        if parsed.max_cost_usd is not None and unknown_price_models:
             payload = {
                 "schema": "xscientist.start.v1",
                 "ok": False,
                 "phase": "budget",
                 "error_code": "unknown_model_price",
                 "error": (
-                    f"no price is configured for model {selected_model!r}; "
+                    "no price is configured for every research-role model "
+                    f"({', '.join(unknown_price_models)}); "
                     "XScientist will not guess or treat it as free"
                 ),
                 "workspace": ".",
@@ -3986,11 +4502,20 @@ def _run_start(parsed: argparse.Namespace) -> int:
             )
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
+        role_error = isinstance(exc, _ResearchModelRoleError)
+        next_actions = list(exc.next_actions) if role_error else []
+        role_error_fields: dict[str, object] = {}
+        if role_error:
+            role_error_fields = {
+                "error_code": "research_model_role_boundary",
+                "next_actions": next_actions,
+            }
         payload = _safe_json_error_payload(
             exc,
             schema="xscientist.start.v1",
             phase="prepare",
             phases=phases,
+            **role_error_fields,
         )
         if parsed.as_json:
             print(
@@ -4004,6 +4529,8 @@ def _run_start(parsed: argparse.Namespace) -> int:
             print(
                 f"xscientist start stopped during preparation: {exc}", file=sys.stderr
             )
+            for action in next_actions:
+                print(f"Next: {action}", file=sys.stderr)
         return 2
 
     if not report["ok"]:
@@ -4080,17 +4607,25 @@ def _run_start(parsed: argparse.Namespace) -> int:
         question,
         "--autopilot",
         parsed.autopilot,
+        "--target-venue",
+        parsed.target_venue,
         "--bfts-config",
         str(workspace / "bfts_config.yaml"),
         "--research-vcs-strict",
     ]
-    project_args.extend(_research_model_arguments(selected_model))
+    project_args.extend(
+        _research_model_arguments(
+            selected_model,
+            judgment_model=str(model_contract["judgment_model"]),
+        )
+    )
     if not parsed.as_json:
         print(
             "Research model contract: "
-            f"{model_contract['provider']}/{model_contract['client_model']} "
-            f"(source: {model_contract['selection_source']}; "
-            "all research roles explicit)"
+            f"execution={model_contract['execution_model']}; "
+            f"judgment={model_contract['judgment_model']} "
+            "(internal scientific authority; not the publication verifier); "
+            "publication authority=external signed verifier"
         )
     if parsed.data_dir:
         project_args.extend(["--data-dir", str(Path(parsed.data_dir).expanduser())])
@@ -4128,6 +4663,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         "phase": "complete" if returncode == 0 else "research",
         "workspace": ".",
         "project": ".",
+        "target_venue": parsed.target_venue,
         "returncode": returncode,
         "model_contract": model_contract,
         "research_dag": ("outputs/views/{workspace}/research-dag/research-dag.html"),
@@ -5701,7 +6237,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             workspace = resolve_workspace_root(parsed.directory)
-            if _validated_workspace_file(workspace, "research.yaml") is not None:
+            try:
+                existing_research_config = _validated_workspace_file(
+                    workspace, "research.yaml"
+                )
+            except ValueError as exc:
+                raise WorkspaceInitError(
+                    f"unsafe managed workspace path for research.yaml: {exc}"
+                ) from exc
+            if existing_research_config is not None:
                 raise WorkspaceInitError(
                     "refusing to refresh an existing Research VCS workspace; "
                     "use `xscientist setup --force` to refresh managed runtime files"
@@ -5714,18 +6258,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=parsed.force,
             )
         except (OSError, ValueError, WorkspaceInitError) as exc:
+            error_text = str(exc)
+            unsafe_managed_path = (
+                "unsafe managed workspace path" in error_text
+                or "symlink" in error_text
+                or "regular file" in error_text
+            )
+            next_actions = (
+                ["xscientist init NEW_DIRECTORY"] if unsafe_managed_path else []
+            )
             if parsed.as_json:
                 print(
                     json.dumps(
                         _safe_json_error_payload(
                             exc,
                             schema="xscientist.init.v1",
+                            phase="input",
+                            error_code=(
+                                "unsafe_managed_workspace_path"
+                                if unsafe_managed_path
+                                else "workspace_initialization_failed"
+                            ),
+                            next_actions=next_actions,
                         ),
                         ensure_ascii=False,
                     )
                 )
             else:
                 print(f"xscientist init: {exc}", file=sys.stderr)
+                for action in next_actions:
+                    print(f"Next: {action}", file=sys.stderr)
             return 2
         if parsed.as_json:
             print(

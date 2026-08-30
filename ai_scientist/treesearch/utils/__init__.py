@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 import logging
 import shutil
 import zipfile
@@ -53,9 +55,7 @@ def extract_archives(path: Path):
     processed: set[Path] = set()
     while True:
         zip_files = [
-            zip_f
-            for zip_f in path.rglob("*.zip")
-            if zip_f.resolve() not in processed
+            zip_f for zip_f in path.rglob("*.zip") if zip_f.resolve() not in processed
         ]
         if not zip_files:
             break
@@ -83,9 +83,7 @@ def _extract_single_archive(zip_f: Path) -> None:
     f_out_dir = zip_f.with_suffix("")
 
     if f_out_dir.exists():
-        logger.debug(
-            f"Skipping {zip_f} as an item with the same name already exists."
-        )
+        logger.debug(f"Skipping {zip_f} as an item with the same name already exists.")
         if f_out_dir.is_file() and _zip_matches_existing_file(zip_f, f_out_dir):
             zip_f.unlink()
         return

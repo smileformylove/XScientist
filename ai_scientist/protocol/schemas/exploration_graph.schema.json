@@ -15,6 +15,28 @@
     },
     "generated_at": {"type": "string"},
     "source_journals": {"type": "array", "items": {"type": "string"}},
+    "authority_attempts": {
+      "type": ["object", "null"],
+      "description": "Immutable, content-addressed audit of all authority attempts, including terminal attempts that produced no Node.",
+      "required": ["schema", "path", "bundle_root", "content_hash", "object"],
+      "properties": {
+        "schema": {"type": "string", "const": "xscientist.ara.authority-attempts.v1"},
+        "path": {"type": "string", "const": "authority_attempts.json"},
+        "bundle_root": {"type": "string", "const": "authority/ledgers"},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "object": {
+          "type": "object",
+          "required": ["hash", "size", "gzip"],
+          "properties": {
+            "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "size": {"type": "integer", "minimum": 0},
+            "gzip": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "nodes": {
       "type": "array",
       "items": {
@@ -49,6 +71,46 @@
             "type": "array",
             "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
             "description": "ContextPack object hashes injected immediately before this node was planned."
+          },
+          "selection_llm_call_refs": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "description": "Semantic call receipts for judgment-model decisions that selected this node."
+          },
+          "authority_attempt_ids": {
+            "type": "array",
+            "items": {"type": "string", "pattern": "^attempt-[0-9a-f]{32}$"},
+            "uniqueItems": true,
+            "description": "Ordered append-only authority attempts that affected this node."
+          },
+          "authority_attempt_terminal_hashes": {
+            "type": "object",
+            "propertyNames": {"pattern": "^attempt-[0-9a-f]{32}$"},
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "description": "Terminal event hashes for every authority_attempt_id; both fields are bound into content_hash."
+          },
+          "implementation_spec_hash": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Canonical judgment-locked experiment specification bound into content_hash."
+          },
+          "repair_spec_hash": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Canonical technical repair specification bound into content_hash when present."
+          },
+          "parse_metrics_spec_hash": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Canonical metric-parser implementation specification bound into content_hash."
+          },
+          "plot_spec_hash": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Canonical plotting implementation specification bound into content_hash."
           },
           "stage": {"type": ["string", "null"]},
           "step": {"type": ["integer", "null"]},
@@ -90,7 +152,8 @@
       "properties": {
         "nodes": {"type": "integer", "minimum": 0},
         "edges": {"type": "integer", "minimum": 0},
-        "buggy": {"type": "integer", "minimum": 0}
+        "buggy": {"type": "integer", "minimum": 0},
+        "authority_attempts": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": true
     }

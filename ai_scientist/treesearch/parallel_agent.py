@@ -1,5 +1,8 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from concurrent.futures import ALL_COMPLETED, ProcessPoolExecutor, wait
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import List, Optional, Any, Callable, cast, Dict, Tuple
 import ast
 import hashlib
@@ -26,7 +29,11 @@ from .errors import ExperimentCannotContinueError
 from .utils import data_preview
 from .utils.config import Config
 from .utils.metric import MetricValue, WorstMetricValue
-from .utils.response import extract_single_plan_and_code, wrap_code
+from .utils.response import (
+    extract_single_plan_and_code,
+    extract_single_python_code,
+    wrap_code,
+)
 from .utils.serialize import atomic_write_text
 from ai_scientist.protocol import capture_llm_calls
 from ai_scientist.utils.deterministic_evaluator import (
@@ -34,6 +41,15 @@ from ai_scientist.utils.deterministic_evaluator import (
     evaluate_experiment_data,
 )
 from ai_scientist.utils.atomic_io import atomic_write_bytes
+from ai_scientist.utils.authority_attempts import (
+    AuthorityAttemptError,
+    begin_authority_attempt,
+    canonical_authority_hash,
+    inspect_authority_attempts,
+    persist_authority_object,
+    record_authority_attempt_result,
+    run_authority_call,
+)
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
 import copy
 import dataclasses
@@ -52,6 +68,7 @@ MAX_SCIENTIFIC_SEEDS = 32
 MAX_RESEARCH_DECISION_RETRIES = 3
 MAX_PLOT_FILE_BYTES = 100 * 1024 * 1024
 MAX_PARALLEL_WORKERS = 64
+JUDGMENT_MODEL_REQUIRED = "__xscientist_non_glm_judgment_model_required__"
 SUPPORTED_DETERMINISTIC_METRICS = (
     "accuracy",
     "precision",
@@ -104,8 +121,32 @@ hyperparam_idea_spec = FunctionSpec(
                 "minLength": 1,
                 "maxLength": 2000,
             },
+            "parameter": {"type": "string", "minLength": 1, "maxLength": 128},
+            "control_value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+            },
+            "candidate_values": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+            "selection_rule": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+            },
         },
-        "required": ["name", "description"],
+        "required": [
+            "name",
+            "description",
+            "parameter",
+            "control_value",
+            "candidate_values",
+            "selection_rule",
+        ],
         "additionalProperties": False,
     },
 )
@@ -123,6 +164,228 @@ metric_selection_spec = FunctionSpec(
             "rationale": {"type": "string", "minLength": 1, "maxLength": 1000},
         },
         "required": ["metric", "rationale"],
+        "additionalProperties": False,
+    },
+)
+
+
+locked_implementation_spec = FunctionSpec(
+    name="lock_experiment_implementation_spec",
+    description=(
+        "Lock the scientific implementation contract before an execution-only "
+        "model is allowed to write code"
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "objective": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "hypothesis": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+            },
+            "implementation_steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+            "locked_parameters": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                        },
+                    },
+                    "required": ["name", "value", "rationale"],
+                    "additionalProperties": False,
+                },
+            },
+            "required_outputs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+            "prohibited_changes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+            "acceptance_checks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+            "hyperparameter_trial": {
+                "anyOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "parameter": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                            },
+                            "control_value": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512,
+                            },
+                            "candidate_values": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 512,
+                                },
+                            },
+                            "selection_rule": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1000,
+                            },
+                        },
+                        "required": [
+                            "parameter",
+                            "control_value",
+                            "candidate_values",
+                            "selection_rule",
+                        ],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+            "ablation_contract": {
+                "anyOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "component": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                            },
+                            "control_node_id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                            },
+                            "control_code_hash": {
+                                "type": "string",
+                                "pattern": "^sha256:[0-9a-f]{64}$",
+                            },
+                            "expected_outcome": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1000,
+                            },
+                        },
+                        "required": [
+                            "component",
+                            "control_node_id",
+                            "control_code_hash",
+                            "expected_outcome",
+                        ],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+        },
+        "required": [
+            "objective",
+            "hypothesis",
+            "implementation_steps",
+            "locked_parameters",
+            "required_outputs",
+            "prohibited_changes",
+            "acceptance_checks",
+            "hyperparameter_trial",
+            "ablation_contract",
+        ],
+        "additionalProperties": False,
+    },
+)
+
+
+implementation_conformance_spec = FunctionSpec(
+    name="review_locked_implementation_conformance",
+    description="Check whether generated code implements the locked experiment spec",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "conforms": {"type": "boolean"},
+            "violations": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+        },
+        "required": ["conforms", "violations"],
+        "additionalProperties": False,
+    },
+)
+
+
+locked_repair_spec = FunctionSpec(
+    name="lock_implementation_repair_spec",
+    description=(
+        "Lock a technical repair without changing the parent scientific contract"
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "failure_summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+            },
+            "repair_steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+            "prohibited_changes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+            "acceptance_checks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512},
+            },
+        },
+        "required": [
+            "failure_summary",
+            "repair_steps",
+            "prohibited_changes",
+            "acceptance_checks",
+        ],
         "additionalProperties": False,
     },
 )
@@ -154,6 +417,1014 @@ def _stage_max_tokens(stage_cfg: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("stage max_tokens must be a positive integer or null")
     return value
+
+
+def _config_section(container: Any, name: str) -> Any | None:
+    getter = getattr(container, "get", None)
+    if callable(getter):
+        try:
+            return getter(name, None)
+        except (TypeError, AttributeError):
+            pass
+    return getattr(container, name, None)
+
+
+def _model_route_identity(model: object) -> tuple[str, str]:
+    from ai_scientist.utils.provider_registry import resolve_model_provider
+
+    selected = str(model or "").strip()
+    if not selected or selected == JUDGMENT_MODEL_REQUIRED:
+        raise ResearchDecisionError(
+            "BFTS requires an explicit non-GLM scientific judgment model"
+        )
+    try:
+        spec = resolve_model_provider(selected)
+    except ValueError as exc:
+        raise ResearchDecisionError("BFTS model authority route is invalid") from exc
+    return str(spec.provider).casefold(), str(spec.client_model).casefold()
+
+
+def _is_glm53_stage(stage_cfg: Any | None) -> bool:
+    if stage_cfg is None:
+        return False
+    return _model_route_identity(getattr(stage_cfg, "model", None))[1] == "glm-5.3"
+
+
+def _judgment_stage(cfg: Any) -> Any:
+    """Return the scientific-authority route, failing closed for GLM execution."""
+
+    agent_cfg = cfg.agent
+    judgment = _config_section(agent_cfg, "judgment")
+    code = _config_section(agent_cfg, "code")
+    if judgment is None and not _is_glm53_stage(code):
+        # Compatibility for historical single-model configs.  The explicit
+        # route is mandatory as soon as GLM-5.3 is selected as executor.
+        judgment = _config_section(agent_cfg, "feedback")
+    if judgment is None:
+        raise ResearchDecisionError(
+            "GLM-5.3 execution requires agent.judgment with a distinct non-GLM "
+            "model before BFTS may define or run an experiment"
+        )
+    if _is_glm53_stage(code) and _is_glm53_stage(judgment):
+        raise ResearchDecisionError(
+            "GLM-5.3 cannot own BFTS scientific judgment; configure a distinct "
+            "non-GLM agent.judgment route"
+        )
+    return judgment
+
+
+def _assert_glm53_authority_boundary(cfg: Any) -> None:
+    """Ensure every BFTS judgment consumer is outside the GLM execution route."""
+
+    agent_cfg = cfg.agent
+    code = _config_section(agent_cfg, "code")
+    if not _is_glm53_stage(code):
+        return
+    judgment = _judgment_stage(cfg)
+    expected = _model_route_identity(getattr(judgment, "model", None))
+    mismatched: list[str] = []
+    for name in ("feedback", "vlm_feedback", "summary"):
+        route = _config_section(agent_cfg, name)
+        if (
+            route is None
+            or _model_route_identity(getattr(route, "model", None)) != expected
+        ):
+            mismatched.append(name)
+    select_node = _config_section(agent_cfg, "select_node")
+    if select_node is None or (
+        _model_route_identity(getattr(select_node, "model", None)) != expected
+    ):
+        mismatched.append("select_node")
+    if mismatched:
+        raise ResearchDecisionError(
+            "GLM-5.3 BFTS authority boundary is incomplete; route agent."
+            + ", agent.".join(mismatched)
+            + " through the same non-GLM agent.judgment model"
+        )
+
+
+def _canonical_spec_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _persist_authority_object(
+    agent: Any,
+    *,
+    category: str,
+    payload: dict[str, Any],
+) -> str:
+    """Persist one content-addressed authority object before execution.
+
+    This preserves rejected/crashed attempts as inspectable structured trace
+    objects instead of waiting for a successful Node append.  Identical objects
+    deduplicate naturally by hash across concurrent workers.
+    """
+
+    try:
+        object_hash, _object_ref = persist_authority_object(
+            str(agent.cfg.log_dir),
+            category=category,
+            payload=payload,
+        )
+    except AuthorityAttemptError as exc:
+        raise ResearchDecisionError(
+            "BFTS authority object could not be persisted safely"
+        ) from exc
+    return object_hash
+
+
+def _append_agent_attempt_id(agent: Any, attempt_id: str | None) -> None:
+    if attempt_id is None:
+        return
+    attempt_ids = getattr(agent, "_last_authority_attempt_ids", None)
+    if not isinstance(attempt_ids, list):
+        attempt_ids = []
+        agent._last_authority_attempt_ids = attempt_ids
+    if attempt_id not in attempt_ids:
+        attempt_ids.append(attempt_id)
+
+
+def _run_judgment_authority_call(
+    agent: Any,
+    *,
+    category: str,
+    specification: dict[str, Any],
+    parent_node_id: str | None,
+    role: str,
+    model: str,
+    task_kind: str,
+    operation: Callable[[], Any],
+) -> Any:
+    try:
+        result, attempt_id, terminal_hash = run_authority_call(
+            str(agent.cfg.log_dir),
+            category=category,
+            specification=specification,
+            parent_node_id=parent_node_id,
+            role=role,
+            model=model,
+            task_kind=task_kind,
+            operation=operation,
+        )
+    except AuthorityAttemptError as exc:
+        raise ResearchDecisionError(
+            "Scientific-authority attempt could not be persisted safely"
+        ) from exc
+    _append_agent_attempt_id(agent, attempt_id)
+    if attempt_id is not None and terminal_hash is not None:
+        terminal_hashes = getattr(
+            agent,
+            "_last_authority_attempt_terminal_hashes",
+            None,
+        )
+        if not isinstance(terminal_hashes, dict):
+            terminal_hashes = {}
+            agent._last_authority_attempt_terminal_hashes = terminal_hashes
+        terminal_hashes[attempt_id] = terminal_hash
+    return result
+
+
+def _begin_implementation_attempt(
+    agent: Any,
+    *,
+    category: str,
+    payload: dict[str, Any],
+    parent_node_id: str | None,
+    role: str,
+    model: str,
+    task_kind: str,
+) -> tuple[str, str | None]:
+    try:
+        spec_hash, spec_ref = persist_authority_object(
+            str(agent.cfg.log_dir),
+            category=category,
+            payload=payload,
+        )
+        attempt_id = begin_authority_attempt(
+            str(agent.cfg.log_dir),
+            spec_hash=spec_hash,
+            spec_ref=spec_ref,
+            parent_node_id=parent_node_id,
+            role=role,
+            model=model,
+            task_kind=task_kind,
+        )
+    except AuthorityAttemptError as exc:
+        raise ResearchDecisionError(
+            "Implementation attempt could not be persisted before submission"
+        ) from exc
+    _append_agent_attempt_id(agent, attempt_id)
+    agent._last_execution_attempt_id = attempt_id
+    return spec_hash, attempt_id
+
+
+@contextmanager
+def _authority_attempt_result_guard(agent: Any, attempt_id: str | None):
+    terminal = False
+
+    def finish(
+        status: str,
+        *,
+        result_payload: Any | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        nonlocal terminal
+        if terminal:
+            return
+        try:
+            terminal_hash = record_authority_attempt_result(
+                str(agent.cfg.log_dir),
+                attempt_id,
+                status=status,
+                result_payload=result_payload,
+                error_type=error_type,
+            )
+        except AuthorityAttemptError as exc:
+            raise ResearchDecisionError(
+                "Implementation attempt result could not be appended safely"
+            ) from exc
+        if attempt_id is not None and terminal_hash is not None:
+            terminal_hashes = getattr(
+                agent,
+                "_last_authority_attempt_terminal_hashes",
+                None,
+            )
+            if not isinstance(terminal_hashes, dict):
+                terminal_hashes = {}
+                agent._last_authority_attempt_terminal_hashes = terminal_hashes
+            terminal_hashes[attempt_id] = terminal_hash
+        terminal = True
+
+    try:
+        yield finish
+    except BaseException as exc:
+        if not terminal:
+            finish(
+                "timeout" if isinstance(exc, TimeoutError) else "failed",
+                error_type=type(exc).__name__,
+            )
+        raise
+
+
+def _persist_conformance_receipt(
+    agent: Any,
+    *,
+    spec_hash: str,
+    code_hash: str,
+    conforms: bool,
+    violations: list[str],
+    judgment_model: str,
+    repair_spec_hash: str | None = None,
+) -> str:
+    return _persist_authority_object(
+        agent,
+        category="conformance",
+        payload={
+            "schema": "xscientist.implementation-conformance.v1",
+            "implementation_spec_hash": spec_hash,
+            "repair_spec_hash": repair_spec_hash,
+            "candidate_code_hash": code_hash,
+            "execution_model": str(agent.cfg.agent.code.model),
+            "judgment_model": str(judgment_model),
+            "conforms": bool(conforms),
+            "violations": list(violations),
+        },
+    )
+
+
+def _locked_spec_plan(spec: dict[str, Any]) -> str:
+    lines = [str(spec["objective"]).strip()]
+    lines.extend(
+        f"{index}. {step}"
+        for index, step in enumerate(spec["implementation_steps"], start=1)
+    )
+    return "\n".join(lines)
+
+
+def _locked_plan_and_code_query(
+    agent: Any,
+    prompt: Any,
+    *,
+    retries: int,
+    task_kind: str,
+    existing_code: str | None = None,
+    parent_node_id: str | None = None,
+) -> tuple[str, str]:
+    """Let judgment lock a spec, then let GLM implement only that spec.
+
+    A second judgment call checks semantic conformance before any generated
+    program can reach the experiment executor.  The accepted spec and hash are
+    retained on the agent so the resulting Node can persist them in the
+    structured trajectory.
+    """
+
+    retries = _validate_retry_count(retries)
+    agent._last_locked_spec = None
+    agent._last_locked_spec_hash = None
+    agent._last_repair_spec = None
+    agent._last_repair_spec_hash = None
+    agent._last_authority_attempt_ids = []
+    agent._last_authority_attempt_terminal_hashes = {}
+    agent._last_execution_attempt_id = None
+    judgment = _judgment_stage(agent.cfg)
+    metric = str(getattr(agent, "evaluation_metrics", "") or "").strip()
+    if metric not in SUPPORTED_DETERMINISTIC_METRICS:
+        raise ResearchDecisionError(
+            "GLM-5.3 execution requires a locked host-supported evaluation metric"
+        )
+    prompt_hash = _opaque_content_ref(
+        json.dumps(prompt, ensure_ascii=False, sort_keys=True, default=str)
+    )
+    specification_prompt = {
+        "Authority": (
+            "You are the scientific judgment model. Define the bounded experiment "
+            "implementation contract before an execution-only model writes code."
+        ),
+        "Task kind": task_kind,
+        "Primary metric (already frozen; do not replace)": metric,
+        "Scientific context": prompt,
+        "Constraints": [
+            "Do not redefine the research question or primary metric.",
+            "Lock concrete hyperparameter values or bounded candidate values where relevant.",
+            "For an ablation, lock the exact component removed and the control held fixed.",
+            "Separate required outputs and acceptance checks from implementation steps.",
+            "List scientific changes that the execution model is forbidden to make.",
+        ],
+    }
+    raw_spec = _run_judgment_authority_call(
+        agent,
+        category="implementation-specification-request",
+        specification={
+            "schema": "xscientist.implementation-specification-request.v1",
+            "prompt": specification_prompt,
+            "prompt_hash": prompt_hash,
+        },
+        parent_node_id=parent_node_id,
+        role="scientific_specification",
+        model=str(judgment.model),
+        task_kind=task_kind,
+        operation=lambda: query(
+            system_message=specification_prompt,
+            user_message=None,
+            func_spec=locked_implementation_spec,
+            model=judgment.model,
+            temperature=judgment.temp,
+            max_tokens=_stage_max_tokens(judgment),
+        ),
+    )
+    if not isinstance(raw_spec, dict):
+        raise ResearchDecisionError(
+            "Scientific judgment model returned an invalid implementation spec"
+        )
+    if task_kind == "hyperparameter_tuning":
+        locked_trial = (
+            prompt.get("Locked hyperparameter trial")
+            if isinstance(prompt, dict)
+            else None
+        )
+        if (
+            not isinstance(locked_trial, dict)
+            or not isinstance(locked_trial.get("parameter"), str)
+            or not locked_trial["parameter"].strip()
+            or not isinstance(locked_trial.get("control_value"), str)
+            or not locked_trial["control_value"].strip()
+            or not isinstance(locked_trial.get("candidate_values"), list)
+            or not locked_trial["candidate_values"]
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in locked_trial["candidate_values"]
+            )
+            or not isinstance(locked_trial.get("selection_rule"), str)
+            or not locked_trial["selection_rule"].strip()
+        ):
+            raise ResearchDecisionError(
+                "Hyperparameter execution requires a concrete judgment-locked "
+                "parameter, control, candidate values, and selection rule"
+            )
+        raw_spec["hyperparameter_trial"] = copy.deepcopy(locked_trial)
+        raw_spec["ablation_contract"] = None
+        locked_parameters = list(raw_spec.get("locked_parameters") or [])
+        locked_parameters.append(
+            {
+                "name": locked_trial["parameter"],
+                "value": ", ".join(locked_trial["candidate_values"]),
+                "rationale": "Judgment-locked bounded hyperparameter candidates.",
+            }
+        )
+        raw_spec["locked_parameters"] = locked_parameters
+    elif task_kind == "ablation":
+        locked_ablation = (
+            prompt.get("Locked ablation contract") if isinstance(prompt, dict) else None
+        )
+        if (
+            not isinstance(locked_ablation, dict)
+            or not isinstance(locked_ablation.get("component"), str)
+            or not locked_ablation["component"].strip()
+            or not isinstance(locked_ablation.get("control_node_id"), str)
+            or not locked_ablation["control_node_id"].strip()
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(locked_ablation.get("control_code_hash") or ""),
+            )
+            is None
+            or not isinstance(locked_ablation.get("expected_outcome"), str)
+            or not locked_ablation["expected_outcome"].strip()
+        ):
+            raise ResearchDecisionError(
+                "Ablation execution requires an exact judgment-locked component, "
+                "control node/hash, and expected outcome"
+            )
+        raw_spec["hyperparameter_trial"] = None
+        raw_spec["ablation_contract"] = copy.deepcopy(locked_ablation)
+    else:
+        # Generic implementation/debug/plotting specs may lock ordinary runtime
+        # values, but they cannot silently introduce a hyperparameter trial or
+        # ablation outside the corresponding search stage.
+        raw_spec["hyperparameter_trial"] = None
+        raw_spec["ablation_contract"] = None
+    locked_spec: dict[str, Any] = {
+        "schema": "xscientist.locked-experiment-spec.v1",
+        "task_kind": str(task_kind),
+        "primary_metric": metric,
+        "scientific_context_hash": prompt_hash,
+        "judgment_model": str(judgment.model),
+        **raw_spec,
+    }
+    # These boundaries are host-owned even if a model omitted equivalent text.
+    locked_spec["prohibited_changes"] = list(
+        dict.fromkeys(
+            [
+                *list(locked_spec.get("prohibited_changes") or []),
+                "Do not redefine the research question or hypothesis.",
+                f"Do not replace the frozen primary metric: {metric}.",
+                "Do not inspect or optimize against held-out confirmation outcomes.",
+            ]
+        )
+    )
+    expected_spec_hash = _canonical_spec_hash(locked_spec)
+    spec_hash, implementation_attempt_id = _begin_implementation_attempt(
+        agent,
+        category="implementation-spec",
+        payload=locked_spec,
+        parent_node_id=parent_node_id,
+        role="locked_task_implementation",
+        model=str(agent.cfg.agent.code.model),
+        task_kind=task_kind,
+    )
+    if spec_hash != expected_spec_hash:
+        raise ResearchDecisionError("Persisted implementation spec hash mismatch")
+
+    with _authority_attempt_result_guard(
+        agent,
+        implementation_attempt_id,
+    ) as finish_attempt:
+        violations: list[str] = []
+        for _attempt in range(retries):
+            execution_prompt = {
+                "Authority": (
+                    "You are an execution-only implementation model. The scientific "
+                    "contract below is immutable. Implement it; do not plan, select a "
+                    "metric, change parameters, or reinterpret the experiment."
+                ),
+                "Locked experiment spec": locked_spec,
+                "Locked spec hash": spec_hash,
+                "Implementation context": prompt,
+                "Previous conformance violations": violations,
+                "Response contract": (
+                    "Return exactly one fenced Python code block and no prose before "
+                    "or after it."
+                ),
+            }
+            completion_text = (
+                wrap_code(existing_code)
+                if existing_code is not None
+                else query(
+                    system_message=execution_prompt,
+                    user_message=None,
+                    model=agent.cfg.agent.code.model,
+                    temperature=agent.cfg.agent.code.temp,
+                    max_tokens=_stage_max_tokens(agent.cfg.agent.code),
+                )
+            )
+            try:
+                code = extract_single_python_code(completion_text)
+            except ValueError:
+                violations = [
+                    "Return exactly one complete, executable fenced Python program."
+                ]
+                _persist_conformance_receipt(
+                    agent,
+                    spec_hash=spec_hash,
+                    code_hash=_opaque_content_ref(completion_text),
+                    conforms=False,
+                    violations=violations,
+                    judgment_model=str(judgment.model),
+                )
+                continue
+
+            conformance_prompt = {
+                "Authority": (
+                    "You are the scientific judgment model. Fail closed unless the "
+                    "candidate code conforms exactly to the locked experiment spec."
+                ),
+                "Locked experiment spec": locked_spec,
+                "Locked spec hash": spec_hash,
+                "Candidate implementation": wrap_code(code),
+                "Review constraints": [
+                    "Reject any change to the research objective, metric, locked parameters, control, or ablation.",
+                    "Reject missing required outputs or acceptance instrumentation.",
+                    "Do not repair the code or produce a new plan; only judge conformance.",
+                ],
+            }
+            review = _run_judgment_authority_call(
+                agent,
+                category="implementation-conformance-request",
+                specification={
+                    "schema": "xscientist.implementation-conformance-request.v1",
+                    "locked_spec_hash": spec_hash,
+                    "candidate_code_hash": _opaque_content_ref(code),
+                    "prompt": conformance_prompt,
+                },
+                parent_node_id=parent_node_id,
+                role="implementation_conformance",
+                model=str(judgment.model),
+                task_kind=task_kind,
+                operation=lambda: query(
+                    system_message=conformance_prompt,
+                    user_message=None,
+                    func_spec=implementation_conformance_spec,
+                    model=judgment.model,
+                    temperature=0,
+                    max_tokens=_stage_max_tokens(judgment),
+                ),
+            )
+            if not isinstance(review, dict):
+                raise ResearchDecisionError(
+                    "Scientific judgment model returned an invalid conformance review"
+                )
+            review_violations = review.get("violations")
+            violations = (
+                [str(item) for item in review_violations]
+                if isinstance(review_violations, list)
+                else ["Conformance review did not return a bounded violation list."]
+            )
+            _persist_conformance_receipt(
+                agent,
+                spec_hash=spec_hash,
+                code_hash=_opaque_content_ref(code),
+                conforms=review.get("conforms") is True and not violations,
+                violations=violations,
+                judgment_model=str(judgment.model),
+            )
+            if review.get("conforms") is True and not violations:
+                agent._last_locked_spec = locked_spec
+                agent._last_locked_spec_hash = spec_hash
+                if not getattr(
+                    agent,
+                    "_defer_authority_attempt_terminal",
+                    False,
+                ):
+                    finish_attempt(
+                        "accepted",
+                        result_payload={"code": code},
+                    )
+                return _locked_spec_plan(locked_spec), code
+            if existing_code is not None:
+                break
+
+        finish_attempt(
+            "rejected",
+            result_payload={"violations": violations},
+        )
+        raise ResearchDecisionError(
+            "GLM-5.3 implementation failed locked-spec conformance after bounded retries"
+        )
+
+
+def _locked_repair_and_code_query(
+    agent: Any,
+    prompt: Any,
+    *,
+    parent_spec: dict[str, Any] | None,
+    parent_spec_hash: str | None,
+    retries: int,
+    parent_node_id: str | None = None,
+) -> tuple[str, str]:
+    """Repair code while preserving the parent's scientific contract exactly."""
+
+    retries = _validate_retry_count(retries)
+    if (
+        not isinstance(parent_spec, dict)
+        or not isinstance(parent_spec_hash, str)
+        or _canonical_spec_hash(parent_spec) != parent_spec_hash
+    ):
+        raise ResearchDecisionError(
+            "GLM-5.3 debug requires the parent's intact locked experiment spec"
+        )
+    metric = str(getattr(agent, "evaluation_metrics", "") or "").strip()
+    if parent_spec.get("primary_metric") != metric:
+        raise ResearchDecisionError(
+            "Debug metric does not match the parent locked experiment spec"
+        )
+    judgment = _judgment_stage(agent.cfg)
+    agent._last_authority_attempt_ids = []
+    agent._last_authority_attempt_terminal_hashes = {}
+    agent._last_execution_attempt_id = None
+    failure_hash = _opaque_content_ref(
+        json.dumps(prompt, ensure_ascii=False, sort_keys=True, default=str)
+    )
+    repair_request = {
+        "Authority": (
+            "You are the scientific judgment model. Diagnose only the technical "
+            "failure and lock repair steps. The parent scientific contract is "
+            "immutable."
+        ),
+        "Parent experiment spec": parent_spec,
+        "Parent spec hash": parent_spec_hash,
+        "Failure context": prompt,
+        "Constraints": [
+            "Do not change the hypothesis, metric, datasets, hyperparameters, control, or ablation.",
+            "Specify only technical repair steps and checks for the observed failure.",
+        ],
+    }
+    raw_repair = _run_judgment_authority_call(
+        agent,
+        category="repair-specification-request",
+        specification={
+            "schema": "xscientist.repair-specification-request.v1",
+            "prompt": repair_request,
+            "failure_context_hash": failure_hash,
+        },
+        parent_node_id=parent_node_id,
+        role="technical_repair_specification",
+        model=str(judgment.model),
+        task_kind="debug_repair",
+        operation=lambda: query(
+            system_message=repair_request,
+            user_message=None,
+            func_spec=locked_repair_spec,
+            model=judgment.model,
+            temperature=judgment.temp,
+            max_tokens=_stage_max_tokens(judgment),
+        ),
+    )
+    if not isinstance(raw_repair, dict):
+        raise ResearchDecisionError(
+            "Scientific judgment returned an invalid repair spec"
+        )
+    repair_spec = {
+        "schema": "xscientist.locked-repair-spec.v1",
+        "parent_implementation_spec_hash": parent_spec_hash,
+        "failure_context_hash": failure_hash,
+        "judgment_model": str(judgment.model),
+        **raw_repair,
+    }
+    repair_spec["prohibited_changes"] = list(
+        dict.fromkeys(
+            [
+                *list(repair_spec.get("prohibited_changes") or []),
+                "Do not change the parent hypothesis or research objective.",
+                f"Do not replace the frozen primary metric: {metric}.",
+                "Do not change locked hyperparameters, control, or ablation fields.",
+            ]
+        )
+    )
+    expected_repair_hash = _canonical_spec_hash(repair_spec)
+    repair_hash, repair_attempt_id = _begin_implementation_attempt(
+        agent,
+        category="repair-spec",
+        payload=repair_spec,
+        parent_node_id=parent_node_id,
+        role="locked_task_repair",
+        model=str(agent.cfg.agent.code.model),
+        task_kind="debug_repair",
+    )
+    if repair_hash != expected_repair_hash:
+        raise ResearchDecisionError("Persisted repair spec hash mismatch")
+
+    with _authority_attempt_result_guard(
+        agent,
+        repair_attempt_id,
+    ) as finish_attempt:
+        violations: list[str] = []
+        for _attempt in range(retries):
+            completion = query(
+                system_message={
+                    "Authority": (
+                        "You are an execution-only repair model. Implement the locked "
+                        "technical repair without changing the immutable experiment spec."
+                    ),
+                    "Parent experiment spec": parent_spec,
+                    "Parent spec hash": parent_spec_hash,
+                    "Locked repair spec": repair_spec,
+                    "Locked repair spec hash": repair_hash,
+                    "Failure and implementation context": prompt,
+                    "Previous conformance violations": violations,
+                    "Response contract": (
+                        "Return exactly one fenced Python code block and no prose."
+                    ),
+                },
+                user_message=None,
+                model=agent.cfg.agent.code.model,
+                temperature=agent.cfg.agent.code.temp,
+                max_tokens=_stage_max_tokens(agent.cfg.agent.code),
+            )
+            try:
+                code = extract_single_python_code(completion)
+            except ValueError:
+                violations = ["Return exactly one executable fenced Python program."]
+                _persist_conformance_receipt(
+                    agent,
+                    spec_hash=parent_spec_hash,
+                    repair_spec_hash=repair_hash,
+                    code_hash=_opaque_content_ref(completion),
+                    conforms=False,
+                    violations=violations,
+                    judgment_model=str(judgment.model),
+                )
+                continue
+            conformance_prompt = {
+                "Authority": (
+                    "You are the scientific judgment model. Reject a repair that "
+                    "changes the parent scientific contract or misses the locked fix."
+                ),
+                "Parent experiment spec": parent_spec,
+                "Parent spec hash": parent_spec_hash,
+                "Locked repair spec": repair_spec,
+                "Locked repair spec hash": repair_hash,
+                "Candidate repaired implementation": wrap_code(code),
+            }
+            review = _run_judgment_authority_call(
+                agent,
+                category="repair-conformance-request",
+                specification={
+                    "schema": "xscientist.repair-conformance-request.v1",
+                    "parent_spec_hash": parent_spec_hash,
+                    "repair_spec_hash": repair_hash,
+                    "candidate_code_hash": _opaque_content_ref(code),
+                    "prompt": conformance_prompt,
+                },
+                parent_node_id=parent_node_id,
+                role="repair_conformance",
+                model=str(judgment.model),
+                task_kind="debug_repair",
+                operation=lambda: query(
+                    system_message=conformance_prompt,
+                    user_message=None,
+                    func_spec=implementation_conformance_spec,
+                    model=judgment.model,
+                    temperature=0,
+                    max_tokens=_stage_max_tokens(judgment),
+                ),
+            )
+            review_violations = (
+                review.get("violations") if isinstance(review, dict) else None
+            )
+            violations = (
+                [str(item) for item in review_violations]
+                if isinstance(review_violations, list)
+                else ["Conformance review did not return a bounded violation list."]
+            )
+            _persist_conformance_receipt(
+                agent,
+                spec_hash=parent_spec_hash,
+                repair_spec_hash=repair_hash,
+                code_hash=_opaque_content_ref(code),
+                conforms=isinstance(review, dict)
+                and review.get("conforms") is True
+                and not violations,
+                violations=violations,
+                judgment_model=str(judgment.model),
+            )
+            if (
+                isinstance(review, dict)
+                and review.get("conforms") is True
+                and not violations
+            ):
+                agent._last_locked_spec = copy.deepcopy(parent_spec)
+                agent._last_locked_spec_hash = parent_spec_hash
+                agent._last_repair_spec = repair_spec
+                agent._last_repair_spec_hash = repair_hash
+                repair_plan = "\n".join(
+                    [str(repair_spec["failure_summary"]).strip()]
+                    + [
+                        f"{index}. {step}"
+                        for index, step in enumerate(
+                            repair_spec["repair_steps"],
+                            start=1,
+                        )
+                    ]
+                )
+                if not getattr(
+                    agent,
+                    "_defer_authority_attempt_terminal",
+                    False,
+                ):
+                    finish_attempt(
+                        "accepted",
+                        result_payload={"code": code},
+                    )
+                return repair_plan, code
+        finish_attempt(
+            "rejected",
+            result_payload={"violations": violations},
+        )
+        raise ResearchDecisionError(
+            "GLM-5.3 repair failed locked-spec conformance after bounded retries"
+        )
+
+
+def _locked_spec_node_fields(agent: Any) -> dict[str, Any]:
+    spec = getattr(agent, "_last_locked_spec", None)
+    spec_hash = getattr(agent, "_last_locked_spec_hash", None)
+    if not isinstance(spec, dict) or not isinstance(spec_hash, str):
+        return {}
+    if _canonical_spec_hash(spec) != spec_hash:
+        raise ResearchDecisionError("Locked experiment spec hash changed before save")
+    fields = {
+        "implementation_spec": copy.deepcopy(spec),
+        "implementation_spec_hash": spec_hash,
+        "authority_attempt_ids": list(
+            getattr(agent, "_last_authority_attempt_ids", []) or []
+        ),
+        "authority_attempt_terminal_hashes": dict(
+            getattr(
+                agent,
+                "_last_authority_attempt_terminal_hashes",
+                {},
+            )
+            or {}
+        ),
+    }
+    repair_spec = getattr(agent, "_last_repair_spec", None)
+    repair_hash = getattr(agent, "_last_repair_spec_hash", None)
+    if repair_spec is not None or repair_hash is not None:
+        if (
+            not isinstance(repair_spec, dict)
+            or not isinstance(repair_hash, str)
+            or _canonical_spec_hash(repair_spec) != repair_hash
+        ):
+            raise ResearchDecisionError("Locked repair spec hash changed before save")
+        fields.update(
+            {
+                "repair_spec": copy.deepcopy(repair_spec),
+                "repair_spec_hash": repair_hash,
+            }
+        )
+    return fields
+
+
+def _finalize_node_authority_attempts(
+    cfg: Any,
+    node: Node,
+    *,
+    status: str,
+    result_payload: Any | None,
+    error_type: str | None = None,
+) -> None:
+    """Append missing terminal events and bind their hashes into the node."""
+
+    attempt_ids = list(node.authority_attempt_ids or [])
+    terminal_hashes = dict(node.authority_attempt_terminal_hashes or {})
+    for attempt_id in attempt_ids:
+        if attempt_id in terminal_hashes:
+            continue
+        try:
+            terminal_hash = record_authority_attempt_result(
+                str(cfg.log_dir),
+                attempt_id,
+                status=status,
+                result_payload=result_payload,
+                error_type=error_type,
+            )
+        except AuthorityAttemptError as exc:
+            raise ResearchDecisionError(
+                "Node authority attempt could not be finalized safely"
+            ) from exc
+        if terminal_hash is None:
+            raise ResearchDecisionError(
+                "Node authority attempt did not produce a terminal receipt"
+            )
+        terminal_hashes[attempt_id] = terminal_hash
+    node.authority_attempt_terminal_hashes = terminal_hashes
+    try:
+        audit = inspect_authority_attempts(
+            str(cfg.log_dir),
+            expected_attempt_ids=attempt_ids,
+        )
+    except AuthorityAttemptError as exc:
+        raise ResearchDecisionError(
+            "Node authority attempt audit could not be completed"
+        ) from exc
+    if not audit["expected_valid"]:
+        raise ResearchDecisionError(
+            "Node authority attempts are incomplete, orphaned, or invalid"
+        )
+    observed_terminal_hashes = audit["terminal_event_hashes"]
+    if any(
+        observed_terminal_hashes.get(attempt_id) != terminal_hashes.get(attempt_id)
+        for attempt_id in attempt_ids
+    ):
+        raise ResearchDecisionError(
+            "Node authority terminal receipt hash does not match the ledger"
+        )
+
+
+def _merge_authority_fields_into_node(
+    node: Node,
+    fields: dict[str, Any],
+) -> None:
+    node.authority_attempt_ids = list(
+        dict.fromkeys(
+            [
+                *list(getattr(node, "authority_attempt_ids", []) or []),
+                *list(fields.get("authority_attempt_ids", []) or []),
+            ]
+        )
+    )
+    node.authority_attempt_terminal_hashes = {
+        **dict(getattr(node, "authority_attempt_terminal_hashes", {}) or {}),
+        **dict(fields.get("authority_attempt_terminal_hashes", {}) or {}),
+    }
+
+
+def _merge_agent_authority_attempts_into_node(agent: Any, node: Node) -> None:
+    """Bind every completed auxiliary authority call currently held by an agent."""
+
+    _merge_authority_fields_into_node(
+        node,
+        {
+            "authority_attempt_ids": list(
+                getattr(agent, "_last_authority_attempt_ids", []) or []
+            ),
+            "authority_attempt_terminal_hashes": dict(
+                getattr(
+                    agent,
+                    "_last_authority_attempt_terminal_hashes",
+                    {},
+                )
+                or {}
+            ),
+        },
+    )
+
+
+def _finalize_incomplete_attempts_for_parent(
+    cfg: Any,
+    *,
+    parent_node_id: str,
+    status: str,
+    result_payload: Any,
+    error_type: str,
+) -> None:
+    """Close auxiliary worker attempts that were interrupted before return."""
+
+    try:
+        audit = inspect_authority_attempts(str(cfg.log_dir))
+    except AuthorityAttemptError as exc:
+        raise ResearchDecisionError(
+            "Interrupted worker attempts could not be enumerated"
+        ) from exc
+    related = [
+        str(row["attempt_id"])
+        for row in audit["attempts"]
+        if row.get("incomplete") is True and row.get("parent_node_id") == parent_node_id
+    ]
+    terminal_hashes: dict[str, str] = {}
+    for attempt_id in related:
+        try:
+            terminal_hash = record_authority_attempt_result(
+                str(cfg.log_dir),
+                attempt_id,
+                status=status,
+                result_payload=result_payload,
+                error_type=error_type,
+            )
+        except AuthorityAttemptError as exc:
+            raise ResearchDecisionError(
+                "Interrupted worker attempt could not be finalized"
+            ) from exc
+        if terminal_hash is not None:
+            terminal_hashes[attempt_id] = terminal_hash
+    if related:
+        verification = inspect_authority_attempts(
+            str(cfg.log_dir),
+            expected_attempt_ids=related,
+        )
+        if not verification["expected_valid"] or any(
+            verification["terminal_event_hashes"].get(attempt_id)
+            != terminal_hashes.get(attempt_id)
+            for attempt_id in related
+        ):
+            raise ResearchDecisionError(
+                "Interrupted worker attempt terminal receipts are invalid"
+            )
 
 
 def _ablation_code_diff_hash(control_code: str, ablation_code: str) -> str:
@@ -1178,12 +2449,18 @@ class AblationIdea:
         component: str,
         expected_outcome: str,
         llm_call_refs: list[str] | None = None,
+        authority_attempt_ids: list[str] | None = None,
+        authority_attempt_terminal_hashes: dict[str, str] | None = None,
     ):
         self.name = name
         self.description = description
         self.component = component
         self.expected_outcome = expected_outcome
         self.llm_call_refs = list(llm_call_refs or [])
+        self.authority_attempt_ids = list(authority_attempt_ids or [])
+        self.authority_attempt_terminal_hashes = dict(
+            authority_attempt_terminal_hashes or {}
+        )
 
 
 class HyperparamTuningIdea:
@@ -1193,11 +2470,25 @@ class HyperparamTuningIdea:
         self,
         name: str,
         description: str,
+        parameter: str | None = None,
+        control_value: str | None = None,
+        candidate_values: list[str] | None = None,
+        selection_rule: str | None = None,
         llm_call_refs: list[str] | None = None,
+        authority_attempt_ids: list[str] | None = None,
+        authority_attempt_terminal_hashes: dict[str, str] | None = None,
     ):
         self.name = name
         self.description = description
+        self.parameter = parameter
+        self.control_value = control_value
+        self.candidate_values = list(candidate_values or [])
+        self.selection_rule = selection_rule
         self.llm_call_refs = list(llm_call_refs or [])
+        self.authority_attempt_ids = list(authority_attempt_ids or [])
+        self.authority_attempt_terminal_hashes = dict(
+            authority_attempt_terminal_hashes or {}
+        )
 
 
 class MinimalAgent:
@@ -1218,6 +2509,15 @@ class MinimalAgent:
         self.evaluation_metrics = evaluation_metrics
         self.stage_name = stage_name
         self.data_preview = None
+        self._last_locked_spec: dict[str, Any] | None = None
+        self._last_locked_spec_hash: str | None = None
+        self._last_repair_spec: dict[str, Any] | None = None
+        self._last_repair_spec_hash: str | None = None
+        self._last_authority_attempt_ids: list[str] = []
+        self._last_authority_attempt_terminal_hashes: dict[str, str] = {}
+        self._last_execution_attempt_id: str | None = None
+        self._last_plot_llm_call_refs: list[str] = []
+        _assert_glm53_authority_boundary(cfg)
 
     @property
     def _prompt_environment(self):
@@ -1424,8 +2724,34 @@ class MinimalAgent:
                 f"parent_node_id={provenance.get('parent_node_id')} "
                 f"parent_content_hash={provenance.get('parent_content_hash')}[/cyan]"
             )
-            # Seed-derived nodes have no LLM origin, so llm_call_refs stays
-            # empty. Provenance links back to the parent via the seed manifest.
+            # A seed is still executable research code.  Under a GLM execution
+            # profile it must first receive a locked judgment spec and pass the
+            # same conformance review as newly generated code; provenance alone
+            # is not scientific authorization.
+            agent_cfg = getattr(getattr(self, "cfg", None), "agent", None)
+            if _is_glm53_stage(getattr(agent_cfg, "code", None)):
+                seed_prompt = {
+                    "Research idea": self.task_desc,
+                    "Imported ARA seed plan (advisory only)": plan,
+                    "Imported code hash": _opaque_content_ref(code),
+                    "Seed provenance": provenance,
+                    "Primary metric": self.evaluation_metrics,
+                }
+                with capture_llm_calls() as refs:
+                    plan, code = _locked_plan_and_code_query(
+                        self,
+                        seed_prompt,
+                        retries=1,
+                        task_kind="ara_seed_import",
+                        existing_code=code,
+                    )
+                return Node(
+                    plan=plan,
+                    code=code,
+                    llm_call_refs=list(refs),
+                    **_locked_spec_node_fields(self),
+                )
+            # Non-GLM legacy routes retain the exact seed bytes and provenance.
             return Node(plan=plan, code=code)
 
         prompt: Any = {
@@ -1467,9 +2793,14 @@ class MinimalAgent:
         # Capture semantic LLM call-receipt hashes that produced this node's code.
         # When the ARA tracer is inactive the block is a no-op (refs stays []).
         with capture_llm_calls() as refs:
-            plan, code = self.plan_and_code_query(prompt)
+            plan, code = self.plan_and_code_query(prompt, task_kind="baseline")
         print("MinimalAgent: Draft complete")
-        return Node(plan=plan, code=code, llm_call_refs=list(refs))
+        return Node(
+            plan=plan,
+            code=code,
+            llm_call_refs=list(refs),
+            **_locked_spec_node_fields(self),
+        )
 
     def _debug(self, parent_node: Node) -> Node:
         prompt: Any = {
@@ -1498,8 +2829,24 @@ class MinimalAgent:
             prompt["Data Overview"] = self.data_preview
 
         with capture_llm_calls() as refs:
-            plan, code = self.plan_and_code_query(prompt)
-        return Node(plan=plan, code=code, parent=parent_node, llm_call_refs=list(refs))
+            if _is_glm53_stage(self.cfg.agent.code):
+                plan, code = _locked_repair_and_code_query(
+                    self,
+                    prompt,
+                    parent_spec=parent_node.implementation_spec,
+                    parent_spec_hash=parent_node.implementation_spec_hash,
+                    retries=MAX_RESEARCH_DECISION_RETRIES,
+                    parent_node_id=parent_node.id,
+                )
+            else:
+                plan, code = self.plan_and_code_query(prompt, task_kind="debug")
+        return Node(
+            plan=plan,
+            code=code,
+            parent=parent_node,
+            llm_call_refs=list(refs),
+            **_locked_spec_node_fields(self),
+        )
 
     def _improve(self, parent_node: Node) -> Node:
         prompt: Any = {
@@ -1521,12 +2868,17 @@ class MinimalAgent:
         prompt["Instructions"] |= self._prompt_impl_guideline
 
         with capture_llm_calls() as refs:
-            plan, code = self.plan_and_code_query(prompt)
+            plan, code = self.plan_and_code_query(
+                prompt,
+                task_kind="improvement",
+                parent_node_id=parent_node.id,
+            )
         return Node(
             plan=plan,
             code=code,
             parent=parent_node,
             llm_call_refs=list(refs),
+            **_locked_spec_node_fields(self),
         )
 
     def _generate_seed_node(self, parent_node: Node):
@@ -1544,6 +2896,10 @@ class MinimalAgent:
             ablation_code_diff_hash=parent_node.ablation_code_diff_hash,
             ablation_control_semantic_hash=parent_node.ablation_control_semantic_hash,
             ablation_semantic_hash=parent_node.ablation_semantic_hash,
+            implementation_spec=copy.deepcopy(parent_node.implementation_spec),
+            implementation_spec_hash=parent_node.implementation_spec_hash,
+            repair_spec=copy.deepcopy(parent_node.repair_spec),
+            repair_spec_hash=parent_node.repair_spec_hash,
         )
 
     def _generate_hyperparam_tuning_node(
@@ -1558,6 +2914,12 @@ class MinimalAgent:
                 + hyperparam_idea.description
             ),
             "Base code you are working on": wrap_code(parent_node.code),
+            "Locked hyperparameter trial": {
+                "parameter": hyperparam_idea.parameter,
+                "control_value": hyperparam_idea.control_value,
+                "candidate_values": hyperparam_idea.candidate_values,
+                "selection_rule": hyperparam_idea.selection_rule,
+            },
             "Instructions": {},
         }
         prompt["Instructions"] |= {
@@ -1591,13 +2953,31 @@ class MinimalAgent:
         }
         prompt["Instructions"] |= self._prompt_hyperparam_tuning_resp_fmt
         with capture_llm_calls() as refs:
-            plan, code = self.plan_and_code_query(prompt)
+            plan, code = self.plan_and_code_query(
+                prompt,
+                task_kind="hyperparameter_tuning",
+                parent_node_id=parent_node.id,
+            )
+        locked_fields = _locked_spec_node_fields(self)
+        locked_fields["authority_attempt_ids"] = list(
+            dict.fromkeys(
+                [
+                    *hyperparam_idea.authority_attempt_ids,
+                    *locked_fields.get("authority_attempt_ids", []),
+                ]
+            )
+        )
+        locked_fields["authority_attempt_terminal_hashes"] = {
+            **hyperparam_idea.authority_attempt_terminal_hashes,
+            **locked_fields.get("authority_attempt_terminal_hashes", {}),
+        }
         return Node(
             plan="Hyperparam tuning name: " + hyperparam_idea.name + ".\n" + plan,
             code=code,
             parent=parent_node,
             hyperparam_name=hyperparam_idea.name,
             llm_call_refs=[*hyperparam_idea.llm_call_refs, *refs],
+            **locked_fields,
         )
 
     def _generate_ablation_node(self, parent_node: Node, ablation_idea: AblationIdea):
@@ -1614,6 +2994,12 @@ class MinimalAgent:
                 + ablation_idea.expected_outcome
             ),
             "Base code you are working on": wrap_code(parent_node.code),
+            "Locked ablation contract": {
+                "component": ablation_idea.component,
+                "control_node_id": parent_node.id,
+                "control_code_hash": _semantic_code_hash(parent_node.code),
+                "expected_outcome": ablation_idea.expected_outcome,
+            },
             "Instructions": {},
         }
         prompt["Instructions"] |= {
@@ -1656,9 +3042,26 @@ class MinimalAgent:
         }
         prompt["Instructions"] |= self._prompt_ablation_resp_fmt
         with capture_llm_calls() as refs:
-            plan, code = self.plan_and_code_query(prompt)
+            plan, code = self.plan_and_code_query(
+                prompt,
+                task_kind="ablation",
+                parent_node_id=parent_node.id,
+            )
         control_semantic_hash = _semantic_code_hash(parent_node.code)
         ablation_semantic_hash = _semantic_code_hash(code)
+        locked_fields = _locked_spec_node_fields(self)
+        locked_fields["authority_attempt_ids"] = list(
+            dict.fromkeys(
+                [
+                    *ablation_idea.authority_attempt_ids,
+                    *locked_fields.get("authority_attempt_ids", []),
+                ]
+            )
+        )
+        locked_fields["authority_attempt_terminal_hashes"] = {
+            **ablation_idea.authority_attempt_terminal_hashes,
+            **locked_fields.get("authority_attempt_terminal_hashes", {}),
+        }
         return Node(
             plan="Ablation name: " + ablation_idea.name + ".\n" + plan,
             code=code,
@@ -1671,10 +3074,26 @@ class MinimalAgent:
             ablation_control_semantic_hash=control_semantic_hash,
             ablation_semantic_hash=ablation_semantic_hash,
             llm_call_refs=[*ablation_idea.llm_call_refs, *refs],
+            **locked_fields,
         )
 
-    def plan_and_code_query(self, prompt, retries=3) -> tuple[str, str]:
+    def plan_and_code_query(
+        self,
+        prompt,
+        retries=3,
+        *,
+        task_kind: str = "implementation",
+        parent_node_id: str | None = None,
+    ) -> tuple[str, str]:
         """Generate a natural language plan + code in the same LLM call and split them apart."""
+        if _is_glm53_stage(self.cfg.agent.code):
+            return _locked_plan_and_code_query(
+                self,
+                prompt,
+                retries=retries,
+                task_kind=task_kind,
+                parent_node_id=parent_node_id,
+            )
         retries = _validate_retry_count(retries)
         for _ in range(retries):
             completion_text = query(
@@ -1719,21 +3138,35 @@ class MinimalAgent:
         with capture_llm_calls() as refs:
             response = cast(
                 dict,
-                query(
-                    system_message=prompt,
-                    user_message=None,
-                    func_spec=review_func_spec,
-                    model=self.cfg.agent.feedback.model,
-                    temperature=self.cfg.agent.feedback.temp,
-                    max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                _run_judgment_authority_call(
+                    self,
+                    category="execution-review-request",
+                    specification={
+                        "schema": "xscientist.execution-review-request.v1",
+                        "node_id": node.id,
+                        "prompt": prompt,
+                    },
+                    parent_node_id=node.id,
+                    role="execution_evidence_review",
+                    model=str(self.cfg.agent.feedback.model),
+                    task_kind="execution_review",
+                    operation=lambda: query(
+                        system_message=prompt,
+                        user_message=None,
+                        func_spec=review_func_spec,
+                        model=self.cfg.agent.feedback.model,
+                        temperature=self.cfg.agent.feedback.temp,
+                        max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                    ),
                 ),
             )
 
+        _merge_agent_authority_attempts_into_node(self, node)
         node.analysis = response["summary"]
         node.agent_review_bug_advisory = response["is_bug"]
         node.llm_call_refs.extend(refs)
-        # GLM review is explanatory only. It cannot hide a successful host
-        # execution (or rescue an execution exception) from deterministic gates.
+        # Model review cannot hide a successful host execution (or rescue an
+        # execution exception) from deterministic gates.
         node.is_buggy = node.exc_type is not None
         print(
             "[red]Checking if response contains metric name and description[/red]",
@@ -1845,14 +3278,27 @@ class MinimalAgent:
             )
 
         # Get plotting code from LLM
-        plan, code = self.plan_and_code_query(plotting_prompt)
+        with capture_llm_calls() as plot_refs:
+            plan, code = self.plan_and_code_query(
+                plotting_prompt,
+                task_kind="node_plotting",
+                parent_node_id=node.id,
+            )
+        node.llm_call_refs.extend(plot_refs)
 
         # Ensure the code starts with imports
-        if not code.strip().startswith("import"):
+        if not _is_glm53_stage(self.cfg.agent.code) and not code.strip().startswith(
+            "import"
+        ):
             code = "import matplotlib.pyplot as plt\nimport numpy as np\n\n" + code
 
         node.plot_code = code
         node.plot_plan = plan
+        plot_fields = _locked_spec_node_fields(self)
+        if plot_fields:
+            node.plot_spec = copy.deepcopy(plot_fields["implementation_spec"])
+            node.plot_spec_hash = plot_fields["implementation_spec_hash"]
+            _merge_authority_fields_into_node(node, plot_fields)
 
         return code
 
@@ -1876,13 +3322,28 @@ class MinimalAgent:
         retry_count = 0
         retry_limit = MAX_RESEARCH_DECISION_RETRIES
         while retry_count < retry_limit:
-            response = query(
-                system_message=determine_prompt,
-                user_message=None,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
-                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+            response = _run_judgment_authority_call(
+                self,
+                category="dataset-evidence-interpretation-request",
+                specification={
+                    "schema": "xscientist.dataset-evidence-interpretation-request.v1",
+                    "node_id": node.id,
+                    "retry_sequence": retry_count,
+                    "prompt": determine_prompt,
+                },
+                parent_node_id=node.id,
+                role="dataset_evidence_interpretation",
+                model=str(self.cfg.agent.feedback.model),
+                task_kind="dataset_evidence_interpretation",
+                operation=lambda: query(
+                    system_message=determine_prompt,
+                    user_message=None,
+                    model=self.cfg.agent.feedback.model,
+                    temperature=self.cfg.agent.feedback.temp,
+                    max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                ),
             )
+            _merge_agent_authority_attempts_into_node(self, node)
 
             (
                 reasoning,
@@ -1949,15 +3410,29 @@ class MinimalAgent:
             try:
                 response_select_plots = cast(
                     dict,
-                    query(
-                        system_message=prompt_select_plots,
-                        user_message=None,
-                        func_spec=plot_selection_spec,
-                        model=self.cfg.agent.feedback.model,
-                        temperature=self.cfg.agent.feedback.temp,
-                        max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                    _run_judgment_authority_call(
+                        self,
+                        category="plot-selection-request",
+                        specification={
+                            "schema": "xscientist.plot-selection-request.v1",
+                            "node_id": node.id,
+                            "prompt": prompt_select_plots,
+                        },
+                        parent_node_id=node.id,
+                        role="plot_evidence_selection",
+                        model=str(self.cfg.agent.feedback.model),
+                        task_kind="plot_evidence_selection",
+                        operation=lambda: query(
+                            system_message=prompt_select_plots,
+                            user_message=None,
+                            func_spec=plot_selection_spec,
+                            model=self.cfg.agent.feedback.model,
+                            temperature=self.cfg.agent.feedback.temp,
+                            max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                        ),
                     ),
                 )
+                _merge_agent_authority_attempts_into_node(self, node)
 
                 print("[cyan]Plot selection response received[/cyan]")
                 # Extract the plot paths list
@@ -2021,17 +3496,38 @@ class MinimalAgent:
             for plot_path in selected_plots
         ]
 
+        image_content_hashes = [
+            _opaque_content_ref(str(item.get("image_url", {}).get("url", "")))
+            for item in user_message
+            if item.get("type") == "image_url"
+        ]
         response = cast(
             dict,
-            query(
-                system_message=None,
-                user_message=user_message,
-                func_spec=vlm_feedback_spec,
-                model=self.cfg.agent.vlm_feedback.model,
-                temperature=self.cfg.agent.vlm_feedback.temp,
-                max_tokens=_stage_max_tokens(self.cfg.agent.vlm_feedback),
+            _run_judgment_authority_call(
+                self,
+                category="plot-evidence-analysis-request",
+                specification={
+                    "schema": "xscientist.plot-evidence-analysis-request.v1",
+                    "node_id": node.id,
+                    "selected_plot_paths": list(selected_plots),
+                    "image_content_hashes": image_content_hashes,
+                    "instruction": user_message[0],
+                },
+                parent_node_id=node.id,
+                role="plot_evidence_analysis",
+                model=str(self.cfg.agent.vlm_feedback.model),
+                task_kind="plot_evidence_analysis",
+                operation=lambda: query(
+                    system_message=None,
+                    user_message=user_message,
+                    func_spec=vlm_feedback_spec,
+                    model=self.cfg.agent.vlm_feedback.model,
+                    temperature=self.cfg.agent.vlm_feedback.temp,
+                    max_tokens=_stage_max_tokens(self.cfg.agent.vlm_feedback),
+                ),
             ),
         )
+        _merge_agent_authority_attempts_into_node(self, node)
         print(
             f"[cyan]VLM response received from {self.cfg.agent.vlm_feedback.model}[/cyan]"
         )
@@ -2084,17 +3580,32 @@ class MinimalAgent:
             ),
         }
 
-        return cast(
+        summary = cast(
             dict,
-            query(
-                system_message=summary_prompt,
-                user_message=None,
-                func_spec=experiment_summary_spec,
-                model=self.cfg.agent.feedback.model,
-                temperature=self.cfg.agent.feedback.temp,
-                max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+            _run_judgment_authority_call(
+                self,
+                category="node-summary-request",
+                specification={
+                    "schema": "xscientist.node-summary-request.v1",
+                    "node_id": node.id,
+                    "prompt": summary_prompt,
+                },
+                parent_node_id=node.id,
+                role="scientific_summary",
+                model=str(self.cfg.agent.feedback.model),
+                task_kind="node_summary",
+                operation=lambda: query(
+                    system_message=summary_prompt,
+                    user_message=None,
+                    func_spec=experiment_summary_spec,
+                    model=self.cfg.agent.feedback.model,
+                    temperature=self.cfg.agent.feedback.temp,
+                    max_tokens=_stage_max_tokens(self.cfg.agent.feedback),
+                ),
             ),
         )
+        _merge_agent_authority_attempts_into_node(self, node)
+        return summary
 
 
 class GPUManager:
@@ -2178,6 +3689,15 @@ class ParallelAgent:
             best_stage2_node  # to initialize plotting code (stage 3)
         )
         self.data_preview = None
+        self._last_locked_spec: dict[str, Any] | None = None
+        self._last_locked_spec_hash: str | None = None
+        self._last_repair_spec: dict[str, Any] | None = None
+        self._last_repair_spec_hash: str | None = None
+        self._last_authority_attempt_ids: list[str] = []
+        self._last_authority_attempt_terminal_hashes: dict[str, str] = {}
+        self._last_execution_attempt_id: str | None = None
+        self._last_plot_llm_call_refs: list[str] = []
+        _assert_glm53_authority_boundary(cfg)
         configured_workers = cfg.agent.num_workers
         if (
             isinstance(configured_workers, bool)
@@ -2246,13 +3766,26 @@ class ParallelAgent:
             ],
         }
 
-        response = query(
-            system_message=prompt,
-            user_message=None,
-            func_spec=metric_selection_spec,
-            model=self.cfg.agent.code.model,
-            temperature=self.cfg.agent.code.temp,
-            max_tokens=_stage_max_tokens(self.cfg.agent.code),
+        judgment = _judgment_stage(self.cfg)
+        response = _run_judgment_authority_call(
+            self,
+            category="metric-selection-request",
+            specification={
+                "schema": "xscientist.metric-selection-request.v1",
+                "prompt": prompt,
+            },
+            parent_node_id=None,
+            role="metric_selection",
+            model=str(judgment.model),
+            task_kind="stage_metric_selection",
+            operation=lambda: query(
+                system_message=prompt,
+                user_message=None,
+                func_spec=metric_selection_spec,
+                model=judgment.model,
+                temperature=judgment.temp,
+                max_tokens=_stage_max_tokens(judgment),
+            ),
         )
         metric = response["metric"]
         if metric not in SUPPORTED_DETERMINISTIC_METRICS:
@@ -2262,8 +3795,23 @@ class ParallelAgent:
         print("[green]Research Agent selected the stage metric contract[/green]")
         return metric
 
-    def plan_and_code_query(self, prompt, retries=3) -> tuple[str, str]:
+    def plan_and_code_query(
+        self,
+        prompt,
+        retries=3,
+        *,
+        task_kind: str = "implementation",
+        parent_node_id: str | None = None,
+    ) -> tuple[str, str]:
         """Generate a natural language plan + code in the same LLM call and split them apart."""
+        if _is_glm53_stage(self.cfg.agent.code):
+            return _locked_plan_and_code_query(
+                self,
+                prompt,
+                retries=retries,
+                task_kind=task_kind,
+                parent_node_id=parent_node_id,
+            )
         retries = _validate_retry_count(retries)
         for _ in range(retries):
             completion_text = query(
@@ -2290,6 +3838,14 @@ class ParallelAgent:
         self, node: Node, agg_plotting_code: str
     ) -> Node:
         """Generate a special aggregation node for seed evaluation results"""
+        authority_fields = {
+            "authority_attempt_ids": list(
+                getattr(self, "_last_authority_attempt_ids", []) or []
+            ),
+            "authority_attempt_terminal_hashes": dict(
+                getattr(self, "_last_authority_attempt_terminal_hashes", {}) or {}
+            ),
+        }
         return Node(
             plan="Aggregate results from multiple seeds",
             code="# plotting aggregation code",
@@ -2297,11 +3853,26 @@ class ParallelAgent:
             parent=node,
             is_seed_node=True,
             is_seed_agg_node=True,
+            plot_spec=copy.deepcopy(getattr(self, "_last_locked_spec", None)),
+            plot_spec_hash=getattr(self, "_last_locked_spec_hash", None),
+            llm_call_refs=list(getattr(self, "_last_plot_llm_call_refs", [])),
+            **authority_fields,
         )
 
     def _run_multi_seed_evaluation(self, node: Node) -> List[Node]:
         """Run multiple seeds of the same node to get statistical metrics.
         Returns a list of nodes with different random seeds."""
+
+        if _is_glm53_stage(self.cfg.agent.code) and (
+            not isinstance(node.implementation_spec, dict)
+            or not isinstance(node.implementation_spec_hash, str)
+            or _canonical_spec_hash(node.implementation_spec)
+            != node.implementation_spec_hash
+        ):
+            raise ResearchDecisionError(
+                "GLM-5.3 multi-seed execution refused a node without an intact "
+                "judgment-locked experiment spec"
+            )
 
         # Convert node to dict for parallel processing
         node_data = node.to_dict()
@@ -2534,6 +4105,66 @@ class ParallelAgent:
             )
 
     @staticmethod
+    def _prepare_node_before_submit(
+        node_data,
+        task_desc,
+        cfg,
+        memory_summary,
+        evaluation_metrics,
+        stage_name,
+        new_ablation_idea,
+        new_hyperparam_idea,
+        context_pack_ref,
+    ) -> dict[str, Any]:
+        """Lock and implement a GLM node before submitting executable code."""
+
+        planning_agent = MinimalAgent(
+            task_desc=task_desc,
+            cfg=cfg,
+            memory_summary=memory_summary,
+            evaluation_metrics=evaluation_metrics,
+            stage_name=stage_name,
+        )
+        planning_agent._defer_authority_attempt_terminal = True
+        parent_node = (
+            Node.from_dict(copy.deepcopy(node_data), journal=None)
+            if node_data is not None
+            else None
+        )
+        if parent_node is None:
+            child_node = planning_agent._draft()
+        elif parent_node.is_buggy:
+            child_node = planning_agent._debug(parent_node)
+            child_node.parent = parent_node
+        elif new_hyperparam_idea is not None and new_ablation_idea is None:
+            child_node = planning_agent._generate_hyperparam_tuning_node(
+                parent_node,
+                new_hyperparam_idea,
+            )
+            child_node.parent = parent_node
+        elif new_ablation_idea is not None and new_hyperparam_idea is None:
+            child_node = planning_agent._generate_ablation_node(
+                parent_node,
+                new_ablation_idea,
+            )
+            child_node.parent = parent_node
+        else:
+            child_node = planning_agent._improve(parent_node)
+            child_node.parent = parent_node
+        if context_pack_ref:
+            child_node.context_pack_refs = [str(context_pack_ref)]
+        if not child_node.authority_attempt_ids or set(
+            child_node.authority_attempt_terminal_hashes
+        ) == set(child_node.authority_attempt_ids):
+            raise ResearchDecisionError(
+                "GLM worker submission requires one durable planned implementation "
+                "attempt that is not yet terminal"
+            )
+        prepared = child_node.to_dict(allow_incomplete_authority_attempts=True)
+        _safe_pickle_test(prepared, f"prepared node {child_node.id}")
+        return prepared
+
+    @staticmethod
     def _process_node_wrapper(
         node_data,
         task_desc,
@@ -2549,6 +4180,7 @@ class ParallelAgent:
         best_stage1_plot_code=None,
         seed_eval=False,
         context_pack_ref=None,
+        prepared_child_data=None,
     ):
         """Wrapper function that creates a fresh environment for each process"""
         from .journal import Node, Journal
@@ -2582,6 +4214,7 @@ class ParallelAgent:
             evaluation_metrics=evaluation_metrics,
             stage_name=stage_name,
         )
+        worker_agent._defer_authority_attempt_terminal = True
 
         # Create interpreter instance for worker process
         print("Creating Interpreter")
@@ -2612,7 +4245,19 @@ class ParallelAgent:
 
             # Process the node using worker agent
             print("Starting node processing")
-            if seed_eval:
+            if prepared_child_data is not None:
+                prepared_parent_id = prepared_child_data.get("parent_id")
+                expected_parent_id = parent_node.id if parent_node is not None else None
+                if prepared_parent_id != expected_parent_id:
+                    raise ResearchDecisionError(
+                        "Prepared GLM node does not match its locked parent"
+                    )
+                child_node = Node.from_dict(
+                    deepcopy(prepared_child_data),
+                    journal=None,
+                )
+                child_node.parent = parent_node
+            elif seed_eval:
                 # Use the parent node's code to run the same code again
                 child_node = worker_agent._generate_seed_node(parent_node)
                 child_node.parent = parent_node
@@ -2778,10 +4423,16 @@ class ParallelAgent:
                     "Response format": worker_agent._prompt_metricparse_resp_fmt(),
                 }
 
-                (
-                    parse_metrics_plan,
-                    parse_metrics_code,
-                ) = worker_agent.plan_and_code_query(parse_metrics_prompt)
+                with capture_llm_calls() as parse_refs:
+                    (
+                        parse_metrics_plan,
+                        parse_metrics_code,
+                    ) = worker_agent.plan_and_code_query(
+                        parse_metrics_prompt,
+                        task_kind="metric_parser",
+                        parent_node_id=child_node.id,
+                    )
+                child_node.llm_call_refs.extend(parse_refs)
                 logger.info(
                     "Metric parser generated (plan_ref=%s code_ref=%s)",
                     _opaque_content_ref(parse_metrics_plan),
@@ -2789,6 +4440,15 @@ class ParallelAgent:
                 )
                 child_node.parse_metrics_plan = parse_metrics_plan
                 child_node.parse_metrics_code = parse_metrics_code
+                parse_fields = _locked_spec_node_fields(worker_agent)
+                if parse_fields:
+                    child_node.parse_metrics_spec = copy.deepcopy(
+                        parse_fields["implementation_spec"]
+                    )
+                    child_node.parse_metrics_spec_hash = parse_fields[
+                        "implementation_spec_hash"
+                    ]
+                    _merge_authority_fields_into_node(child_node, parse_fields)
                 try:
                     # Execute the parsing code
                     metrics_exec_result = analysis_interpreter.run(
@@ -2814,14 +4474,31 @@ class ParallelAgent:
 
                         metrics_response = cast(
                             dict,
-                            query(
-                                system_message=metrics_prompt,
-                                user_message=None,
-                                func_spec=metric_parse_spec,
-                                model=cfg.agent.feedback.model,
-                                temperature=cfg.agent.feedback.temp,
-                                max_tokens=_stage_max_tokens(cfg.agent.feedback),
+                            _run_judgment_authority_call(
+                                worker_agent,
+                                category="metric-evidence-interpretation-request",
+                                specification={
+                                    "schema": "xscientist.metric-evidence-interpretation-request.v1",
+                                    "node_id": child_node.id,
+                                    "prompt": metrics_prompt,
+                                },
+                                parent_node_id=child_node.id,
+                                role="metric_evidence_interpretation",
+                                model=str(cfg.agent.feedback.model),
+                                task_kind="metric_evidence_interpretation",
+                                operation=lambda: query(
+                                    system_message=metrics_prompt,
+                                    user_message=None,
+                                    func_spec=metric_parse_spec,
+                                    model=cfg.agent.feedback.model,
+                                    temperature=cfg.agent.feedback.temp,
+                                    max_tokens=_stage_max_tokens(cfg.agent.feedback),
+                                ),
                             ),
+                        )
+                        _merge_agent_authority_attempts_into_node(
+                            worker_agent,
+                            child_node,
                         )
                         # If there is any None value, child_node.metric should be set to WorstMetricValue.
                         # This is achieved by raising an error in the MetricValue class,
@@ -3003,15 +4680,46 @@ class ParallelAgent:
 
             _assert_preserved_evaluation_artifact(child_node)
 
+            if prepared_child_data is None and _is_glm53_stage(cfg.agent.code):
+                _finalize_node_authority_attempts(
+                    cfg,
+                    child_node,
+                    status="accepted",
+                    result_payload={
+                        "node_id": child_node.id,
+                        "code": child_node.code,
+                    },
+                )
+
             # Convert result node to dict
             print("Converting result to dict")
-            result_data = child_node.to_dict()
+            result_data = child_node.to_dict(allow_incomplete_authority_attempts=True)
             print(f"Result data keys: {result_data.keys()}")
             print(f"Result data size: {len(str(result_data))} chars")
             print("Returning result")
             return result_data
 
         except Exception as e:
+            if prepared_child_data is None and _is_glm53_stage(cfg.agent.code):
+                attempt_id = getattr(
+                    worker_agent,
+                    "_last_execution_attempt_id",
+                    None,
+                )
+                if attempt_id is not None:
+                    try:
+                        record_authority_attempt_result(
+                            str(cfg.log_dir),
+                            attempt_id,
+                            status=(
+                                "timeout" if isinstance(e, TimeoutError) else "failed"
+                            ),
+                            error_type=type(e).__name__,
+                        )
+                    except AuthorityAttemptError as receipt_error:
+                        raise ResearchDecisionError(
+                            "Failed GLM worker attempt could not be recorded"
+                        ) from receipt_error
             logger.error("Worker process failed: %s", type(e).__name__)
             raise
         finally:
@@ -3056,19 +4764,49 @@ class ParallelAgent:
             ),
         }
 
+        judgment = _judgment_stage(self.cfg)
+        before_attempt_ids = set(self._last_authority_attempt_ids)
         with capture_llm_calls() as refs:
-            response = query(
-                system_message=hyperparam_tuning_prompt,
-                user_message=None,
-                func_spec=hyperparam_idea_spec,
-                model=self.cfg.agent.code.model,
-                temperature=self.cfg.agent.code.temp,
-                max_tokens=_stage_max_tokens(self.cfg.agent.code),
+            response = _run_judgment_authority_call(
+                self,
+                category="hyperparameter-proposal-request",
+                specification={
+                    "schema": "xscientist.hyperparameter-proposal-request.v1",
+                    "prompt": hyperparam_tuning_prompt,
+                },
+                parent_node_id=(
+                    self.best_stage1_node.id if self.best_stage1_node else None
+                ),
+                role="hyperparameter_selection",
+                model=str(judgment.model),
+                task_kind="hyperparameter_proposal",
+                operation=lambda: query(
+                    system_message=hyperparam_tuning_prompt,
+                    user_message=None,
+                    func_spec=hyperparam_idea_spec,
+                    model=judgment.model,
+                    temperature=judgment.temp,
+                    max_tokens=_stage_max_tokens(judgment),
+                ),
             )
+        attempt_ids = [
+            attempt_id
+            for attempt_id in self._last_authority_attempt_ids
+            if attempt_id not in before_attempt_ids
+        ]
         return HyperparamTuningIdea(
             name=response["name"],
             description=response["description"],
+            parameter=response["parameter"],
+            control_value=response["control_value"],
+            candidate_values=response["candidate_values"],
+            selection_rule=response["selection_rule"],
             llm_call_refs=list(refs),
+            authority_attempt_ids=attempt_ids,
+            authority_attempt_terminal_hashes={
+                attempt_id: self._last_authority_attempt_terminal_hashes[attempt_id]
+                for attempt_id in attempt_ids
+            },
         )
 
     def _generate_ablation_idea(
@@ -3103,21 +4841,47 @@ class ParallelAgent:
                 ]
             },
         }
+        judgment = _judgment_stage(self.cfg)
+        before_attempt_ids = set(self._last_authority_attempt_ids)
         with capture_llm_calls() as refs:
-            response = query(
-                system_message=ablation_prompt,
-                user_message=None,
-                func_spec=ablation_idea_spec,
-                model=self.cfg.agent.code.model,
-                temperature=self.cfg.agent.code.temp,
-                max_tokens=_stage_max_tokens(self.cfg.agent.code),
+            response = _run_judgment_authority_call(
+                self,
+                category="ablation-proposal-request",
+                specification={
+                    "schema": "xscientist.ablation-proposal-request.v1",
+                    "prompt": ablation_prompt,
+                },
+                parent_node_id=(
+                    self.best_stage3_node.id if self.best_stage3_node else None
+                ),
+                role="ablation_selection",
+                model=str(judgment.model),
+                task_kind="ablation_proposal",
+                operation=lambda: query(
+                    system_message=ablation_prompt,
+                    user_message=None,
+                    func_spec=ablation_idea_spec,
+                    model=judgment.model,
+                    temperature=judgment.temp,
+                    max_tokens=_stage_max_tokens(judgment),
+                ),
             )
+        attempt_ids = [
+            attempt_id
+            for attempt_id in self._last_authority_attempt_ids
+            if attempt_id not in before_attempt_ids
+        ]
         return AblationIdea(
             name=response["name"],
             component=response["component"],
             description=response["description"],
             expected_outcome=response["expected_outcome"],
             llm_call_refs=list(refs),
+            authority_attempt_ids=attempt_ids,
+            authority_attempt_terminal_hashes={
+                attempt_id: self._last_authority_attempt_terminal_hashes[attempt_id]
+                for attempt_id in attempt_ids
+            },
         )
 
     def _get_leaves(self, node: Node) -> List[Node]:
@@ -3328,11 +5092,14 @@ class ParallelAgent:
             model=summary_cfg.model,
             temp=summary_cfg.temp,
             max_tokens=_stage_max_tokens(summary_cfg),
+            log_dir=str(self.cfg.log_dir),
         )
 
         print("Submitting tasks to process pool")
         futures: list[Any] = []
         future_idea_keys: dict[Any, tuple[str, str] | None] = {}
+        future_prepared_nodes: dict[Any, dict[str, Any] | None] = {}
+        prepared_before_submission: list[dict[str, Any]] = []
         reserved_hyperparams = set(self._hyperparam_tuning_state["tried_hyperparams"])
         reserved_ablations = set(self._ablation_state["completed_ablations"])
         live_nodes = [node.to_dict() for node in self.journal.nodes]
@@ -3442,6 +5209,20 @@ class ParallelAgent:
                 best_stage3_plot_code = (
                     self.best_stage3_node.plot_code if self.best_stage3_node else None
                 )
+                prepared_child_data = None
+                if _is_glm53_stage(self.cfg.agent.code):
+                    prepared_child_data = self._prepare_node_before_submit(
+                        node_data,
+                        self.task_desc,
+                        self.cfg,
+                        worker_memory_summary,
+                        self.evaluation_metrics,
+                        self.stage_name,
+                        new_ablation_idea,
+                        new_hyperparam_idea,
+                        context_pack_ref,
+                    )
+                    prepared_before_submission.append(prepared_child_data)
                 future = self.executor.submit(
                     self._process_node_wrapper,
                     node_data,
@@ -3458,12 +5239,30 @@ class ParallelAgent:
                     best_stage3_plot_code,
                     False,
                     context_pack_ref,
+                    prepared_child_data,
                 )
                 futures.append(future)
                 future_idea_keys[future] = expected_idea
+                future_prepared_nodes[future] = prepared_child_data
         except BaseException as exc:
             for pending in futures:
                 pending.cancel()
+            for prepared in prepared_before_submission:
+                prepared_node = Node.from_dict(copy.deepcopy(prepared), journal=None)
+                _finalize_node_authority_attempts(
+                    self.cfg,
+                    prepared_node,
+                    status="failed",
+                    result_payload={"phase": "worker_submission"},
+                    error_type="WorkerSubmissionError",
+                )
+                _finalize_incomplete_attempts_for_parent(
+                    self.cfg,
+                    parent_node_id=prepared_node.id,
+                    status="failed",
+                    result_payload={"phase": "worker_submission"},
+                    error_type="WorkerSubmissionError",
+                )
             self.cleanup()
             if not isinstance(exc, Exception):
                 raise
@@ -3477,6 +5276,7 @@ class ParallelAgent:
         # A partial batch is not scientific evidence and is never journaled.
         print("Waiting for bounded worker batch")
         staged_results: list[dict[str, Any]] = []
+        unfinished: set[Any] = set()
         try:
             _done, unfinished = wait(
                 futures,
@@ -3527,6 +5327,38 @@ class ParallelAgent:
         except BaseException as exc:
             for pending in futures:
                 pending.cancel()
+            for future, prepared in future_prepared_nodes.items():
+                if prepared is None:
+                    continue
+                prepared_node = Node.from_dict(copy.deepcopy(prepared), journal=None)
+                _finalize_node_authority_attempts(
+                    self.cfg,
+                    prepared_node,
+                    status="timeout" if future in unfinished else "failed",
+                    result_payload={
+                        "phase": "worker_batch",
+                        "timeout": future in unfinished,
+                    },
+                    error_type=(
+                        "WorkerBatchTimeout"
+                        if future in unfinished
+                        else "WorkerBatchFailure"
+                    ),
+                )
+                _finalize_incomplete_attempts_for_parent(
+                    self.cfg,
+                    parent_node_id=prepared_node.id,
+                    status="timeout" if future in unfinished else "failed",
+                    result_payload={
+                        "phase": "worker_batch",
+                        "timeout": future in unfinished,
+                    },
+                    error_type=(
+                        "WorkerBatchTimeout"
+                        if future in unfinished
+                        else "WorkerBatchFailure"
+                    ),
+                )
             self.cleanup()
             if not isinstance(exc, Exception):
                 raise
@@ -3549,6 +5381,16 @@ class ParallelAgent:
         try:
             for result_data in staged_results:
                 result_node = Node.from_dict(copy.deepcopy(result_data), self.journal)
+                if _is_glm53_stage(self.cfg.agent.code):
+                    _finalize_node_authority_attempts(
+                        self.cfg,
+                        result_node,
+                        status="accepted",
+                        result_payload={
+                            "node_id": result_node.id,
+                            "code_hash": _opaque_content_ref(result_node.code),
+                        },
+                    )
                 self.journal.append(result_node)
                 committed_nodes.append(result_node)
             for result_node in committed_nodes:
@@ -3729,7 +5571,13 @@ class ParallelAgent:
                 f"{seed.exp_results_dir}/experiment_data.npy" for seed in seed_nodes
             ),
         }
-        plan, code = self.plan_and_code_query(plotting_prompt)
+        with capture_llm_calls() as plot_refs:
+            plan, code = self.plan_and_code_query(
+                plotting_prompt,
+                task_kind="seed_aggregation_plotting",
+                parent_node_id=parent_node.id,
+            )
+        self._last_plot_llm_call_refs = list(plot_refs)
 
         logger.info(
             "Generated seed aggregation plan/code: plan_chars=%d code_chars=%d",

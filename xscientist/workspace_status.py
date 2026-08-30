@@ -91,25 +91,33 @@ def _empty_closure_levels(status: str = "unavailable") -> dict[str, dict[str, An
     }
 
 
-def _latest_background_run(root: Path) -> dict[str, Any] | None:
-    candidates: list[dict[str, Any]] = []
+def _selected_background_run(root: Path) -> dict[str, Any] | None:
+    candidates: list[tuple[str, dict[str, Any]]] = []
     for path in (root / "04_logs" / "runs").glob("*.json"):
         payload, error = _read_json(path)
         if error or payload.get("schema") != RUN_SCHEMA:
             continue
-        candidates.append(payload)
+        candidates.append((path.name, payload))
     if not candidates:
         return None
-    latest = max(candidates, key=lambda item: str(item.get("created_at") or ""))
+    active_states = {"queued", "running", "cancelling"}
+    _selected_name, selected = max(
+        candidates,
+        key=lambda item: (
+            str(item[1].get("status") or "") in active_states,
+            item[0],
+        ),
+    )
     return {
-        "id": latest.get("id"),
-        "status": latest.get("status"),
-        "created_at": latest.get("created_at"),
-        "finished_at": latest.get("finished_at"),
-        "provider": latest.get("provider"),
-        "model": latest.get("model"),
-        "profile": latest.get("profile"),
-        "returncode": latest.get("returncode"),
+        "id": selected.get("id"),
+        "status": selected.get("status"),
+        "created_at": selected.get("created_at"),
+        "finished_at": selected.get("finished_at"),
+        "provider": selected.get("provider"),
+        "model": selected.get("model"),
+        "profile": selected.get("profile"),
+        "returncode": selected.get("returncode"),
+        "selection_basis": "active_state_then_stable_run_id",
     }
 
 
@@ -394,7 +402,7 @@ def build_workspace_status(
                 "remediation": str(dag_view["refresh_command"]),
             }
         )
-    background_run = _latest_background_run(root)
+    background_run = _selected_background_run(root)
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
     readiness_blockers = [
         item

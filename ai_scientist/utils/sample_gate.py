@@ -6,14 +6,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ai_scientist.utils.experiment_registry import load_experiment_records
+from ai_scientist.utils.experiment_registry import load_verified_experiment_records
 from ai_scientist.utils.pipeline_contracts import (
     load_contract_artifact,
     save_contract_artifact,
     save_json_artifact,
     update_pipeline_artifact,
 )
-
+from ai_scientist.utils.research_integrity import ResearchIntegrityError
 
 DEFAULT_SAMPLE_TASK_COUNT = 1
 
@@ -71,8 +71,12 @@ def build_sample_gate_plan(
     sample_task_count: int = DEFAULT_SAMPLE_TASK_COUNT,
     mode: str = "sample_then_full",
 ) -> dict[str, Any]:
-    tasks = [item for item in (research_plan.get("tasks") or []) if isinstance(item, dict)]
-    sample_count = min(_coerce_positive_int(sample_task_count, DEFAULT_SAMPLE_TASK_COUNT), len(tasks))
+    tasks = [
+        item for item in (research_plan.get("tasks") or []) if isinstance(item, dict)
+    ]
+    sample_count = min(
+        _coerce_positive_int(sample_task_count, DEFAULT_SAMPLE_TASK_COUNT), len(tasks)
+    )
     sample_tasks = []
     for idx, task in enumerate(tasks[:sample_count]):
         task_id = str(task.get("task_id") or f"task_{idx}").strip()
@@ -127,7 +131,9 @@ def evaluate_sample_gate(
     experiment_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     sample_tasks = [
-        item for item in (sample_gate.get("sample_tasks") or []) if isinstance(item, dict)
+        item
+        for item in (sample_gate.get("sample_tasks") or [])
+        if isinstance(item, dict)
     ]
     latest = _latest_record_by_task(experiment_records)
     reasons: list[str] = []
@@ -160,7 +166,9 @@ def evaluate_sample_gate(
                 "task_id": task_id,
                 "passed": not task_reasons,
                 "reasons": task_reasons,
-                "record_id": record.get("record_id") if isinstance(record, dict) else None,
+                "record_id": (
+                    record.get("record_id") if isinstance(record, dict) else None
+                ),
             }
         )
     passed = bool(sample_tasks) and not reasons
@@ -235,8 +243,35 @@ def evaluate_and_save_sample_gate(
     gate = sample_gate
     if not isinstance(gate, dict):
         gate = load_contract_artifact(root, "sample_gate", default={}) or {}
-    records = load_experiment_records(root)
-    evaluated = evaluate_sample_gate(gate, experiment_records=records)
+    try:
+        records = load_verified_experiment_records(root)
+    except ResearchIntegrityError as exc:
+        # An execution gate must fail closed.  In particular, do not reuse an
+        # older valid row when a later row is malformed or when either integrity
+        # sidecar is absent/tampered.
+        evaluated = evaluate_sample_gate(gate, experiment_records=[])
+        evaluated["status"] = "blocked"
+        evaluated["full_generation_allowed"] = False
+        evaluated["result"] = {
+            "passed": False,
+            "reasons": ["experiment_registry_integrity_failed"],
+            "task_results": [
+                {
+                    **item,
+                    "passed": False,
+                    "reasons": ["experiment_registry_integrity_failed"],
+                    "record_id": None,
+                }
+                for item in evaluated.get("result", {}).get("task_results", [])
+                if isinstance(item, dict)
+            ],
+            "registry_integrity": {
+                "ok": False,
+                "detail": str(exc),
+            },
+        }
+    else:
+        evaluated = evaluate_sample_gate(gate, experiment_records=records)
     _save_sample_gate_artifact(
         root,
         evaluated,

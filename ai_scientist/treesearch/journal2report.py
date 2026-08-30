@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from .backend import query
 from .journal import Journal
 from .utils.config import StageConfig

@@ -31,7 +31,13 @@ CONFIG_RELATIVE_PATH = Path(".xscientist") / "providers.json"
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_MODELS = {"zhipu": "glm-4-flash"}
 PROVIDER_ALIASES = {"custom": "openai_compat"}
-PLACEHOLDER_VALUES = {"", "replace-me", "your-api-key", "your_api_key_here"}
+PLACEHOLDER_VALUES = {
+    "",
+    "changeme",
+    "replace-me",
+    "your-api-key",
+    "your_api_key_here",
+}
 
 # ``load_workspace_environment`` necessarily exposes the selected workspace to
 # legacy code through ``os.environ``.  Keep a small, in-memory ownership map so
@@ -95,7 +101,24 @@ class ManagedEnvironmentTransaction:
             self._active = False
         self._leave_context()
 
-    def rollback(self) -> tuple[str, ...]:
+    def post_state(self) -> dict[str, tuple[object, object, int]]:
+        """Return the latest journaled CAS token for every owned key."""
+
+        with _ENVIRONMENT_LOCK:
+            post_state: dict[str, tuple[object, object, int]] = {}
+            for mutation in self._mutations:
+                post_state[mutation.name] = (
+                    mutation.after_process,
+                    mutation.after_managed,
+                    mutation.after_generation,
+                )
+            return post_state
+
+    def rollback(
+        self,
+        *,
+        expected_post_state: Mapping[str, tuple[object, object, int]] | None = None,
+    ) -> tuple[str, ...]:
         """Undo still-owned mutations while preserving every concurrent write."""
 
         if not self._active:
@@ -103,24 +126,51 @@ class ManagedEnvironmentTransaction:
         conflicts: set[str] = set()
         missing = _MISSING_ENVIRONMENT_VALUE
         with _ENVIRONMENT_LOCK:
+            journal_post_state = self.post_state()
+            invalid_post_state: set[str] = set()
+            if expected_post_state is not None:
+                invalid_post_state.update(
+                    set(journal_post_state) ^ set(expected_post_state)
+                )
+                for name in set(journal_post_state) & set(expected_post_state):
+                    journal_state = journal_post_state[name]
+                    expected_state = expected_post_state[name]
+                    if len(expected_state) != 3 or any(
+                        not _environment_values_equal(expected, journaled)
+                        for expected, journaled in zip(
+                            expected_state,
+                            journal_state,
+                            strict=True,
+                        )
+                    ):
+                        invalid_post_state.add(name)
             for mutation in reversed(self._mutations):
                 name = mutation.name
+                if name in invalid_post_state:
+                    conflicts.add(name)
+                    continue
                 current_process = os.environ.get(name, missing)
                 current_managed = _MANAGED_ENV_VALUES.get(name, missing)
                 current_generation = _ENVIRONMENT_GENERATIONS.get(name, missing)
-                if not (
-                    _environment_values_equal(current_process, mutation.after_process)
-                    and _environment_values_equal(
-                        current_managed, mutation.after_managed
-                    )
-                    and _environment_values_equal(
-                        current_generation, mutation.after_generation
-                    )
+                # A generation change means another controlled writer now owns
+                # the whole key, including an ABA write of the same visible
+                # value.  Preserve it intact.  A raw external process write has
+                # no generation token, so compare the process and ownership
+                # components independently: keep the external value while still
+                # removing this transaction's stale ownership metadata.
+                if not _environment_values_equal(
+                    current_generation, mutation.after_generation
                 ):
                     conflicts.add(name)
                     continue
-                _restore_process_environment(name, mutation.before_process)
-                _restore_managed_environment(name, mutation.before_managed)
+                if _environment_values_equal(current_process, mutation.after_process):
+                    _restore_process_environment(name, mutation.before_process)
+                else:
+                    conflicts.add(name)
+                if _environment_values_equal(current_managed, mutation.after_managed):
+                    _restore_managed_environment(name, mutation.before_managed)
+                else:
+                    conflicts.add(name)
                 if mutation.before_generation is missing:
                     _ENVIRONMENT_GENERATIONS.pop(name, None)
                 else:
@@ -999,6 +1049,8 @@ def validate_custom_base_url(value: str) -> str:
     selected = str(value or "").strip().rstrip("/")
     if not selected:
         raise ProviderConfigError("--base-url cannot be empty")
+    if any(ord(char) < 32 or ord(char) == 127 for char in selected):
+        raise ProviderConfigError("--base-url cannot contain control characters")
     parsed = urllib.parse.urlsplit(selected)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ProviderConfigError("--base-url must be an absolute HTTP(S) URL")
@@ -1092,7 +1144,13 @@ def _effective_workspace_environment(
 ) -> dict[str, str]:
     # Explicit process/CLI values win over the current workspace file.  Stale
     # values injected by an earlier workspace have already been removed above.
-    return {**dict(stored), **_process_environment_for_workspace(workspace, environ)}
+    # Known placeholder literals are absence, not an instruction to shadow a
+    # valid private workspace value or route a provider through a dummy endpoint.
+    process = _process_environment_for_workspace(workspace, environ)
+    for name in ALLOWED_ENV_NAMES:
+        if name in process and not _is_configured_value(process[name]):
+            process.pop(name, None)
+    return {**dict(stored), **process}
 
 
 def mark_managed_environment(
@@ -1182,6 +1240,15 @@ def load_workspace_environment(root: str | Path | None = None) -> dict[str, Any]
                     managed_value=None,
                 )
         process_environment = _process_environment_for_workspace(workspace)
+        # Template literals such as ``replace-me`` are absence.  Let a valid
+        # protected workspace value replace them instead of producing a split
+        # brain where diagnostics report the file but the live process keeps
+        # the placeholder.
+        for name in tuple(process_environment):
+            if name in ALLOWED_ENV_NAMES and not _is_configured_value(
+                process_environment[name]
+            ):
+                process_environment.pop(name, None)
         for name, value in stored.items():
             if not _is_configured_value(value):
                 continue
@@ -1314,7 +1381,21 @@ def remove_provider(root: str | Path, provider: str) -> dict[str, Any]:
     return config
 
 
-def update_bfts_models(path: str | Path, model: str) -> bool:
+def update_bfts_models(
+    path: str | Path,
+    model: str,
+    *,
+    judgment_model: str | None = None,
+) -> bool:
+    """Update BFTS model routes without granting GLM scientific authority.
+
+    ``model`` is the implementation/execution route.  An explicit
+    ``judgment_model`` owns experiment decisions and their review.  Historical
+    single-model non-GLM calls remain convenient; GLM calls without a judgment
+    route update only the execution/drafting roles and leave the config
+    fail-closed until a distinct judgment route is supplied.
+    """
+
     target = Path(path)
     if not target.is_file():
         return False
@@ -1327,16 +1408,75 @@ def update_bfts_models(path: str | Path, model: str) -> bool:
         raise ProviderConfigError("BFTS configuration must be a mapping")
     payload.setdefault("report", {})["model"] = model
     agent = payload.setdefault("agent", {})
-    for key in ("code", "feedback", "vlm_feedback"):
-        agent.setdefault(key, {})["model"] = model
-    for key in ("summary", "select_node"):
-        section = agent.get(key)
-        if section is not None:
+    if not isinstance(agent, dict):
+        raise ProviderConfigError("BFTS configuration agent must be a mapping")
+    agent.setdefault("code", {})["model"] = model
+
+    from ai_scientist.utils.provider_registry import resolve_model_provider
+
+    try:
+        execution_is_glm53 = (
+            str(resolve_model_provider(model).client_model).casefold() == "glm-5.3"
+        )
+    except ValueError as exc:
+        raise ProviderConfigError(f"invalid BFTS execution model: {exc}") from exc
+    selected_judgment = str(judgment_model or "").strip()
+    if not selected_judgment and not execution_is_glm53:
+        selected_judgment = model
+    if selected_judgment:
+        try:
+            judgment_is_glm53 = (
+                str(resolve_model_provider(selected_judgment).client_model).casefold()
+                == "glm-5.3"
+            )
+        except ValueError as exc:
+            raise ProviderConfigError(f"invalid BFTS judgment model: {exc}") from exc
+        if execution_is_glm53 and judgment_is_glm53:
+            raise ProviderConfigError(
+                "GLM-5.3 execution requires a distinct non-GLM BFTS judgment model"
+            )
+        feedback_template = agent.get("feedback")
+        if feedback_template is None:
+            feedback_template = {"temp": 0.2, "max_tokens": 4096}
+            agent["feedback"] = feedback_template
+        if not isinstance(feedback_template, dict):
+            raise ProviderConfigError(
+                "BFTS configuration agent.feedback must be a mapping"
+            )
+        judgment = agent.get("judgment")
+        if judgment is None:
+            judgment = {
+                "temp": feedback_template.get("temp", 0.2),
+                "max_tokens": feedback_template.get("max_tokens", 4096),
+            }
+            agent["judgment"] = judgment
+        if not isinstance(judgment, dict):
+            raise ProviderConfigError(
+                "BFTS configuration agent.judgment must be a mapping"
+            )
+        judgment["model"] = selected_judgment
+        for key in ("feedback", "vlm_feedback", "summary"):
+            section = agent.get(key)
+            if section is None:
+                section = {
+                    "temp": 0.2 if key != "vlm_feedback" else 0.1,
+                    "max_tokens": 4096,
+                }
+                agent[key] = section
             if not isinstance(section, dict):
                 raise ProviderConfigError(
                     f"BFTS configuration agent.{key} must be a mapping"
                 )
-            section["model"] = model
+            section["model"] = selected_judgment
+        select_node = agent.get("select_node")
+        if select_node is None:
+            select_node = {"temp": 0.2, "max_tokens": 4096}
+            agent["select_node"] = select_node
+        if not isinstance(select_node, dict):
+            raise ProviderConfigError(
+                "BFTS configuration agent.select_node must be a mapping"
+            )
+        select_node["model"] = selected_judgment
     generated_header = (
         original.splitlines()[0] + "\n"
         if original.startswith("# Generated by xscientist init ")
@@ -1347,6 +1487,137 @@ def update_bfts_models(path: str | Path, model: str) -> bool:
         generated_header + yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
     )
     return True
+
+
+def explain_provider_configuration(
+    root: str | Path,
+    provider: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Describe one effective provider route without returning configured values.
+
+    This is deliberately a read-only, configuration-only view.  In particular,
+    it never probes a local service or a paid API.  Credential and endpoint
+    values are represented by their winning *source* and stable fingerprints so
+    the result can be saved in support logs without turning those logs into a
+    second secret store.
+    """
+
+    from ai_scientist.utils.provider_registry import model_provenance
+
+    workspace = resolve_provider_workspace_root(root)
+    config = load_provider_config(workspace, missing_ok=False)
+    selected = normalize_provider_name(
+        str(provider or config.get("active_provider") or "")
+    )
+    if not selected:
+        raise ProviderConfigError(
+            "no active provider is configured; pass a provider name or run "
+            "`xscientist provider add NAME`"
+        )
+    if selected not in PROVIDER_FIELDS:
+        raise ProviderConfigError(f"unsupported provider: {selected!r}")
+
+    env_file_name = str(config.get("env_file") or DEFAULT_ENV_FILE)
+    env_file = resolve_env_file(workspace, env_file_name)
+    if env_file.is_file() and not _env_file_is_private(env_file):
+        raise ProviderConfigError(
+            "refusing to read credentials with broad permissions: "
+            f"{env_file.relative_to(workspace).as_posix()}"
+        )
+    stored = read_env_file(env_file) if env_file.is_file() else {}
+    process = _process_environment_for_workspace(workspace, environ)
+    workspace_key = _workspace_key(workspace)
+    with _ENVIRONMENT_LOCK:
+        managed_environment = dict(_MANAGED_ENV_VALUES)
+
+    fields: list[dict[str, object]] = []
+    for field in PROVIDER_FIELDS[selected]:
+        source = "missing"
+        source_name: str | None = None
+        configured = False
+        for candidate_source, values in (
+            ("process_environment", process),
+            ("workspace_env_file", stored),
+        ):
+            for name in (field.name, *field.aliases):
+                if _is_configured_value(values.get(name)):
+                    managed = managed_environment.get(name)
+                    source = (
+                        "workspace_env_file"
+                        if candidate_source == "process_environment"
+                        and environ is None
+                        and managed == (workspace_key, values.get(name))
+                        and stored.get(name) == values.get(name)
+                        else candidate_source
+                    )
+                    source_name = name
+                    configured = True
+                    break
+            if configured:
+                break
+        if not configured and _is_configured_value(field.default):
+            source = "provider_default"
+            source_name = field.name
+            configured = True
+        fields.append(
+            {
+                "name": field.name,
+                "aliases": list(field.aliases),
+                "secret": field.secret,
+                "required": field.required,
+                "configured": configured,
+                "source": source,
+                "source_name": source_name,
+                "value_returned": False,
+            }
+        )
+
+    entries = config.get("providers") or {}
+    entry = entries.get(selected, {}) if isinstance(entries, dict) else {}
+    metadata_configured = isinstance(entry, dict) and bool(entry)
+    model = str(entry.get("model") or "") if metadata_configured else ""
+    missing_required = [
+        str(item["name"])
+        for item in fields
+        if item["required"] and not item["configured"]
+    ]
+    missing_clients = missing_provider_modules(selected)
+    provenance = (
+        model_provenance(
+            model,
+            env=_effective_workspace_environment(workspace, stored, environ),
+        )
+        if model
+        else None
+    )
+
+    return {
+        "provider": selected,
+        "active": config.get("active_provider") == selected,
+        "metadata_configured": metadata_configured,
+        "model": model or None,
+        "env_file": env_file.relative_to(workspace).as_posix(),
+        "fields": fields,
+        "missing_required_fields": missing_required,
+        "client_available": not missing_clients,
+        "missing_client_modules": list(missing_clients),
+        "install_command": installation_command(selected),
+        "configuration_ready": bool(
+            metadata_configured and not missing_required and not missing_clients
+        ),
+        "credential_validation": (
+            "presence_only"
+            if any(field.required for field in PROVIDER_FIELDS[selected])
+            else "not_required"
+        ),
+        "verification_scope": "configuration_only",
+        "provenance": provenance,
+        "network_request_made": False,
+        "files_changed": False,
+        "secret_values_returned": False,
+    }
 
 
 def provider_statuses(
@@ -1459,6 +1730,7 @@ __all__ = [
     "PROVIDER_ALIASES",
     "discover_provider_models",
     "empty_provider_config",
+    "explain_provider_configuration",
     "normalize_provider_name",
     "normalize_provider_model",
     "PROVIDER_FIELDS",

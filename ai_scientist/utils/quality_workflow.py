@@ -295,11 +295,23 @@ def evaluate_final_submission_readiness(
                 + ", ".join(snapshot_check.get("mismatches") or [])
             )
         try:
-            from ai_scientist.utils.high_quality_pipeline import build_scientific_evidence_gate
+            from ai_scientist.utils.high_quality_pipeline import (
+                build_scientific_evidence_gate,
+            )
 
-            fresh_scientific_gate = build_scientific_evidence_gate(run_dir)
+            assessed_venue = (
+                str(resolved_quality_result.get("target_venue") or "").strip().lower()
+                or None
+            )
+            fresh_scientific_gate = build_scientific_evidence_gate(
+                run_dir,
+                target_venue=assessed_venue,
+            )
         except (OSError, TypeError, ValueError):
-            fresh_scientific_gate = {"status": "blocked", "hard_failures": ["recompute_error"]}
+            fresh_scientific_gate = {
+                "status": "blocked",
+                "hard_failures": ["recompute_error"],
+            }
         if fresh_scientific_gate.get("status") != "verified":
             accepted = False
             reasons.append(
@@ -308,7 +320,9 @@ def evaluate_final_submission_readiness(
             )
 
     missing_artifacts = [
-        name for name, payload in artifacts.items() if not isinstance(payload, dict) or not payload
+        name
+        for name, payload in artifacts.items()
+        if not isinstance(payload, dict) or not payload
     ]
     if require_review_artifacts and missing_artifacts:
         accepted = False
@@ -329,7 +343,9 @@ def evaluate_final_submission_readiness(
     )
     stage_overall_score = _coerce_float(stage_standards.get("overall_score"))
     blocked_stage_count = _coerce_int(stage_standards.get("blocked_stage_count"))
-    if stage_overall_score is not None and stage_overall_score < float(min_stage_overall_score):
+    if stage_overall_score is not None and stage_overall_score < float(
+        min_stage_overall_score
+    ):
         accepted = False
         reasons.append(
             f"stage standards overall score below target ({stage_overall_score:.1f} < {float(min_stage_overall_score):.1f})"
@@ -376,9 +392,8 @@ def evaluate_final_submission_readiness(
     self_evolution_status = str(
         evolution_summary.get("status") or evolution_self_check.get("status") or ""
     ).strip()
-    if (
-        self_evolution_score is not None
-        and self_evolution_score < float(min_self_evolution_score)
+    if self_evolution_score is not None and self_evolution_score < float(
+        min_self_evolution_score
     ):
         accepted = False
         reasons.append(
@@ -396,9 +411,7 @@ def evaluate_final_submission_readiness(
         )
     if self_evolution_status and self_evolution_status != "ready":
         accepted = False
-        reasons.append(
-            f"self-evolution status is not ready ({self_evolution_status})"
-        )
+        reasons.append(f"self-evolution status is not ready ({self_evolution_status})")
 
     review_state = (
         artifacts.get("review_state")
@@ -429,7 +442,10 @@ def evaluate_final_submission_readiness(
     hostile_critic_blocking_issue_count = _coerce_int(
         hostile_critic_summary.get("blocking_issue_count")
     )
-    if hostile_critic_active_issue_count is not None and hostile_critic_active_issue_count > 0:
+    if (
+        hostile_critic_active_issue_count is not None
+        and hostile_critic_active_issue_count > 0
+    ):
         accepted = False
         reasons.append(
             "independent hostile critic still reports active blockers "
@@ -504,7 +520,9 @@ def evaluate_final_submission_readiness(
     integrity_counts: dict[str, Any] = {}
     integrity_report_path = None
     if isinstance(integrity_report, dict) and integrity_report:
-        integrity_verdict = str(integrity_report.get("overall_verdict") or "").strip() or None
+        integrity_verdict = (
+            str(integrity_report.get("overall_verdict") or "").strip() or None
+        )
         integrity_counts = (
             integrity_report.get("counts")
             if isinstance(integrity_report.get("counts"), dict)
@@ -578,19 +596,41 @@ def _focus_area_from_text(text: str) -> Optional[str]:
         return None
     if "claim" in lowered or "unsupported" in lowered:
         return "claim_support"
-    if any(token in lowered for token in ["rigor", "baseline", "ablation", "methodology", "reproduc"]):
+    if any(
+        token in lowered
+        for token in ["rigor", "baseline", "ablation", "methodology", "reproduc"]
+    ):
         return "rigor"
-    if any(token in lowered for token in ["numeric", "number", "quantitative", "quantitative", "comparison"]):
+    if any(
+        token in lowered
+        for token in ["numeric", "number", "quantitative", "quantitative", "comparison"]
+    ):
         return "numeric_coverage"
-    if any(token in lowered for token in ["evidence", "figure", "table", "visual", "caption"]):
+    if any(
+        token in lowered
+        for token in ["evidence", "figure", "table", "visual", "caption"]
+    ):
         return "evidence_packaging"
     if "contribution" in lowered:
         return "contribution_framing"
-    if any(token in lowered for token in ["breakthrough", "significance", "broad impact", "nature-style"]):
+    if any(
+        token in lowered
+        for token in ["breakthrough", "significance", "broad impact", "nature-style"]
+    ):
         return "breakthrough_significance"
     if any(token in lowered for token in ["venue", "paper_type", "fit for target"]):
         return "venue_fit"
-    if any(token in lowered for token in ["narrative", "abstract", "introduction", "title", "framing", "quality"]):
+    if any(
+        token in lowered
+        for token in [
+            "narrative",
+            "abstract",
+            "introduction",
+            "title",
+            "framing",
+            "quality",
+        ]
+    ):
         return "narrative_quality"
     return None
 
@@ -636,8 +676,12 @@ def _derive_repair_execution_focus(
     repair_plan: dict[str, Any],
     review_state: dict[str, Any],
 ) -> dict[str, Any]:
-    tasks = [item for item in (repair_plan.get("tasks") or []) if isinstance(item, dict)]
-    ready_tasks = [item for item in tasks if str(item.get("status") or "").strip() == "ready"]
+    tasks = [
+        item for item in (repair_plan.get("tasks") or []) if isinstance(item, dict)
+    ]
+    ready_tasks = [
+        item for item in tasks if str(item.get("status") or "").strip() == "ready"
+    ]
     lane_priority = {
         "evidence_followup": 0,
         "method_repair": 1,
@@ -659,7 +703,11 @@ def _derive_repair_execution_focus(
     )
     top_tasks = sorted_ready_tasks[:3]
     lane_order = _dedupe_strings(
-        [str(item.get("lane") or "").strip() for item in sorted_ready_tasks if str(item.get("lane") or "").strip()],
+        [
+            str(item.get("lane") or "").strip()
+            for item in sorted_ready_tasks
+            if str(item.get("lane") or "").strip()
+        ],
         limit=6,
     )
     lane_summaries = (
@@ -672,8 +720,11 @@ def _derive_repair_execution_focus(
         if isinstance(lane_summaries.get("hostile_critic"), dict)
         else {}
     )
-    hostile_recheck_required = bool(int(hostile_summary.get("active_issue_count") or 0) > 0) or any(
-        str(item.get("escalation_lane") or "").strip() == "hostile_critic" for item in top_tasks
+    hostile_recheck_required = bool(
+        int(hostile_summary.get("active_issue_count") or 0) > 0
+    ) or any(
+        str(item.get("escalation_lane") or "").strip() == "hostile_critic"
+        for item in top_tasks
     )
     return {
         "lane_order": lane_order,
@@ -684,7 +735,8 @@ def _derive_repair_execution_focus(
                 "priority_tier": str(item.get("priority_tier") or "").strip() or "p2",
                 "owner": str(item.get("owner") or "").strip() or None,
                 "verifier": str(item.get("verifier") or "").strip() or None,
-                "close_condition": str(item.get("close_condition") or "").strip() or None,
+                "close_condition": str(item.get("close_condition") or "").strip()
+                or None,
             }
             for item in top_tasks
         ],
@@ -1054,14 +1106,13 @@ def derive_quality_followup_plan(
         plan.update(
             {
                 "mode": "final_polish",
-                "max_quality_rewrites": max(1, min(int(settings["max_quality_rewrites"]), 1)),
+                "max_quality_rewrites": max(
+                    1, min(int(settings["max_quality_rewrites"]), 1)
+                ),
                 "reason": "paper is close to ready; run a short autonomous polish pass",
             }
         )
-    elif (
-        priority is not None
-        and priority >= 82.0
-    ) or (
+    elif (priority is not None and priority >= 82.0) or (
         rewrite_gain is not None and rewrite_gain >= 1.0
     ):
         target_settings = _stronger_followup_settings(
@@ -1235,9 +1286,7 @@ def execute_quality_workflow_with_followups(
 
     summary = quality_pass["summary"]
     if followup_history:
-        summary = (
-            f"{summary}, autonomous_followups={quality_result['autonomous_followup_rounds_run']}"
-        )
+        summary = f"{summary}, autonomous_followups={quality_result['autonomous_followup_rounds_run']}"
 
     return {
         **quality_pass,

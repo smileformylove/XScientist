@@ -661,7 +661,7 @@ class ResearchDagTests(unittest.TestCase):
             "edges": [],
         }
         graph_path.write_text(json.dumps(original_graph), encoding="utf-8")
-        ids = self._record_lineage(
+        self._record_lineage(
             ara_manifest_hash=hash_manifest(manifest),
             ara_graph_hash=content_hash(original_graph),
         )
@@ -695,17 +695,14 @@ class ResearchDagTests(unittest.TestCase):
                 "statement": "An unrelated checkpoint must not accept the raw graph edit."
             },
         )
-        self.repository.commit(stage="ideation", subject="unrelated later checkpoint")
-        later = build_research_dag(self.repo_path)
-        later_source = next(
-            item for item in later["sources"] if item["name"] == "ara:0"
-        )
-        self.assertEqual(later_source["graph_binding"]["state"], "mismatch")
-        self.assertFalse(later["integrity"]["is_dag"])
-        self.assertNotIn(
-            ("ara:0:bound", ids["evidence"], "anchors"),
-            {(edge["source"], edge["target"], edge["type"]) for edge in later["edges"]},
-        )
+        with self.assertRaisesRegex(ResearchGitError, "uncheckpointed raw Git commit"):
+            self.repository.commit(
+                stage="ideation", subject="unrelated later checkpoint"
+            )
+        with self.assertRaisesRegex(
+            ResearchGitError, "is not bound to a research checkpoint"
+        ):
+            build_research_dag(self.repo_path)
 
     def test_invalid_ara_hash_does_not_claim_traceability(self) -> None:
         ara = self.root / "invalid-hash-ara"

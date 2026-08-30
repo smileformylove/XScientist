@@ -185,6 +185,7 @@ def _configured_models(payload: dict) -> list[str]:
             "vlm_feedback",
             "summary",
             "select_node",
+            "judgment",
         ):
             section = agent.get(key)
             if isinstance(section, dict):
@@ -215,6 +216,19 @@ def check_configured_models(payload: dict) -> list[CheckResult]:
 
     results: list[CheckResult] = []
     for model in models:
+        if model == "__xscientist_non_glm_judgment_model_required__":
+            results.append(
+                CheckResult(
+                    label="Configured scientific judgment model",
+                    ok=False,
+                    severity="error",
+                    detail=(
+                        "a distinct non-GLM judgment model is required; run "
+                        "xscientist start with --judgment-model PROVIDER/MODEL"
+                    ),
+                )
+            )
+            continue
         try:
             client_module = _model_client_module(model)
             requirement_rows = describe_model_requirements([model], env=os.environ)

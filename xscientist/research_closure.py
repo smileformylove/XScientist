@@ -24,11 +24,13 @@ from .research_authority import PRODUCER_LINEAGE_RELATIONS
 from .research_git import (
     ResearchGitError,
     list_research_objects_at_ref,
+    research_object_introduction_order,
     show_checkpoint,
+    validate_complete_research_trajectory,
     verify_research_repository,
 )
 
-RESEARCH_CLOSURE_SCHEMA = "xscientist.research-closure.v2"
+RESEARCH_CLOSURE_SCHEMA = "xscientist.research-closure.v3"
 RESEARCH_CLOSURE_LEVELS = ("trace", "replay", "verify")
 REPRODUCTION_RECEIPT_V2 = "xscientist.reproduction-receipt.v2"
 REPRODUCTION_TARGET_POLICY_V2 = "xscientist.reproduction-target-binding.v2"
@@ -992,6 +994,7 @@ def _claim_closure(
     *,
     repo: str | Path,
     target_level: str,
+    introduction_order: Mapping[str, int],
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     claim_id = str(claim["object_id"])
     superseded_ids = _effective_superseded_ids(objects)
@@ -1209,17 +1212,20 @@ def _claim_closure(
             in _targets(objects[update_id], relation_types=("updates", "invalidates"))
         ]
         if candidates:
-            effective_source_updates[source_id] = max(
-                candidates,
-                key=lambda update_id: (
-                    str(
-                        (objects[update_id].get("payload") or {}).get("checked_at")
-                        or ""
-                    ),
-                    str(objects[update_id].get("created_at") or ""),
-                    update_id,
-                ),
+            latest_sequence = max(
+                introduction_order.get(update_id, -1) for update_id in candidates
             )
+            latest_updates = [
+                update_id
+                for update_id in candidates
+                if introduction_order.get(update_id, -1) == latest_sequence
+            ]
+            if latest_sequence < 0 or len(latest_updates) != 1:
+                raise ResearchGitError(
+                    f"source {source_id} has ambiguous active updates without a "
+                    "unique Git introduction order"
+                )
+            effective_source_updates[source_id] = latest_updates[0]
     search_receipt_ids = sorted(
         {
             target
@@ -2326,8 +2332,48 @@ def audit_research_closure(
         raise ResearchGitError("closure level must be trace, replay, or verify")
     checkpoint = show_checkpoint(repo, ref)
     resolved = str(checkpoint["commit"])
+    try:
+        trajectory_projection = validate_complete_research_trajectory(
+            repo,
+            ref=resolved,
+        )
+    except ResearchGitError as exc:
+        trajectory_validation = {
+            "ok": False,
+            "schema_version": None,
+            "projection_hash": None,
+            "resolved_head": resolved,
+            "complete": False,
+            "truncated": False,
+            "checkpoint_count": 0,
+            "boundary_parent_edges": [],
+            "boundary_rollback_edges": [],
+            "errors": [str(exc) or "complete_trajectory_validation_failed"],
+        }
+    else:
+        trajectory_validation = {
+            "ok": True,
+            "schema_version": trajectory_projection.get("schema_version"),
+            "projection_hash": trajectory_projection.get("projection_hash"),
+            "resolved_head": trajectory_projection.get("resolved_head"),
+            "complete": trajectory_projection.get("complete") is True,
+            "truncated": trajectory_projection.get("truncated") is True,
+            "checkpoint_count": trajectory_projection.get("checkpoint_count"),
+            "boundary_parent_edges": [
+                dict(item)
+                for item in trajectory_projection.get("boundary_parent_edges") or []
+                if isinstance(item, Mapping)
+            ],
+            "boundary_rollback_edges": [
+                dict(item)
+                for item in trajectory_projection.get("boundary_rollback_edges") or []
+                if isinstance(item, Mapping)
+            ],
+            "errors": [],
+        }
     object_rows = list_research_objects_at_ref(repo, resolved)
     objects = {str(item["object_id"]): item for item in object_rows}
+    introduction_order = research_object_introduction_order(repo, ref=resolved)
     all_claims = sorted(
         (item for item in object_rows if item.get("kind") == "claim"),
         key=lambda item: str(item["object_id"]),
@@ -2357,9 +2403,22 @@ def audit_research_closure(
                     "no_claims", "", "selected ref contains no typed claim objects"
                 )
             )
+        if trajectory_validation["ok"] is not True:
+            level_specific_blockers.append(
+                _blocker(
+                    "structured_trajectory_invalid",
+                    "",
+                    "; ".join(trajectory_validation["errors"])
+                    or "complete structured trajectory validation failed",
+                )
+            )
         for claim in claims:
             row, row_blockers, row_warnings = _claim_closure(
-                claim, objects, repo=repo, target_level=closure_level
+                claim,
+                objects,
+                repo=repo,
+                target_level=closure_level,
+                introduction_order=introduction_order,
             )
             rows.append(row)
             level_specific_blockers.extend(row_blockers)
@@ -2422,6 +2481,7 @@ def audit_research_closure(
         "warnings": warnings,
         "closure_levels": closure_levels,
         "integrity": integrity,
+        "trajectory": trajectory_validation,
         "payloads_disclosed": False,
     }
     result = {**base, "content_hash": content_hash(base)}

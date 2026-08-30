@@ -25,7 +25,9 @@ from xscientist.provider_config import (
     ProviderConfigError,
     PROVIDER_NAMES,
     activate_provider,
+    begin_managed_environment_transaction,
     discover_workspace_root,
+    explain_provider_configuration,
     load_provider_config,
     load_workspace_environment,
     provider_statuses,
@@ -40,7 +42,262 @@ from xscientist.provider_config import (
 
 
 class ProviderConfigTests(unittest.TestCase):
-    def test_bfts_model_update_preserves_optional_agent_section_shape(self) -> None:
+    def test_provider_explanation_reports_sources_without_values_or_side_effects(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai_compat",
+                model="openai_compat/research-model",
+            )
+            env_file = workspace / ".env"
+            workspace_secret = "workspace-" + "secret"
+            env_file.write_text(
+                f"OPENAI_COMPAT_API_KEY={workspace_secret}\n"
+                "OPENAI_COMPAT_BASE_URL=https://private.example/v1\n",
+                encoding="utf-8",
+            )
+            env_file.chmod(0o600)
+            provider_file = workspace / ".xscientist" / "providers.json"
+            before = {
+                path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                for path in (env_file, provider_file, workspace / "bfts_config.yaml")
+            }
+
+            with mock.patch(
+                "xscientist.provider_config.missing_provider_modules",
+                return_value=[],
+            ):
+                payload = explain_provider_configuration(
+                    workspace,
+                    environ={"OPENAI_COMPAT_API_KEY": "process-secret"},
+                )
+
+            by_name = {field["name"]: field for field in payload["fields"]}
+            self.assertEqual(
+                by_name["OPENAI_COMPAT_API_KEY"]["source"],
+                "process_environment",
+            )
+            self.assertEqual(
+                by_name["OPENAI_COMPAT_BASE_URL"]["source"],
+                "workspace_env_file",
+            )
+            self.assertTrue(payload["configuration_ready"])
+            self.assertEqual(payload["credential_validation"], "presence_only")
+            self.assertFalse(payload["network_request_made"])
+            self.assertFalse(payload["files_changed"])
+            rendered = json.dumps(payload)
+            self.assertNotIn("process-secret", rendered)
+            self.assertNotIn(workspace_secret, rendered)
+            self.assertNotIn("private.example", rendered)
+            self.assertEqual(
+                before,
+                {
+                    path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                    for path in before
+                },
+            )
+
+    def test_process_placeholder_does_not_shadow_private_workspace_value(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            env_file = workspace / ".env"
+            workspace_secret = "workspace-" + "secret"
+            env_file.write_text(
+                f"OPENAI_API_KEY={workspace_secret}\n", encoding="utf-8"
+            )
+            env_file.chmod(0o600)
+            for placeholder in ("replace-me", "changeme"):
+                with self.subTest(placeholder=placeholder):
+                    supplied = {"OPENAI_API_KEY": placeholder}
+
+                    effective = workspace_environment(workspace, environ=supplied)
+                    with mock.patch(
+                        "xscientist.provider_config.missing_provider_modules",
+                        return_value=[],
+                    ):
+                        explanation = explain_provider_configuration(
+                            workspace,
+                            environ=supplied,
+                        )
+
+                    self.assertEqual(effective["OPENAI_API_KEY"], workspace_secret)
+                    self.assertEqual(
+                        explanation["fields"][0]["source"],
+                        "workspace_env_file",
+                    )
+
+    def test_loading_workspace_replaces_process_placeholder_with_private_value(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            env_file = workspace / ".env"
+            env_file.write_text(
+                "OPENAI_API_KEY=workspace-secret\n",
+                encoding="utf-8",
+            )
+            env_file.chmod(0o600)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "replace-me"},
+                clear=True,
+            ):
+                transaction = begin_managed_environment_transaction()
+                state = load_workspace_environment(workspace)
+                loaded_value = os.environ.get("OPENAI_API_KEY")
+                transaction.rollback()
+
+            self.assertEqual(loaded_value, "workspace-secret")
+            self.assertIn("OPENAI_API_KEY", state["loaded_names"])
+
+    def test_provider_explain_cli_is_stable_read_only_and_network_free(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="openai",
+                model="openai/research-model",
+            )
+            env_file = workspace / ".env"
+            workspace_secret = "workspace-" + "secret"
+            env_file.write_text(
+                f"OPENAI_API_KEY={workspace_secret}\n", encoding="utf-8"
+            )
+            env_file.chmod(0o600)
+            tracked = (
+                env_file,
+                workspace / ".xscientist" / "providers.json",
+                workspace / "bfts_config.yaml",
+            )
+            before = {path: path.read_bytes() for path in tracked}
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                mock.patch("urllib.request.OpenerDirector.open") as network_open,
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = cli_main(
+                    [
+                        "provider",
+                        "explain",
+                        "openai",
+                        "--workspace",
+                        str(workspace),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            network_open.assert_not_called()
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.provider-explain.v1")
+            self.assertEqual(payload["verification_scope"], "configuration_only")
+            self.assertTrue(payload["configuration"]["configuration_ready"])
+            self.assertFalse(payload["configuration"]["network_request_made"])
+            self.assertFalse(payload["configuration"]["files_changed"])
+            self.assertEqual(
+                payload["configuration"]["fields"][0]["source"],
+                "workspace_env_file",
+            )
+            self.assertEqual(
+                payload["next_actions"][0]["code"],
+                "audit_workspace_readiness",
+            )
+            self.assertTrue(payload["optional_live_check"]["may_incur_cost"])
+            self.assertNotIn(workspace_secret, stdout.getvalue())
+            self.assertNotIn(str(workspace), stdout.getvalue())
+            self.assertEqual(before, {path: path.read_bytes() for path in tracked})
+
+    def test_provider_explain_unconfigured_route_gives_copyable_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "provider",
+                            "explain",
+                            "openai",
+                            "--workspace",
+                            str(workspace),
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["configuration"]["metadata_configured"])
+            self.assertEqual(
+                payload["next_actions"][0],
+                {
+                    "code": "configure_provider",
+                    "command": "xscientist provider add openai --workspace .",
+                    "network_request": False,
+                },
+            )
+
+    def test_provider_explain_does_not_label_local_ollama_as_billable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(
+                workspace,
+                provider="ollama",
+                model="ollama/qwen2.5:7b",
+            )
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch(
+                    "xscientist.provider_config.missing_provider_modules",
+                    return_value=[],
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "provider",
+                            "explain",
+                            "--workspace",
+                            str(workspace),
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["optional_live_check"]["may_incur_cost"])
+
+    def test_bfts_model_update_keeps_glm_out_of_judgment_roles(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with_optional = Path(td) / "with-optional.yaml"
             with_optional.write_text(
@@ -77,18 +334,46 @@ class ProviderConfigTests(unittest.TestCase):
 
             updated = yaml.safe_load(with_optional.read_text(encoding="utf-8"))
             self.assertEqual(updated["report"]["model"], model)
-            for role in (
-                "code",
-                "feedback",
-                "vlm_feedback",
-                "summary",
-                "select_node",
+            self.assertEqual(updated["agent"]["code"]["model"], model)
+            for role, expected in (
+                ("feedback", "old/feedback"),
+                ("vlm_feedback", "old/vlm"),
+                ("summary", "old/summary"),
+                ("select_node", "old/planner"),
             ):
-                self.assertEqual(updated["agent"][role]["model"], model)
+                self.assertEqual(updated["agent"][role]["model"], expected)
 
             minimal = yaml.safe_load(without_optional.read_text(encoding="utf-8"))
+            self.assertNotIn("judgment", minimal["agent"])
             self.assertNotIn("summary", minimal["agent"])
             self.assertNotIn("select_node", minimal["agent"])
+
+            judgment = "openai/gpt-4o"
+            self.assertTrue(
+                update_bfts_models(
+                    with_optional,
+                    model,
+                    judgment_model=judgment,
+                )
+            )
+            self.assertTrue(
+                update_bfts_models(
+                    without_optional,
+                    model,
+                    judgment_model=judgment,
+                )
+            )
+            for path in (with_optional, without_optional):
+                split = yaml.safe_load(path.read_text(encoding="utf-8"))
+                self.assertEqual(split["agent"]["code"]["model"], model)
+                for role in (
+                    "judgment",
+                    "feedback",
+                    "vlm_feedback",
+                    "summary",
+                    "select_node",
+                ):
+                    self.assertEqual(split["agent"][role]["model"], judgment)
 
     def test_loading_two_workspaces_does_not_reuse_managed_provider_values(
         self,
@@ -233,6 +518,9 @@ class ProviderConfigTests(unittest.TestCase):
                 self.assertEqual(cli_main(["provider", "list", "--json"]), 0)
 
             payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.provider-list.v1")
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["network_request_made"])
             self.assertFalse(payload["workspace_initialized"])
             self.assertTrue(payload["discovery_only"])
             ollama = next(
@@ -653,7 +941,10 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertNotIn("test-secret-value", stdout.getvalue())
             payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.provider-add.v1")
             self.assertEqual(payload["credentials_written"], ["OPENAI_API_KEY"])
+            self.assertTrue(payload["credential_storage"]["written_to_workspace"])
+            self.assertFalse(payload["credential_storage"]["secret_values_returned"])
             self.assertEqual(payload["workspace"], ".")
             self.assertEqual(payload["env_file"], ".env")
             self.assertNotIn(str(workspace), stdout.getvalue())
@@ -789,6 +1080,9 @@ class ProviderConfigTests(unittest.TestCase):
             "https://user:password@gateway.example/v1": "embedded credentials",
             "https://gateway.example/v1?token=secret": "query",
             "https://gateway.example:bad/v1": "invalid port",
+            "https://gateway.example/v1\tsegment": "control characters",
+            "https://gateway.example/v1\x00suffix": "control characters",
+            "https://gateway.example/v1\x7fsuffix": "control characters",
         }
         for value, message in invalid_urls.items():
             with (
@@ -896,7 +1190,14 @@ class ProviderConfigTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertFalse((workspace / ".env").exists())
             self.assertNotIn("process-only-secret", stdout.getvalue())
-            self.assertEqual(json.loads(stdout.getvalue())["credentials_written"], [])
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["credentials_written"], [])
+            self.assertFalse(payload["credential_storage"]["written_to_workspace"])
+            self.assertEqual(
+                payload["credential_storage"]["process_field_names"],
+                ["OPENAI_API_KEY"],
+            )
+            self.assertEqual(payload["credential_storage"]["workspace_field_names"], [])
 
     def test_openai_compatible_generic_alias_environment_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1101,11 +1402,19 @@ class ProviderConfigTests(unittest.TestCase):
                         "--workspace",
                         str(workspace),
                         "--non-interactive",
+                        "--json",
                     ]
                 )
 
             self.assertEqual(exit_code, 2)
-            self.assertIn("missing OPENAI_API_KEY", stderr.getvalue())
+            payload = json.loads(stderr.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.provider-error.v1")
+            self.assertEqual(payload["error_code"], "provider_configuration_missing")
+            self.assertIn("missing OPENAI_API_KEY", payload["error"])
+            self.assertEqual(
+                payload["next_actions"],
+                ["xscientist provider add openai --workspace ."],
+            )
             self.assertFalse((workspace / ".env").exists())
 
     def test_add_requires_initialized_workspace_before_prompting_or_writing(

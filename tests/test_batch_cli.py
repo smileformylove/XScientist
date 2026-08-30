@@ -56,6 +56,20 @@ class BatchCliTests(unittest.TestCase):
         require_login.assert_not_called()
         initialize_runtime.assert_not_called()
 
+    def test_batch_main_rejects_glm53_scientific_judgment_before_login(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(batch, "require_login") as require_login,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            batch.main(["--model-agg-plots", "custom/glm-5.3"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("final figure selection", stderr.getvalue())
+        self.assertIn("--model-agg-plots", stderr.getvalue())
+        require_login.assert_not_called()
+
     def test_workspace_default_model_applies_to_every_role_and_can_be_overridden(
         self,
     ) -> None:

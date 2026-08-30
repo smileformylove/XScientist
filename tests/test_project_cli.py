@@ -63,6 +63,22 @@ class ProjectCliTests(unittest.TestCase):
         self.assertIn("Start from a plain-language question", rendered)
         self.assertNotRegex(rendered, r"[\u4e00-\u9fff]")
 
+    def test_project_main_rejects_glm53_scientific_judgment_before_login(
+        self,
+    ) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(project, "require_login") as require_login,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            project.main(["demo", "--model-citation", "openai_compat/glm-5.3"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("source attribution", stderr.getvalue())
+        self.assertIn("--model-citation", stderr.getvalue())
+        require_login.assert_not_called()
+
     def test_workspace_default_model_applies_to_every_role_and_can_be_overridden(
         self,
     ) -> None:

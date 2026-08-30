@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from ai_scientist.config.venues import DEFAULT_TARGET_VENUE
 from ai_scientist.review_strategies import (
     ReviewStrategy,
     ReviewStrategyManager,
@@ -13,7 +14,6 @@ from ai_scientist.utils.submission_history import (
     recommend_submission_strategy_adjustments,
 )
 
-
 DEFAULT_REVIEW_STRATEGY_BY_TYPE = {
     "normal": ReviewStrategy.NEURIPS,
     "icbinb": ReviewStrategy.ICLR,
@@ -23,6 +23,7 @@ DEFAULT_REVIEW_STRATEGY_BY_TYPE = {
 
 DEFAULT_REVIEW_STRATEGY_BY_VENUE = {
     "neurips": ReviewStrategy.NEURIPS,
+    "icml": ReviewStrategy.ICML,
     "iclr": ReviewStrategy.ICLR,
     "cvpr": ReviewStrategy.CVPR,
     "journal": ReviewStrategy.JOURNAL,
@@ -91,7 +92,7 @@ def build_review_execution_plan(
     if high_quality_mode:
         venue_config = VENUE_PRESETS.get(
             resolved_target_venue,
-            VENUE_PRESETS["neurips"],
+            VENUE_PRESETS[DEFAULT_TARGET_VENUE],
         )
         strategy_feedback = recommend_submission_strategy_adjustments(
             resolved_target_venue,

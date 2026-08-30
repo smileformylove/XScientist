@@ -663,9 +663,17 @@ def _build_experiment_registry_rows(
     for idx, task in enumerate(research_plan.get("tasks") or []):
         stage = stages[min(idx, len(stages) - 1)] if stages else {}
         best = stage.get("best") or {}
-        attempts = [item for item in stage.get("attempts") or [] if isinstance(item, dict)]
+        attempts = [
+            item for item in stage.get("attempts") or [] if isinstance(item, dict)
+        ]
         if not attempts and best:
-            attempts = [{**best, "node_id": best.get("node_id") or best.get("best_node_id"), "is_buggy": False}]
+            attempts = [
+                {
+                    **best,
+                    "node_id": best.get("node_id") or best.get("best_node_id"),
+                    "is_buggy": False,
+                }
+            ]
         if not attempts:
             attempts = [{"node_id": f"missing-{idx}", "is_buggy": True}]
         for attempt_idx, attempt in enumerate(attempts):
@@ -675,7 +683,9 @@ def _build_experiment_registry_rows(
             status = "completed" if has_metric and not buggy else "failed"
             if not stages and not best:
                 status = "planned"
-            is_best = bool(best) and node_id == str(best.get("node_id") or best.get("best_node_id") or "")
+            is_best = bool(best) and node_id == str(
+                best.get("node_id") or best.get("best_node_id") or ""
+            )
             result_summary = {
                 "metric_name": attempt.get("metric_name"),
                 "metric_mean": attempt.get("metric_mean"),
@@ -683,14 +693,18 @@ def _build_experiment_registry_rows(
                 "dataset_names": attempt.get("dataset_names") or [task.get("dataset")],
                 "seed": attempt.get("seed"),
                 "evaluation_report": attempt.get("evaluation_report"),
-                "delta_objective_vs_prev_stage": stage.get("delta_objective_vs_prev_stage"),
+                "delta_objective_vs_prev_stage": stage.get(
+                    "delta_objective_vs_prev_stage"
+                ),
                 "warnings": warnings,
                 "attempt_node_id": node_id,
                 "node_counts": stage.get("node_counts"),
             }
             artifacts = {
                 "paper_root": str(paper_root_path),
-                "experiment_report_json": str(paper_root_path / "experiment_report.json"),
+                "experiment_report_json": str(
+                    paper_root_path / "experiment_report.json"
+                ),
                 "experiment_report_md": str(paper_root_path / "experiment_report.md"),
                 "latest_run_dir": latest_run_dir,
                 "stage_dir": stage.get("stage_dir"),
@@ -700,42 +714,55 @@ def _build_experiment_registry_rows(
                 artifacts.update(attempt["artifacts"])
             rows.append(
                 build_experiment_record(
-                record_id=f"{str(task.get('task_id') or f'task_{idx}')}:stage_{idx}:{node_id}",
-                task_id=str(task.get("task_id") or f"task_{idx}"),
-                dataset=str(task.get("dataset") or "dataset_to_be_selected"),
-                metric=str(task.get("metric") or "primary_task_metric"),
-                baseline_ref=str(task.get("baseline") or "strong_existing_baseline"),
-                config={
-                    "goal": task.get("goal"),
-                    "priority": task.get("priority"),
-                },
-                seed=attempt.get("seed"),
-                status=status,
-                result_summary=result_summary,
-                artifacts=artifacts,
-                error_type=None if status == "completed" else "buggy_or_missing_attempt",
-                error_message=None if status == "completed" else "; ".join(warnings[:3]) or "Attempt did not produce a valid metric.",
-                entered_storyline=is_best,
-                budget=task.get("budget"),
-                workflow_mode=research_plan.get("workflow_mode"),
-                policy_name=(research_plan.get("execution_policy") or {}).get(
-                    "policy_name"
-                ),
-                acceptance_checks=task.get("acceptance_checks"),
-                acceptance_results=[
-                    {
-                        "check": str(check),
-                        "passed": status == "completed",
-                        "source": "experiment_journal_attempt",
-                    }
-                    for check in (task.get("acceptance_checks") or [])
-                ],
-                budget_audit={
-                    "audited": status == "completed",
-                    "within_budget": status == "completed",
-                    "source": "experiment_registry_builder",
-                },
-                budget_status="within_budget" if status == "completed" else None,
+                    record_id=f"{str(task.get('task_id') or f'task_{idx}')}:stage_{idx}:{node_id}",
+                    task_id=str(task.get("task_id") or f"task_{idx}"),
+                    dataset=str(task.get("dataset") or "dataset_to_be_selected"),
+                    metric=str(task.get("metric") or "primary_task_metric"),
+                    baseline_ref=str(
+                        task.get("baseline") or "strong_existing_baseline"
+                    ),
+                    config={
+                        "goal": task.get("goal"),
+                        "priority": task.get("priority"),
+                    },
+                    seed=attempt.get("seed"),
+                    status=status,
+                    result_summary=result_summary,
+                    artifacts=artifacts,
+                    error_type=(
+                        None if status == "completed" else "buggy_or_missing_attempt"
+                    ),
+                    error_message=(
+                        None
+                        if status == "completed"
+                        else "; ".join(warnings[:3])
+                        or "Attempt did not produce a valid metric."
+                    ),
+                    entered_storyline=is_best,
+                    budget=task.get("budget"),
+                    workflow_mode=research_plan.get("workflow_mode"),
+                    policy_name=(research_plan.get("execution_policy") or {}).get(
+                        "policy_name"
+                    ),
+                    acceptance_checks=task.get("acceptance_checks"),
+                    acceptance_results=[
+                        {
+                            "check": str(check),
+                            "passed": status == "completed",
+                            "source": "experiment_journal_attempt",
+                        }
+                        for check in (task.get("acceptance_checks") or [])
+                    ],
+                    budget_audit={
+                        "audited": status == "completed",
+                        "within_budget": status == "completed",
+                        "source": "experiment_registry_builder",
+                    },
+                    budget_status="within_budget" if status == "completed" else None,
+                    evidence_role=task.get("evidence_role"),
+                    paired_control_task_id=task.get("paired_control_task_id"),
+                    intervention_variant=task.get("intervention_variant"),
+                    stress_condition=task.get("stress_condition"),
                 )
             )
     return rows
@@ -1727,7 +1754,8 @@ class ContinuousPaperGenerator:
                     f"- Rigor: {paper.get('rigor_score')}",
                     f"- Claim support: {paper.get('claim_support_score')}",
                     f"- Gate passed: {paper.get('quality_gate_passed')}",
-                    f"- Accepted: {paper.get('submission_acceptance_passed')}",
+                    "- Local submission-ready: "
+                    f"{paper.get('local_submission_ready', paper.get('submission_acceptance_passed'))}",
                     f"- Integrity forensics: {integrity.get('verdict')} "
                     f"({integrity.get('status')}, findings={integrity.get('findings')})",
                     f"- Integrity report: {integrity.get('report_file')}",
@@ -1812,7 +1840,7 @@ class ContinuousPaperGenerator:
         print(f"质量门槛通过: {report['quality_summary']['gate_passed']}")
         print(f"质量门槛未过: {report['quality_summary']['gate_failed']}")
         print(f"投稿准备完成: {report['quality_summary']['submission_ready']}")
-        print(f"投稿接受标准达标: {report['quality_summary']['submission_accepted']}")
+        print(f"本地投稿准备度通过: {report['quality_summary']['submission_accepted']}")
         print(f"写作守护通过: {report['quality_summary'].get('guardrail_passed', 0)}")
         print(f"写作守护拦截: {report['quality_summary'].get('guardrail_blocked', 0)}")
         print(
@@ -1838,7 +1866,7 @@ class ContinuousPaperGenerator:
             print("\n按 venue 统计:")
             for venue, stats in sorted(report["quality_summary"]["by_venue"].items()):
                 print(
-                    f"  {venue}: {stats['gate_passed']}/{stats['count']} 通过质量门槛, {stats['submission_accepted']}/{stats['count']} 达到投稿接受标准"
+                    f"  {venue}: {stats['gate_passed']}/{stats['count']} 通过质量门槛, {stats['submission_accepted']}/{stats['count']} 通过本地投稿准备度门禁"
                 )
 
         if report["quality_summary"]["top_papers"]:
@@ -1848,7 +1876,7 @@ class ContinuousPaperGenerator:
                     f"  - idea #{paper.get('idea_idx')} [{paper.get('paper_type')}] "
                     f"priority={paper.get('submission_priority_score')} blockers={paper.get('blocker_count')} "
                     f"quality={paper.get('quality_score')} rigor={paper.get('rigor_score')} claim={paper.get('claim_support_score')} "
-                    f"gate={paper.get('quality_gate_passed')} accepted={paper.get('submission_acceptance_passed')}"
+                    f"gate={paper.get('quality_gate_passed')} local_submission_ready={paper.get('submission_acceptance_passed')}"
                 )
 
         print(f"\n📄 报告已保存到: {report_file}")
@@ -3107,9 +3135,14 @@ def _process_single_paper(args):
             )
 
         # ========== 步骤2: 生成论文 ==========
-        current_stage = "writeup"
+        current_stage = "plot_aggregation"
         print(f"\n📝 [想法 #{idea_idx}] 步骤 2/4: 生成论文")
-        aggregate_plots(base_folder=exp_dir, model=model_agg_plots)
+        aggregate_plots(
+            base_folder=exp_dir,
+            model=model_agg_plots,
+            execution_config_path=idea_config_path,
+        )
+        current_stage = "writeup"
         _save_manuscript_contract_state(
             paper_root=paper_structure["root"],
             paper_type=paper_type,
@@ -3657,6 +3690,9 @@ def _process_single_paper(args):
                 "figure_spec_file": str(
                     Path(paper_structure["root"]) / "figure_spec.json"
                 ),
+                "plot_execution_receipt_file": str(
+                    Path(paper_structure["root"]) / "plot_execution_receipt.json"
+                ),
                 "manuscript_state_file": str(
                     Path(paper_structure["root"]) / "manuscript_state.json"
                 ),
@@ -3705,6 +3741,10 @@ def _process_single_paper(args):
                 "submission_acceptance_passed": (
                     acceptance.get("accepted") if high_quality_mode else None
                 ),
+                "local_submission_ready": (
+                    acceptance.get("accepted") if high_quality_mode else None
+                ),
+                "acceptance_guaranteed": False,
                 "submission_package_file": quality_result.get(
                     "submission_package_file"
                 ),
@@ -3853,6 +3893,14 @@ def main(argv=None):
         workflow_modes=list_workflow_modes(),
     )
     args = parser.parse_args(argv)
+    from ai_scientist.utils.research_model_roles import (
+        enforce_glm53_project_role_boundary,
+    )
+
+    try:
+        enforce_glm53_project_role_boundary(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     require_login("连续论文生成(continuous_paper_generator)")
     requested_workflow_mode = args.workflow_mode
     normalize_batch_workflow_args(args)
@@ -4072,10 +4120,10 @@ def main(argv=None):
                 report = json.load(f)
             accepted = report.get("quality_summary", {}).get("submission_accepted", 0)
             if accepted == 0:
-                print("❌ 没有任何论文达到当前投稿接受标准，批量任务视为失败")
+                print("❌ 没有任何论文通过当前本地投稿准备度门禁，批量任务视为失败")
                 sys.exit(1)
         except Exception as exc:
-            print(f"⚠️  读取总结报告失败，无法验证投稿接受标准: {exc}")
+            print(f"⚠️  读取总结报告失败，无法验证本地投稿准备度: {exc}")
     if args.strict_writing_guardrails:
         try:
             with open(report_path, "r") as f:

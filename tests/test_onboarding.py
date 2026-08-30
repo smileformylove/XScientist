@@ -15,8 +15,13 @@ from unittest import mock
 import yaml
 
 from xscientist._version import __version__
-from xscientist.cli import main as cli_main
-from xscientist.cli import _interactive_start_inputs, _prompt_provider_model
+from xscientist.cli import (
+    _interactive_start_inputs,
+    _prompt_provider_model,
+    _research_model_arguments,
+    _research_model_contract,
+    main as cli_main,
+)
 from xscientist.diagnostics import diagnose
 from xscientist.onboarding import (
     WORKSPACE_FILES,
@@ -61,12 +66,17 @@ class OnboardingTests(unittest.TestCase):
 
             config_text = (workspace / "bfts_config.yaml").read_text(encoding="utf-8")
             config = yaml.safe_load(config_text)
-            for role in ("code", "feedback", "vlm_feedback", "summary"):
+            self.assertEqual(config["agent"]["code"]["model"], "openai_compat/glm-5.3")
+            for role in ("judgment", "feedback", "vlm_feedback", "summary"):
                 self.assertEqual(
-                    config["agent"][role]["model"], "openai_compat/glm-5.3"
+                    config["agent"][role]["model"],
+                    "__xscientist_non_glm_judgment_model_required__",
                 )
             self.assertEqual(config["report"]["model"], "openai_compat/glm-5.3")
-            self.assertNotIn("select_node", config["agent"])
+            self.assertEqual(
+                config["agent"]["select_node"]["model"],
+                "__xscientist_non_glm_judgment_model_required__",
+            )
             self.assertNotIn("OPENAI_COMPAT_API_KEY", config_text)
             self.assertNotIn("OPENAI_COMPAT_BASE_URL", config_text)
 
@@ -446,6 +456,10 @@ class OnboardingTests(unittest.TestCase):
                         str(workspace),
                         "--question",
                         "Does X affect Y?",
+                        "--autopilot",
+                        "publication",
+                        "--target-venue",
+                        "icml",
                         "--allow-synthetic-data",
                         "--provider",
                         "zhipu",
@@ -459,6 +473,8 @@ class OnboardingTests(unittest.TestCase):
             argv = project.call_args.args[0]
             self.assertEqual(argv[0], str(workspace.resolve()))
             self.assertIn("--autopilot", argv)
+            self.assertEqual(argv[argv.index("--autopilot") + 1], "publication")
+            self.assertEqual(argv[argv.index("--target-venue") + 1], "icml")
             self.assertIn("--allow-synthetic-data", argv)
             self.assertIn("--research-vcs-strict", argv)
             for flag in (
@@ -472,6 +488,187 @@ class OnboardingTests(unittest.TestCase):
                 "--quality-model",
             ):
                 self.assertEqual(argv[argv.index(flag) + 1], "glm-4-flash")
+
+    def test_glm53_start_contract_requires_a_separate_judgment_route(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "restricted to locked-task implementation"
+        ):
+            _research_model_contract(
+                "openai_compat/glm-5.3",
+                source="test",
+            )
+        with self.assertRaisesRegex(ValueError, "must not resolve to GLM-5.3"):
+            _research_model_contract(
+                "openai_compat/glm-5.3",
+                source="test",
+                judgment_model="zhipu/glm-5.3",
+            )
+
+        contract = _research_model_contract(
+            "openai_compat/glm-5.3",
+            source="test",
+            judgment_model="ollama/qwen2.5:7b",
+        )
+        self.assertTrue(contract["glm53_execution_only"])
+        self.assertTrue(contract["role_separation_enforced"])
+        self.assertFalse(contract["independent_review_claimed"])
+        self.assertEqual(contract["publication_authority"], "external_signed_verifier")
+        for role in ("writeup", "writeup_small"):
+            self.assertEqual(contract["roles"][role], "openai_compat/glm-5.3")
+        for role in (
+            "ideation",
+            "agg_plots",
+            "citation",
+            "idea_ranking",
+            "review",
+            "quality",
+        ):
+            self.assertEqual(contract["roles"][role], "ollama/qwen2.5:7b")
+
+        forwarded = _research_model_arguments(
+            "openai_compat/glm-5.3",
+            judgment_model="ollama/qwen2.5:7b",
+        )
+        for flag in (
+            "--model-writeup",
+            "--model-writeup-small",
+        ):
+            self.assertEqual(
+                forwarded[forwarded.index(flag) + 1],
+                "openai_compat/glm-5.3",
+            )
+        self.assertEqual(
+            forwarded[forwarded.index("--model-agg-plots") + 1],
+            "ollama/qwen2.5:7b",
+        )
+        self.assertEqual(
+            forwarded[forwarded.index("--model-citation") + 1],
+            "ollama/qwen2.5:7b",
+        )
+        for flag in (
+            "--model-ideation",
+            "--model-review",
+            "--idea-rank-model",
+            "--quality-model",
+        ):
+            self.assertEqual(
+                forwarded[forwarded.index(flag) + 1],
+                "ollama/qwen2.5:7b",
+            )
+
+    def test_glm53_start_without_judgment_model_fails_with_recovery_json(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "glm-study"
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "tester"}),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--allow-synthetic-data",
+                        "--provider",
+                        "custom",
+                        "--model",
+                        "glm-5.3",
+                        "--skip-credentials",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            payload = json.loads(output.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["phase"], "prepare")
+            self.assertEqual(payload["error_code"], "research_model_role_boundary")
+            self.assertIn("restricted to locked-task implementation", payload["error"])
+            self.assertTrue(
+                any("--judgment-model" in action for action in payload["next_actions"])
+            )
+            self.assertFalse(workspace.exists())
+
+    def test_glm53_start_forwards_execution_and_judgment_routes_separately(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "glm-study"
+            ready = {
+                "schema": "xscientist.doctor.v1",
+                "ok": True,
+                "configuration_ready": True,
+                "runtime_ready": True,
+                "task": "research",
+                "workspace": ".",
+                "checks": {},
+                "next_actions": [],
+                "host_paths_disclosed": False,
+            }
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "tester"}),
+                ),
+                mock.patch(
+                    "xscientist.provider_config.load_workspace_environment",
+                    return_value={"loaded": True},
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
+                mock.patch("xscientist.cli.project_main", return_value=0) as project,
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X affect Y?",
+                        "--allow-synthetic-data",
+                        "--provider",
+                        "custom",
+                        "--model",
+                        "glm-5.3",
+                        "--judgment-model",
+                        "ollama/qwen2.5:7b",
+                        "--skip-credentials",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            contract = payload["model_contract"]
+            self.assertEqual(contract["execution_model"], "openai_compat/glm-5.3")
+            self.assertEqual(contract["judgment_model"], "ollama/qwen2.5:7b")
+            self.assertEqual(
+                contract["publication_authority"], "external_signed_verifier"
+            )
+            argv = project.call_args.args[0]
+            for flag in (
+                "--model-writeup",
+                "--model-writeup-small",
+            ):
+                self.assertEqual(argv[argv.index(flag) + 1], "openai_compat/glm-5.3")
+            for flag in (
+                "--model-ideation",
+                "--model-agg-plots",
+                "--model-citation",
+                "--model-review",
+                "--idea-rank-model",
+                "--quality-model",
+            ):
+                self.assertEqual(argv[argv.index(flag) + 1], "ollama/qwen2.5:7b")
 
     def test_start_fails_before_provider_use_when_cost_price_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -889,6 +1086,180 @@ class OnboardingTests(unittest.TestCase):
                 (workspace / ".dockerignore").read_text(encoding="utf-8"),
                 "concurrent user data\n",
             )
+
+    def test_create_workspace_rollback_preserves_same_bytes_replacement(
+        self,
+    ) -> None:
+        import xscientist.onboarding as onboarding_module
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            original_writer = onboarding_module.atomic_write_text
+            calls = 0
+            concurrent_inode: int | None = None
+
+            def replace_with_same_bytes_then_fail(
+                path: Path, content: str, **kwargs: object
+            ) -> None:
+                nonlocal calls, concurrent_inode
+                calls += 1
+                if calls == 2:
+                    managed = workspace / ".dockerignore"
+                    payload = managed.read_text(encoding="utf-8")
+                    mode = managed.stat().st_mode & 0o7777
+                    original_writer(managed, payload)
+                    managed.chmod(mode)
+                    concurrent_inode = managed.stat().st_ino
+                    raise PermissionError("late injected write failure")
+                original_writer(path, content, **kwargs)
+
+            with mock.patch(
+                "xscientist.onboarding.atomic_write_text",
+                side_effect=replace_with_same_bytes_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceInitError,
+                    "rollback was incomplete",
+                ):
+                    create_workspace(workspace)
+
+            managed = workspace / ".dockerignore"
+            self.assertTrue(managed.is_file())
+            self.assertEqual(managed.stat().st_ino, concurrent_inode)
+            self.assertIn(".env", managed.read_text(encoding="utf-8"))
+
+    def test_force_rollback_preserves_same_bytes_replacement(self) -> None:
+        import xscientist.onboarding as onboarding_module
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            create_workspace(workspace)
+            managed = workspace / ".dockerignore"
+            managed.write_text("original user bytes\n", encoding="utf-8")
+            managed.chmod(0o640)
+            original_writer = onboarding_module.atomic_write_text
+            calls = 0
+            concurrent_inode: int | None = None
+            concurrent_content = ""
+
+            def replace_with_same_bytes_then_fail(
+                path: Path, content: str, **kwargs: object
+            ) -> None:
+                nonlocal calls, concurrent_inode, concurrent_content
+                calls += 1
+                if calls == 2:
+                    concurrent_content = managed.read_text(encoding="utf-8")
+                    mode = managed.stat().st_mode & 0o7777
+                    original_writer(managed, concurrent_content)
+                    managed.chmod(mode)
+                    concurrent_inode = managed.stat().st_ino
+                    raise PermissionError("late injected write failure")
+                original_writer(path, content, **kwargs)
+
+            with mock.patch(
+                "xscientist.onboarding.atomic_write_text",
+                side_effect=replace_with_same_bytes_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceInitError,
+                    "rollback was incomplete",
+                ):
+                    create_workspace(workspace, force=True)
+
+            self.assertEqual(managed.stat().st_ino, concurrent_inode)
+            self.assertEqual(managed.read_text(encoding="utf-8"), concurrent_content)
+            self.assertNotEqual(concurrent_content, "original user bytes\n")
+
+    def test_create_workspace_fd_rollback_does_not_write_through_symlink_race(
+        self,
+    ) -> None:
+        import os
+
+        import xscientist.file_transactions as file_transactions
+        import xscientist.onboarding as onboarding_module
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "study"
+            create_workspace(workspace)
+            managed = workspace / ".dockerignore"
+            managed.write_text("original user bytes\n", encoding="utf-8")
+            managed.chmod(0o640)
+            external = root / "external.txt"
+            sentinel = b"external sentinel must remain unchanged\n"
+            external.write_bytes(sentinel)
+
+            original_writer = onboarding_module.atomic_write_text
+            real_ftruncate = os.ftruncate
+            calls = 0
+            swapped = False
+
+            def fail_second_write(path: Path, content: str, **kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise PermissionError("late injected write failure")
+                original_writer(path, content, **kwargs)
+
+            def swap_leaf_then_truncate(descriptor: int, length: int) -> None:
+                nonlocal swapped
+                if not swapped:
+                    swapped = True
+                    managed.unlink()
+                    try:
+                        managed.symlink_to(external)
+                    except OSError as exc:  # pragma: no cover - platform capability
+                        self.skipTest(f"file symlinks unavailable: {exc}")
+                real_ftruncate(descriptor, length)
+
+            with (
+                mock.patch(
+                    "xscientist.onboarding.atomic_write_text",
+                    side_effect=fail_second_write,
+                ),
+                mock.patch.object(
+                    file_transactions.os,
+                    "ftruncate",
+                    side_effect=swap_leaf_then_truncate,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceInitError,
+                    "rollback was incomplete",
+                ):
+                    create_workspace(workspace, force=True)
+
+            self.assertTrue(swapped)
+            self.assertTrue(managed.is_symlink())
+            self.assertEqual(managed.resolve(), external.resolve())
+            self.assertEqual(external.read_bytes(), sentinel)
+
+    def test_create_workspace_reports_uncertain_write_without_removing_it(
+        self,
+    ) -> None:
+        import xscientist.onboarding as onboarding_module
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            original_writer = onboarding_module.atomic_write_text
+
+            def write_then_raise(path: Path, content: str, **kwargs: object) -> None:
+                original_writer(path, content, **kwargs)
+                raise PermissionError("writer raised after replacement")
+
+            with mock.patch(
+                "xscientist.onboarding.atomic_write_text",
+                side_effect=write_then_raise,
+            ):
+                with self.assertRaisesRegex(
+                    WorkspaceInitError,
+                    "rollback was incomplete",
+                ):
+                    create_workspace(workspace)
+
+            managed = workspace / ".dockerignore"
+            self.assertTrue(managed.is_file())
+            self.assertIn(".env", managed.read_text(encoding="utf-8"))
 
     def test_create_workspace_refuses_concurrent_leaf_before_replace(self) -> None:
         import xscientist.onboarding as onboarding_module
@@ -1308,10 +1679,61 @@ class OnboardingTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["schema"], "xscientist.init.v1")
             self.assertFalse(payload["ok"])
+            self.assertEqual(payload["phase"], "input")
+            self.assertEqual(payload["error_code"], "unsafe_managed_workspace_path")
+            self.assertEqual(payload["next_actions"], ["xscientist init NEW_DIRECTORY"])
             self.assertIn("must not be a symlink", payload["error"])
             self.assertEqual(stderr.getvalue(), "")
             self.assertEqual(external.read_text(encoding="utf-8"), "sentinel: keep\n")
             self.assertTrue(research_config.is_symlink())
+
+            human_stdout, human_stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(human_stdout),
+                contextlib.redirect_stderr(human_stderr),
+            ):
+                human_code = cli_main(["init", str(workspace)])
+
+            self.assertEqual(human_code, 2)
+            self.assertEqual(human_stdout.getvalue(), "")
+            self.assertIn(
+                "research.yaml must not be a symlink", human_stderr.getvalue()
+            )
+            self.assertIn(
+                "Next: xscientist init NEW_DIRECTORY", human_stderr.getvalue()
+            )
+            self.assertNotIn("Traceback", human_stderr.getvalue())
+            self.assertEqual(external.read_text(encoding="utf-8"), "sentinel: keep\n")
+
+    def test_init_json_catches_research_yaml_validation_value_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            workspace.mkdir()
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch(
+                    "xscientist.cli._validated_workspace_file",
+                    side_effect=ValueError("adversarial validation failure"),
+                ),
+                mock.patch("xscientist.onboarding.create_workspace") as create,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = cli_main(["init", str(workspace), "--json"])
+
+            self.assertEqual(code, 2)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "xscientist.init.v1")
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["workspace"], ".")
+            self.assertEqual(payload["phase"], "input")
+            self.assertEqual(payload["error_code"], "unsafe_managed_workspace_path")
+            self.assertEqual(payload["next_actions"], ["xscientist init NEW_DIRECTORY"])
+            self.assertIn("research.yaml", payload["error"])
+            self.assertIn("adversarial validation failure", payload["error"])
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertNotIn("Traceback", stdout.getvalue())
+            create.assert_not_called()
 
     def test_start_preserves_non_research_topic_and_rolls_back_failed_prepare(
         self,
@@ -1609,7 +2031,10 @@ class OnboardingTests(unittest.TestCase):
             repository = ResearchRepository(workspace)
             self.assertEqual(repository.status()["eligible_changes"], [])
             changed_paths = set(repository.status()["last_checkpoint"]["changed_paths"])
-            self.assertEqual(changed_paths, {"question.md", "topic.md"})
+            self.assertEqual(
+                changed_paths,
+                {"bfts_config.yaml", "question.md", "topic.md"},
+            )
 
     def test_force_refresh_preserves_scientific_sources_and_init_refuses_them(
         self,
@@ -1690,6 +2115,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertFalse(payload["workspace_created"])
             self.assertEqual((workspace / "question.md").read_bytes(), question_before)
             self.assertEqual((workspace / "topic.md").read_bytes(), topic_before)
+
             repository = ResearchRepository(workspace)
             status = repository.status()
             self.assertEqual(status["eligible_changes"], [])
@@ -1711,6 +2137,54 @@ class OnboardingTests(unittest.TestCase):
             self.assertIn("existing Research VCS", output.getvalue())
             self.assertEqual((workspace / "question.md").read_bytes(), question_before)
             self.assertEqual((workspace / "topic.md").read_bytes(), topic_before)
+
+    def test_start_refuses_to_absorb_preexisting_runtime_config_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "setup",
+                            str(workspace),
+                            "--task",
+                            "protocol",
+                            "--skip-credentials",
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+
+            config_path = workspace / "bfts_config.yaml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "\n# user-owned pending runtime edit\n",
+                encoding="utf-8",
+            )
+            before = config_path.read_bytes()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "ollama",
+                        "--model",
+                        "ollama/qwen2.5:7b",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            payload = json.loads(output.getvalue())
+            self.assertIn("managed runtime configuration", payload["error"])
+            self.assertEqual(config_path.read_bytes(), before)
 
     def test_placeholder_privacy_failure_restores_both_sources_and_index(self) -> None:
         from xscientist.research_vcs import ResearchRepository
@@ -2544,6 +3018,84 @@ class OnboardingTests(unittest.TestCase):
                 text=True,
             ).stdout.strip()
             self.assertEqual(subject, "concurrent result")
+
+    def test_setup_and_start_rollback_preserve_same_bytes_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            commands = (
+                (
+                    "setup",
+                    [
+                        "setup",
+                        str(root / "setup"),
+                        "--task",
+                        "protocol",
+                        "--skip-credentials",
+                        "--json",
+                    ],
+                    root / "setup",
+                ),
+                (
+                    "start",
+                    [
+                        "start",
+                        str(root / "start"),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "zhipu",
+                        "--prepare-only",
+                        "--skip-credentials",
+                        "--json",
+                    ],
+                    root / "start",
+                ),
+            )
+            for command_name, argv, workspace in commands:
+                with self.subTest(command=command_name):
+                    concurrent_inode: int | None = None
+                    concurrent_content = b""
+
+                    def replace_same_bytes_then_fail(
+                        target: Path,
+                        **_kwargs: object,
+                    ) -> object:
+                        nonlocal concurrent_inode, concurrent_content
+                        managed = Path(target) / "README.md"
+                        concurrent_content = managed.read_bytes()
+                        mode = managed.stat().st_mode & 0o7777
+                        replacement = managed.with_name(".README.concurrent")
+                        replacement.write_bytes(concurrent_content)
+                        replacement.chmod(mode)
+                        replacement.replace(managed)
+                        concurrent_inode = managed.stat().st_ino
+                        raise RuntimeError("unexpected diagnose failure")
+
+                    output = io.StringIO()
+                    with (
+                        mock.patch(
+                            "ai_scientist.utils.auth_session.validate_session",
+                            return_value=(True, "ok", {"username": "tester"}),
+                        ),
+                        mock.patch(
+                            "xscientist.diagnostics.diagnose",
+                            side_effect=replace_same_bytes_then_fail,
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        code = cli_main(argv)
+
+                    self.assertEqual(code, 2, output.getvalue())
+                    managed = workspace / "README.md"
+                    self.assertTrue(managed.is_file())
+                    self.assertEqual(managed.stat().st_ino, concurrent_inode)
+                    self.assertEqual(managed.read_bytes(), concurrent_content)
+                    self.assertTrue(
+                        any(
+                            marker in output.getvalue()
+                            for marker in ("restore", "rollback")
+                        )
+                    )
 
     def test_setup_linked_worktree_failure_preserves_common_git_config(self) -> None:
         with tempfile.TemporaryDirectory() as td:

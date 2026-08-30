@@ -10,6 +10,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from ai_scientist.config.venues import TARGET_VENUES
 from ai_scientist.utils.launcher_workflow import (
     experiment_stop_exit_code,
     prepare_idea_artifacts,
@@ -248,7 +249,7 @@ def parse_arguments():
     parser.add_argument(
         "--target-venue",
         type=str,
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         default=None,
     )
     parser.add_argument(
@@ -314,11 +315,7 @@ def parse_arguments():
             "standard",
             "fast",
             "depth",
-            "neurips",
-            "iclr",
-            "cvpr",
-            "journal",
-            "nature",
+            *TARGET_VENUES,
         ],
         default=None,
         help="审稿策略预设",

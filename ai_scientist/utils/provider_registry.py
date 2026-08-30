@@ -572,7 +572,10 @@ def build_openai_compatible_client_kwargs(
                 "your_api_key_here",
             }:
                 raise ValueError("OPENAI_COMPAT_API_KEY is a placeholder")
-            parsed = urllib.parse.urlsplit(str(resolved_base_url).strip())
+            normalized_base_url = str(resolved_base_url).strip()
+            if any(ord(char) < 32 or ord(char) == 127 for char in normalized_base_url):
+                raise ValueError("OPENAI_COMPAT_BASE_URL contains control characters")
+            parsed = urllib.parse.urlsplit(normalized_base_url)
             if (
                 parsed.scheme not in {"http", "https"}
                 or not parsed.hostname
@@ -594,7 +597,7 @@ def build_openai_compatible_client_kwargs(
                 raise ValueError(
                     "OPENAI_COMPAT_BASE_URL requires HTTPS for remote hosts"
                 )
-            resolved_base_url = str(resolved_base_url).strip().rstrip("/")
+            resolved_base_url = normalized_base_url.rstrip("/")
         kwargs["api_key"] = api_key or ""
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
@@ -734,8 +737,17 @@ def probe_openai_compatible_model(
         reported_model is not None and finish_reason == "stop" and usage_valid
     )
     identity_status = model_identity_status(client_model, reported_model)
-    identity_verified = identity_status != "unavailable"
     exact_match = identity_status == "exact"
+    if not exact_match:
+        error_code = (
+            "model_identity_mismatch"
+            if identity_status in {"alias", "mismatch"}
+            else "provider_metadata_invalid"
+        )
+    elif not envelope_valid:
+        error_code = "provider_metadata_invalid"
+    else:
+        error_code = None
     return {
         "ok": bool(exact_match and envelope_valid),
         "supported": True,
@@ -744,12 +756,12 @@ def probe_openai_compatible_model(
         "requested_model": model,
         "client_model": client_model,
         "reported_model": reported_model,
-        "model_identity_verified": identity_verified,
+        "model_identity_verified": exact_match,
         "exact_model_match": exact_match,
         "identity_status": identity_status,
         "finish_reason": finish_reason,
         "response_envelope_valid": envelope_valid,
-        "error_code": None if envelope_valid else "provider_metadata_invalid",
+        "error_code": error_code,
         "latency_ms": round((time.monotonic() - started) * 1000, 1),
         "usage": {
             key: value if usage_valid else None for key, value in usage_values.items()
@@ -934,7 +946,6 @@ def probe_openai_compatible_tool_call(
         == usage_values["prompt_tokens"] + usage_values["completion_tokens"]
     )
     identity_status = model_identity_status(client_model, reported_model)
-    identity_verified = identity_status != "unavailable"
     exact_match = identity_status == "exact"
     envelope_valid = bool(
         reported_model is not None and tool_call_valid and usage_valid
@@ -959,7 +970,7 @@ def probe_openai_compatible_tool_call(
         "requested_model": model,
         "client_model": client_model,
         "reported_model": reported_model,
-        "model_identity_verified": identity_verified,
+        "model_identity_verified": exact_match,
         "exact_model_match": exact_match,
         "identity_status": identity_status,
         "capability": "forced_function_call",

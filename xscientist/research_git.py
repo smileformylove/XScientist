@@ -45,6 +45,8 @@ from jsonschema import ValidationError, validate as validate_json
 
 from ai_scientist.protocol.hashing import content_hash, hash_manifest
 from ai_scientist.protocol.research_vcs import (
+    RESEARCH_RELATION_TARGET_KINDS,
+    RESEARCH_RELATION_TYPES,
     ResearchObjectError,
     build_research_object,
     validate_research_object,
@@ -71,6 +73,10 @@ _HARD_MAX_STORE_BYTES = 128 * 1024 * 1024
 _HARD_MAX_RESEARCH_OBJECTS = 8192
 _HARD_MAX_BOUNDED_LOG_OUTPUT = 1 * 1024 * 1024
 _BOUNDED_LOG_TIMEOUT_SECONDS = 10.0
+_MAX_TRAJECTORY_CHECKPOINTS = 127
+_MAX_TRAJECTORY_CHECKPOINT_BYTES = 512 * 1024
+_MAX_TRAJECTORY_CHECKPOINT_CANDIDATES = 16
+_MAX_TRAJECTORY_OBJECT_BYTES = 512 * 1024
 _MAX_RESEARCH_STAGE_BYTES = 1 * 1024 * 1024
 _MAX_RESEARCH_STAGE_ENTRIES = 4096
 _MAX_BUNDLE_POINTER_BYTES = 1 * 1024 * 1024
@@ -518,6 +524,7 @@ def _run_git_bounded(
     *,
     max_output_bytes: int = _HARD_MAX_BOUNDED_LOG_OUTPUT,
     timeout_seconds: float = _BOUNDED_LOG_TIMEOUT_SECONDS,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a read-only Git command with a hard stdout/stderr budget.
 
@@ -632,7 +639,7 @@ def _run_git_bounded(
         stdout=bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
         stderr=bytes(buffers["stderr"]).decode("utf-8", errors="replace"),
     )
-    if completed.returncode:
+    if check and completed.returncode:
         detail = (completed.stderr or completed.stdout).strip()[:512]
         raise ResearchGitError(f"git {' '.join(args)} failed: {detail}")
     return completed
@@ -1422,6 +1429,25 @@ def _record_research_object_locked(
     except ResearchObjectError as exc:
         raise ResearchGitError(str(exc)) from exc
     _refuse_private_research_object(research_object)
+    for relation in research_object.get("relations") or []:
+        relation_type = str(relation.get("type") or "")
+        if relation_type not in RESEARCH_RELATION_TYPES:
+            continue
+        relation_target = str(relation.get("target") or "")
+        try:
+            target_object = load_research_object(root, relation_target)
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                f"built-in research relation {relation_type} references missing "
+                f"object: {relation_target}"
+            ) from exc
+        expected_kinds = RESEARCH_RELATION_TARGET_KINDS.get(relation_type, ())
+        actual_kind = str(target_object.get("kind") or "")
+        if expected_kinds and actual_kind not in expected_kinds:
+            raise ResearchGitError(
+                f"built-in research relation {relation_type} requires target kind "
+                f"{' or '.join(expected_kinds)}; got {actual_kind}: {relation_target}"
+            )
     target = _research_object_path(root, research_object)
     if target.exists():
         try:
@@ -1522,12 +1548,39 @@ def resolve_research_object_id(
             raise ResearchGitError(
                 f"no research objects found for selector: {normalized}"
             )
-        return str(
-            max(
-                candidates,
-                key=lambda item: (str(item.get("created_at") or ""), item["object_id"]),
-            )["object_id"]
-        )
+        commit_order = _research_object_commit_order(root, ref="HEAD", kind=kind)
+
+        candidates_by_path = {
+            (
+                f".xscientist/objects/{kind}/"
+                f"{str(item.get('object_id') or '')}.json"
+            ): item
+            for item in candidates
+        }
+        uncommitted = [
+            item
+            for path, item in candidates_by_path.items()
+            if path not in commit_order
+        ]
+        if len(uncommitted) > 1:
+            raise ResearchGitError(
+                f"@latest:{kind} is ambiguous: multiple uncommitted objects have "
+                "no Git introduction order; commit them separately or use an ID"
+            )
+        if uncommitted:
+            return str(uncommitted[0]["object_id"])
+        latest_sequence = max(commit_order[path] for path in candidates_by_path)
+        latest = [
+            item
+            for path, item in candidates_by_path.items()
+            if commit_order[path] == latest_sequence
+        ]
+        if len(latest) != 1:
+            raise ResearchGitError(
+                f"@latest:{kind} is ambiguous: multiple objects share the latest "
+                "Git checkpoint; use an explicit ID"
+            )
+        return str(latest[0]["object_id"])
     if normalized.startswith("urn:xscientist:research-object:sha256:"):
         matches = [
             item
@@ -1557,6 +1610,88 @@ def resolve_research_object_id(
                 f"research object has wrong kind; expected {expected_kind}: {resolved}"
             )
     return resolved
+
+
+def _research_object_commit_order(
+    repo: Path,
+    *,
+    ref: str,
+    kind: str | None,
+) -> dict[str, int]:
+    """Map object paths to their latest first-parent introduction sequence."""
+
+    if kind is not None and re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", kind) is None:
+        raise ResearchGitError("research object kind is invalid")
+    exists = _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"], check=False)
+    if exists.returncode:
+        return {}
+    raw = _run_git(
+        repo,
+        [
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--no-renames",
+            "--diff-merges=first-parent",
+            "--diff-filter=AD",
+            "--format=%x1e%H",
+            "--name-status",
+            exists.stdout.strip(),
+            "--",
+            (
+                f".xscientist/objects/{kind}"
+                if kind is not None
+                else ".xscientist/objects"
+            ),
+        ],
+    ).stdout
+    order: dict[str, int] = {}
+    sequence = 0
+    for block in raw.split("\x1e"):
+        lines = [line for line in block.strip().splitlines() if line.strip()]
+        if not lines:
+            continue
+        commit_hash = lines[0].strip()
+        if re.fullmatch(r"[0-9a-f]{40,64}", commit_hash) is None:
+            raise ResearchGitError("cannot parse research object commit order")
+        sequence += 1
+        for line in lines[1:]:
+            status, separator, raw_path = line.partition("\t")
+            if not separator or status not in {"A", "D"}:
+                raise ResearchGitError(
+                    "cannot parse research object history transition"
+                )
+            path = _normalise_relative(raw_path)
+            if status == "A":
+                order[path] = sequence
+            else:
+                order.pop(path, None)
+    return order
+
+
+def research_object_introduction_order(
+    repo: str | Path,
+    *,
+    ref: str = "HEAD",
+) -> dict[str, int]:
+    """Return Git-topology introduction order for objects visible at ``ref``.
+
+    Objects introduced together intentionally share a sequence. Missing IDs are
+    uncommitted working-state objects and therefore have no internal chronology.
+    """
+
+    root = _repository_root(repo)
+    path_order = _research_object_commit_order(root, ref=ref, kind=None)
+    result: dict[str, int] = {}
+    for path, sequence in path_order.items():
+        parts = PurePosixPath(path).parts
+        if (
+            len(parts) == 4
+            and parts[:2] == (".xscientist", "objects")
+            and re.fullmatch(r"rso-[0-9a-f]{16}\.json", parts[3])
+        ):
+            result[PurePosixPath(parts[3]).stem] = sequence
+    return result
 
 
 def load_research_object(repo: str | Path, object_id: str) -> dict[str, Any]:
@@ -2063,16 +2198,39 @@ def _latest_checkpoint_record(
 
 def _checkpoint_parent_records(
     repo: Path,
+    *,
+    stage: str,
 ) -> list[tuple[str, str, dict[str, Any]]]:
+    """Resolve exact scientific parents without laundering a raw Git tip.
+
+    An older implementation walked past an uncheckpointed ``HEAD`` and reused
+    the nearest Research VCS ancestor. The newly created checkpoint then made
+    the raw transition look like an ordinary scientific parent. Only an
+    explicit migration may bridge that gap; the first ``init`` has no reachable
+    Research VCS ancestor and remains valid on top of an existing Git project.
+    """
+
     head = _head(repo)
     if head is None:
         return []
     checkpoint_at_head = _checkpoint_id_from_commit(repo, head)
     if checkpoint_at_head:
-        path, payload = _checkpoint_at_commit(repo, head)
-        return [(head, path, payload)]
+        try:
+            path, payload = _checkpoint_at_commit(repo, head)
+        except ResearchGitError as exc:
+            if stage != "migration":
+                raise ResearchGitError(
+                    "checkpoint refused because HEAD is not an exact, hash-valid "
+                    "Research VCS checkpoint; use an explicit migration"
+                ) from exc
+        else:
+            return [(head, path, payload)]
     ancestry = _run_git(repo, ["rev-list", "--parents", "-n", "1", head]).stdout.split()
-    starts = ancestry[1:] if len(ancestry) > 2 else [head]
+    # Start at the backend parents, never at the uncheckpointed tip itself.
+    # This still finds the nearest scientific parent on every side of a raw
+    # merge, but lets the caller distinguish that legacy ancestry from an exact
+    # checkpoint at HEAD.
+    starts = ancestry[1:]
     records: list[tuple[str, str, dict[str, Any]]] = []
     seen_hashes: set[str] = set()
     for start in starts:
@@ -2087,6 +2245,11 @@ def _checkpoint_parent_records(
         if checkpoint_hash and checkpoint_hash not in seen_hashes:
             records.append(record)
             seen_hashes.add(checkpoint_hash)
+    if records and stage != "migration":
+        raise ResearchGitError(
+            "checkpoint refused because HEAD is an uncheckpointed raw Git commit "
+            "above Research VCS history; use an explicit migration"
+        )
     return records
 
 
@@ -2372,6 +2535,19 @@ def _validate_checkpoint_payload(
         raise ResearchGitError(
             f"checkpoint hash verification failed: {checkpoint_path}"
         )
+    is_revert = str(payload.get("stage") or "") == "revert"
+    has_reverts_commit = bool(str(payload.get("reverts_commit") or ""))
+    has_reverts_checkpoint_hash = bool(
+        str(payload.get("reverts_checkpoint_hash") or "")
+    )
+    if is_revert and not (has_reverts_commit and has_reverts_checkpoint_hash):
+        raise ResearchGitError(
+            f"revert checkpoint lacks a typed rollback edge: {checkpoint_path}"
+        )
+    if not is_revert and (has_reverts_commit or has_reverts_checkpoint_hash):
+        raise ResearchGitError(
+            f"non-revert checkpoint contains rollback metadata: {checkpoint_path}"
+        )
     return payload
 
 
@@ -2391,6 +2567,11 @@ def _checkpoint_markdown(payload: dict[str, Any]) -> str:
         "## Scientific changes",
         "",
     ]
+    if payload.get("stage") == "revert":
+        lines[8:8] = [
+            f"- Reverts commit: `{payload.get('reverts_commit')}`",
+            f"- Reverts checkpoint: `{payload.get('reverts_checkpoint_hash')}`",
+        ]
     lines.extend(f"- `{path}`" for path in payload.get("changed_paths") or [])
     if not payload.get("changed_paths"):
         lines.append("- Semantic checkpoint only; no additional tracked file changed.")
@@ -2431,6 +2612,190 @@ def _commit_subject(stage: str, subject: str) -> str:
     return f"{category}({stage}): {clean_subject}"[:200]
 
 
+def _tree_entry(
+    repo: Path,
+    revision: str,
+    path: str,
+    *,
+    bounded: bool = False,
+) -> tuple[str, str] | None:
+    runner = _run_git_bounded if bounded else _run_git
+    result = runner(
+        repo,
+        ["ls-tree", revision, "--", path],
+        **({"max_output_bytes": 4096, "check": False} if bounded else {"check": False}),
+    )
+    if result.returncode or not result.stdout.strip():
+        return None
+    metadata, separator, returned_path = result.stdout.rstrip("\n").partition("\t")
+    fields = metadata.split()
+    if (
+        not separator
+        or returned_path != path
+        or len(fields) != 3
+        or fields[1] not in {"blob", "commit"}
+        or re.fullmatch(r"[0-9a-f]{40,64}", fields[2]) is None
+    ):
+        raise ResearchGitError(f"cannot parse Git tree entry for {path}")
+    return fields[0], fields[2]
+
+
+def _index_entry(repo: Path, path: str) -> tuple[str, str] | None:
+    result = _run_git(repo, ["ls-files", "--stage", "--", path])
+    if not result.stdout.strip():
+        return None
+    rows = result.stdout.rstrip("\n").splitlines()
+    if len(rows) != 1:
+        raise ResearchGitError(f"checkpoint index contains conflicted path: {path}")
+    metadata, separator, returned_path = rows[0].partition("\t")
+    fields = metadata.split()
+    if (
+        not separator
+        or returned_path != path
+        or len(fields) != 3
+        or fields[2] != "0"
+        or re.fullmatch(r"[0-9a-f]{40,64}", fields[1]) is None
+    ):
+        raise ResearchGitError(f"cannot parse checkpoint index entry for {path}")
+    return fields[0], fields[1]
+
+
+def _material_changes_between(
+    repo: Path,
+    before: str | None,
+    after: str,
+    *,
+    bounded: bool = False,
+) -> dict[str, str]:
+    if before is None:
+        args = [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--no-renames",
+            "--name-status",
+            "-r",
+            "-z",
+            after,
+        ]
+    else:
+        args = [
+            "diff",
+            "--no-renames",
+            "--name-status",
+            "-z",
+            before,
+            after,
+        ]
+    runner = _run_git_bounded if bounded else _run_git
+    result = runner(
+        repo,
+        args,
+        **({"max_output_bytes": _HARD_MAX_BOUNDED_LOG_OUTPUT} if bounded else {}),
+    )
+    tokens = result.stdout.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    if len(tokens) % 2:
+        raise ResearchGitError("cannot parse Git material transition")
+    changes: dict[str, str] = {}
+    for index in range(0, len(tokens), 2):
+        status, raw_path = tokens[index : index + 2]
+        if status not in {"A", "M", "D"}:
+            raise ResearchGitError("research revert contains a rename or complex diff")
+        path = _normalise_relative(raw_path)
+        if path.startswith("checkpoints/"):
+            continue
+        if path in changes:
+            raise ResearchGitError("research revert contains duplicate path changes")
+        changes[path] = status
+    return changes
+
+
+def _commit_first_parent(
+    repo: Path,
+    commit: str,
+    *,
+    bounded: bool = False,
+) -> str | None:
+    runner = _run_git_bounded if bounded else _run_git
+    result = runner(
+        repo,
+        ["rev-list", "--parents", "-n", "1", commit],
+        **({"max_output_bytes": 4096} if bounded else {}),
+    )
+    fields = result.stdout.split()
+    if not fields or fields[0] != commit:
+        raise ResearchGitError("cannot resolve research revert target ancestry")
+    return fields[1] if len(fields) > 1 else None
+
+
+def _validate_committed_inverse_revert(
+    repo: Path,
+    *,
+    revert_commit: str,
+    revert_parent: str,
+    target_commit: str,
+    bounded: bool = False,
+) -> None:
+    target_parent = _commit_first_parent(repo, target_commit, bounded=bounded)
+    target_changes = _material_changes_between(
+        repo, target_parent, target_commit, bounded=bounded
+    )
+    revert_changes = _material_changes_between(
+        repo, revert_parent, revert_commit, bounded=bounded
+    )
+    inverse_status = {"A": "D", "D": "A", "M": "M"}
+    expected_revert_changes = {
+        path: inverse_status[status] for path, status in target_changes.items()
+    }
+    if expected_revert_changes != revert_changes:
+        raise ResearchGitError(
+            "research revert material paths/statuses are not the exact target inverse"
+        )
+    for path in target_changes:
+        target_before = (
+            _tree_entry(repo, target_parent, path, bounded=bounded)
+            if target_parent
+            else None
+        )
+        target_after = _tree_entry(repo, target_commit, path, bounded=bounded)
+        revert_before = _tree_entry(repo, revert_parent, path, bounded=bounded)
+        revert_after = _tree_entry(repo, revert_commit, path, bounded=bounded)
+        if revert_before != target_after or revert_after != target_before:
+            raise ResearchGitError(
+                f"research revert blob transition is not inverse for {path}"
+            )
+
+
+def _validate_index_inverse_revert(
+    repo: Path,
+    *,
+    target_commit: str,
+    material: Sequence[str],
+) -> None:
+    head = _head(repo)
+    if head is None:
+        raise ResearchGitError("research revert requires an existing HEAD")
+    target_parent = _commit_first_parent(repo, target_commit)
+    target_changes = _material_changes_between(repo, target_parent, target_commit)
+    if set(target_changes) != set(material):
+        raise ResearchGitError(
+            "research revert index contains paths outside the exact target inverse"
+        )
+    for path in target_changes:
+        target_before = (
+            _tree_entry(repo, target_parent, path) if target_parent else None
+        )
+        target_after = _tree_entry(repo, target_commit, path)
+        current_before = _tree_entry(repo, head, path)
+        current_after = _index_entry(repo, path)
+        if current_before != target_after or current_after != target_before:
+            raise ResearchGitError(
+                f"research revert index is not the exact inverse for {path}"
+            )
+
+
 def _create_checkpoint_locked(
     root: Path,
     *,
@@ -2448,6 +2813,8 @@ def _create_checkpoint_locked(
     only_paths: Sequence[str] | None = None,
     additional_parent_refs: Sequence[str] = (),
     allow_backend_stage: bool = False,
+    reverts_commit: str | None = None,
+    reverts_checkpoint_hash: str | None = None,
     commit: bool = True,
     allow_checkpoint_only: bool = False,
 ) -> CheckpointResult:
@@ -2470,6 +2837,10 @@ def _create_checkpoint_locked(
         )
     if reproduce_command and any(char in reproduce_command for char in "\r\n"):
         raise ResearchGitError("reproduction command must be a single line")
+    # Validate the scientific parent before inspecting or materializing a new
+    # checkpoint. In particular, never let an ordinary checkpoint bridge a raw
+    # Git commit above an existing Research VCS ancestor.
+    checkpoint_parent_records = _checkpoint_parent_records(root, stage=stage)
     staged_before, changed = _changed_paths(root)
     if staged_before and not allow_backend_stage:
         raise ResearchGitError(
@@ -2502,6 +2873,84 @@ def _create_checkpoint_locked(
                 "the research safety policy: " + ", ".join(excluded_backend_paths)
             )
     material = [path for path in selected if not path.startswith("checkpoints/")]
+    rollback_fields = (reverts_commit, reverts_checkpoint_hash)
+    if stage == "revert":
+        if not all(rollback_fields):
+            raise ResearchGitError(
+                "revert checkpoints require an exact target commit and checkpoint hash"
+            )
+        if re.fullmatch(r"[0-9a-f]{40,64}", str(reverts_commit)) is None:
+            raise ResearchGitError("revert target commit is invalid")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(reverts_checkpoint_hash)) is None:
+            raise ResearchGitError("revert target checkpoint hash is invalid")
+    elif any(rollback_fields):
+        raise ResearchGitError("rollback metadata is only valid for revert checkpoints")
+    deleted_immutable_objects = sorted(
+        path
+        for path in material
+        if path.startswith(".xscientist/objects/")
+        and path.endswith(".json")
+        and not (root / path).exists()
+    )
+    if deleted_immutable_objects and stage != "revert":
+        raise ResearchGitError(
+            "immutable research objects can only be removed by a typed research "
+            "revert: " + ", ".join(deleted_immutable_objects)
+        )
+    immutable_object_paths = sorted(
+        path
+        for path in material
+        if path.startswith(".xscientist/objects/") and path.endswith(".json")
+    )
+    if stage != "revert":
+        head = _head(root)
+        for path in immutable_object_paths:
+            if head and _tree_entry(root, head, path) is not None:
+                raise ResearchGitError(
+                    "immutable research objects cannot be modified or deleted by "
+                    f"an ordinary checkpoint: {path}"
+                )
+            target = root / path
+            if not target.is_file() or target.is_symlink():
+                raise ResearchGitError(f"new research object path is invalid: {path}")
+            try:
+                research_object = validate_research_object(
+                    json.loads(target.read_text(encoding="utf-8"))
+                )
+            except (OSError, json.JSONDecodeError, ResearchObjectError) as exc:
+                raise ResearchGitError(
+                    f"new research object is invalid: {path}"
+                ) from exc
+            expected_path = _research_object_path(root, research_object)
+            if expected_path.relative_to(root).as_posix() != path:
+                raise ResearchGitError(
+                    f"new research object identity disagrees with its path: {path}"
+                )
+    else:
+        _target_path, target_checkpoint = _checkpoint_at_commit(
+            root, str(reverts_commit)
+        )
+        if target_checkpoint.get("content_hash") != reverts_checkpoint_hash:
+            raise ResearchGitError(
+                "revert target checkpoint hash does not match the target commit"
+            )
+        head = _head(root)
+        if (
+            head is None
+            or _run_git(
+                root,
+                ["merge-base", "--is-ancestor", str(reverts_commit), head],
+                check=False,
+            ).returncode
+        ):
+            raise ResearchGitError(
+                "research revert target must be an ancestor of the current HEAD"
+            )
+        _validate_index_inverse_revert(
+            root,
+            target_commit=str(reverts_commit),
+            material=material,
+        )
     if not material and not allow_checkpoint_only:
         return CheckpointResult(
             created=False,
@@ -2512,7 +2961,7 @@ def _create_checkpoint_locked(
 
     parent_records = _append_checkpoint_parent_records(
         root,
-        _checkpoint_parent_records(root),
+        checkpoint_parent_records,
         additional_parent_refs,
     )
     previous = parent_records[0][2] if parent_records else None
@@ -2608,6 +3057,9 @@ def _create_checkpoint_locked(
             "environment": environment,
         },
     }
+    if stage == "revert":
+        base_payload["reverts_commit"] = str(reverts_commit)
+        base_payload["reverts_checkpoint_hash"] = str(reverts_checkpoint_hash)
     checkpoint_hash = content_hash(base_payload)
     checkpoint_id = f"rcp-{checkpoint_hash.split(':', 1)[1][:16]}"
     payload = {
@@ -2739,6 +3191,13 @@ def _create_checkpoint_locked(
             f"Research-State: {status}",
             f"Research-Event: {checkpoint_hash}",
         ]
+        if stage == "revert":
+            trailers.extend(
+                [
+                    f"Research-Reverts: {reverts_commit}",
+                    f"Research-Reverts-Checkpoint: {reverts_checkpoint_hash}",
+                ]
+            )
         trailers.extend(f"Research-Parent: {item}" for item in parent_checkpoint_hashes)
         trailers.extend(f"ARA-Manifest: {item['manifest_hash']}" for item in manifests)
         if reproduce_command:
@@ -3439,7 +3898,19 @@ def revert_research_checkpoint(
         _require_clean_research_switch(root)
         resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
         resolved_commit = resolved.stdout.strip()
-        _checkpoint_at_commit(root, resolved_commit)
+        _target_path, target_checkpoint = _checkpoint_at_commit(root, resolved_commit)
+        head = _head(root)
+        if (
+            head is None
+            or _run_git(
+                root,
+                ["merge-base", "--is-ancestor", resolved_commit, head],
+                check=False,
+            ).returncode
+        ):
+            raise ResearchGitError(
+                "research revert target must be an ancestor of the current HEAD"
+            )
         checkpoint_paths = [
             path
             for path in _run_git(
@@ -3479,6 +3950,8 @@ def revert_research_checkpoint(
                 status="completed",
                 allow_backend_stage=True,
                 allow_checkpoint_only=True,
+                reverts_commit=resolved_commit,
+                reverts_checkpoint_hash=str(target_checkpoint["content_hash"]),
             )
         except Exception:
             _run_git(root, ["revert", "--abort"], check=False)
@@ -3649,7 +4122,12 @@ def add_research_object(
         )
 
 
-def _checkpoint_at_commit(repo: Path, commit: str) -> tuple[str, dict[str, Any]]:
+def _checkpoint_at_commit(
+    repo: Path,
+    commit: str,
+    *,
+    validate_rollback_edge: bool = True,
+) -> tuple[str, dict[str, Any]]:
     resolved = _run_git(
         repo,
         ["rev-parse", "--verify", f"{commit}^{{commit}}"],
@@ -3747,6 +4225,57 @@ def _checkpoint_at_commit(repo: Path, commit: str) -> tuple[str, dict[str, Any]]
         raise ResearchGitError(
             f"commit {resolved} is not bound to research checkpoint "
             f"{checkpoint_id}: changed_paths does not match the committed material"
+        )
+    is_revert = str(payload.get("stage") or "") == "revert"
+    reverts_commit = str(payload.get("reverts_commit") or "")
+    reverts_checkpoint_hash = str(payload.get("reverts_checkpoint_hash") or "")
+    revert_trailer = trailers.get("Research-Reverts") or []
+    revert_checkpoint_trailer = trailers.get("Research-Reverts-Checkpoint") or []
+    if is_revert:
+        if (
+            len(revert_trailer) != 1
+            or len(revert_checkpoint_trailer) != 1
+            or revert_trailer[0] != reverts_commit
+            or revert_checkpoint_trailer[0] != reverts_checkpoint_hash
+        ):
+            raise ResearchGitError(
+                f"commit {resolved} rollback trailers do not match its checkpoint"
+            )
+        if first_parent is None:
+            raise ResearchGitError("a revert checkpoint must have a parent commit")
+        if validate_rollback_edge:
+            ancestry_check = _run_git(
+                repo,
+                ["merge-base", "--is-ancestor", reverts_commit, first_parent],
+                check=False,
+            )
+            if ancestry_check.returncode:
+                raise ResearchGitError(
+                    f"commit {resolved} rollback target is not in first-parent history"
+                )
+            _target_path, target_checkpoint = _checkpoint_at_commit(
+                repo,
+                reverts_commit,
+                validate_rollback_edge=False,
+            )
+            if target_checkpoint.get("content_hash") != reverts_checkpoint_hash:
+                raise ResearchGitError(
+                    f"commit {resolved} rollback checkpoint hash does not match target"
+                )
+            _validate_committed_inverse_revert(
+                repo,
+                revert_commit=resolved,
+                revert_parent=first_parent,
+                target_commit=reverts_commit,
+            )
+    elif (
+        reverts_commit
+        or reverts_checkpoint_hash
+        or revert_trailer
+        or revert_checkpoint_trailer
+    ):
+        raise ResearchGitError(
+            f"commit {resolved} has rollback metadata outside a revert checkpoint"
         )
     return checkpoint_path, payload
 
@@ -3847,11 +4376,37 @@ def verify_research_repository(
         errors.append(str(exc))
     for object_id, payload in typed_objects.items():
         for relation in payload.get("relations") or []:
+            relation_type = str(relation.get("type") or "")
+            if relation_type not in RESEARCH_RELATION_TYPES:
+                continue
             target = str(relation.get("target") or "")
-            if target.startswith("rso-") and target not in typed_objects:
+            target_object = typed_objects.get(target)
+            if target_object is None:
                 errors.append(
                     f"typed research object {object_id} references missing object: {target}"
                 )
+                continue
+            expected_kinds = RESEARCH_RELATION_TARGET_KINDS.get(relation_type, ())
+            actual_kind = str(target_object.get("kind") or "")
+            if expected_kinds and actual_kind not in expected_kinds:
+                errors.append(
+                    f"typed research object {object_id} relation {relation_type} "
+                    f"requires target kind {' or '.join(expected_kinds)}; got "
+                    f"{actual_kind}: {target}"
+                )
+    legacy_identity_ids = sorted(
+        object_id
+        for object_id, payload in typed_objects.items()
+        if str(payload.get("identity_profile") or "")
+        != "xscientist.research-object-identity.v2"
+    )
+    if legacy_identity_ids:
+        warnings.append(
+            f"{len(legacy_identity_ids)} legacy research object(s) have no "
+            "authenticated v2 envelope; created_at is ignored and latest/recency "
+            "uses Git introduction order or immutable ID fallback. Record a new "
+            "superseding v2 object to migrate without rewriting history."
+        )
 
     for checkpoint_path in sorted(
         path
@@ -3907,6 +4462,23 @@ def verify_research_repository(
                 f"checkpoint sequence mismatch at {checkpoint_path}: "
                 f"expected {expected_sequence}, got {payload.get('sequence')}"
             )
+        if payload.get("stage") == "revert":
+            target_commit = str(payload.get("reverts_commit") or "")
+            try:
+                _target_path, target_checkpoint = _checkpoint_at_commit(
+                    root, target_commit
+                )
+            except ResearchGitError as exc:
+                errors.append(
+                    f"checkpoint {checkpoint_path} has invalid rollback target: {exc}"
+                )
+            else:
+                if target_checkpoint.get("content_hash") != payload.get(
+                    "reverts_checkpoint_hash"
+                ):
+                    errors.append(
+                        f"checkpoint {checkpoint_path} rollback target hash mismatch"
+                    )
 
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -4085,7 +4657,13 @@ def research_log(
     if bounded:
         raw = _run_git_bounded(
             root,
-            ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
+            [
+                "log",
+                "--topo-order",
+                f"--max-count={limit}",
+                f"--format={fmt}",
+                resolved_ref,
+            ],
             max_output_bytes=min(
                 _HARD_MAX_BOUNDED_LOG_OUTPUT, max(64 * 1024, limit * 8192)
             ),
@@ -4093,7 +4671,13 @@ def research_log(
     else:
         raw = _run_git(
             root,
-            ["log", f"--max-count={limit}", f"--format={fmt}", resolved_ref],
+            [
+                "log",
+                "--topo-order",
+                f"--max-count={limit}",
+                f"--format={fmt}",
+                resolved_ref,
+            ],
         ).stdout
     entries: list[dict[str, Any]] = []
     for item in raw.split("\x1e"):
@@ -4123,6 +4707,715 @@ def research_log(
             }
         )
     return entries
+
+
+def _trajectory_checkpoint_at_commit(
+    repo: Path,
+    *,
+    commit: str,
+    validate_rollback_edge: bool = True,
+) -> dict[str, Any]:
+    """Load one exact checkpoint using only byte- and time-bounded Git reads."""
+
+    if re.fullmatch(r"[0-9a-f]{40,64}", commit) is None:
+        raise ResearchGitError("structured trajectory commit identity is invalid")
+    trailer_body = _run_git_bounded(
+        repo,
+        ["show", "-s", "--format=%(trailers:only,unfold)", commit],
+        max_output_bytes=64 * 1024,
+    ).stdout
+    trailers: dict[str, list[str]] = {}
+    for line in trailer_body.splitlines():
+        if ": " not in line:
+            continue
+        key, value = line.split(": ", 1)
+        if key.startswith("Research-"):
+            trailers.setdefault(key, []).append(value.strip())
+    required_trailers = (
+        "Research-Checkpoint",
+        "Research-Stage",
+        "Research-State",
+        "Research-Event",
+    )
+    for key in required_trailers:
+        values = trailers.get(key) or []
+        if len(values) != 1 or not values[0]:
+            detail = "missing" if not values else "ambiguous"
+            raise ResearchGitError(
+                "structured trajectory commit is not bound to exactly one "
+                f"checkpoint: {detail} {key} trailer"
+            )
+    checkpoint_id = trailers["Research-Checkpoint"][0]
+    if re.fullmatch(r"rcp-[0-9a-f]{16}", checkpoint_id) is None:
+        raise ResearchGitError(
+            "structured trajectory checkpoint trailer identity is invalid"
+        )
+
+    ancestry = _run_git_bounded(
+        repo,
+        ["rev-list", "--parents", "-n", "1", commit],
+        max_output_bytes=64 * 1024,
+    ).stdout.split()
+    if not ancestry or ancestry[0] != commit:
+        raise ResearchGitError("structured trajectory commit ancestry is invalid")
+    parent_commits = ancestry[1:]
+    first_parent = parent_commits[0] if parent_commits else None
+    if first_parent is None:
+        changed_args = [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--no-renames",
+            "--name-only",
+            "-r",
+            "-z",
+            commit,
+        ]
+    else:
+        changed_args = [
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            first_parent,
+            commit,
+        ]
+    raw_changed_paths = _run_git_bounded(
+        repo,
+        changed_args,
+        max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+    ).stdout
+    commit_paths = {
+        _normalise_relative(path) for path in raw_changed_paths.split("\0") if path
+    }
+    checkpoint_paths = sorted(
+        path
+        for path in commit_paths
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    )
+    if (
+        not checkpoint_paths
+        or len(checkpoint_paths) > _MAX_TRAJECTORY_CHECKPOINT_CANDIDATES
+    ):
+        raise ResearchGitError(
+            "structured trajectory checkpoint candidate set is missing or unbounded"
+        )
+    preferred_suffix = f"-{checkpoint_id.removeprefix('rcp-')[:8]}.json"
+    candidates = sorted(
+        checkpoint_paths,
+        key=lambda path: (not path.endswith(preferred_suffix), path),
+    )
+
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for checkpoint_path in candidates:
+        revision = f"{commit}:{checkpoint_path}"
+        size_text = _run_git_bounded(
+            repo,
+            ["cat-file", "-s", revision],
+            max_output_bytes=4096,
+        ).stdout.strip()
+        try:
+            size = int(size_text)
+        except ValueError as exc:
+            raise ResearchGitError(
+                "structured trajectory checkpoint size is invalid"
+            ) from exc
+        if size < 2 or size > _MAX_TRAJECTORY_CHECKPOINT_BYTES:
+            raise ResearchGitError(
+                "structured trajectory checkpoint exceeds the bounded view"
+            )
+        raw = _run_git_bounded(
+            repo,
+            ["show", revision],
+            max_output_bytes=size + 1024,
+        ).stdout
+        try:
+            candidate = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("checkpoint_id") == checkpoint_id
+        ):
+            matches.append((checkpoint_path, candidate))
+    if len(matches) != 1:
+        raise ResearchGitError(
+            "structured trajectory commit does not contain exactly one matching "
+            "checkpoint"
+        )
+    checkpoint_path, raw_payload = matches[0]
+    payload = _validate_checkpoint_payload(
+        raw_payload,
+        checkpoint_path=f"{commit}:{checkpoint_path}",
+    )
+    event_hash = str(payload.get("content_hash") or "")
+    expected_checkpoint_id = f"rcp-{event_hash.split(':', 1)[-1][:16]}"
+    binding_fields = {
+        "Research-Checkpoint": (checkpoint_id, expected_checkpoint_id),
+        "Research-Event": (trailers["Research-Event"][0], event_hash),
+        "Research-Stage": (
+            trailers["Research-Stage"][0],
+            str(payload.get("stage") or ""),
+        ),
+        "Research-State": (
+            trailers["Research-State"][0],
+            str(payload.get("status") or ""),
+        ),
+    }
+    if any(actual != expected for actual, expected in binding_fields.values()):
+        raise ResearchGitError(
+            "structured trajectory commit/checkpoint trailer binding is invalid"
+        )
+    if payload.get("parent_commit") != first_parent:
+        raise ResearchGitError(
+            "structured trajectory checkpoint first-parent binding is invalid"
+        )
+    parent_checkpoint_hashes = [
+        str(item) for item in payload.get("parent_checkpoint_hashes") or []
+    ]
+    if (
+        len(parent_checkpoint_hashes) > len(parent_commits)
+        or payload.get("previous_checkpoint_hash")
+        != (parent_checkpoint_hashes[0] if parent_checkpoint_hashes else None)
+        or (trailers.get("Research-Parent") or []) != parent_checkpoint_hashes
+    ):
+        raise ResearchGitError(
+            "structured trajectory checkpoint-parent metadata is invalid"
+        )
+    declared_paths = {str(item) for item in payload.get("changed_paths") or []}
+    actual_material_paths = {
+        path for path in commit_paths if not path.startswith("checkpoints/")
+    }
+    if checkpoint_path not in commit_paths or declared_paths != actual_material_paths:
+        raise ResearchGitError(
+            "structured trajectory checkpoint paths disagree with the commit"
+        )
+    is_revert = str(payload.get("stage") or "") == "revert"
+    reverts_commit = str(payload.get("reverts_commit") or "")
+    reverts_checkpoint_hash = str(payload.get("reverts_checkpoint_hash") or "")
+    revert_trailer = trailers.get("Research-Reverts") or []
+    revert_checkpoint_trailer = trailers.get("Research-Reverts-Checkpoint") or []
+    if is_revert:
+        if (
+            len(revert_trailer) != 1
+            or len(revert_checkpoint_trailer) != 1
+            or revert_trailer[0] != reverts_commit
+            or revert_checkpoint_trailer[0] != reverts_checkpoint_hash
+            or first_parent is None
+        ):
+            raise ResearchGitError("structured trajectory rollback metadata is invalid")
+        if validate_rollback_edge:
+            ancestry_check = _run_git_bounded(
+                repo,
+                ["merge-base", "--is-ancestor", reverts_commit, first_parent],
+                max_output_bytes=4096,
+                check=False,
+            )
+            if ancestry_check.returncode:
+                raise ResearchGitError(
+                    "structured trajectory rollback target is not an ancestor"
+                )
+            target = _trajectory_checkpoint_at_commit(
+                repo,
+                commit=reverts_commit,
+                validate_rollback_edge=False,
+            )
+            target_checkpoint = target.get("checkpoint") or {}
+            if target_checkpoint.get("content_hash") != reverts_checkpoint_hash:
+                raise ResearchGitError(
+                    "structured trajectory rollback target hash is invalid"
+                )
+            _validate_committed_inverse_revert(
+                repo,
+                revert_commit=commit,
+                revert_parent=first_parent,
+                target_commit=reverts_commit,
+                bounded=True,
+            )
+    elif (
+        reverts_commit
+        or reverts_checkpoint_hash
+        or revert_trailer
+        or revert_checkpoint_trailer
+    ):
+        raise ResearchGitError(
+            "structured trajectory contains rollback metadata outside a revert"
+        )
+    return {
+        "commit": commit,
+        "path": checkpoint_path,
+        "checkpoint_hash_valid": _checkpoint_hash_valid(payload),
+        "checkpoint": payload,
+        "backend_parent_commits": parent_commits,
+    }
+
+
+def _trajectory_object_at_commit(
+    repo: Path,
+    *,
+    commit: str,
+    path: str,
+) -> dict[str, Any]:
+    """Load one checkpoint-declared object without exposing its semantic payload."""
+
+    normalized = _normalise_relative(path)
+    parts = PurePosixPath(normalized).parts
+    if (
+        len(parts) != 4
+        or parts[:2] != (".xscientist", "objects")
+        or re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", parts[2]) is None
+        or re.fullmatch(r"rso-[0-9a-f]{16}\.json", parts[3]) is None
+    ):
+        raise ResearchGitError(
+            f"structured trajectory contains an invalid object path: {normalized}"
+        )
+    revision = f"{commit}:{normalized}"
+    size_text = _run_git_bounded(
+        repo,
+        ["cat-file", "-s", revision],
+        max_output_bytes=4096,
+    ).stdout.strip()
+    try:
+        size = int(size_text)
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"structured trajectory object size is invalid: {normalized}"
+        ) from exc
+    if size < 2 or size > _MAX_TRAJECTORY_OBJECT_BYTES:
+        raise ResearchGitError(
+            f"structured trajectory object exceeds the bounded view: {normalized}"
+        )
+    raw = _run_git_bounded(
+        repo,
+        ["show", revision],
+        max_output_bytes=size + 1024,
+    ).stdout
+    try:
+        research_object = validate_research_object(json.loads(raw))
+    except (json.JSONDecodeError, ResearchObjectError) as exc:
+        raise ResearchGitError(
+            f"structured trajectory object is invalid: {normalized}"
+        ) from exc
+    expected_id = PurePosixPath(parts[3]).stem
+    if (
+        research_object.get("object_id") != expected_id
+        or research_object.get("kind") != parts[2]
+    ):
+        raise ResearchGitError(
+            f"structured trajectory object identity disagrees with its path: {normalized}"
+        )
+    actor = research_object.get("actor")
+    actor = actor if isinstance(actor, Mapping) else {}
+    profile = research_object.get("semantic_profile")
+    profile = profile if isinstance(profile, Mapping) else {}
+    return {
+        "object_id": research_object["object_id"],
+        "kind": research_object["kind"],
+        "state": research_object["state"],
+        "content_hash": research_object["content_hash"],
+        "actor": {
+            "actor_id": str(actor.get("actor_id") or ""),
+            "authority": str(actor.get("authority") or ""),
+        },
+        "provenance_hash": content_hash(research_object.get("provenance") or {}),
+        "semantic_profile": {
+            "uri": str(profile.get("uri") or ""),
+            "version": str(profile.get("version") or ""),
+            "schema_digest": str(profile.get("schema_digest") or ""),
+        },
+        "relations": [dict(item) for item in research_object.get("relations") or []],
+    }
+
+
+def _trajectory_object_changes(
+    repo: Path,
+    *,
+    commit: str,
+    parent_commit: str | None,
+    object_paths: Sequence[str],
+    allow_removals: bool = False,
+) -> dict[str, str]:
+    """Return the exact add/delete state of immutable objects in one checkpoint."""
+
+    if not object_paths:
+        return {}
+    if parent_commit:
+        args = [
+            "diff",
+            "--no-renames",
+            "--name-status",
+            parent_commit,
+            commit,
+            "--",
+            ".xscientist/objects",
+        ]
+    else:
+        args = [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--no-renames",
+            "--name-status",
+            "-r",
+            commit,
+            "--",
+            ".xscientist/objects",
+        ]
+    raw = _run_git_bounded(
+        repo,
+        args,
+        max_output_bytes=min(
+            _HARD_MAX_BOUNDED_LOG_OUTPUT,
+            max(4096, len(object_paths) * 256),
+        ),
+    ).stdout
+    changes: dict[str, str] = {}
+    for line in raw.splitlines():
+        status, separator, path = line.partition("\t")
+        normalized = _normalise_relative(path) if separator else ""
+        if status not in {"A", "D"} or normalized not in object_paths:
+            raise ResearchGitError(
+                "structured trajectory attempted to mutate or rename an immutable "
+                "research object"
+            )
+        if status == "D" and not allow_removals:
+            raise ResearchGitError(
+                "structured trajectory contains immutable object deletion outside "
+                "a validated research revert"
+            )
+        if normalized in changes:
+            raise ResearchGitError(
+                "structured trajectory contains duplicate object path changes"
+            )
+        changes[normalized] = "added" if status == "A" else "removed"
+    if set(changes) != set(object_paths):
+        raise ResearchGitError(
+            "structured trajectory object changes disagree with the checkpoint"
+        )
+    return changes
+
+
+def research_trajectory(
+    repo: str | Path,
+    *,
+    limit: int = 50,
+    ref: str = "HEAD",
+) -> dict[str, Any]:
+    """Project typed objects and hash-valid checkpoints as scientific history.
+
+    This is a bounded, payload-free inspection surface, not a second log and
+    not a publication attestation.  The projection contains the exact object
+    identities, relations, actors, checkpoint hashes and checkpoint-parent
+    edges needed to navigate scientific history.  Semantic payloads remain in
+    their immutable objects and can be inspected explicitly with ``show``.
+    """
+
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or limit < 1
+        or limit > _MAX_TRAJECTORY_CHECKPOINTS
+    ):
+        raise ResearchGitError(
+            f"trajectory limit must be between 1 and {_MAX_TRAJECTORY_CHECKPOINTS}"
+        )
+    root = _repository_root(repo)
+    log_entries = research_log(
+        root,
+        limit=limit + 1,
+        ref=ref,
+        bounded=True,
+    )
+    if not log_entries:
+        raise ResearchGitError("structured trajectory has no committed checkpoint")
+
+    newest_first: list[dict[str, Any]] = []
+    reached_initial_checkpoint = False
+    for log_entry in log_entries[:limit]:
+        try:
+            shown = _trajectory_checkpoint_at_commit(
+                root,
+                commit=str(log_entry["commit"]),
+            )
+        except ResearchGitError as exc:
+            raise ResearchGitError(
+                "structured trajectory contains a commit without an exact, "
+                "hash-valid Research VCS checkpoint"
+            ) from exc
+        if shown.get("checkpoint_hash_valid") is not True:
+            raise ResearchGitError(
+                "structured trajectory contains a hash-invalid checkpoint"
+            )
+        checkpoint = shown.get("checkpoint") or {}
+        changed_paths = [str(item) for item in checkpoint.get("changed_paths") or []]
+        object_paths = sorted(
+            path for path in changed_paths if path.startswith(".xscientist/objects/")
+        )
+        parent_commit = str(checkpoint.get("parent_commit") or "").strip() or None
+        object_changes = _trajectory_object_changes(
+            root,
+            commit=str(log_entry["commit"]),
+            parent_commit=parent_commit,
+            object_paths=object_paths,
+            allow_removals=str(checkpoint.get("stage") or "") == "revert",
+        )
+        objects = []
+        for path in object_paths:
+            change = object_changes[path]
+            source_commit = (
+                str(log_entry["commit"]) if change == "added" else parent_commit
+            )
+            if source_commit is None:
+                raise ResearchGitError(
+                    "structured trajectory removed an object without a parent commit"
+                )
+            objects.append(
+                {
+                    **_trajectory_object_at_commit(
+                        root,
+                        commit=source_commit,
+                        path=path,
+                    ),
+                    "change": change,
+                }
+            )
+        backend_parent_commits = [
+            str(item) for item in shown.get("backend_parent_commits") or []
+        ]
+        parent_checkpoint_hashes = [
+            str(item) for item in checkpoint.get("parent_checkpoint_hashes") or []
+        ]
+        event = {
+            "commit": str(log_entry["commit"]),
+            "backend_parent_commits": backend_parent_commits,
+            "parent_commits": backend_parent_commits[: len(parent_checkpoint_hashes)],
+            "checkpoint_id": str(checkpoint.get("checkpoint_id") or ""),
+            "checkpoint_hash": str(checkpoint.get("content_hash") or ""),
+            "parent_checkpoint_hashes": parent_checkpoint_hashes,
+            "stage": str(checkpoint.get("stage") or ""),
+            "status": str(checkpoint.get("status") or ""),
+            "actor": str(checkpoint.get("actor") or ""),
+            "subject": str(checkpoint.get("subject") or "")[:512],
+            "objects": objects,
+            "artifact_paths": sorted(set(changed_paths) - set(object_paths)),
+        }
+        if str(checkpoint.get("stage") or "") == "revert":
+            event["reverts_commit"] = str(checkpoint.get("reverts_commit") or "")
+            event["reverts_checkpoint_hash"] = str(
+                checkpoint.get("reverts_checkpoint_hash") or ""
+            )
+        newest_first.append(event)
+        if (
+            checkpoint.get("previous_checkpoint_hash") in {None, ""}
+            and not event["parent_checkpoint_hashes"]
+        ):
+            reached_initial_checkpoint = True
+            break
+
+    if not newest_first:
+        raise ResearchGitError("structured trajectory has no Research VCS checkpoint")
+    if not reached_initial_checkpoint and len(log_entries) <= limit:
+        raise ResearchGitError(
+            "structured trajectory ended before its initial Research VCS checkpoint"
+        )
+
+    entries_by_commit = {str(entry["commit"]): entry for entry in newest_first}
+    if len(entries_by_commit) != len(newest_first):
+        raise ResearchGitError("structured trajectory contains duplicate commits")
+    children: dict[str, set[str]] = {commit: set() for commit in entries_by_commit}
+    in_degree: dict[str, int] = {commit: 0 for commit in entries_by_commit}
+    for child_commit, entry in entries_by_commit.items():
+        for parent_commit in entry.get("parent_commits") or []:
+            parent = str(parent_commit)
+            if parent not in entries_by_commit:
+                continue
+            children[parent].add(child_commit)
+            in_degree[child_commit] += 1
+    ready = sorted(
+        (commit for commit, degree in in_degree.items() if degree == 0),
+        key=lambda commit: (
+            str(entries_by_commit[commit].get("checkpoint_hash") or ""),
+            commit,
+        ),
+    )
+    entries: list[dict[str, Any]] = []
+    while ready:
+        commit = ready.pop(0)
+        entries.append(entries_by_commit[commit])
+        for child in sorted(
+            children[commit],
+            key=lambda candidate: (
+                str(entries_by_commit[candidate].get("checkpoint_hash") or ""),
+                candidate,
+            ),
+        ):
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                ready.append(child)
+        ready.sort(
+            key=lambda candidate: (
+                str(entries_by_commit[candidate].get("checkpoint_hash") or ""),
+                candidate,
+            )
+        )
+    if len(entries) != len(entries_by_commit):
+        raise ResearchGitError(
+            "structured trajectory checkpoint graph contains a cycle"
+        )
+    for index, entry in enumerate(entries):
+        entry["sequence"] = index
+    boundary_parent_edges: list[dict[str, str]] = []
+    for entry in entries:
+        backend_parent_commits = [
+            str(item) for item in entry.get("backend_parent_commits") or []
+        ]
+        parent_commits = [str(item) for item in entry.get("parent_commits") or []]
+        parent_hashes = [
+            str(item) for item in entry.get("parent_checkpoint_hashes") or []
+        ]
+        if len(parent_commits) != len(parent_hashes):
+            raise ResearchGitError(
+                "structured trajectory checkpoint-parent arity is invalid"
+            )
+        undeclared_research_parents = sorted(
+            parent
+            for parent in backend_parent_commits
+            if parent in entries_by_commit and parent not in parent_commits
+        )
+        if undeclared_research_parents:
+            raise ResearchGitError(
+                "structured trajectory omits a reachable research parent edge"
+            )
+        for parent_commit, parent_hash in zip(parent_commits, parent_hashes):
+            parent_entry = entries_by_commit.get(parent_commit)
+            if parent_entry is None:
+                boundary_parent_edges.append(
+                    {
+                        "child_commit": str(entry["commit"]),
+                        "parent_commit": parent_commit,
+                        "parent_checkpoint_hash": parent_hash,
+                    }
+                )
+                continue
+            if parent_entry.get("checkpoint_hash") != parent_hash or int(
+                parent_entry.get("sequence") or 0
+            ) >= int(entry.get("sequence") or 0):
+                raise ResearchGitError(
+                    "structured trajectory checkpoint-parent edge is invalid"
+                )
+    if reached_initial_checkpoint and boundary_parent_edges:
+        raise ResearchGitError(
+            "structured trajectory checkpoint-parent closure is incomplete"
+        )
+    rollback_edges: list[dict[str, str]] = []
+    boundary_rollback_edges: list[dict[str, str]] = []
+    for entry in entries:
+        if entry.get("stage") != "revert":
+            continue
+        edge = {
+            "revert_commit": str(entry["commit"]),
+            "revert_checkpoint_hash": str(entry["checkpoint_hash"]),
+            "target_commit": str(entry.get("reverts_commit") or ""),
+            "target_checkpoint_hash": str(entry.get("reverts_checkpoint_hash") or ""),
+        }
+        target_entry = entries_by_commit.get(edge["target_commit"])
+        if target_entry is None:
+            boundary_rollback_edges.append(edge)
+        elif target_entry.get("checkpoint_hash") != edge[
+            "target_checkpoint_hash"
+        ] or int(target_entry.get("sequence") or 0) >= int(entry.get("sequence") or 0):
+            raise ResearchGitError("structured trajectory rollback edge is invalid")
+        rollback_edges.append(edge)
+    if reached_initial_checkpoint and boundary_rollback_edges:
+        raise ResearchGitError(
+            "structured trajectory rollback-edge closure is incomplete"
+        )
+    object_transition_count = sum(len(entry["objects"]) for entry in entries)
+    object_count = len(
+        {
+            str(research_object.get("object_id") or "")
+            for entry in entries
+            for research_object in entry["objects"]
+        }
+    )
+    core = {
+        "schema_version": "xscientist.structured-trajectory-projection.v1",
+        "resolved_head": str(newest_first[0]["commit"]),
+        "complete": reached_initial_checkpoint,
+        "truncated": not reached_initial_checkpoint,
+        "payloads_disclosed": False,
+        "checkpoint_count": len(entries),
+        "object_count": object_count,
+        "object_transition_count": object_transition_count,
+        "boundary_parent_edges": sorted(
+            boundary_parent_edges,
+            key=lambda item: (
+                item["child_commit"],
+                item["parent_commit"],
+                item["parent_checkpoint_hash"],
+            ),
+        ),
+        "rollback_edges": sorted(
+            rollback_edges,
+            key=lambda item: (item["revert_commit"], item["target_commit"]),
+        ),
+        "boundary_rollback_edges": sorted(
+            boundary_rollback_edges,
+            key=lambda item: (item["revert_commit"], item["target_commit"]),
+        ),
+        "entries": entries,
+    }
+    return {
+        **core,
+        "selected_ref": str(ref),
+        "projection_hash": content_hash(core),
+    }
+
+
+def validate_complete_research_trajectory(
+    repo: str | Path,
+    *,
+    ref: str = "HEAD",
+) -> dict[str, Any]:
+    """Validate and return the complete canonical trajectory at one ref.
+
+    Publication and closure audits must not validate only a recent slice. The
+    canonical projection is therefore evaluated at the hard checkpoint cap and
+    accepted only when it reaches the initial Research VCS checkpoint with no
+    unresolved parent or rollback boundary. Histories beyond the bounded cap
+    fail closed instead of being silently truncated.
+    """
+
+    projection = research_trajectory(
+        repo,
+        limit=_MAX_TRAJECTORY_CHECKPOINTS,
+        ref=ref,
+    )
+    projection_core = {
+        key: value
+        for key, value in projection.items()
+        if key not in {"selected_ref", "projection_hash"}
+    }
+    resolved = _run_git(
+        _repository_root(repo),
+        ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+    ).stdout.strip()
+    if (
+        projection.get("schema_version")
+        != "xscientist.structured-trajectory-projection.v1"
+        or projection.get("projection_hash") != content_hash(projection_core)
+        or projection.get("resolved_head") != resolved
+        or projection.get("complete") is not True
+        or projection.get("truncated") is not False
+        or projection.get("payloads_disclosed") is not False
+        or projection.get("boundary_parent_edges") != []
+        or projection.get("boundary_rollback_edges") != []
+        or projection.get("checkpoint_count") != len(projection.get("entries") or [])
+    ):
+        raise ResearchGitError(
+            "structured trajectory is incomplete, truncated, or hash-invalid"
+        )
+    return projection
 
 
 def _set_delta(before: Iterable[Any], after: Iterable[Any]) -> dict[str, list[str]]:
@@ -4433,7 +5726,8 @@ def research_blame(
 
     root = _repository_root(repo)
     resolved = _run_git(root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
-    objects = _research_objects_at_commit(root, resolved.stdout.strip())
+    resolved_commit = resolved.stdout.strip()
+    objects = _research_objects_at_commit(root, resolved_commit)
     selector = str(object_id or "").strip()
 
     # Resolve against the requested commit, not the mutable working tree.  The
@@ -4453,13 +5747,37 @@ def research_blame(
             raise ResearchGitError(
                 f"no research objects found for selector at {commit}: {selector}"
             )
-        resolved_object_id = max(
-            candidates,
-            key=lambda item: (
-                str(item[1].get("created_at") or ""),
-                item[0],
-            ),
-        )[0]
+        commit_order = _research_object_commit_order(
+            root,
+            ref=resolved_commit,
+            kind=selected_kind,
+        )
+
+        sequenced = [
+            (
+                candidate_id,
+                commit_order.get(str(candidate.get("repository_path") or "")),
+            )
+            for candidate_id, candidate in candidates
+        ]
+        if any(sequence is None for _candidate_id, sequence in sequenced):
+            raise ResearchGitError(
+                "historical @latest cannot verify every object introduction"
+            )
+        latest_sequence = max(
+            int(sequence or 0) for _candidate_id, sequence in sequenced
+        )
+        latest_ids = [
+            candidate_id
+            for candidate_id, sequence in sequenced
+            if sequence == latest_sequence
+        ]
+        if len(latest_ids) != 1:
+            raise ResearchGitError(
+                f"historical @latest:{selected_kind} is ambiguous at {commit}; "
+                "use an explicit object ID"
+            )
+        resolved_object_id = latest_ids[0]
     elif selector.startswith("urn:xscientist:research-object:sha256:"):
         matches = [
             candidate_id
@@ -4496,10 +5814,13 @@ def research_blame(
         root,
         [
             "log",
+            "--full-history",
+            "--topo-order",
             "--reverse",
+            "--max-count=2",
             "--diff-filter=A",
             "--format=%H%x00%aI%x00%an%x00%s",
-            commit,
+            resolved_commit,
             "--",
             path,
         ],
@@ -4507,6 +5828,12 @@ def research_blame(
     if not raw:
         raise ResearchGitError(
             f"cannot locate research object origin: {resolved_object_id}"
+        )
+    if len(raw) != 1:
+        raise ResearchGitError(
+            "research object has multiple reachable origins at the selected ref; "
+            "select a branch or parent ref with a unique origin: "
+            f"{resolved_object_id}"
         )
     fields = raw[0].split("\0", 3)
     if len(fields) != 4:
@@ -6396,6 +7723,7 @@ __all__ = [
     "research_diff",
     "research_blame",
     "research_log",
+    "research_trajectory",
     "research_stage",
     "research_unstage",
     "preview_research_merge",
@@ -6403,4 +7731,5 @@ __all__ = [
     "switch_research_branch",
     "verify_research_bundle",
     "verify_research_repository",
+    "validate_complete_research_trajectory",
 ]

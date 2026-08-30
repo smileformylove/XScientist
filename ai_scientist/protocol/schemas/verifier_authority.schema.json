@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/verifier-authority.v1/verifier_authority.schema.json",
+  "title": "XScientist external verifier authority receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "payload", "attestation", "receipt_hash"],
+  "properties": {
+    "schema_version": {"const": "xscientist.verifier-authority.v1"},
+    "purpose": {"const": "xscientist.independent-verification.v1"},
+    "payload": {"$ref": "#/$defs/payload"},
+    "attestation": {
+      "allOf": [
+        {"$ref": "https://xscientist.io/protocol/trust.v1/attestation.schema.json"},
+        {
+          "properties": {
+            "algorithm": {"const": "ed25519"},
+            "purpose": {"const": "xscientist.independent-verification.v1"}
+          }
+        }
+      ]
+    },
+    "receipt_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "identity": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 512,
+      "pattern": "^(agent|service|human):\\S"
+    },
+    "boundedId": {"type": "string", "minLength": 1, "maxLength": 512},
+    "idSet": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/boundedId"}
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "purpose",
+        "verifier_id",
+        "verifier_identity",
+        "producer_ids",
+        "data_manifest_hash",
+        "data_snapshot_id",
+        "trajectory_binding_hash",
+        "research_vcs_frozen_head",
+        "research_vcs_lineage_head",
+        "research_vcs_attempt_object_ids",
+        "research_vcs_binding_object_ids",
+        "research_vcs_checkpoint_hashes",
+        "failed_record_ids",
+        "research_vcs_disposition_object_ids",
+        "registration_hash",
+        "records_hash",
+        "registry_hash",
+        "evidence_snapshot_hash",
+        "manuscript_hash",
+        "report_hash",
+        "confirmatory_record_ids",
+        "reproduction_record_ids"
+      ],
+      "properties": {
+        "schema_version": {"const": "xscientist.verifier-authority.v1"},
+        "purpose": {"const": "xscientist.independent-verification.v1"},
+        "verifier_id": {"$ref": "#/$defs/canonicalPrincipal"},
+        "verifier_identity": {"$ref": "#/$defs/identity"},
+        "producer_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/canonicalPrincipal"}
+        },
+        "data_manifest_hash": {"$ref": "#/$defs/hash"},
+        "data_snapshot_id": {"$ref": "#/$defs/hash"},
+        "trajectory_binding_hash": {"$ref": "#/$defs/hash"},
+        "research_vcs_frozen_head": {"$ref": "#/$defs/gitCommit"},
+        "research_vcs_lineage_head": {"$ref": "#/$defs/gitCommit"},
+        "research_vcs_attempt_object_ids": {"$ref": "#/$defs/rsoSet"},
+        "research_vcs_binding_object_ids": {"$ref": "#/$defs/rsoSet"},
+        "research_vcs_checkpoint_hashes": {"$ref": "#/$defs/hashSet"},
+        "failed_record_ids": {"$ref": "#/$defs/idSet"},
+        "research_vcs_disposition_object_ids": {"$ref": "#/$defs/rsoSet"},
+        "registration_hash": {"$ref": "#/$defs/hash"},
+        "records_hash": {"$ref": "#/$defs/hash"},
+        "registry_hash": {"$ref": "#/$defs/hash"},
+        "evidence_snapshot_hash": {"$ref": "#/$defs/hash"},
+        "manuscript_hash": {"$ref": "#/$defs/hash"},
+        "report_hash": {"$ref": "#/$defs/hash"},
+        "confirmatory_record_ids": {"$ref": "#/$defs/idSet"},
+        "reproduction_record_ids": {"$ref": "#/$defs/idSet"}
+      }
+    },
+    "gitCommit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "rsoSet": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"}
+    },
+    "hashSet": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/hash"}
+    },
+    "canonicalPrincipal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!(agent|service|human):)[^\\s]+$"
+    }
+  }
+}

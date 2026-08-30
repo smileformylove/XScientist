@@ -3,17 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from ai_scientist.config.venues import DEFAULT_TARGET_VENUE
 from ai_scientist.utils.high_quality_pipeline import VENUE_PRESETS, resolve_target_venue
 from ai_scientist.utils.submission_history import (
     recommend_submission_strategy_adjustments,
 )
-
 
 PAGE_LIMITS = {
     "normal": 8,
     "icbinb": 4,
     "journal": 12,
     "extended": 2,
+}
+
+VENUE_PAGE_LIMITS = {
+    "neurips": 9,
+    "icml": 8,
 }
 
 MANUSCRIPT_POLICIES = {
@@ -32,6 +37,26 @@ MANUSCRIPT_POLICIES = {
         "frontmatter_numerics_required": True,
         "limitation_policy": "state at least one real failure mode or scope caveat in the main paper",
         "rebuttal_style": "defensive but evidence-first",
+    },
+    "icml": {
+        "required_sections": [
+            "abstract",
+            "introduction",
+            "related_work",
+            "method",
+            "experiments",
+            "results",
+            "limitations",
+            "reproducibility",
+            "conclusion",
+        ],
+        "mandatory_evidence_density": "high",
+        "frontmatter_numerics_required": True,
+        "limitation_policy": (
+            "report evaluated scope, negative results, uncertainty, and at least "
+            "one concrete failure mode without overstating acceptance readiness"
+        ),
+        "rebuttal_style": "claim-evidence aligned, statistically explicit, and scoped",
     },
     "iclr": {
         "required_sections": [
@@ -105,12 +130,17 @@ def resolve_writeup_engine(writeup_type: str) -> str:
     return "icbinb" if writeup_type in {"icbinb", "extended"} else "normal"
 
 
-def resolve_page_limit(writeup_type: str) -> int:
+def resolve_page_limit(writeup_type: str, target_venue: Optional[str] = None) -> int:
+    normalized_target_venue = str(target_venue or "").strip().lower()
+    if normalized_target_venue in VENUE_PAGE_LIMITS:
+        return VENUE_PAGE_LIMITS[normalized_target_venue]
     return PAGE_LIMITS.get(writeup_type, PAGE_LIMITS["icbinb"])
 
 
 def resolve_manuscript_policy(target_venue: str) -> dict:
-    return dict(MANUSCRIPT_POLICIES.get(target_venue, MANUSCRIPT_POLICIES["neurips"]))
+    return dict(
+        MANUSCRIPT_POLICIES.get(target_venue, MANUSCRIPT_POLICIES[DEFAULT_TARGET_VENUE])
+    )
 
 
 def build_writeup_execution_plan(
@@ -123,7 +153,7 @@ def build_writeup_execution_plan(
     research_root: str | Path | None = None,
 ) -> dict:
     resolved_target_venue = resolve_target_venue(writeup_type, target_venue)
-    page_limit = resolve_page_limit(writeup_type)
+    page_limit = resolve_page_limit(writeup_type, resolved_target_venue)
     strategy_feedback = {}
     effective_num_cite_rounds = num_cite_rounds
     effective_writeup_retries = writeup_retries
@@ -131,7 +161,7 @@ def build_writeup_execution_plan(
     if high_quality_mode:
         venue_config = VENUE_PRESETS.get(
             resolved_target_venue,
-            VENUE_PRESETS["neurips"],
+            VENUE_PRESETS[DEFAULT_TARGET_VENUE],
         )
         strategy_feedback = recommend_submission_strategy_adjustments(
             resolved_target_venue,

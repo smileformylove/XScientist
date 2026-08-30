@@ -47,7 +47,9 @@ paper_types:
 # Generate every supported type.
 all_types: false
 
-# Optional venue intent: neurips, iclr, cvpr, journal, or nature.
+# Optional venue intent: neurips, icml, iclr, cvpr, journal, or nature.
+# NeurIPS/ICML activate fail-closed official-template, empirical-data,
+# Research-VCS-freeze, evidence-portfolio, and external-verifier gates.
 target_venue: null
 auto_adjust_paper_type: false
 
@@ -64,6 +66,8 @@ parallel:
 # ====================
 
 models:
+  # These are illustrative provider routes, not scientific authority. Keep a
+  # strong planner/reviewer boundary even when GLM is selected as an executor.
   ideation: "glm-4-flash"
   agg_plots: "glm-4-flash"
   writeup: "glm-4-plus"

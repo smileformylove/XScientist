@@ -102,7 +102,7 @@ def _make_stub_agent(*, seed_code: str | None):
 
     counter = {"llm_calls": 0}
 
-    def _fake_plan_and_code(self, prompt):
+    def _fake_plan_and_code(self, prompt, **_kwargs):
         counter["llm_calls"] += 1
         code = seed_code or "print('baseline draft')"
         return "baseline plan", code

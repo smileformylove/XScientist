@@ -41,6 +41,8 @@ class LocalRunControlTests(unittest.TestCase):
                     "--question",
                     "private question",
                     "--allow-synthetic-data",
+                    "--judgment-model",
+                    "ollama/qwen2.5:7b",
                     "--detach",
                 ],
             )
@@ -49,10 +51,14 @@ class LocalRunControlTests(unittest.TestCase):
             self.assertNotIn("resume_argv", payload)
             self.assertNotIn("process_identity", payload)
             self.assertIn("<stored-in-workspace>", payload["command"])
+            self.assertIn("--judgment-model", payload["command"])
+            self.assertIn("ollama/qwen2.5:7b", payload["command"])
+            self.assertEqual(payload["judgment_model"], "ollama/qwen2.5:7b")
             state_path = workspace / "04_logs" / "runs" / f"{payload['id']}.json"
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["schema"], RUN_SCHEMA)
             self.assertIn("private question", saved["resume_argv"])
+            self.assertEqual(saved["judgment_model"], "ollama/qwen2.5:7b")
             self.assertNotIn("--detach", saved["resume_argv"])
             self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(state_path.parent.stat().st_mode & 0o777, 0o700)

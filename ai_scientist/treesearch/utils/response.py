@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 import json
 import re
 
@@ -102,6 +104,29 @@ def extract_single_plan_and_code(text: str) -> tuple[str, str]:
     if not is_valid_python_script(code):
         raise ValueError("Plan/code response contains invalid Python")
     return plan, format_code(code)
+
+
+def extract_single_python_code(text: str) -> str:
+    """Validate a code-only response containing exactly one Python fence.
+
+    Execution-only model routes must not be allowed to smuggle a replacement
+    research plan alongside the implementation.  Requiring the entire response
+    to be one fenced Python program makes that boundary mechanically visible.
+    """
+
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 1024 * 1024:
+        raise ValueError("Code response is invalid")
+    match = re.fullmatch(
+        r"[ \t\r\n]*```(?:python)?[ \t]*\n(?P<code>.*?)\n?```[ \t\r\n]*",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if match is None:
+        raise ValueError("Code response must contain exactly one Python fence")
+    code = match.group("code").strip()
+    if not code or "```" in code or not is_valid_python_script(code):
+        raise ValueError("Code response contains invalid Python")
+    return format_code(code)
 
 
 def format_code(code) -> str:

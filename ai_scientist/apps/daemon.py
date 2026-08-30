@@ -17,6 +17,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from ai_scientist.config.paths import PRIMARY_OUTPUT_ENV_VAR, resolve_output_path
+from ai_scientist.config.venues import TARGET_VENUES, TARGET_VENUE_SET
 from ai_scientist.utils.high_quality_pipeline import (
     QUALITY_PRESETS,
     run_high_quality_pass,
@@ -2584,7 +2585,7 @@ def _classify_source_runtime(
     if desired_policy == "program_driven":
         if submission_mode:
             workflow_alignment_score += 2
-        if target_venue in {"nature", "journal", "neurips", "iclr", "cvpr"}:
+        if target_venue in TARGET_VENUE_SET:
             workflow_alignment_score += 1
         workflow_alignment_reason = "Program-driven repair prefers submission-oriented, budget-disciplined sources."
     elif desired_policy == "agentic_tree":
@@ -2608,7 +2609,7 @@ def _classify_source_runtime(
     elif desired_policy == "multi_agent_board":
         if submission_mode:
             workflow_alignment_score += 2
-        if target_venue in {"nature", "journal", "neurips", "iclr", "cvpr"}:
+        if target_venue in TARGET_VENUE_SET:
             workflow_alignment_score += 1
         if isinstance(paper_types, list) and any(
             str(item) in {"journal", "extended"} for item in paper_types
@@ -6513,11 +6514,7 @@ Example:
             "standard",
             "fast",
             "depth",
-            "neurips",
-            "iclr",
-            "cvpr",
-            "journal",
-            "nature",
+            *TARGET_VENUES,
         ],
         help="Review strategy forced when the evidence strategy escalates",
     )
@@ -6579,7 +6576,7 @@ Example:
         "--rewrite-board-venue",
         type=str,
         default=None,
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
     )
     parser.add_argument("--rewrite-board-min-priority", type=float, default=70.0)
     parser.add_argument("--rewrite-board-min-gain", type=float, default=0.5)
@@ -6603,7 +6600,7 @@ Example:
         "--shortlist-venue",
         type=str,
         default=None,
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
     )
     parser.add_argument("--shortlist-min-priority", type=float, default=75.0)
     parser.add_argument("--shortlist-max-blockers", type=int, default=2)

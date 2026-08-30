@@ -25,6 +25,7 @@ from xscientist.research_git import (
     create_research_bundle,
     create_research_tag,
     init_repository,
+    merge_research_branch,
     repository_status,
     reproduce_checkpoint,
     restore_research_bundle,
@@ -1445,25 +1446,12 @@ class LocalResearchGitTests(unittest.TestCase):
                 stage="experiment",
                 subject="test branch B",
             )
-            self._git(
+            converged = merge_research_branch(
                 root,
-                "merge",
-                "--no-ff",
                 "hypothesis/a",
-                "-m",
-                "merge scientific branches",
+                subject="merge scientific branches",
             )
-            (root / "manuscript" / "merge.md").write_text(
-                "# Converged evidence\n",
-                encoding="utf-8",
-            )
-
-            converged = create_checkpoint(
-                root,
-                stage="review",
-                subject="review converged evidence",
-            )
-            payload = json.loads(converged.checkpoint_path.read_text(encoding="utf-8"))
+            payload = show_checkpoint(root, converged.commit)["checkpoint"]
             fsck = verify_research_repository(root)
 
             self.assertEqual(payload["sequence"], 3)

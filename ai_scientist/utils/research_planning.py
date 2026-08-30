@@ -21,6 +21,28 @@ DEFAULT_EXPERIMENT_BUDGET = {
     "max_retry_per_task": 2,
 }
 
+STRUCTURED_EVIDENCE_PORTFOLIO_VENUES = frozenset({"neurips", "icml"})
+EVIDENCE_PORTFOLIO_ROLES = ("primary", "ablation", "robustness")
+
+_ABLATION_PLAN_MARKERS = (
+    "ablation",
+    "without ",
+    "w/o",
+    "remove ",
+    "disable ",
+    "component contribution",
+)
+_ROBUSTNESS_PLAN_MARKERS = (
+    "robustness",
+    "sensitivity",
+    "out-of-distribution",
+    "out of distribution",
+    "ood",
+    "stress test",
+    "boundary condition",
+    "distribution shift",
+)
+
 SOCRATIC_CHALLENGE_POLICY = {
     "minimum_rival_hypotheses": 3,
     "minimum_discriminating_tests": 3,
@@ -273,6 +295,100 @@ def _coerce_list(value: Any) -> list[str]:
     return [
         item.strip("-* ").strip() for item in split_items if item.strip("-* ").strip()
     ]
+
+
+def _structured_evidence_portfolio_required(
+    *,
+    target_venue: str | None,
+    submission_mode: bool,
+    high_quality_mode: bool,
+) -> bool:
+    venue = str(target_venue or "").strip().lower()
+    return venue in STRUCTURED_EVIDENCE_PORTFOLIO_VENUES and bool(
+        submission_mode or high_quality_mode
+    )
+
+
+def _build_evidence_task_specs(
+    task_descriptions: list[str],
+    *,
+    portfolio_required: bool,
+) -> list[dict[str, Any]]:
+    """Attach explicit scientific roles and fill missing top-venue controls."""
+
+    specs = [
+        {
+            "description": str(description).strip(),
+            "evidence_role": None,
+            "paired_control_task_id": None,
+            "intervention_variant": None,
+            "stress_condition": None,
+        }
+        for description in task_descriptions
+        if str(description).strip()
+    ]
+    if not portfolio_required:
+        return specs
+
+    specs[0].update(
+        {
+            "evidence_role": "primary",
+            "intervention_variant": "full_method",
+        }
+    )
+    seen_roles = {"primary"}
+    for spec in specs[1:]:
+        description = str(spec["description"])
+        lowered = description.lower()
+        if any(marker in lowered for marker in _ABLATION_PLAN_MARKERS):
+            spec.update(
+                {
+                    "evidence_role": "ablation",
+                    "paired_control_task_id": "task_0",
+                    "intervention_variant": description,
+                }
+            )
+            seen_roles.add("ablation")
+        elif any(marker in lowered for marker in _ROBUSTNESS_PLAN_MARKERS):
+            spec.update(
+                {
+                    "evidence_role": "robustness",
+                    "paired_control_task_id": "task_0",
+                    "intervention_variant": "full_method",
+                    "stress_condition": description,
+                }
+            )
+            seen_roles.add("robustness")
+        else:
+            spec["evidence_role"] = "supporting"
+
+    if "ablation" not in seen_roles:
+        specs.append(
+            {
+                "description": (
+                    "Run a controlled ablation of the key proposed component while "
+                    "holding the primary dataset, metric, and evaluation protocol fixed."
+                ),
+                "evidence_role": "ablation",
+                "paired_control_task_id": "task_0",
+                "intervention_variant": "remove_or_disable_key_component",
+                "stress_condition": None,
+            }
+        )
+    if "robustness" not in seen_roles:
+        specs.append(
+            {
+                "description": (
+                    "Run a robustness stress test under a declared distribution shift, "
+                    "perturbation, or boundary condition while preserving the primary metric."
+                ),
+                "evidence_role": "robustness",
+                "paired_control_task_id": "task_0",
+                "intervention_variant": "full_method",
+                "stress_condition": "declared_distribution_shift_or_boundary_condition",
+            }
+        )
+    return specs
 
 
 def _extract_keywords(text: str, *, prefix: str, limit: int = 4) -> list[str]:
@@ -611,6 +727,10 @@ def _build_agent_plan(
                 "task_id": task.get("task_id"),
                 "owner": task.get("owner"),
                 "dependencies": task.get("dependencies") or [],
+                "evidence_role": task.get("evidence_role"),
+                "paired_control_task_id": task.get("paired_control_task_id"),
+                "intervention_variant": task.get("intervention_variant"),
+                "stress_condition": task.get("stress_condition"),
                 "claim_targets": task.get("claim_targets") or [],
                 "kill_criteria": task.get("kill_criteria") or [],
                 "required_inputs": task.get("required_inputs") or [],
@@ -718,12 +838,15 @@ def build_research_plan(
     high_quality_mode: bool = False,
 ) -> dict[str, Any]:
     workflow_mode = str(idea_card.get("workflow_mode") or "classic_pipeline")
+    resolved_target_venue = (
+        str(target_venue or idea_card.get("target_venue") or "").strip().lower()
+    )
     execution_policy = build_workflow_execution_policy(
         workflow_mode,
         submission_mode=submission_mode,
         breakthrough_mode=breakthrough_mode,
         high_quality_mode=high_quality_mode,
-        target_venue=target_venue or idea_card.get("target_venue"),
+        target_venue=resolved_target_venue or None,
     )
     budget_payload = dict(DEFAULT_EXPERIMENT_BUDGET)
     budget_payload.update(execution_policy.budget)
@@ -734,6 +857,15 @@ def build_research_plan(
     )
     if not task_descriptions:
         task_descriptions = ["Run the minimum viable experiment for the main claim."]
+    portfolio_required = _structured_evidence_portfolio_required(
+        target_venue=resolved_target_venue,
+        submission_mode=submission_mode,
+        high_quality_mode=high_quality_mode,
+    )
+    task_specs = _build_evidence_task_specs(
+        task_descriptions,
+        portfolio_required=portfolio_required,
+    )
 
     datasets = list(idea_card.get("candidate_datasets") or ["dataset_to_be_selected"])
     metrics = list(idea_card.get("candidate_metrics") or ["primary_task_metric"])
@@ -751,7 +883,10 @@ def build_research_plan(
         failure_criteria=failure_criteria,
     )
     discriminating_tests = socratic_challenge["discriminating_tests"]
-    for idx, description in enumerate(task_descriptions):
+    for idx, task_spec in enumerate(task_specs):
+        description = str(task_spec["description"])
+        evidence_role = task_spec.get("evidence_role")
+        paired_control_task_id = task_spec.get("paired_control_task_id")
         claim_id = f"claim_{idx}"
         if workflow_mode == "agentic_tree":
             task_kind = "branch_probe" if idx > 0 else "exploration_seed"
@@ -764,24 +899,70 @@ def build_research_plan(
         else:
             task_kind = "core_experiment"
         owner = _task_owner_for_workflow(workflow_mode, task_kind=task_kind)
-        dependencies = [] if idx == 0 else [f"task_{idx - 1}"]
+        dependencies = (
+            []
+            if idx == 0
+            else (
+                [str(paired_control_task_id)]
+                if paired_control_task_id
+                else [f"task_{idx - 1}"]
+            )
+        )
         escalation_lane = (
             "hostile_critic"
             if workflow_mode == "multi_agent_board"
             else ("reviewer_board" if workflow_mode == "review_board" else "reviewer")
         )
         discriminating_test = discriminating_tests[idx % len(discriminating_tests)]
+        evidence_requirements = [
+            "baseline-comparable metric delta",
+            "claim-linked experiment record",
+            "figure-or-table-ready artifact",
+            "rival-hypothesis outcome with calibrated uncertainty",
+        ]
+        if evidence_role == "primary":
+            evidence_requirements.extend(
+                [
+                    "numeric primary outcome",
+                    "structured uncertainty or statistical estimate",
+                ]
+            )
+        elif evidence_role == "ablation":
+            evidence_requirements.extend(
+                [
+                    "paired completed primary control",
+                    "declared intervention variant",
+                    "numeric paired comparison",
+                ]
+            )
+        elif evidence_role == "robustness":
+            evidence_requirements.extend(
+                [
+                    "paired completed primary control",
+                    "declared stress condition",
+                    "numeric paired comparison",
+                ]
+            )
+        dataset_index = (
+            0 if evidence_role == "ablation" else min(idx, len(datasets) - 1)
+        )
+        metric_index = 0 if paired_control_task_id else min(idx, len(metrics) - 1)
+        baseline_index = 0 if paired_control_task_id else min(idx, len(baselines) - 1)
         task = {
             "task_id": f"task_{idx}",
             "goal": description,
             "priority": "P0" if idx == 0 else "P1",
             "task_kind": task_kind,
+            "evidence_role": evidence_role,
+            "paired_control_task_id": paired_control_task_id,
+            "intervention_variant": task_spec.get("intervention_variant"),
+            "stress_condition": task_spec.get("stress_condition"),
             "owner": owner,
             "dependencies": dependencies,
-            "dataset": datasets[min(idx, len(datasets) - 1)],
-            "metric": metrics[min(idx, len(metrics) - 1)],
-            "baseline": baselines[min(idx, len(baselines) - 1)],
-            "success_criterion": f"Produce evidence relevant to {claim_id} with a clear {metrics[min(idx, len(metrics) - 1)]} outcome.",
+            "dataset": datasets[dataset_index],
+            "metric": metrics[metric_index],
+            "baseline": baselines[baseline_index],
+            "success_criterion": f"Produce evidence relevant to {claim_id} with a clear {metrics[metric_index]} outcome.",
             "stop_condition": "Stop when the claim is supported, weakened, or the budget is exhausted.",
             "branch_outcome_labels": ["keep", "discard", "crash"],
             "branch_keep_rule": (
@@ -791,12 +972,7 @@ def build_research_plan(
             or [
                 "Stop the branch if the evidence does not materially support the target claim."
             ],
-            "evidence_requirements": [
-                "baseline-comparable metric delta",
-                "claim-linked experiment record",
-                "figure-or-table-ready artifact",
-                "rival-hypothesis outcome with calibrated uncertainty",
-            ],
+            "evidence_requirements": evidence_requirements,
             "expected_outputs": [
                 "experiment logs",
                 "summary json",
@@ -804,9 +980,9 @@ def build_research_plan(
             ],
             "required_inputs": [
                 "research_plan",
-                f"dataset:{datasets[min(idx, len(datasets) - 1)]}",
-                f"metric:{metrics[min(idx, len(metrics) - 1)]}",
-                f"baseline:{baselines[min(idx, len(baselines) - 1)]}",
+                f"dataset:{datasets[dataset_index]}",
+                f"metric:{metrics[metric_index]}",
+                f"baseline:{baselines[baseline_index]}",
                 f"claim:{claim_id}",
             ],
             "produced_artifacts": [
@@ -834,9 +1010,9 @@ def build_research_plan(
             ),
             "closure_evidence_refs": [
                 claim_id,
-                f"dataset:{datasets[min(idx, len(datasets) - 1)]}",
-                f"metric:{metrics[min(idx, len(metrics) - 1)]}",
-                f"baseline:{baselines[min(idx, len(baselines) - 1)]}",
+                f"dataset:{datasets[dataset_index]}",
+                f"metric:{metrics[metric_index]}",
+                f"baseline:{baselines[baseline_index]}",
             ],
             "escalation_lane": escalation_lane,
             "claim_targets": [claim_id],
@@ -867,12 +1043,20 @@ def build_research_plan(
         execution_policy=policy_snapshot(execution_policy),
         failure_criteria=failure_criteria,
     )
+    task_ids_by_evidence_role = {
+        role: [
+            str(task.get("task_id"))
+            for task in tasks
+            if task.get("evidence_role") == role
+        ]
+        for role in EVIDENCE_PORTFOLIO_ROLES
+    }
     plan_payload = {
         "plan_id": f"{idea_card.get('idea_id')}_plan",
         "idea_id": idea_card.get("idea_id"),
         "idea_name": idea_card.get("name"),
         "workflow_mode": workflow_mode,
-        "target_venue": target_venue or idea_card.get("target_venue"),
+        "target_venue": resolved_target_venue or None,
         "budget": budget_payload,
         "execution_policy": policy_snapshot(execution_policy),
         "agent_plan": agent_plan,
@@ -885,6 +1069,21 @@ def build_research_plan(
             "claim_promotion_requires_verified_report": True,
         },
         "socratic_challenge": socratic_challenge,
+        "evidence_portfolio": {
+            "required": portfolio_required,
+            "target_venue": resolved_target_venue or None,
+            "required_roles": (
+                list(EVIDENCE_PORTFOLIO_ROLES) if portfolio_required else []
+            ),
+            "task_ids_by_role": task_ids_by_evidence_role,
+            "pairing_policy": (
+                "ablation_and_robustness_pair_to_completed_primary"
+                if portfolio_required
+                else "not_required"
+            ),
+            "numeric_evidence_required": portfolio_required,
+            "statistical_evidence_required": portfolio_required,
+        },
         "tasks": tasks,
     }
     truth_contract = build_truth_contract(idea_card, plan_payload)
@@ -977,6 +1176,10 @@ def build_claim_evidence_graph(
                     "type": "experiment",
                     "label": task.get("goal"),
                     "status": task.get("status", "planned"),
+                    "evidence_role": task.get("evidence_role"),
+                    "paired_control_task_id": task.get("paired_control_task_id"),
+                    "intervention_variant": task.get("intervention_variant"),
+                    "stress_condition": task.get("stress_condition"),
                 },
                 {
                     "id": metric_id,
@@ -1018,6 +1221,18 @@ def build_claim_evidence_graph(
                 edges.append(
                     {"source": rival_id, "target": task_id, "type": "tested_by"}
                 )
+        paired_control_task_id = str(task.get("paired_control_task_id") or "").strip()
+        if paired_control_task_id:
+            relation_type = (
+                "ablates" if task.get("evidence_role") == "ablation" else "stress_tests"
+            )
+            edges.append(
+                {
+                    "source": task_id,
+                    "target": paired_control_task_id,
+                    "type": relation_type,
+                }
+            )
 
     return {
         "graph_id": f"{idea_card.get('idea_id')}_claim_graph",

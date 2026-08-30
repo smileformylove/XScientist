@@ -1,5 +1,6 @@
 [
     {
+        "XScientist Modification Notice": "Modified by XScientist contributors; see THIRD_PARTY_NOTICES.md for provenance and license details.",
         "Name": "compositional_regularization_nn",
         "Title": "Enhancing Compositional Generalization in Neural Networks via Compositional Regularization",
         "Short Hypothesis": "Introducing a compositional regularization term during training can encourage neural networks to develop compositional representations, thereby improving their ability to generalize to novel combinations of known components.",
@@ -22,6 +23,7 @@
         ]
     },
     {
+        "XScientist Modification Notice": "Modified by XScientist contributors; see THIRD_PARTY_NOTICES.md for provenance and license details.",
         "Name": "interpretability_failure_modes",
         "Title": "When Interpretability Fails: Investigating the Limitations of Explanation Methods in Deep Learning",
         "Short Hypothesis": "Explanation methods for deep learning models may not always provide accurate or reliable interpretations of model behavior; identifying when these methods fail can inform better application and development of interpretability techniques.",
@@ -45,6 +47,7 @@
         ]
     },
     {
+        "XScientist Modification Notice": "Modified by XScientist contributors; see THIRD_PARTY_NOTICES.md for provenance and license details.",
         "Name": "real_world_pest_detection",
         "Title": "Real-World Challenges in Pest Detection Using Deep Learning: An Investigation into Failures and Solutions",
         "Short Hypothesis": "Deep learning models for pest detection often fail to generalize in real-world agricultural settings due to data quality issues, environmental variability, and model limitations. Investigating these failures can lead to more robust solutions.",
@@ -60,6 +63,7 @@
         "Risk Factors and Limitations": "Potential risks include the availability and quality of real-world data, the computational demands of training and testing multiple deep learning models, and the generalizability of the findings to different types of pests and crops. Additionally, environmental factors may introduce variability that is challenging to control."
     },
     {
+        "XScientist Modification Notice": "Modified by XScientist contributors; see THIRD_PARTY_NOTICES.md for provenance and license details.",
         "Name": "dynamic_environment_adaptation",
         "Title": "Dynamic Environment Adaptation in Deep Learning: A Novel Approach to Real-Time Learning",
         "Short Hypothesis": "Developing a deep learning model capable of real-time adaptation to changing environmental conditions can significantly enhance the performance and reliability of AI systems in real-world applications.",
@@ -79,6 +83,7 @@
         ]
     },
     {
+        "XScientist Modification Notice": "Modified by XScientist contributors; see THIRD_PARTY_NOTICES.md for provenance and license details.",
         "Name": "temporal_coherence_learning",
         "Title": "Temporal Coherence Learning in Deep Learning: Bridging the Gap Between Continuous and Discrete Time Representations",
         "Short Hypothesis": "Deep learning models can be enhanced by explicitly incorporating temporal coherence, enabling them to better capture and utilize the temporal structure inherent in sequential data.",

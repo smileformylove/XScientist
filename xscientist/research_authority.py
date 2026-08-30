@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.principal_identity import canonical_principal
 
 from .research_git import ResearchGitError
 from .research_vcs import ResearchRepository
@@ -35,6 +36,12 @@ def _actor_id(item: dict[str, Any]) -> str:
     return " ".join(str((item.get("actor") or {}).get("actor_id") or "").split())
 
 
+def _payload_producer_id(item: dict[str, Any]) -> str:
+    payload = item.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    return " ".join(str(payload.get("producer_id") or "").split())
+
+
 def producer_actor_ids(
     repository: ResearchRepository,
     target_ids: Sequence[str],
@@ -52,8 +59,26 @@ def producer_actor_ids(
             continue
         visited.add(object_id)
         actor = _actor_id(item)
+        payload_producer = _payload_producer_id(item)
+        if actor and payload_producer:
+            try:
+                same_principal = canonical_principal(
+                    actor, label="research object actor"
+                ) == canonical_principal(
+                    payload_producer, label="research object producer_id"
+                )
+            except ValueError as exc:
+                raise ResearchGitError(
+                    "research object producer identity is invalid"
+                ) from exc
+            if not same_principal:
+                raise ResearchGitError(
+                    "research object actor does not match its payload producer_id"
+                )
         if actor:
             actors.add(actor)
+        if payload_producer:
+            actors.add(payload_producer)
         for relation in item.get("relations") or []:
             if relation.get("type") in PRODUCER_LINEAGE_RELATIONS:
                 target = str(relation.get("target") or "")
@@ -72,15 +97,30 @@ def require_independent_evaluator(
     """Fail closed on a provenance conflict and return an auditable receipt."""
 
     evaluator = " ".join(str(evaluator_id or "").split())
-    if not evaluator:
-        raise ResearchGitError(f"{label} requires an evaluator id")
+    try:
+        evaluator_principal = canonical_principal(
+            evaluator, label=f"{label} evaluator id"
+        )
+    except ValueError as exc:
+        raise ResearchGitError(f"{label} requires a valid evaluator id") from exc
     if not target_ids:
         raise ResearchGitError(f"{label} requires at least one evaluated object")
     resolved_target_ids = sorted(
         {str(repository.get(value)["object_id"]) for value in target_ids}
     )
     producer_ids, lineage_ids = producer_actor_ids(repository, resolved_target_ids)
-    if evaluator in producer_ids:
+    try:
+        producer_principals = sorted(
+            {
+                canonical_principal(value, label=f"{label} producer id")
+                for value in producer_ids
+            }
+        )
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"{label} producer provenance contains an invalid identity"
+        ) from exc
+    if evaluator_principal in producer_principals:
         raise ResearchGitError(
             f"{label} requires an evaluator independent of the complete producer "
             "provenance"
@@ -90,8 +130,10 @@ def require_independent_evaluator(
         "assurance": "declared_actor_disjointness",
         "identity_verified": False,
         "evaluator_id": evaluator,
+        "evaluator_principal": evaluator_principal,
         "target_ids": resolved_target_ids,
         "producer_actor_ids": producer_ids,
+        "producer_principals": producer_principals,
         "lineage_object_ids": lineage_ids,
     }
     return {**core, "receipt_hash": canonical_content_hash(core)}

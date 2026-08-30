@@ -666,6 +666,16 @@ PAPER_TEMPLATES = {
     },
 }
 
+# ICML uses the same broad manuscript anatomy as the general ML template, while
+# venue-specific evidence, review, and limitation requirements are enforced by
+# the dedicated ICML workflow policies. Keep a distinct identity here so the
+# evaluator does not silently report that it used NeurIPS criteria.
+PAPER_TEMPLATES["icml"] = {
+    **PAPER_TEMPLATES["neurips"],
+    "name": "ICML",
+    "style": "general_machine_learning",
+}
+
 
 # ========================================
 # 学术写作标准

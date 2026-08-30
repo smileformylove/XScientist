@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 from __future__ import annotations
 import time
 import uuid
@@ -25,15 +27,64 @@ from rich import print
 import logging
 from pathlib import Path
 from ai_scientist.utils.llm_budget import is_llm_budget_exception
+from ai_scientist.protocol import capture_llm_calls
 from ai_scientist.utils.evaluation_binding import (
     evaluation_comparison_contract,
     evaluation_hash_binding,
+)
+from ai_scientist.utils.authority_attempts import (
+    ATTEMPT_ID_RE,
+    OBJECT_HASH_RE,
+    AuthorityAttemptError,
+    canonical_authority_hash,
+    run_authority_call,
 )
 
 logger = logging.getLogger(__name__)
 
 NODE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 NODE_ID_RE = re.compile(NODE_ID_PATTERN)
+
+
+def _validate_implementation_spec_binding(
+    spec: dict[str, Any] | None,
+    expected_hash: str | None,
+) -> None:
+    if spec is None and expected_hash is None:
+        return
+    if not isinstance(spec, dict) or not isinstance(expected_hash, str):
+        raise ValueError("implementation spec and hash must be stored together")
+    try:
+        actual_hash = canonical_authority_hash(spec)
+    except AuthorityAttemptError as exc:
+        raise ValueError("implementation spec must be strict JSON") from exc
+    if actual_hash != expected_hash:
+        raise ValueError("implementation spec hash does not match its payload")
+
+
+def _validate_authority_attempt_bindings(
+    attempt_ids: list[str],
+    terminal_hashes: dict[str, str],
+    *,
+    require_terminal: bool = False,
+) -> None:
+    if not isinstance(attempt_ids, list) or any(
+        not isinstance(item, str) or ATTEMPT_ID_RE.fullmatch(item) is None
+        for item in attempt_ids
+    ):
+        raise ValueError("authority attempt ids are invalid")
+    if len(attempt_ids) != len(set(attempt_ids)):
+        raise ValueError("authority attempt ids must be unique")
+    if not isinstance(terminal_hashes, dict) or any(
+        not isinstance(attempt_id, str)
+        or attempt_id not in attempt_ids
+        or not isinstance(event_hash, str)
+        or OBJECT_HASH_RE.fullmatch(event_hash) is None
+        for attempt_id, event_hash in terminal_hashes.items()
+    ):
+        raise ValueError("authority attempt terminal hashes are invalid")
+    if require_terminal and set(terminal_hashes) != set(attempt_ids):
+        raise ValueError("terminal node authority attempts must all be complete")
 
 
 def _optional_config_value(config: Any, key: str) -> Any:
@@ -239,9 +290,42 @@ class Node(DataClassJsonMixin):
     # planned. This answers "what history did the agent actually see?" without
     # copying the pack into every node or changing the experiment content hash.
     context_pack_refs: list[str] = field(default_factory=list, kw_only=True)
+    selection_llm_call_refs: list[str] = field(default_factory=list, kw_only=True)
+    authority_attempt_ids: list[str] = field(default_factory=list, kw_only=True)
+    authority_attempt_terminal_hashes: dict[str, str] = field(
+        default_factory=dict,
+        kw_only=True,
+    )
+
+    # Canonical scientific contract selected by the judgment route before an
+    # execution-only model generated this node's implementation.  The hash is
+    # revalidated before serialization and makes the authority handoff
+    # inspectable in checkpoints/replays.
+    implementation_spec: dict[str, Any] | None = field(default=None, kw_only=True)
+    implementation_spec_hash: str | None = field(default=None, kw_only=True)
+    repair_spec: dict[str, Any] | None = field(default=None, kw_only=True)
+    repair_spec_hash: str | None = field(default=None, kw_only=True)
+    parse_metrics_spec: dict[str, Any] | None = field(default=None, kw_only=True)
+    parse_metrics_spec_hash: str | None = field(default=None, kw_only=True)
+    plot_spec: dict[str, Any] | None = field(default=None, kw_only=True)
+    plot_spec_hash: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         _validate_node_id(self.id)
+        _validate_implementation_spec_binding(
+            self.implementation_spec,
+            self.implementation_spec_hash,
+        )
+        _validate_implementation_spec_binding(self.repair_spec, self.repair_spec_hash)
+        _validate_implementation_spec_binding(
+            self.parse_metrics_spec,
+            self.parse_metrics_spec_hash,
+        )
+        _validate_implementation_spec_binding(self.plot_spec, self.plot_spec_hash)
+        _validate_authority_attempt_bindings(
+            self.authority_attempt_ids,
+            self.authority_attempt_terminal_hashes,
+        )
         # Ensure children is a set even if initialized with a list
         if isinstance(self.children, list):
             self.children = set(self.children)
@@ -357,8 +441,28 @@ class Node(DataClassJsonMixin):
             return 0
         return self.parent.debug_depth + 1  # type: ignore
 
-    def to_dict(self, *, artifact_base: Path | None = None) -> Dict:
+    def to_dict(
+        self,
+        *,
+        artifact_base: Path | None = None,
+        allow_incomplete_authority_attempts: bool = False,
+    ) -> Dict:
         """Convert node to dictionary for serialization"""
+        _validate_implementation_spec_binding(
+            self.implementation_spec,
+            self.implementation_spec_hash,
+        )
+        _validate_implementation_spec_binding(self.repair_spec, self.repair_spec_hash)
+        _validate_implementation_spec_binding(
+            self.parse_metrics_spec,
+            self.parse_metrics_spec_hash,
+        )
+        _validate_implementation_spec_binding(self.plot_spec, self.plot_spec_hash)
+        _validate_authority_attempt_bindings(
+            self.authority_attempt_ids,
+            self.authority_attempt_terminal_hashes,
+            require_terminal=not allow_incomplete_authority_attempts,
+        )
         serialized_results_dir = None
         if self.exp_results_dir:
             results_path = Path(self.exp_results_dir)
@@ -455,6 +559,19 @@ class Node(DataClassJsonMixin):
             "exec_time_feedback": self.exec_time_feedback,
             "llm_call_refs": list(self.llm_call_refs or []),
             "context_pack_refs": list(self.context_pack_refs or []),
+            "selection_llm_call_refs": list(self.selection_llm_call_refs or []),
+            "authority_attempt_ids": list(self.authority_attempt_ids or []),
+            "authority_attempt_terminal_hashes": dict(
+                self.authority_attempt_terminal_hashes or {}
+            ),
+            "implementation_spec": self.implementation_spec,
+            "implementation_spec_hash": self.implementation_spec_hash,
+            "repair_spec": self.repair_spec,
+            "repair_spec_hash": self.repair_spec_hash,
+            "parse_metrics_spec": self.parse_metrics_spec,
+            "parse_metrics_spec_hash": self.parse_metrics_spec_hash,
+            "plot_spec": self.plot_spec,
+            "plot_spec_hash": self.plot_spec_hash,
             "plot_term_out": self.plot_term_out,
             "plot_exec_time": self.plot_exec_time,
             "plot_exc_type": self.plot_exc_type,
@@ -653,14 +770,49 @@ class Journal:
             else:
                 model = cfg.agent.select_node.model
                 temperature = cfg.agent.select_node.temp
-            selection = query(
-                system_message=prompt,
-                user_message=None,
-                func_spec=node_selection_spec,
-                model=model,
-                temperature=temperature,
-                max_tokens=_optional_config_value(cfg.agent.select_node, "max_tokens"),
-            )
+            log_dir = _optional_config_value(cfg, "log_dir")
+            if not isinstance(log_dir, str) or not log_dir.strip():
+                raise ResearchDecisionError(
+                    "Node selection requires an authority-attempt log directory"
+                )
+
+            def select_candidate() -> dict[str, Any]:
+                result = query(
+                    system_message=prompt,
+                    user_message=None,
+                    func_spec=node_selection_spec,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=_optional_config_value(
+                        cfg.agent.select_node,
+                        "max_tokens",
+                    ),
+                )
+                if not isinstance(result, dict) or str(
+                    result.get("selected_id") or ""
+                ) not in {str(node.id) for node in nodes}:
+                    raise FunctionCallValidationError(
+                        "Selected implementation is not an allowed candidate"
+                    )
+                return result
+
+            with capture_llm_calls() as selection_refs:
+                selection, selection_attempt_id, selection_terminal_hash = (
+                    run_authority_call(
+                        log_dir,
+                        category="node-selection-request",
+                        specification={
+                            "schema": "xscientist.node-selection-request.v1",
+                            "candidate_ids": [str(node.id) for node in nodes],
+                            "candidate_evidence_hash": canonical_authority_hash(prompt),
+                        },
+                        parent_node_id=None,
+                        role="select_node",
+                        model=str(model),
+                        task_kind="candidate_selection",
+                        operation=select_candidate,
+                    )
+                )
 
             # Find and return the selected node
             selected_node = next(
@@ -668,6 +820,31 @@ class Journal:
                 None,
             )
             if selected_node:
+                selected_node.selection_llm_call_refs.extend(selection_refs)
+                if (
+                    selection_attempt_id is not None
+                    and selection_terminal_hash is not None
+                ):
+                    authority_attempt_ids = list(
+                        getattr(selected_node, "authority_attempt_ids", []) or []
+                    )
+                    if selection_attempt_id not in authority_attempt_ids:
+                        authority_attempt_ids.append(selection_attempt_id)
+                    selected_node.authority_attempt_ids = authority_attempt_ids
+                    authority_attempt_terminal_hashes = dict(
+                        getattr(
+                            selected_node,
+                            "authority_attempt_terminal_hashes",
+                            {},
+                        )
+                        or {}
+                    )
+                    authority_attempt_terminal_hashes[selection_attempt_id] = (
+                        selection_terminal_hash
+                    )
+                    selected_node.authority_attempt_terminal_hashes = (
+                        authority_attempt_terminal_hashes
+                    )
                 logger.warning(
                     f"Selected node {selected_node.id} as best implementation"
                 )
@@ -679,6 +856,10 @@ class Journal:
                 )
 
         except Exception as e:
+            if isinstance(e, AuthorityAttemptError):
+                raise ResearchDecisionError(
+                    "Node-selection authority receipt failed safety validation"
+                ) from e
             if isinstance(e, ResearchDecisionError) or is_llm_budget_exception(e):
                 raise
             logger.error("Research-agent node selection failed: %s", type(e).__name__)
@@ -788,17 +969,36 @@ class Journal:
         model = model_kwargs.get("model") or os.environ.get("ZHIPU_DEFAULT_MODEL")
         if not model:
             raise ValueError("Summary generation requires an explicit model")
-        summary = query(
-            system_message=prompt,
-            user_message=(
-                "Please provide a comprehensive summary of the experimental progress that includes:\n"
-                "1. Key patterns supported by deterministically verified experiments\n"
-                "2. Common failure patterns and pitfalls to avoid\n"
-                "3. Exploratory recommendations, with unverified evidence clearly separated"
+        user_message = (
+            "Please provide a comprehensive summary of the experimental progress that includes:\n"
+            "1. Key patterns supported by deterministically verified experiments\n"
+            "2. Common failure patterns and pitfalls to avoid\n"
+            "3. Exploratory recommendations, with unverified evidence clearly separated"
+        )
+        log_dir = model_kwargs.get("log_dir")
+        if not isinstance(log_dir, (str, os.PathLike)) or not str(log_dir).strip():
+            raise ResearchDecisionError(
+                "Journal summary requires an authority-attempt log directory"
+            )
+        summary, _attempt_id, _terminal_hash = run_authority_call(
+            str(log_dir),
+            category="journal-summary-request",
+            specification={
+                "schema": "xscientist.journal-summary-request.v1",
+                "prompt_hash": canonical_authority_hash(prompt),
+                "node_ids": [node.id for node in self.nodes],
+            },
+            parent_node_id=None,
+            role="scientific_summary",
+            model=str(model),
+            task_kind="journal_summary",
+            operation=lambda: query(
+                system_message=prompt,
+                user_message=user_message,
+                model=model,
+                temperature=model_kwargs.get("temp", 0.3),
+                max_tokens=model_kwargs.get("max_tokens"),
             ),
-            model=model,
-            temperature=model_kwargs.get("temp", 0.3),
-            max_tokens=model_kwargs.get("max_tokens"),
         )
 
         return summary
@@ -929,12 +1129,27 @@ class Journal:
             ),
         }
 
-        stage_summary = query(
-            system_message=summary_prompt,
-            user_message="Generate a comprehensive summary of the experimental findings in this stage",
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        authority_log_dir = getattr(cfg, "log_dir", None) or workspace_dir
+        stage_summary, _attempt_id, _terminal_hash = run_authority_call(
+            str(authority_log_dir),
+            category="stage-summary-request",
+            specification={
+                "schema": "xscientist.stage-summary-request.v1",
+                "stage_name": stage_name,
+                "node_ids": [node.id for node in self.nodes],
+                "prompt_hash": canonical_authority_hash(summary_prompt),
+            },
+            parent_node_id=None,
+            role="scientific_summary",
+            model=str(model),
+            task_kind="stage_summary",
+            operation=lambda: query(
+                system_message=summary_prompt,
+                user_message="Generate a comprehensive summary of the experimental findings in this stage",
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ),
         )
 
         atomic_write_text(

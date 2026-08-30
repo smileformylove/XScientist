@@ -6,7 +6,9 @@ import tempfile
 import unittest
 import math
 from pathlib import Path
+from unittest import mock
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.pipeline_contracts import (
     initialize_pipeline_contracts,
     load_pipeline_manifest,
@@ -14,11 +16,14 @@ from ai_scientist.utils.pipeline_contracts import (
 from ai_scientist.utils.research_integrity import (
     ResearchIntegrityError,
     assert_claim_promotion_allowed,
+    build_adaptive_state_freeze,
     build_preregistration,
     build_verification_report,
+    derive_adaptive_state_hashes,
     lock_preregistration,
     save_preregistration,
     save_verification_report,
+    validate_adaptive_state_freeze,
     validate_preregistration,
     _canonical_hash,
     _protocol_fidelity_hash,
@@ -53,6 +58,241 @@ def _digest(char: str) -> str:
 
 
 class ResearchIntegrityTests(unittest.TestCase):
+    def test_failed_reproduction_blocks_even_when_trajectory_structure_is_valid(
+        self,
+    ) -> None:
+        preregistration = {
+            "adaptive_state_freeze": {"state_hash": _digest("a")},
+            "analysis_plan": {},
+        }
+        records = [
+            {
+                "record_id": "primary-complete",
+                "study_phase": "confirmatory",
+                "status": "completed",
+                "producer_id": "agent:runner",
+            },
+            {
+                "record_id": "reproduction-failed",
+                "study_phase": "exploratory",
+                "independent_reproduction": True,
+                "status": "failed",
+                "producer_id": "human:reviewer",
+            },
+        ]
+        attestation = {
+            "ok": True,
+            "errors": [],
+            "trajectory_hash": _digest("b"),
+            "publication_ready": False,
+            "publication_blocking_attempt_record_ids": ["reproduction-failed"],
+            "disposed_attempt_record_ids": [],
+        }
+        with (
+            tempfile.TemporaryDirectory() as td,
+            mock.patch(
+                "ai_scientist.utils.trajectory_binding.attest_structured_trajectory",
+                return_value=attestation,
+            ),
+        ):
+            report = build_verification_report(
+                preregistration,
+                records,
+                verifier_id="human:reviewer",
+                clean_room=True,
+                verification_root=td,
+            )
+
+        criteria = {item["id"]: item for item in report["criteria"]}
+        self.assertFalse(criteria["confirmatory_attempt_completeness"]["passed"])
+        self.assertFalse(criteria["trajectory_binding"]["passed"])
+        self.assertFalse(criteria["independent_verifier"]["passed"])
+
+    def test_verification_report_binds_each_record_to_locked_host_data(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = b"x,y\n1,2\n"
+            files = [
+                {
+                    "path": "observations.csv",
+                    "size_bytes": len(data),
+                    "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                }
+            ]
+            snapshot_id = canonical_content_hash({"files": files})
+            snapshot = (
+                root / ".ara-store" / "datasets" / snapshot_id.removeprefix("sha256:")
+            )
+            snapshot.mkdir(parents=True)
+            data_path = snapshot / "observations.csv"
+            data_path.write_bytes(data)
+            data_path.chmod(0o444)
+            snapshot.chmod(0o555)
+            manifest_core = {
+                "schema_version": "xscientist.data-contract.v1",
+                "mode": "content_addressed_snapshot_read_only",
+                "ready": True,
+                "source_path_disclosed": False,
+                "snapshot_id": snapshot_id,
+                "file_count": 1,
+                "total_bytes": len(data),
+                "files": files,
+                "scientific_boundary": "fixed test observations",
+            }
+            manifest_hash = canonical_content_hash(manifest_core)
+            config = root / "00_config"
+            config.mkdir()
+            (config / "data_manifest.json").write_text(
+                json.dumps({**manifest_core, "manifest_hash": manifest_hash}),
+                encoding="utf-8",
+            )
+            draft = build_preregistration(_idea_card(), _research_plan())
+            draft["data_policy"].update(
+                {
+                    "data_manifest_hash": manifest_hash,
+                    "data_snapshot_id": snapshot_id,
+                }
+            )
+            locked = lock_preregistration(
+                draft,
+                split_hashes={"task_0": _digest("a")},
+                registered_by="planner",
+            )
+            report = build_verification_report(
+                locked,
+                [
+                    {
+                        "record_id": "confirm-1",
+                        "task_id": "task_0",
+                        "dataset": "benchmark-v1",
+                        "metric": "accuracy",
+                        "baseline_ref": "baseline-a",
+                        "status": "completed",
+                        "study_phase": "confirmatory",
+                        "producer_id": "agent:executor",
+                        "data_manifest_hash": _digest("8"),
+                        "data_snapshot_id": _digest("9"),
+                    }
+                ],
+                verifier_id="human:reviewer",
+                clean_room=True,
+                verification_root=root,
+            )
+
+        criterion = {item["id"]: item for item in report["criteria"]}[
+            "data_contract_binding"
+        ]
+        self.assertTrue(criterion["required"])
+        self.assertFalse(criterion["passed"])
+        self.assertIn("data_contract_binding", report["required_failures"])
+        self.assertEqual(report["data_manifest_hash"], manifest_hash)
+        self.assertEqual(report["data_snapshot_id"], snapshot_id)
+
+    def test_adaptive_state_freeze_is_content_addressed_and_tamper_evident(
+        self,
+    ) -> None:
+        draft = build_preregistration(_idea_card(), _research_plan())
+        draft["data_policy"]["split_hashes"] = {"task_0": _digest("a")}
+        derived = derive_adaptive_state_hashes(
+            draft,
+            research_vcs_head="1" * 40,
+        )
+        locked = lock_preregistration(
+            draft,
+            split_hashes={"task_0": _digest("a")},
+            registered_by="planner",
+            freeze_inputs={
+                "research_vcs_head": "1" * 40,
+                **derived,
+            },
+        )
+        freeze = locked["adaptive_state_freeze"]
+
+        self.assertTrue(validate_adaptive_state_freeze(freeze)["ok"])
+        self.assertTrue(validate_preregistration(locked, require_locked=True)["ok"])
+        protocol_before = _protocol_fidelity_hash(locked, "task_0")
+
+        freeze["memory_state_hash"] = _digest("f")
+        self.assertNotEqual(protocol_before, _protocol_fidelity_hash(locked, "task_0"))
+        freeze_report = validate_adaptive_state_freeze(freeze)
+        self.assertFalse(freeze_report["ok"])
+        self.assertIn("adaptive_state_freeze_hash_mismatch", freeze_report["errors"])
+        locked_report = validate_preregistration(locked, require_locked=True)
+        self.assertFalse(locked_report["ok"])
+
+    def test_adaptive_state_freeze_rejects_non_content_hash_inputs(self) -> None:
+        with self.assertRaisesRegex(ResearchIntegrityError, "requires content hashes"):
+            build_adaptive_state_freeze(
+                build_preregistration(_idea_card(), _research_plan()),
+                research_vcs_head="1" * 40,
+                code_state_hash="git-sha-is-not-a-content-hash",
+                memory_state_hash=_digest("b"),
+                evaluator_spec_hash=_digest("c"),
+                research_state_hash=_digest("d"),
+            )
+
+    def test_mutable_legacy_deviation_cannot_authorize_frozen_publication(
+        self,
+    ) -> None:
+        draft = build_preregistration(_idea_card(), _research_plan())
+        draft["data_policy"]["split_hashes"] = {"task_0": _digest("a")}
+        derived = derive_adaptive_state_hashes(
+            draft,
+            research_vcs_head="1" * 40,
+        )
+        locked = lock_preregistration(
+            draft,
+            split_hashes={"task_0": _digest("a")},
+            registered_by="recorder:planner",
+            freeze_inputs={"research_vcs_head": "1" * 40, **derived},
+        )
+        locked["deviations"] = [
+            {
+                "reason": "added after observing the result",
+                "approved_before_unblinding": True,
+            }
+        ]
+
+        report = build_verification_report(
+            locked,
+            [],
+            verifier_id="human:reviewer",
+            clean_room=True,
+        )
+
+        criterion = {item["id"]: item for item in report["criteria"]}[
+            "deviation_control"
+        ]
+        self.assertFalse(criterion["passed"])
+        self.assertIn("deviation_control", report["required_failures"])
+
+    def test_adaptive_state_freeze_rejects_unbound_aggregate_state(self) -> None:
+        with self.assertRaisesRegex(ResearchIntegrityError, "must bind"):
+            build_adaptive_state_freeze(
+                build_preregistration(_idea_card(), _research_plan()),
+                research_vcs_head="1" * 40,
+                code_state_hash=_digest("a"),
+                memory_state_hash=_digest("b"),
+                evaluator_spec_hash=_digest("c"),
+                research_state_hash=_digest("d"),
+            )
+
+    def test_adaptive_state_freeze_rejects_invented_bound_components(self) -> None:
+        invented = {
+            "code_state_hash": _digest("a"),
+            "memory_state_hash": _digest("b"),
+            "evaluator_spec_hash": _digest("c"),
+        }
+        with self.assertRaisesRegex(ResearchIntegrityError, "must be derived"):
+            build_adaptive_state_freeze(
+                build_preregistration(_idea_card(), _research_plan()),
+                research_vcs_head="1" * 40,
+                **invented,
+                research_state_hash=_canonical_hash(
+                    {"kind": "confirmatory_research_state", **invented}
+                ),
+            )
+
     def test_locked_preregistration_rejects_missing_identity_and_nonfinite_alpha(
         self,
     ) -> None:
@@ -257,6 +497,7 @@ class ResearchIntegrityTests(unittest.TestCase):
                 "baseline_metric_mean": 0.70,
                 "delta_vs_baseline": 0.12,
                 "effect_size": 0.12,
+                "standard_error": 0.01,
             }
             input_path = root / f"input-{seed}.json"
             result_path = root / f"result-{seed}.json"
@@ -320,6 +561,7 @@ class ResearchIntegrityTests(unittest.TestCase):
             "baseline_metric_mean": 0.70,
             "delta_vs_baseline": 0.11,
             "effect_size": 0.11,
+            "confidence_interval": [0.08, 0.14],
         }
         reproduction_input = root / "reproduction-input.json"
         reproduction_result = root / "reproduction-result.json"

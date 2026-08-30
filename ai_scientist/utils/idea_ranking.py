@@ -7,6 +7,7 @@ from statistics import median
 from typing import Callable, Optional
 
 from ai_scientist.config.paths import resolve_output_path
+from ai_scientist.config.venues import DEFAULT_TARGET_VENUE
 from ai_scientist.utils.atomic_io import atomic_write_json
 
 IDEA_SCORE_DIMENSIONS = (
@@ -181,7 +182,9 @@ def _load_historical_acceptance_profile(
         if not idea or not quality_result:
             continue
 
-        venue = quality_result.get("target_venue") or target_venue or "neurips"
+        venue = (
+            quality_result.get("target_venue") or target_venue or DEFAULT_TARGET_VENUE
+        )
         min_priority, max_blockers = resolve_submission_acceptance_settings(venue)
         acceptance = evaluate_submission_acceptance(
             quality_result,
@@ -388,6 +391,7 @@ def score_idea_for_venue(
     venue_instructions = {
         None: "平衡评估创新性、可验证性和论文叙事潜力。",
         "neurips": "优先考虑方法创新、实验严谨性、baseline 对比和清晰技术贡献。",
+        "icml": "优先考虑有边界的新颖性、强 baseline、消融、统计可靠性与可复现性。",
         "iclr": "优先考虑核心 insight、理论/经验支撑与研究叙事完整性。",
         "cvpr": "优先考虑视觉结果质量、实验覆盖度和结果呈现潜力。",
         "journal": "优先考虑完整性、稳定性、系统性实验和长期学术价值。",

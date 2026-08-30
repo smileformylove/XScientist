@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/integrity.v1/verification_report.schema.json",
+  "title": "XScientist scientific verification report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "preregistration_id",
+    "registration_hash",
+    "verifier_id",
+    "clean_room",
+    "status",
+    "claim_promotion_allowed",
+    "criteria",
+    "required_failures",
+    "confirmatory_record_ids",
+    "reproduction_record_ids",
+    "reproduction_task_counts",
+    "analysis_plan_contract",
+    "conclusion_interpretation",
+    "records_hash",
+    "registry_hash",
+    "evidence_snapshot_hash",
+    "manuscript_hash",
+    "data_manifest_hash",
+    "data_snapshot_id",
+    "report_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "generated_at": {"type": "string", "minLength": 1, "maxLength": 128},
+    "preregistration_id": {"$ref": "#/$defs/id"},
+    "registration_hash": {"$ref": "#/$defs/hash"},
+    "verifier_id": {"$ref": "#/$defs/id"},
+    "clean_room": {"type": "boolean"},
+    "status": {"enum": ["verified", "blocked"]},
+    "claim_promotion_allowed": {"type": "boolean"},
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {"$ref": "#/$defs/criterion"}
+    },
+    "required_failures": {
+      "type": "array",
+      "maxItems": 1024,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/id"}
+    },
+    "confirmatory_record_ids": {"$ref": "#/$defs/idSet"},
+    "reproduction_record_ids": {"$ref": "#/$defs/idSet"},
+    "reproduction_task_counts": {
+      "type": "object",
+      "maxProperties": 100000,
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "analysis_plan_contract": {"type": "object"},
+    "conclusion_interpretation": {"type": "object"},
+    "records_hash": {"$ref": "#/$defs/hash"},
+    "registry_hash": {"$ref": "#/$defs/hash"},
+    "evidence_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "manuscript_hash": {"$ref": "#/$defs/hash"},
+    "data_manifest_hash": {
+      "anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+    },
+    "data_snapshot_id": {
+      "anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+    },
+    "trajectory_binding_hash": {
+      "anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+    },
+    "research_vcs_frozen_head": {
+      "anyOf": [{"$ref": "#/$defs/gitCommit"}, {"type": "null"}]
+    },
+    "research_vcs_lineage_head": {
+      "anyOf": [{"$ref": "#/$defs/gitCommit"}, {"type": "null"}]
+    },
+    "research_vcs_attempt_object_ids": {"$ref": "#/$defs/rsoSet"},
+    "research_vcs_binding_object_ids": {"$ref": "#/$defs/rsoSet"},
+    "research_vcs_checkpoint_hashes": {"$ref": "#/$defs/hashSet"},
+    "failed_record_ids": {"$ref": "#/$defs/idSet"},
+    "research_vcs_disposition_object_ids": {"$ref": "#/$defs/rsoSet"},
+    "report_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "gitCommit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "idSet": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/id"}
+    },
+    "rsoSet": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"}
+    },
+    "hashSet": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/hash"}
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "required", "detail"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "passed": {"type": "boolean"},
+        "required": {"type": "boolean"},
+        "detail": {"type": "string", "maxLength": 8192}
+      }
+    }
+  }
+}

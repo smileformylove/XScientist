@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import re
 from typing import Any
 import unicodedata
@@ -11,10 +13,27 @@ from urllib.parse import urlsplit, urlunsplit
 
 from ai_scientist.protocol import content_hash
 from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.atomic_io import atomic_write_json
 from ai_scientist.utils.research_integrity import (
     ResearchIntegrityError,
     build_preregistration,
+    derive_adaptive_state_hashes,
     lock_preregistration,
+    validate_empirical_data_manifest,
+    validate_preregistration,
+)
+from ai_scientist.utils.safe_files import (
+    BoundedFileError,
+    read_bounded_regular_file,
+)
+from ai_scientist.utils.trajectory_binding import (
+    ATTEMPT_DISPOSITION_PROTOCOL,
+    ATTEMPT_DISPOSITIONS,
+    TRAJECTORY_BINDING_PROTOCOL,
+    attempt_registry_contract_errors,
+    build_terminal_negative_artifact_receipt,
+    registry_row_hash,
+    terminal_negative_contract_errors,
 )
 
 from .research_git import (
@@ -23,6 +42,8 @@ from .research_git import (
     ResearchObjectResult,
     capture_environment_receipt,
     create_checkpoint,
+    research_object_introduction_order,
+    repository_status,
 )
 from .research_lifecycle import ResearchLifecycle
 from .research_semantics import (
@@ -39,6 +60,160 @@ def _required_text(value: str, *, label: str) -> str:
     if not normalized:
         raise ResearchGitError(f"{label} cannot be empty")
     return normalized
+
+
+def _read_bounded_project_file(
+    paper_root: Path,
+    filename: str,
+    *,
+    label: str,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> bytes:
+    path = paper_root / filename
+    try:
+        return read_bounded_regular_file(
+            path,
+            maximum=max_bytes,
+            label=filename.replace(".", "_"),
+        )
+    except BoundedFileError as exc:
+        raise ResearchGitError(f"{label} is missing or unsafe") from exc
+
+
+def _decode_project_json(encoded: bytes, *, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ResearchGitError(f"{label} is missing, unsafe, or invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ResearchGitError(f"{label} must be a JSON object")
+    return payload
+
+
+def _load_bounded_project_json(
+    paper_root: Path,
+    filename: str,
+    *,
+    label: str,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> dict[str, Any]:
+    return _decode_project_json(
+        _read_bounded_project_file(
+            paper_root,
+            filename,
+            label=label,
+            max_bytes=max_bytes,
+        ),
+        label=label,
+    )
+
+
+def _load_bounded_registry_rows(paper_root: Path) -> list[dict[str, Any]]:
+    encoded = _read_bounded_project_file(
+        paper_root,
+        "experiment_registry.jsonl",
+        label="experiment registry",
+        max_bytes=64 * 1024 * 1024,
+    )
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeError as exc:
+        raise ResearchGitError("experiment registry is not valid UTF-8") from exc
+    rows: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if len(rows) >= 100_000:
+            raise ResearchGitError("experiment registry exceeds 100000 rows")
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ResearchGitError(
+                f"experiment registry line {line_number} is invalid JSON"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ResearchGitError(
+                f"experiment registry line {line_number} is not an object"
+            )
+        rows.append(row)
+    return rows
+
+
+def _locked_registration_object(
+    repository: ResearchRepository, preregistration: Mapping[str, Any]
+) -> dict[str, Any]:
+    matches = [
+        item
+        for item in repository.objects(kind="preregistration", state="locked")
+        if (item.get("payload") or {}).get("registration_hash")
+        == preregistration.get("registration_hash")
+        and (item.get("payload") or {}).get("preregistration_id")
+        == preregistration.get("preregistration_id")
+    ]
+    if len(matches) != 1:
+        raise ResearchGitError(
+            "paper preregistration must resolve to exactly one locked Research VCS object"
+        )
+    return matches[0]
+
+
+def _read_optional_project_file(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> bytes | None:
+    try:
+        return read_bounded_regular_file(
+            path,
+            maximum=max_bytes,
+            label=path.name.replace(".", "_"),
+        )
+    except BoundedFileError as exc:
+        if exc.reason == "missing":
+            return None
+        raise ResearchGitError(f"{label} is unsafe or unreadable") from exc
+
+
+def _canonical_confirmatory_tasks(
+    research_plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    raw_tasks = research_plan.get("tasks")
+    if not isinstance(raw_tasks, list) or not raw_tasks or len(raw_tasks) > 256:
+        raise ResearchGitError(
+            "research plan must contain between 1 and 256 confirmatory tasks"
+        )
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_tasks):
+        if not isinstance(raw, Mapping):
+            raise ResearchGitError("research plan task must be a JSON object")
+        task_id = _required_text(
+            str(raw.get("task_id") or ""), label=f"research task {index} id"
+        )
+        if task_id in seen:
+            raise ResearchGitError(f"duplicate research task id: {task_id}")
+        seen.add(task_id)
+        task = dict(raw)
+        task["task_id"] = task_id
+        for field in ("dataset", "metric", "baseline"):
+            task[field] = _required_text(
+                str(task.get(field) or ""), label=f"{task_id} {field}"
+            )
+        tasks.append(task)
+    return tasks
+
+
+def _restore_atomic_json(path: Path, previous: bytes | None) -> None:
+    """Restore one campaign mirror after a failed multi-file transition."""
+
+    if previous is None:
+        path.unlink(missing_ok=True)
+        return
+    from ai_scientist.utils.atomic_io import atomic_write_bytes
+
+    atomic_write_bytes(path, previous)
 
 
 def _hashes(values: Sequence[str], *, label: str) -> list[str]:
@@ -720,21 +895,41 @@ def save_source_update(
             raise ResearchGitError(
                 "source reinstatement requires an active retraction update"
             )
-        latest_retraction = max(
-            active_retractions,
-            key=lambda item: (
-                _source_update_time(item) or datetime.min.replace(tzinfo=timezone.utc),
-                str(item.get("created_at") or ""),
-                str(item.get("object_id") or ""),
-            ),
+        introduction_order = research_object_introduction_order(repository.path)
+        latest_time = max(
+            _source_update_time(item) or datetime.min.replace(tzinfo=timezone.utc)
+            for item in active_retractions
         )
+        time_matches = [
+            item
+            for item in active_retractions
+            if (_source_update_time(item) or datetime.min.replace(tzinfo=timezone.utc))
+            == latest_time
+        ]
+        latest_sequence = max(
+            introduction_order.get(str(item["object_id"]), -1) for item in time_matches
+        )
+        latest_matches = [
+            item
+            for item in time_matches
+            if introduction_order.get(str(item["object_id"]), -1) == latest_sequence
+        ]
+        if latest_sequence < 0 or len(latest_matches) != 1:
+            raise ResearchGitError(
+                "active retractions are ambiguous at the latest source/Git event; "
+                "record an explicit superseding update"
+            )
+        latest_retraction = latest_matches[0]
         latest_payload = latest_retraction.get("payload") or {}
         if core["provider"] != str(latest_payload.get("provider") or ""):
             raise ResearchGitError(
                 "source reinstatement provider must match the latest active retraction"
             )
-        latest_time = _source_update_time(latest_retraction)
-        if latest_time is None or parsed_checked_at <= latest_time:
+        latest_retraction_time = _source_update_time(latest_retraction)
+        if (
+            latest_retraction_time is None
+            or parsed_checked_at <= latest_retraction_time
+        ):
             raise ResearchGitError(
                 "source reinstatement must be checked after the latest active "
                 "retraction"
@@ -854,10 +1049,14 @@ def save_experiment(
     summary: str,
     status: str,
     study_phase: str = "exploratory",
+    task_id: str | None = None,
     plan_id: str | None = None,
     priority_id: str | None = None,
     preregistration_id: str | None = None,
     metrics: Mapping[str, Any] | None = None,
+    configuration: Mapping[str, Any] | None = None,
+    producer_id: str | None = None,
+    result_artifact_hashes: Mapping[str, str] | None = None,
     seeds: Sequence[int] = (),
     environment_hash: str | None = None,
     dependency_lock_hashes: Sequence[str] = (),
@@ -878,8 +1077,25 @@ def save_experiment(
         "status": status,
         "study_phase": study_phase,
     }
+    if task_id is not None:
+        payload["task_id"] = _required_text(task_id, label="experiment task id")
     if metrics:
         payload["metrics"] = dict(metrics)
+    if configuration:
+        normalized_configuration = dict(configuration)
+        payload["configuration"] = normalized_configuration
+        payload["configuration_hash"] = canonical_content_hash(normalized_configuration)
+    if producer_id is not None:
+        payload["producer_id"] = _required_text(
+            producer_id, label="experiment producer id"
+        )
+    if result_artifact_hashes:
+        payload["result_artifact_hashes"] = {
+            _required_text(str(name), label="result artifact label"): _hashes(
+                [str(digest)], label="result artifact hash"
+            )[0]
+            for name, digest in sorted(result_artifact_hashes.items())
+        }
     if seeds:
         payload["seeds"] = list(dict.fromkeys(seeds))
     if failure_class.strip():
@@ -919,7 +1135,14 @@ def save_experiment(
         "dataset_hashes": _hashes(dataset_hashes, label="dataset hash"),
         "seeds": sorted(set(seeds)),
     }
-    selected_commit = str(code_commit or repository.status().get("head") or "")
+    selected_commit = str(
+        code_commit
+        or (
+            ""
+            if str(study_phase).strip().lower() == "confirmatory"
+            else repository.status().get("head") or ""
+        )
+    )
     if selected_commit:
         provenance["code_commit"] = selected_commit
     provenance = {
@@ -944,6 +1167,949 @@ def save_experiment(
         status=result.state,
         commit=commit,
         reproduce_command=reproduce_command,
+    )
+
+
+def _confirmatory_queue_contract(
+    tasks: Sequence[Mapping[str, Any]],
+    outcomes: Mapping[str, Mapping[str, Any]],
+    *,
+    split_hashes: Mapping[str, str],
+    data_manifest_hash: str,
+    data_snapshot_id: str,
+) -> dict[str, Any]:
+    """Build the immutable executor/result-recording contract locked by preregistration."""
+
+    contract_tasks: list[dict[str, Any]] = []
+    for index, task in enumerate(tasks):
+        task_id = str(task["task_id"])
+        outcome = outcomes[task_id]
+        row = {
+            "queue_index": index,
+            "task_id": task_id,
+            "goal": task.get("goal"),
+            "dependencies": list(task.get("dependencies") or []),
+            "dataset": outcome.get("dataset"),
+            "metric": outcome.get("metric"),
+            "baseline": outcome.get("baseline"),
+            "evidence_role": outcome.get("evidence_role"),
+            "paired_control_task_id": outcome.get("paired_control_task_id"),
+            "intervention_variant": outcome.get("intervention_variant"),
+            "stress_condition": outcome.get("stress_condition"),
+            "transformation_contract": outcome.get("transformation_contract"),
+            "transformation_contract_hash": outcome.get("transformation_contract_hash"),
+            "split_hash": split_hashes[task_id],
+            "data_manifest_hash": data_manifest_hash,
+            "data_snapshot_id": data_snapshot_id,
+            "allowed_terminal_states": [
+                "completed",
+                "failed",
+                "timed_out",
+                "cancelled",
+            ],
+            "required_completed_fields": [
+                "producer_id",
+                "configuration",
+                "configuration_hash",
+                "result_artifact_hashes",
+            ],
+            "required_unsuccessful_fields": ["producer_id", "failure_class"],
+            "record_command_template": [
+                "xscientist",
+                "research",
+                "experiment",
+                "{RESULT_SUMMARY}",
+                "--status",
+                "{TERMINAL_STATUS}",
+                "--study-phase",
+                "confirmatory",
+                "--task",
+                task_id,
+                "--plan",
+                "{PLAN_OBJECT_ID}",
+                "--preregistration",
+                "{PREREGISTRATION_OBJECT_ID}",
+                "--producer-id",
+                "{PRODUCER_ID}",
+                "--repo",
+                ".",
+            ],
+            "record_command_terminal_arguments": {
+                "completed": [
+                    "--config",
+                    "{NAME=VALUE}",
+                    "--result-artifact",
+                    "{LABEL=PATH}",
+                ],
+                "unsuccessful": [
+                    "--failure-class",
+                    "{FAILURE_CLASS}",
+                ],
+            },
+        }
+        row["task_contract_hash"] = canonical_content_hash(row)
+        contract_tasks.append(row)
+    core = {
+        "schema": "xscientist.confirmatory-queue-contract.v1",
+        "tasks": contract_tasks,
+    }
+    return {**core, "queue_contract_hash": canonical_content_hash(core)}
+
+
+def confirm_paper_research(
+    paper_dir: str,
+    *,
+    registered_by: str = "recorder:xscientist-user",
+    split_hashes: Mapping[str, str] | None = None,
+    data_manifest_hash: str | None = None,
+    data_snapshot_id: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Lock a generated multi-task paper plan and materialize its run queue.
+
+    The planning model never grants itself confirmatory authority.  This
+    host-owned transition revalidates the generated plan, empirical snapshot,
+    task splits, and current Research VCS head; records the plan and locked
+    registration as immutable objects; then checkpoints inspectable mirrors in
+    the same paper directory.
+    """
+
+    requested_paper_root = Path(paper_dir).expanduser()
+    if requested_paper_root.is_symlink():
+        raise ResearchGitError("paper directory must not be a symbolic link")
+    paper_root = requested_paper_root.resolve()
+    if not paper_root.is_dir():
+        raise ResearchGitError("paper directory was not found or is a symbolic link")
+    status = repository_status(paper_root)
+    repository = ResearchRepository(str(status["repository"]))
+    repository_root = repository.path
+    try:
+        paper_relative = paper_root.relative_to(repository_root)
+    except ValueError as exc:
+        raise ResearchGitError(
+            "paper directory must be inside the selected Research VCS repository"
+        ) from exc
+    _ensure_direct_save_is_safe(repository, commit=True)
+
+    preregistration_path = paper_root / "preregistration.json"
+    queue_path = paper_root / "confirmatory_queue.json"
+    previous_preregistration = _read_bounded_project_file(
+        paper_root,
+        "preregistration.json",
+        label="generated preregistration draft",
+    )
+    previous_queue = _read_optional_project_file(
+        queue_path,
+        label="existing confirmatory queue",
+    )
+    research_plan = _load_bounded_project_json(
+        paper_root,
+        "research_plan.json",
+        label="generated research plan",
+    )
+    draft = _decode_project_json(
+        previous_preregistration,
+        label="generated preregistration draft",
+    )
+    tasks = _canonical_confirmatory_tasks(research_plan)
+    plan_id = _required_text(
+        str(research_plan.get("plan_id") or ""), label="research plan id"
+    )
+    if draft.get("status") != "draft":
+        raise ResearchGitError(
+            "paper preregistration must be a draft; an existing lock must be "
+            "audited rather than silently replaced"
+        )
+    if str(draft.get("plan_id") or "").strip() != plan_id:
+        raise ResearchGitError(
+            "preregistration draft does not bind the generated research plan"
+        )
+
+    raw_outcomes = draft.get("outcomes")
+    if not isinstance(raw_outcomes, list):
+        raise ResearchGitError("preregistration outcomes must be an array")
+    outcomes = {
+        str(item.get("task_id") or "").strip(): item
+        for item in raw_outcomes
+        if isinstance(item, Mapping) and str(item.get("task_id") or "").strip()
+    }
+    task_ids = {str(task["task_id"]) for task in tasks}
+    if len(outcomes) != len(raw_outcomes) or set(outcomes) != task_ids:
+        raise ResearchGitError(
+            "preregistration outcomes must match every generated research task exactly"
+        )
+    scientific_fields = (
+        "dataset",
+        "metric",
+        "baseline",
+        "evidence_role",
+        "paired_control_task_id",
+        "intervention_variant",
+        "stress_condition",
+    )
+    for task in tasks:
+        task_id = str(task["task_id"])
+        outcome = outcomes[task_id]
+        if any(outcome.get(field) != task.get(field) for field in scientific_fields):
+            raise ResearchGitError(
+                f"preregistration outcome {task_id} differs from its generated task "
+                "contract"
+            )
+        transformation = outcome.get("transformation_contract")
+        transformation_hash = outcome.get("transformation_contract_hash")
+        if (
+            transformation is not None
+            and transformation_hash != canonical_content_hash(transformation)
+        ):
+            raise ResearchGitError(
+                f"preregistration outcome {task_id} transformation hash is invalid"
+            )
+
+    data_report = validate_empirical_data_manifest(paper_root)
+    if data_report.get("ok") is not True:
+        raise ResearchGitError(
+            "confirmatory research requires a verified read-only empirical data "
+            "snapshot: " + ", ".join(data_report.get("errors") or [])
+        )
+    locked_manifest_hash = str(data_report.get("manifest_hash") or "")
+    locked_snapshot_id = str(data_report.get("snapshot_id") or "")
+    if data_manifest_hash and data_manifest_hash != locked_manifest_hash:
+        raise ResearchGitError(
+            "supplied data manifest hash differs from the host-verified manifest"
+        )
+    if data_snapshot_id and data_snapshot_id != locked_snapshot_id:
+        raise ResearchGitError(
+            "supplied data snapshot id differs from the host-verified snapshot"
+        )
+
+    existing_split_hashes = (draft.get("data_policy") or {}).get("split_hashes")
+    existing_split_hashes = (
+        existing_split_hashes if isinstance(existing_split_hashes, Mapping) else {}
+    )
+    supplied_splits = dict(split_hashes or {})
+    conflicting_splits = sorted(
+        str(task_id)
+        for task_id in set(existing_split_hashes) & set(supplied_splits)
+        if str(existing_split_hashes[task_id]).strip()
+        != str(supplied_splits[task_id]).strip()
+    )
+    if conflicting_splits:
+        raise ResearchGitError(
+            "supplied split hashes conflict with the generated preregistration: "
+            + ", ".join(conflicting_splits)
+        )
+    selected_splits = {
+        str(key).strip(): str(value).strip()
+        for key, value in {**existing_split_hashes, **supplied_splits}.items()
+        if str(key).strip()
+    }
+    if set(selected_splits) != task_ids:
+        missing = sorted(task_ids - set(selected_splits))
+        unknown = sorted(set(selected_splits) - task_ids)
+        detail = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if unknown:
+            detail.append("unknown=" + ",".join(unknown))
+        raise ResearchGitError(
+            "confirmatory split hashes must cover every task exactly"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+    _hashes(list(selected_splits.values()), label="dataset split hash")
+
+    alternative = _required_text(
+        str((draft.get("hypotheses") or {}).get("alternative") or ""),
+        label="registered alternative hypothesis",
+    )
+    falsifiers = (draft.get("hypotheses") or {}).get("falsifiers") or []
+    falsifier = next(
+        (str(item).strip() for item in falsifiers if str(item).strip()),
+        "",
+    )
+    falsifier = _required_text(falsifier, label="registered falsifier")
+    hypothesis_matches = [
+        item
+        for item in repository.objects(kind="hypothesis")
+        if str((item.get("payload") or {}).get("statement") or "").strip()
+        == alternative
+        and str((item.get("payload") or {}).get("falsifier") or "").strip() == falsifier
+    ]
+    hypothesis_checkpoint: CheckpointResult | None = None
+    if len(hypothesis_matches) > 1:
+        raise ResearchGitError(
+            "multiple Research VCS hypotheses match the generated paper; resolve "
+            "the ambiguity before confirmation"
+        )
+    if hypothesis_matches:
+        hypothesis_id = str(hypothesis_matches[0]["object_id"])
+    else:
+        hypothesis = repository.record(
+            "hypothesis",
+            {"statement": alternative, "falsifier": falsifier},
+            state="draft",
+            actor={"actor_id": registered_by, "authority": "recorder"},
+        )
+        hypothesis_id = hypothesis.object_id
+        hypothesis_checkpoint = create_checkpoint(
+            repository_root,
+            stage="ideation",
+            subject="record generated paper hypothesis before confirmation",
+            status="completed",
+            only_paths=[hypothesis.path.relative_to(repository_root).as_posix()],
+        )
+
+    repository_state = repository.status()
+    if repository_state.get("worktree_clean") is not True:
+        raise ResearchGitError(
+            "confirmatory freeze requires a clean Research VCS worktree"
+        )
+    research_vcs_head = _required_text(
+        str(repository_state.get("head") or ""),
+        label="Research VCS checkpoint before confirmatory freeze",
+    )
+    preregistration_relative = (paper_relative / "preregistration.json").as_posix()
+    queue_relative = (paper_relative / "confirmatory_queue.json").as_posix()
+    if preregistration_relative.startswith("./"):
+        preregistration_relative = preregistration_relative[2:]
+    if queue_relative.startswith("./"):
+        queue_relative = queue_relative[2:]
+    draft = dict(draft)
+    draft["data_policy"] = dict(draft.get("data_policy") or {})
+    draft["data_policy"].update(
+        {
+            "split_hashes": dict(sorted(selected_splits.items())),
+            "data_manifest_hash": locked_manifest_hash,
+            "data_snapshot_id": locked_snapshot_id,
+        }
+    )
+    queue_contract = _confirmatory_queue_contract(
+        tasks,
+        outcomes,
+        split_hashes=selected_splits,
+        data_manifest_hash=locked_manifest_hash,
+        data_snapshot_id=locked_snapshot_id,
+    )
+    draft["confirmatory_campaign"] = {
+        "schema": "xscientist.confirmatory-campaign.v1",
+        "preregistration_path": preregistration_relative,
+        "queue_path": queue_relative,
+        "queue_contract": queue_contract,
+        "queue_contract_hash": queue_contract["queue_contract_hash"],
+    }
+    try:
+        derived_state_hashes = derive_adaptive_state_hashes(
+            draft,
+            research_vcs_head=research_vcs_head,
+        )
+        locked = lock_preregistration(
+            draft,
+            split_hashes=dict(sorted(selected_splits.items())),
+            registered_by=registered_by,
+            freeze_inputs={
+                "research_vcs_head": research_vcs_head,
+                **derived_state_hashes,
+            },
+        )
+    except ResearchIntegrityError as exc:
+        raise ResearchGitError(str(exc)) from exc
+    validation = validate_preregistration(locked, require_locked=True)
+    if validation.get("ok") is not True:
+        raise ResearchGitError(
+            "host-generated locked preregistration failed validation: "
+            + ", ".join(validation.get("errors") or [])
+        )
+
+    plan = repository.record(
+        "research_plan",
+        research_plan,
+        state="draft",
+        relations=[{"type": "depends_on", "target": hypothesis_id}],
+        actor={"actor_id": registered_by, "authority": "recorder"},
+    )
+    registration = repository.record(
+        "preregistration",
+        locked,
+        state="locked",
+        relations=[{"type": "depends_on", "target": plan.object_id}],
+        actor={"actor_id": registered_by, "authority": "recorder"},
+    )
+    recorded = _finish(
+        repository,
+        registration,
+        stage="preregister",
+        subject=message or "lock generated multi-task confirmatory campaign",
+        status="completed",
+        commit=True,
+        related=[plan],
+    )
+    registration_checkpoint = recorded.get("checkpoint")
+    if registration_checkpoint is None or not registration_checkpoint.committed:
+        raise ResearchGitError(
+            "confirmatory campaign lock was not committed to Research VCS"
+        )
+
+    locked_campaign = locked.get("confirmatory_campaign") or {}
+    locked_queue_contract = locked_campaign.get("queue_contract") or {}
+    queue_tasks: list[dict[str, Any]] = []
+    for contract_task in locked_queue_contract.get("tasks") or []:
+        task_id = str(contract_task.get("task_id") or "")
+        queue_tasks.append(
+            {
+                **dict(contract_task),
+                "status": "queued",
+                "study_phase": "confirmatory",
+                "adaptive_state_hash": locked["adaptive_state_freeze"]["state_hash"],
+                "research_state_hash": locked["adaptive_state_freeze"][
+                    "research_state_hash"
+                ],
+                "post_freeze_adaptation": False,
+                "bound_object_ids": {
+                    "plan": plan.object_id,
+                    "preregistration": registration.object_id,
+                },
+                "record_command_prefix": [
+                    "xscientist",
+                    "research",
+                    "experiment",
+                    "{RESULT_SUMMARY}",
+                    "--study-phase",
+                    "confirmatory",
+                    "--task",
+                    task_id,
+                    "--plan",
+                    plan.object_id,
+                    "--preregistration",
+                    registration.object_id,
+                    "--repo",
+                    ".",
+                ],
+            }
+        )
+    queue: dict[str, Any] = {
+        "schema": "xscientist.confirmatory-queue.v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "locked",
+        "paper_dir": paper_relative.as_posix() or ".",
+        "plan_id": plan_id,
+        "plan_object_id": plan.object_id,
+        "preregistration_id": locked["preregistration_id"],
+        "preregistration_object_id": registration.object_id,
+        "registration_hash": locked["registration_hash"],
+        "frozen_head": research_vcs_head,
+        "frozen_state_hash": locked["adaptive_state_freeze"]["state_hash"],
+        "data_manifest_hash": locked_manifest_hash,
+        "data_snapshot_id": locked_snapshot_id,
+        "queue_contract_hash": locked_queue_contract.get("queue_contract_hash"),
+        "tasks": queue_tasks,
+    }
+    queue["queue_hash"] = canonical_content_hash(queue)
+
+    try:
+        atomic_write_json(preregistration_path, locked, ensure_ascii=False)
+        atomic_write_json(queue_path, queue, ensure_ascii=False)
+    except BaseException as exc:
+        _restore_atomic_json(preregistration_path, previous_preregistration)
+        _restore_atomic_json(queue_path, previous_queue)
+        raise ResearchGitError(
+            "INCOMPLETE_CONFIRMATORY_CAMPAIGN: the immutable preregistration "
+            f"object {registration.object_id} was committed, but its paper mirrors "
+            "could not be written. Do not create a second lock; recover by "
+            "materializing that exact locked object and its queue, then checkpoint "
+            "only the declared campaign artifact paths."
+        ) from exc
+    try:
+        campaign_checkpoint = create_checkpoint(
+            repository_root,
+            stage="preregister",
+            subject="materialize locked confirmatory queue",
+            status="completed",
+            only_paths=[preregistration_relative, queue_relative],
+        )
+    except BaseException as exc:
+        raise ResearchGitError(
+            "INCOMPLETE_CONFIRMATORY_CAMPAIGN: the immutable preregistration "
+            f"object {registration.object_id} is committed and the locked mirrors "
+            "are present, but their checkpoint failed. Do not create a second "
+            "lock. Recovery: run `xscientist research stage "
+            f"{preregistration_relative} {queue_relative} --repo .` and then "
+            "`xscientist research commit --repo . --stage preregister "
+            "-m 'materialize locked confirmatory queue'`."
+        ) from exc
+
+    return {
+        **recorded,
+        "hypothesis_checkpoint": hypothesis_checkpoint,
+        "campaign_checkpoint": campaign_checkpoint,
+        "preregistration_path": str(preregistration_path),
+        "queue_path": str(queue_path),
+        "queue": queue,
+        "validation": validation,
+    }
+
+
+def bind_experiment_trajectory(
+    paper_dir: str,
+    *,
+    record_id: str,
+    attempt_id: str,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Bind one immutable registry row to its Research VCS attempt/checkpoint."""
+
+    paper_root = Path(paper_dir).expanduser().resolve()
+    status = repository_status(paper_root)
+    repository = ResearchRepository(str(status["repository"]))
+    preregistration = _load_bounded_project_json(
+        paper_root,
+        "preregistration.json",
+        label="locked preregistration",
+    )
+    registration = _locked_registration_object(repository, preregistration)
+    registration_object_id = str(registration["object_id"])
+    try:
+        paper_relative = paper_root.relative_to(repository.path)
+    except ValueError as exc:
+        raise ResearchGitError("paper directory is outside Research VCS") from exc
+    allowed_pending = {
+        (paper_relative / filename).as_posix()
+        for filename in (
+            "experiment_registry.jsonl",
+            "experiment_registry.integrity.json",
+            "experiment_registry.history.jsonl",
+            "pipeline_manifest.json",
+            "stage_standards.json",
+            "process_alignment.json",
+        )
+    }
+    current_status = repository.status()
+    if current_status.get("research_stage", {}).get("paths"):
+        raise ResearchGitError("trajectory binding requires an empty native stage")
+    pending = {
+        *list(current_status.get("staged_paths") or []),
+        *list(current_status.get("tracked_changes") or []),
+        *list(current_status.get("eligible_changes") or []),
+    }
+    # Paper-root registry artifacts can be policy-excluded in a standalone
+    # Research VCS repository.  They are nevertheless explicit inputs to this
+    # transition and must be committed with the binding object, never consumed
+    # only from an untracked working copy.
+    excluded_changes = [
+        str(item) for item in current_status.get("excluded_changes") or []
+    ]
+    pending.update(
+        path
+        for path in allowed_pending
+        if any(
+            item == path or item.startswith(path + " (") for item in excluded_changes
+        )
+    )
+    unexpected_pending = sorted(pending - allowed_pending)
+    if unexpected_pending:
+        raise ResearchGitError(
+            "trajectory binding found unrelated pending paths: "
+            + ", ".join(unexpected_pending)
+        )
+    registry_repository_path = (paper_relative / "experiment_registry.jsonl").as_posix()
+    if registry_repository_path not in pending:
+        raise ResearchGitError(
+            "trajectory binding requires the registry row to be pending in the "
+            "same Research VCS transition"
+        )
+    rows = _load_bounded_registry_rows(paper_root)
+    normalized_record_id = _required_text(record_id, label="registry record id")
+    matches = [
+        row
+        for row in rows
+        if row.get("record_type") != "attempt_disposition"
+        and str(row.get("record_id") or "").strip() == normalized_record_id
+    ]
+    if len(matches) != 1:
+        raise ResearchGitError(
+            "registry record id must identify exactly one immutable evidence row"
+        )
+    row = matches[0]
+    attempt = repository.get(attempt_id)
+    contract_errors = attempt_registry_contract_errors(
+        row,
+        attempt,
+        registration_object_id=registration_object_id,
+    )
+    if contract_errors:
+        raise ResearchGitError(
+            "registry row and Research VCS attempt disagree: "
+            + ", ".join(contract_errors)
+        )
+    adaptive_freeze = preregistration.get("adaptive_state_freeze")
+    if not isinstance(adaptive_freeze, Mapping):
+        raise ResearchGitError("locked preregistration has no adaptive state freeze")
+    lineage = ResearchLifecycle(repository)._confirmatory_lineage_attestation(
+        registration=registration,
+        preregistration_id=registration_object_id,
+        preregistration=preregistration,
+        adaptive_freeze=adaptive_freeze,
+        allowed_pending_paths=set(pending),
+    )
+    normalized_attempt_id = str(attempt.get("object_id") or "")
+    if normalized_attempt_id not in set(
+        lineage.get("prior_confirmatory_attempt_ids") or []
+    ):
+        raise ResearchGitError(
+            "attempt is not in the host-attested post-freeze Research VCS lineage"
+        )
+    all_bindings = [
+        item
+        for item in repository.objects(kind="gate_decision")
+        if (item.get("payload") or {}).get("protocol_kind")
+        == TRAJECTORY_BINDING_PROTOCOL
+    ]
+    existing = [
+        item
+        for item in all_bindings
+        if (item.get("payload") or {}).get("record_id") == normalized_record_id
+        or (item.get("payload") or {}).get("attempt_id") == normalized_attempt_id
+    ]
+    if existing:
+        raise ResearchGitError(
+            "registry record or attempt already has a trajectory binding"
+        )
+    bindable_rows = [
+        row
+        for row in rows
+        if row.get("record_type") != "attempt_disposition"
+        and (
+            str(row.get("study_phase") or "").strip().lower() == "confirmatory"
+            or row.get("independent_reproduction") is True
+        )
+    ]
+    bindable_ids = [str(row.get("record_id") or "").strip() for row in bindable_rows]
+    bound_record_ids = {
+        str((item.get("payload") or {}).get("record_id") or "").strip()
+        for item in all_bindings
+    }
+    unbound_record_ids = [
+        record_id for record_id in bindable_ids if record_id not in bound_record_ids
+    ]
+    if (
+        any(not record_id for record_id in bindable_ids)
+        or len(bindable_ids) != len(set(bindable_ids))
+        or unbound_record_ids != [normalized_record_id]
+    ):
+        raise ResearchGitError(
+            "trajectory binding requires exactly one new, uniquely identified "
+            "registry row per checkpoint"
+        )
+    bound_attempt_ids = {
+        str((item.get("payload") or {}).get("attempt_id") or "").strip()
+        for item in all_bindings
+    }
+    unbound_lineage_attempt_ids = (
+        set(lineage.get("prior_confirmatory_attempt_ids") or []) - bound_attempt_ids
+    )
+    if unbound_lineage_attempt_ids != {normalized_attempt_id}:
+        raise ResearchGitError(
+            "trajectory binding requires exactly one unbound attempt in the "
+            "host-attested lineage"
+        )
+    head = str(repository.status().get("head") or "")
+    origin = repository.blame(normalized_attempt_id, commit=head).get("origin") or {}
+    origin_commit = str(origin.get("commit") or "")
+    shown = repository.show(origin_commit)
+    checkpoint = shown.get("checkpoint") or {}
+    if shown.get("checkpoint_hash_valid") is not True:
+        raise ResearchGitError("attempt origin has no valid Research VCS checkpoint")
+    core = {
+        "protocol_kind": TRAJECTORY_BINDING_PROTOCOL,
+        "decision": "bind_registry_record_to_research_trajectory",
+        "record_id": normalized_record_id,
+        "registry_row_hash": registry_row_hash(row),
+        "attempt_id": normalized_attempt_id,
+        "attempt_content_hash": attempt.get("content_hash"),
+        "attempt_origin_commit": origin_commit,
+        "attempt_checkpoint_hash": checkpoint.get("content_hash"),
+    }
+    payload = {**core, "binding_hash": canonical_content_hash(core)}
+    result = repository.record(
+        "gate_decision",
+        payload,
+        state="verified",
+        relations=[
+            {"type": "attests", "target": normalized_attempt_id},
+            {
+                "type": "depends_on",
+                "target": registration_object_id,
+                "role": "protocol",
+            },
+        ],
+        actor={"actor_id": "xscientist-host", "authority": "deterministic_gate"},
+    )
+    checkpoint = create_checkpoint(
+        repository.path,
+        stage="review",
+        subject=message or f"bind registry record {normalized_record_id} to trajectory",
+        status="verified",
+        only_paths=[
+            result.path.relative_to(repository.path).as_posix(),
+            *sorted(pending),
+        ],
+    )
+    return {"object": result, "related": [], "checkpoint": checkpoint}
+
+
+def record_attempt_disposition(
+    paper_dir: str,
+    *,
+    record_id: str,
+    disposition: str,
+    reason: str,
+    retry_record_id: str | None = None,
+    approved_before_unblinding: bool = False,
+    negative_result_artifact: str | None = None,
+    negative_result_evidence_id: str | None = None,
+    recorded_by: str = "recorder:xscientist-user",
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Append an auditable decision for a failed/timed-out/cancelled attempt."""
+
+    normalized_disposition = str(disposition or "").strip().lower()
+    if normalized_disposition not in ATTEMPT_DISPOSITIONS:
+        raise ResearchGitError("unsupported attempt disposition")
+    normalized_reason = _required_text(reason, label="attempt disposition reason")
+    normalized_record_id = _required_text(record_id, label="registry record id")
+    normalized_recorder = _required_text(
+        recorded_by,
+        label="attempt disposition recorder",
+    )
+    paper_root = Path(paper_dir).expanduser().resolve()
+    status = repository_status(paper_root)
+    repository = ResearchRepository(str(status["repository"]))
+    _ensure_direct_save_is_safe(repository, commit=True)
+    preregistration = _load_bounded_project_json(
+        paper_root,
+        "preregistration.json",
+        label="locked preregistration",
+    )
+    registration = _locked_registration_object(repository, preregistration)
+    registration_object_id = str(registration["object_id"])
+    rows = _load_bounded_registry_rows(paper_root)
+    evidence_row_list = [
+        row for row in rows if row.get("record_type") != "attempt_disposition"
+    ]
+    evidence_record_ids = [
+        str(row.get("record_id") or "").strip() for row in evidence_row_list
+    ]
+    if any(not item for item in evidence_record_ids) or len(evidence_record_ids) != len(
+        set(evidence_record_ids)
+    ):
+        raise ResearchGitError(
+            "attempt disposition requires unique non-empty registry record ids"
+        )
+    evidence_rows = {
+        str(row.get("record_id") or "").strip(): row for row in evidence_row_list
+    }
+    row = evidence_rows.get(normalized_record_id)
+    if row is None or str(row.get("status") or "").strip().lower() not in {
+        "failed",
+        "error",
+        "timeout",
+        "timed_out",
+        "cancelled",
+        "canceled",
+    }:
+        raise ResearchGitError(
+            "attempt disposition requires one unsuccessful registry record"
+        )
+    bindings = [
+        item
+        for item in repository.objects(kind="gate_decision")
+        if (item.get("payload") or {}).get("protocol_kind")
+        == TRAJECTORY_BINDING_PROTOCOL
+        and (item.get("payload") or {}).get("record_id") == normalized_record_id
+    ]
+    if len(bindings) != 1:
+        raise ResearchGitError(
+            "failed registry record must have exactly one trajectory binding first"
+        )
+    binding_payload = bindings[0].get("payload") or {}
+    attempt = repository.get(str(binding_payload.get("attempt_id") or ""))
+    if (
+        binding_payload.get("registry_row_hash") != registry_row_hash(row)
+        or binding_payload.get("attempt_content_hash") != attempt.get("content_hash")
+        or attempt_registry_contract_errors(
+            row,
+            attempt,
+            registration_object_id=registration_object_id,
+        )
+    ):
+        raise ResearchGitError(
+            "failed registry row no longer matches its immutable trajectory binding"
+        )
+    existing = [
+        item
+        for item in repository.objects(kind="gate_decision")
+        if (item.get("payload") or {}).get("protocol_kind")
+        == ATTEMPT_DISPOSITION_PROTOCOL
+        and (item.get("payload") or {}).get("attempt_record_id") == normalized_record_id
+    ]
+    if existing:
+        raise ResearchGitError("attempt already has an immutable disposition")
+    retry_binding: dict[str, Any] | None = None
+    normalized_retry = str(retry_record_id or "").strip() or None
+    if normalized_disposition == "technical_failure_retried":
+        retry = evidence_rows.get(str(normalized_retry or ""))
+        if (
+            not retry
+            or retry.get("task_id") != row.get("task_id")
+            or retry.get("preregistration_id") != row.get("preregistration_id")
+            or str(retry.get("status") or "").strip().lower()
+            not in {"completed", "verified"}
+        ):
+            raise ResearchGitError(
+                "technical failure disposition requires a completed same-task retry"
+            )
+        retry_bindings = [
+            item
+            for item in repository.objects(kind="gate_decision")
+            if (item.get("payload") or {}).get("protocol_kind")
+            == TRAJECTORY_BINDING_PROTOCOL
+            and (item.get("payload") or {}).get("record_id") == normalized_retry
+        ]
+        if len(retry_bindings) != 1:
+            raise ResearchGitError("retry record must have one trajectory binding")
+        retry_binding = retry_bindings[0]
+        retry_binding_payload = retry_binding.get("payload") or {}
+        retry_attempt = repository.get(
+            str(retry_binding_payload.get("attempt_id") or "")
+        )
+        if (
+            retry_binding_payload.get("registry_row_hash") != registry_row_hash(retry)
+            or retry_binding_payload.get("attempt_content_hash")
+            != retry_attempt.get("content_hash")
+            or attempt_registry_contract_errors(
+                retry,
+                retry_attempt,
+                registration_object_id=registration_object_id,
+            )
+        ):
+            raise ResearchGitError(
+                "retry registry row no longer matches its immutable trajectory binding"
+            )
+    elif normalized_retry:
+        raise ResearchGitError("retry record is only valid for technical failure")
+    if (
+        normalized_disposition == "approved_deviation"
+        and approved_before_unblinding is not True
+    ):
+        raise ResearchGitError(
+            "approved_deviation requires an explicit pre-unblinding timing "
+            "assertion for audit; it remains a publication blocker"
+        )
+    artifact_receipt: dict[str, Any] | None = None
+    negative_evidence: dict[str, Any] | None = None
+    normalized_negative_evidence_id = (
+        str(negative_result_evidence_id or "").strip() or None
+    )
+    if normalized_disposition == "terminal_negative":
+        if not str(negative_result_artifact or "").strip():
+            raise ResearchGitError(
+                "terminal_negative requires --negative-result-artifact"
+            )
+        if normalized_negative_evidence_id is None:
+            raise ResearchGitError(
+                "terminal_negative requires --negative-result-evidence"
+            )
+        try:
+            artifact_receipt = build_terminal_negative_artifact_receipt(
+                repository,
+                str(negative_result_artifact),
+            )
+            negative_evidence = repository.get(normalized_negative_evidence_id)
+        except (ValueError, ResearchGitError) as exc:
+            raise ResearchGitError(str(exc)) from exc
+    elif negative_result_artifact or normalized_negative_evidence_id:
+        raise ResearchGitError(
+            "negative result artifact/evidence selectors are only valid for "
+            "terminal_negative"
+        )
+    core: dict[str, Any] = {
+        "protocol_kind": ATTEMPT_DISPOSITION_PROTOCOL,
+        "decision": "record_attempt_disposition",
+        "attempt_record_id": normalized_record_id,
+        "attempt_record_hash": registry_row_hash(row),
+        "attempt_id": binding_payload.get("attempt_id"),
+        "attempt_content_hash": binding_payload.get("attempt_content_hash"),
+        "disposition": normalized_disposition,
+        "reason": normalized_reason,
+        "retry_record_id": normalized_retry,
+        "approved_before_unblinding": approved_before_unblinding is True,
+        "negative_result_preserved": normalized_disposition == "terminal_negative",
+    }
+    if retry_binding is not None:
+        core["retry_attempt_id"] = (retry_binding.get("payload") or {}).get(
+            "attempt_id"
+        )
+    if artifact_receipt is not None and negative_evidence is not None:
+        negative_payload = negative_evidence.get("payload") or {}
+        core.update(
+            {
+                "negative_result_artifact": artifact_receipt,
+                "negative_result_evidence_id": normalized_negative_evidence_id,
+                "negative_result_evidence_hash": negative_evidence.get("content_hash"),
+                "negative_result_measurement_hash": negative_payload.get(
+                    "measurement_hash"
+                ),
+            }
+        )
+    relations: list[dict[str, str]] = [
+        {"type": "attests", "target": str(binding_payload.get("attempt_id") or "")},
+        {
+            "type": "depends_on",
+            "target": registration_object_id,
+            "role": "protocol",
+        },
+    ]
+    if retry_binding is not None:
+        relations.append(
+            {
+                "type": "depends_on",
+                "target": str((retry_binding.get("payload") or {}).get("attempt_id")),
+                "role": "retry",
+            }
+        )
+    if normalized_negative_evidence_id is not None:
+        relations.append(
+            {
+                "type": "depends_on",
+                "target": normalized_negative_evidence_id,
+                "role": "negative_result_evidence",
+            }
+        )
+    if normalized_disposition == "terminal_negative":
+        terminal_errors = terminal_negative_contract_errors(
+            repository,
+            {"payload": core, "relations": relations},
+            attempt,
+            registry_row=row,
+        )
+        if terminal_errors:
+            raise ResearchGitError(
+                "terminal negative contract is not host-verifiable: "
+                + ", ".join(terminal_errors)
+            )
+    payload = {**core, "disposition_hash": canonical_content_hash(core)}
+    result = repository.record(
+        "gate_decision",
+        payload,
+        state="verified",
+        relations=relations,
+        actor={"actor_id": normalized_recorder, "authority": "recorder"},
+    )
+    return _finish(
+        repository,
+        result,
+        stage="review",
+        subject=message or f"record disposition for {normalized_record_id}",
+        status="verified",
+        commit=True,
     )
 
 
@@ -1005,10 +2171,45 @@ def save_preregistration(
         )
         if minimum_effect is not None:
             draft["outcomes"][0]["minimum_effect"] = float(minimum_effect)
+        data_attestation = validate_empirical_data_manifest(repo)
+        if data_attestation.get("ok") is True:
+            draft["data_policy"]["data_manifest_hash"] = data_attestation.get(
+                "manifest_hash"
+            )
+            draft["data_policy"]["data_snapshot_id"] = data_attestation.get(
+                "snapshot_id"
+            )
+        elif data_attestation.get("errors") != ["data_manifest_not_found"]:
+            raise ResearchIntegrityError(
+                "cannot lock preregistration to an invalid empirical data "
+                "contract: " + ", ".join(data_attestation.get("errors") or ["unknown"])
+            )
+        repository_state = repository.status()
+        if repository_state.get("worktree_clean") is not True:
+            raise ResearchIntegrityError(
+                "confirmatory freeze requires a clean Research VCS worktree"
+            )
+        research_vcs_head = _required_text(
+            str(repository_state.get("head") or ""),
+            label="Research VCS checkpoint before confirmatory freeze",
+        )
+        # Derive the freeze from the exact preregistration contract that will
+        # be locked. This shared host-owned derivation is also recomputed by
+        # the top-venue publication gate, so arbitrary digest-shaped values
+        # cannot masquerade as committed code, memory, or evaluator state.
+        draft["data_policy"]["split_hashes"] = {task_id: split_hash}
+        derived_state_hashes = derive_adaptive_state_hashes(
+            draft,
+            research_vcs_head=research_vcs_head,
+        )
         locked = lock_preregistration(
             draft,
             split_hashes={task_id: split_hash},
             registered_by=registered_by,
+            freeze_inputs={
+                "research_vcs_head": research_vcs_head,
+                **derived_state_hashes,
+            },
         )
     except ResearchIntegrityError as exc:
         raise ResearchGitError(str(exc)) from exc
@@ -1023,7 +2224,7 @@ def save_preregistration(
         locked,
         state="locked",
         relations=[{"type": "depends_on", "target": plan.object_id}],
-        actor={"actor_id": registered_by, "authority": "human"},
+        actor={"actor_id": registered_by, "authority": "recorder"},
     )
     return _finish(
         repository,
@@ -1386,6 +2587,7 @@ def save_review(
 
 
 __all__ = [
+    "confirm_paper_research",
     "save_claim",
     "save_effect_estimate",
     "save_estimand",

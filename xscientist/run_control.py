@@ -172,6 +172,7 @@ _PUBLIC_VALUE_FLAGS = {
     "--task",
     "--provider",
     "--model",
+    "--judgment-model",
     "--profile",
     "--max-project-tokens",
     "--max-project-hours",
@@ -305,6 +306,7 @@ def _run_descriptor(workspace: Path, argv: Sequence[str]) -> dict[str, str | Non
     return {
         "provider": provider,
         "model": model,
+        "judgment_model": _argv_option(argv, "--judgment-model"),
         "profile": _argv_option(argv, "--autopilot") or "balanced",
         "task": _argv_option(argv, "--task") or "research",
     }
@@ -475,10 +477,11 @@ def public_run_view(payload: dict[str, Any]) -> dict[str, Any]:
     view["command"] = _public_command(
         command_source if isinstance(command_source, list) else []
     )
-    for key in ("provider", "model", "profile", "task"):
+    for key in ("provider", "model", "judgment_model", "profile", "task"):
         value = payload.get(key)
         if value is not None:
-            view[key] = _safe_public_value(f"--{key}", str(value))
+            flag = "--judgment-model" if key == "judgment_model" else f"--{key}"
+            view[key] = _safe_public_value(flag, str(value))
     started = str(payload.get("started_at") or "")
     finished = str(payload.get("finished_at") or "")
     if started:
@@ -509,9 +512,7 @@ def list_runs(workspace: str | Path) -> list[dict[str, Any]]:
         except RunControlError:
             continue
         rows.append(public_run_view(payload))
-    return sorted(
-        rows, key=lambda item: str(item.get("created_at") or ""), reverse=True
-    )
+    return sorted(rows, key=lambda item: str(item.get("id") or ""), reverse=True)
 
 
 def get_run(workspace: str | Path, run_id: str) -> dict[str, Any]:

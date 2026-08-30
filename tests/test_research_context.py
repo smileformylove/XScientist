@@ -509,6 +509,14 @@ class ResearchContextTests(unittest.TestCase):
                         payload["context_chain"]["previous_context_id"],
                         previous.object_id,
                     )
+                    self.assertIn(
+                        {
+                            "type": "supersedes",
+                            "target": previous.object_id,
+                            "role": "context_chain",
+                        },
+                        repository.get(current.object_id)["relations"],
+                    )
                 previous = current
                 recorded.append(payload)
 

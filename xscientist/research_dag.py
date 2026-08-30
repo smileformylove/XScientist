@@ -25,6 +25,7 @@ from .research_git import (
     _repository_root,
     _run_git,
     list_research_objects_at_ref,
+    research_object_introduction_order,
     show_checkpoint,
 )
 
@@ -187,6 +188,7 @@ def _summary(item: Mapping[str, Any], *, disclose: bool) -> str:
 
 def _strategy_projection(
     objects: Mapping[str, Mapping[str, Any]],
+    introduction_order: Mapping[str, int],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Project current theory, claim drill-down, and research-depth coverage."""
 
@@ -221,17 +223,25 @@ def _strategy_projection(
                 or (item.get("payload") or {}).get("portfolio_id") == portfolio_id
             )
         ]
-        return (
-            max(
-                rows,
-                key=lambda item: (
-                    str(item.get("created_at") or ""),
-                    str(item.get("object_id") or ""),
-                ),
+        if not rows:
+            return None
+        if any(str(item["object_id"]) not in introduction_order for item in rows):
+            raise ResearchGitError(
+                f"DAG cannot verify Git introduction order for {kind}"
             )
-            if rows
-            else None
+        latest_sequence = max(
+            introduction_order[str(item["object_id"])] for item in rows
         )
+        latest_rows = [
+            item
+            for item in rows
+            if introduction_order[str(item["object_id"])] == latest_sequence
+        ]
+        if len(latest_rows) != 1:
+            raise ResearchGitError(
+                f"DAG has ambiguous latest {kind} objects at one checkpoint"
+            )
+        return latest_rows[0]
 
     active_hypotheses = sorted(
         object_id
@@ -2004,6 +2014,7 @@ def build_research_dag(
     commit = str(checkpoint["commit"])
     rows = list_research_objects_at_ref(repo, commit)
     objects = {str(item["object_id"]): item for item in rows}
+    introduction_order = research_object_introduction_order(repo, ref=commit)
     claims = [item for item in rows if item.get("kind") == "claim"]
     closure = (
         audit_research_closure(repo, ref=commit, level="verify") if claims else None
@@ -2381,7 +2392,9 @@ def build_research_dag(
             for object_id, manifest_hash, graph_hash in unresolved_ara_bindings
         )
     proof_counts = Counter(node["proof"]["level"] for node in nodes)
-    theory_frontier, claim_insights, strategy_summary = _strategy_projection(objects)
+    theory_frontier, claim_insights, strategy_summary = _strategy_projection(
+        objects, introduction_order
+    )
     base = {
         "schema_version": RESEARCH_DAG_SCHEMA,
         "ref": ref,

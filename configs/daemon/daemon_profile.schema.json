@@ -325,6 +325,7 @@
       "enum": [
         null,
         "neurips",
+        "icml",
         "iclr",
         "cvpr",
         "journal",
@@ -373,6 +374,7 @@
       "enum": [
         null,
         "neurips",
+        "icml",
         "iclr",
         "cvpr",
         "journal",

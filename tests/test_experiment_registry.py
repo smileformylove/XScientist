@@ -1,22 +1,43 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
 from ai_scientist.utils import experiment_registry
 from ai_scientist.utils.experiment_registry import (
+    append_experiment_record,
     build_experiment_record,
+    check_experiment_registry_integrity,
     load_experiment_records,
+    load_verified_experiment_records,
     save_experiment_registry,
     summarize_experiment_registry,
 )
+from ai_scientist.utils.research_integrity import ResearchIntegrityError
 from ai_scientist.utils.pipeline_contracts import load_pipeline_manifest
 
 
 class ExperimentRegistryTests(unittest.TestCase):
-    def test_failed_registry_rebuild_preserves_file_and_manifest_state(self) -> None:
+    @staticmethod
+    def _legacy_v1_history_row(integrity: dict) -> dict:
+        core = {
+            "record_count": integrity["row_count"],
+            "records_hash": integrity["records_hash"],
+            "raw_hash": integrity["raw_hash"],
+            "chain_tip": integrity["chain_tip"],
+        }
+        return {
+            "version": 1,
+            **core,
+            "audit_hash": experiment_registry.canonical_hash(core),
+        }
+
+    def test_missing_integrity_evidence_blocks_registry_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo_project"
             project_root.mkdir(parents=True, exist_ok=True)
@@ -25,22 +46,303 @@ class ExperimentRegistryTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    experiment_registry,
-                    "save_jsonl_artifact",
-                    side_effect=OSError("disk busy"),
-                ),
-                mock.patch.object(
                     experiment_registry, "update_pipeline_artifact"
                 ) as update,
-                self.assertRaisesRegex(OSError, "disk busy"),
+                self.assertRaisesRegex(
+                    ResearchIntegrityError, "tampered|must all exist"
+                ),
             ):
-                save_experiment_registry(project_root, [{"status": "new"}])
+                save_experiment_registry(
+                    project_root,
+                    [{"record_id": "new", "status": "new"}],
+                )
 
             self.assertEqual(
                 output_path.read_text(encoding="utf-8"),
                 '{"status":"previous"}\n',
             )
             update.assert_not_called()
+
+    def test_append_refuses_to_bless_tampered_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first = build_experiment_record(
+                task_id="first",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="completed",
+            )
+            second = build_experiment_record(
+                task_id="second",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="failed",
+            )
+            save_experiment_registry(root, [first])
+            registry = root / "experiment_registry.jsonl"
+            registry.write_bytes(
+                registry.read_bytes().replace(b'"completed"', b'"failed"')
+            )
+            before = {
+                path: path.read_bytes()
+                for path in (
+                    registry,
+                    root / "experiment_registry.integrity.json",
+                    root / "experiment_registry.history.jsonl",
+                )
+            }
+
+            with self.assertRaises(ResearchIntegrityError):
+                append_experiment_record(root, second)
+
+            self.assertEqual(before, {path: path.read_bytes() for path in before})
+
+    def test_concurrent_appends_preserve_every_row_and_history_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            def record(index: int) -> dict:
+                return build_experiment_record(
+                    task_id=f"task-{index}",
+                    record_id=f"record-{index}",
+                    dataset="demo",
+                    metric="accuracy",
+                    baseline_ref="base",
+                    status="completed",
+                )
+
+            save_experiment_registry(root, [record(0)])
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                list(
+                    executor.map(
+                        lambda index: append_experiment_record(root, record(index)),
+                        range(1, 9),
+                    )
+                )
+
+            loaded = load_experiment_records(root)
+            report = check_experiment_registry_integrity(root)
+            self.assertEqual(
+                {row["record_id"] for row in loaded},
+                {f"record-{index}" for index in range(9)},
+            )
+            self.assertTrue(report["ok"], report["errors"])
+            history = [
+                json.loads(line)
+                for line in (root / "experiment_registry.history.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual([row["sequence"] for row in history], list(range(1, 10)))
+            self.assertEqual(history[0]["previous_audit_hash"], "GENESIS")
+            self.assertEqual(
+                [row["previous_audit_hash"] for row in history[1:]],
+                [row["audit_hash"] for row in history[:-1]],
+            )
+
+    def test_append_and_save_reject_stale_snapshot_after_coherent_commit(
+        self,
+    ) -> None:
+        for operation in ("append", "save"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as td:
+                root = Path(td) / "target"
+                competing_root = Path(td) / "competing"
+
+                def record(record_id: str) -> dict:
+                    return build_experiment_record(
+                        task_id=record_id,
+                        record_id=record_id,
+                        dataset="demo",
+                        metric="accuracy",
+                        baseline_ref="base",
+                        status="completed",
+                    )
+
+                first = record("A")
+                stale_addition = record("B")
+                concurrent_addition = record("C")
+                save_experiment_registry(root, [first])
+
+                # Prepare a fully coherent A+C triple. The injected replacement
+                # deliberately ignores the advisory transaction lock and lands
+                # after the public writer observed A but before its low-level
+                # commit. A stale A+B writer must fail closed, not adopt A+C as
+                # its baseline and erase C.
+                save_experiment_registry(competing_root, [first])
+                save_experiment_registry(competing_root, [concurrent_addition])
+                coherent_by_name = {
+                    path.name: path.read_bytes()
+                    for path in experiment_registry._registry_paths(competing_root)
+                }
+                original_write = experiment_registry._write_registry_transaction
+                injected = False
+
+                def inject_coherent_commit(project_root, **kwargs):
+                    nonlocal injected
+                    if not injected:
+                        injected = True
+                        for path in experiment_registry._registry_paths(root):
+                            path.write_bytes(coherent_by_name[path.name])
+                    return original_write(project_root, **kwargs)
+
+                with (
+                    mock.patch.object(
+                        experiment_registry,
+                        "_write_registry_transaction",
+                        side_effect=inject_coherent_commit,
+                    ),
+                    self.assertRaisesRegex(ResearchIntegrityError, "concurrently"),
+                ):
+                    if operation == "append":
+                        append_experiment_record(root, stale_addition)
+                    else:
+                        save_experiment_registry(root, [stale_addition])
+
+                self.assertTrue(injected)
+                self.assertEqual(
+                    [row["record_id"] for row in load_experiment_records(root)],
+                    ["A", "C"],
+                )
+                report = check_experiment_registry_integrity(root)
+                self.assertTrue(report["ok"], report["errors"])
+                history = [
+                    json.loads(line)
+                    for line in (root / "experiment_registry.history.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
+                self.assertEqual([row["sequence"] for row in history], [1, 2])
+
+    def test_save_is_idempotent_append_merge_for_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first = build_experiment_record(
+                task_id="first",
+                record_id="first",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="failed",
+            )
+            second = build_experiment_record(
+                task_id="second",
+                record_id="second",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="completed",
+            )
+            save_experiment_registry(root, [first])
+            history_path = root / "experiment_registry.history.jsonl"
+            first_history = history_path.read_bytes()
+
+            save_experiment_registry(root, [first])
+            self.assertEqual(history_path.read_bytes(), first_history)
+            rebuilt_first = build_experiment_record(
+                task_id="first",
+                record_id="first",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="failed",
+            )
+            save_experiment_registry(root, [rebuilt_first])
+            self.assertEqual(history_path.read_bytes(), first_history)
+
+            save_experiment_registry(root, [second])
+            self.assertEqual(load_experiment_records(root), [first, second])
+            self.assertTrue(check_experiment_registry_integrity(root)["ok"])
+
+            changed_first = {**first, "status": "completed"}
+            with self.assertRaisesRegex(ResearchIntegrityError, "immutable"):
+                save_experiment_registry(root, [changed_first])
+
+    def test_legacy_history_requires_full_prefix_anchor_before_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            first = build_experiment_record(
+                task_id="first",
+                record_id="A",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="completed",
+            )
+            second = build_experiment_record(
+                task_id="second",
+                record_id="B",
+                dataset="demo",
+                metric="accuracy",
+                baseline_ref="base",
+                status="completed",
+            )
+            save_experiment_registry(root, [first])
+            first_integrity = json.loads(
+                (root / "experiment_registry.integrity.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            save_experiment_registry(root, [second])
+            second_integrity = json.loads(
+                (root / "experiment_registry.integrity.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            legacy_rows = [
+                self._legacy_v1_history_row(first_integrity),
+                self._legacy_v1_history_row(second_integrity),
+            ]
+            legacy_raw = "".join(
+                json.dumps(row, ensure_ascii=False) + "\n" for row in legacy_rows
+            ).encode("utf-8")
+            history_path = root / "experiment_registry.history.jsonl"
+            history_path.write_bytes(legacy_raw)
+
+            # Ordinary inspection remains backward compatible, but an
+            # unanchored v1 chain must never grant execution/publication trust.
+            self.assertEqual(load_experiment_records(root), [first, second])
+            report = check_experiment_registry_integrity(root)
+            self.assertFalse(report["ok"])
+            self.assertIn("legacy_history_unanchored", report["errors"])
+            with self.assertRaisesRegex(
+                ResearchIntegrityError, "legacy_history_unanchored"
+            ):
+                load_verified_experiment_records(root)
+
+            # An idempotent save performs a one-time, exact-byte migration even
+            # though no experiment record changed.
+            save_experiment_registry(root, [first, second])
+            migrated_raw = history_path.read_bytes()
+            migrated_rows = [
+                json.loads(line) for line in migrated_raw.decode("utf-8").splitlines()
+            ]
+            anchor = migrated_rows[-1]
+            self.assertEqual(anchor["version"], 3)
+            self.assertEqual(anchor["legacy_history_row_count"], 2)
+            self.assertEqual(
+                anchor["legacy_history_tip"], legacy_rows[-1]["audit_hash"]
+            )
+            self.assertEqual(
+                anchor["legacy_history_raw_hash"],
+                "sha256:" + hashlib.sha256(legacy_raw).hexdigest(),
+            )
+            self.assertTrue(check_experiment_registry_integrity(root)["ok"])
+            self.assertEqual(load_verified_experiment_records(root), [first, second])
+
+            # Removing any anchored legacy prefix changes both the exact prefix
+            # digest and row position even though the surviving v1 tip still
+            # describes the current A+B registry snapshot.
+            history_path.write_bytes(
+                b"".join(migrated_raw.splitlines(keepends=True)[1:])
+            )
+            truncated = check_experiment_registry_integrity(root)
+            self.assertFalse(truncated["ok"])
+            self.assertIn(
+                "registry_history_legacy_raw_hash_mismatch",
+                truncated["errors"],
+            )
 
     def test_save_and_summarize_registry_should_update_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as td:

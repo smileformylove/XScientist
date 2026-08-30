@@ -7,6 +7,8 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.config.venues import TARGET_VENUE_SET
+
 try:
     import tomllib as _toml_loader
 except ModuleNotFoundError:
@@ -61,7 +63,7 @@ def _validate_source_entry(entry: dict[str, Any], index: int) -> list[str]:
     if source_type is not None and source_type not in {"topic", "ideas"}:
         errors.append(f"sources[{index}].type must be 'topic' or 'ideas'")
     venue_fields = ["target_venue", "day_target_venue", "night_target_venue"]
-    valid_venues = {None, "neurips", "iclr", "cvpr", "journal", "nature"}
+    valid_venues = {None, *TARGET_VENUE_SET}
     for field in venue_fields:
         if entry.get(field) not in valid_venues:
             errors.append(f"sources[{index}].{field} is not a supported venue")

@@ -6,7 +6,7 @@ import re
 import shlex
 from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from ai_scientist.protocol.hashing import content_hash
 
@@ -15,6 +15,7 @@ from .research_git import (
     list_research_objects,
     list_research_objects_at_ref,
     preview_research_merge,
+    research_object_introduction_order,
     repository_status,
 )
 
@@ -273,17 +274,20 @@ def decide_research_transition(
 
         chosen = "+".join(str(item["action"]) for item in actions)
         alternative = "hold" if chosen != "hold" else "apply_transition"
-        latest_targets = [
-            str(item["object_id"])
-            for item in sorted(
-                context_candidates,
-                key=lambda item: (
-                    str(item.get("created_at") or ""),
-                    str(item["object_id"]),
-                ),
-                reverse=True,
-            )[:8]
-        ]
+        introduction_order = research_object_introduction_order(repo)
+        working_sequence = max(introduction_order.values(), default=0) + 1
+        candidate_sequence = {
+            str(item["object_id"]): introduction_order.get(
+                str(item["object_id"]), working_sequence
+            )
+            for item in context_candidates
+        }
+        selected_sequences = sorted(set(candidate_sequence.values()), reverse=True)[:8]
+        latest_targets = sorted(
+            object_id
+            for object_id, sequence in candidate_sequence.items()
+            if sequence in selected_sequences
+        )
         context_snapshot = build_research_context_snapshot(
             repo,
             target_ids=latest_targets,
@@ -331,6 +335,143 @@ def decide_research_transition(
         "trace_required": True,
         "context": context_snapshot,
         "host_paths_disclosed": False,
+    }
+
+
+def record_research_transition_decision(
+    repo: str | Path,
+    *,
+    event: str,
+    name: str = "",
+    state: str = "",
+    source_branch: str | None = None,
+    competing_hypothesis: bool = False,
+    contradictory_evidence: bool = False,
+    protocol_change: bool = False,
+    independent_replication: bool = False,
+    actor_id: str = "research-transition-policy",
+) -> dict[str, Any]:
+    """Persist an adopted transition policy and its exact decision context.
+
+    ``decide_research_transition`` remains a safe preview.  This companion is
+    the explicit adoption boundary: it records the same deterministic result
+    as a typed decision object, plus the hash-bound context that was visible
+    when the policy was evaluated.  It deliberately records policy reasons,
+    evidence references, and rejected actions—not hidden model reasoning.
+    """
+
+    from .research_context import research_context_issues
+    from .research_git import ResearchGitError
+    from .research_vcs import ResearchRepository
+
+    repository = ResearchRepository(repo)
+    if any(
+        isinstance((item.get("payload") or {}).get("adaptive_state_freeze"), Mapping)
+        for item in repository.objects(kind="preregistration", state="locked")
+    ):
+        raise ResearchGitError(
+            "generic transition decisions cannot be recorded after a confirmatory "
+            "freeze; use trajectory-bind or attempt-disposition so the decision "
+            "has a protocol-defined scientific meaning"
+        )
+    decision = decide_research_transition(
+        repository.path,
+        event=event,
+        name=name,
+        state=state,
+        source_branch=source_branch,
+        competing_hypothesis=competing_hypothesis,
+        contradictory_evidence=contradictory_evidence,
+        protocol_change=protocol_change,
+        independent_replication=independent_replication,
+    )
+    context_payload = decision.get("context")
+    context_result = None
+    if isinstance(context_payload, Mapping):
+        context = dict(context_payload)
+        issues = research_context_issues(
+            context,
+            objects={str(item["object_id"]): item for item in repository.objects()},
+        )
+        if issues:
+            raise ResearchGitError(
+                "invalid transition decision context: " + "; ".join(issues)
+            )
+        context_result = repository.record(
+            "context_snapshot",
+            context,
+            state="completed" if context.get("complete") is True else "rejected",
+            relations=[
+                {
+                    "type": "depends_on",
+                    "target": object_id,
+                    "role": "context_source",
+                }
+                for object_id in context.get("source_object_ids") or []
+            ],
+            actor={"actor_id": actor_id, "authority": "recorder"},
+            provenance={
+                "context_hashes": [str(context["context_hash"])],
+                "memory_hashes": [str(context["memory_snapshot_hash"])],
+                "decision_input_hash": str(context["source_closure_hash"]),
+            },
+        )
+
+    trace = {key: value for key, value in decision.items() if key != "context"}
+    selected = "+".join(
+        str(item.get("action") or "")
+        for item in decision.get("actions") or []
+        if isinstance(item, Mapping) and str(item.get("action") or "")
+    )
+    core = {
+        "protocol_kind": "xscientist.research-vcs-transition-decision.v1",
+        "decision": selected or "none",
+        "claim_promotion_allowed": False,
+        "decision_id": decision["decision_id"],
+        "policy_version": POLICY_VERSION,
+        "decision_trace": trace,
+        "context_object_id": (
+            context_result.object_id if context_result is not None else None
+        ),
+        "context_hash": (
+            context_payload.get("context_hash")
+            if isinstance(context_payload, Mapping)
+            else None
+        ),
+    }
+    payload = {**core, "decision_hash": content_hash(core)}
+    decision_result = repository.record(
+        "gate_decision",
+        payload,
+        state="completed",
+        relations=(
+            [
+                {
+                    "type": "depends_on",
+                    "target": context_result.object_id,
+                    "role": "decision_context",
+                }
+            ]
+            if context_result is not None
+            else []
+        ),
+        actor={"actor_id": actor_id, "authority": "deterministic_gate"},
+        provenance={
+            "context_hashes": (
+                [str(context_payload["context_hash"])]
+                if isinstance(context_payload, Mapping)
+                else []
+            ),
+            "decision_input_hash": content_hash(trace),
+            "policy_hash": content_hash(
+                {"policy": "research_transition", "version": POLICY_VERSION}
+            ),
+        },
+    )
+    return {
+        "decision": decision,
+        "context_object": context_result,
+        "decision_object": decision_result,
     }
 
 

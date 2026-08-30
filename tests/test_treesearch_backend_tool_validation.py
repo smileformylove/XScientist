@@ -859,10 +859,11 @@ def test_vlm_evidence_binding_follows_selected_plot_order(tmp_path) -> None:
         plot_paths.append(str(path))
     selected = [plot_paths[7], plot_paths[2]]
     cfg = SimpleNamespace(
+        log_dir=str(tmp_path),
         agent=SimpleNamespace(
             feedback=SimpleNamespace(model="openai/gpt-4o-mini", temp=0),
             vlm_feedback=SimpleNamespace(model="openai/gpt-4o-mini", temp=0),
-        )
+        ),
     )
     agent = parallel_module.MinimalAgent("task", cfg)
     node = Node(
@@ -894,9 +895,10 @@ def test_vlm_evidence_binding_rejects_analysis_count_mismatch(tmp_path) -> None:
         path.write_bytes(b"image")
         paths.append(str(path))
     cfg = SimpleNamespace(
+        log_dir=str(tmp_path),
         agent=SimpleNamespace(
             vlm_feedback=SimpleNamespace(model="openai/gpt-4o-mini", temp=0)
-        )
+        ),
     )
     agent = parallel_module.MinimalAgent("task", cfg)
     node = Node(plot_paths=paths, datasets_successfully_tested=["already-bound"])

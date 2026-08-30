@@ -6,6 +6,8 @@ import argparse
 import sys
 from collections import Counter
 
+from ai_scientist.config.venues import TARGET_VENUES
+
 
 def main(
     argv=None,
@@ -133,7 +135,7 @@ def main(
     )
     shortlist_parser.add_argument(
         "--venue",
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         help="按目标 venue 过滤",
     )
     shortlist_parser.add_argument(
@@ -342,7 +344,7 @@ def main(
     )
     rewrite_board_parser.add_argument(
         "--venue",
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         help="按目标 venue 过滤",
     )
     rewrite_board_parser.add_argument(
@@ -379,7 +381,7 @@ def main(
     )
     repair_board_parser.add_argument(
         "--venue",
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         help="按目标 venue 过滤",
     )
     repair_board_parser.add_argument(
@@ -425,7 +427,7 @@ def main(
     )
     benchmark_parser.add_argument(
         "--venue",
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         default="nature",
         help="按目标 venue 的门槛做基准评估",
     )
@@ -604,7 +606,7 @@ def main(
     )
     trend_parser.add_argument(
         "--venue",
-        choices=["neurips", "iclr", "cvpr", "journal", "nature"],
+        choices=list(TARGET_VENUES),
         default="nature",
         help="趋势统计的目标 venue",
     )

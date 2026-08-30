@@ -165,7 +165,10 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
     ) -> None:
         from xscientist.benchmark import benchmark_first_run
 
-        first_run = benchmark_first_run(max_seconds=30)
+        # Leave enough headroom for loaded CI hosts.  This test verifies that
+        # changing a valid report's semantic result is detected; it is not a
+        # wall-clock performance benchmark.
+        first_run = benchmark_first_run(max_seconds=120)
         self.assertTrue(verify_benchmark_report(first_run)["ok"])
         first_run["ok"] = False
         tampered = verify_benchmark_report(first_run)
@@ -715,6 +718,14 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
                     process_audit_module, "list_research_objects", return_value=objects
                 ),
                 mock.patch.object(
+                    process_audit_module,
+                    "research_object_introduction_order",
+                    return_value={
+                        str(item["object_id"]): index + 1
+                        for index, item in enumerate(objects)
+                    },
+                ),
+                mock.patch.object(
                     process_audit_module, "show_checkpoint", return_value={}
                 ),
             ):
@@ -802,6 +813,14 @@ class AutoResearchBenchmarkTests(unittest.TestCase):
                 ),
                 mock.patch.object(
                     process_audit_module, "list_research_objects", return_value=objects
+                ),
+                mock.patch.object(
+                    process_audit_module,
+                    "research_object_introduction_order",
+                    return_value={
+                        str(item["object_id"]): index + 1
+                        for index, item in enumerate(objects)
+                    },
                 ),
                 mock.patch.object(
                     process_audit_module, "show_checkpoint", return_value={}

@@ -209,6 +209,20 @@ class ProviderRegistryTests(unittest.TestCase):
                     "OPENAI_COMPAT_USER_AGENT": "unsafe\r\nheader",
                 },
             )
+        for endpoint in (
+            "https://remote.example/v1\x00suffix",
+            "https://remote.example/v1\tsegment",
+            "https://remote.example/v1\x7fsuffix",
+        ):
+            with self.subTest(endpoint=repr(endpoint)):
+                with self.assertRaisesRegex(ValueError, "control characters"):
+                    build_openai_compatible_client_kwargs(
+                        "openai_compat/research-model",
+                        env={
+                            "OPENAI_COMPAT_API_KEY": "compat-key",
+                            "OPENAI_COMPAT_BASE_URL": endpoint,
+                        },
+                    )
 
     def test_openai_compat_uses_configurable_neutral_user_agent(self) -> None:
         kwargs, model = build_openai_compatible_client_kwargs(
@@ -259,6 +273,7 @@ class ProviderRegistryTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
+        self.assertTrue(result["model_identity_verified"])
         self.assertTrue(result["exact_model_match"])
         self.assertEqual(result["reported_model"], "gpt-5.6-luna")
         self.assertFalse(result["response_content_recorded"])
@@ -286,9 +301,11 @@ class ProviderRegistryTests(unittest.TestCase):
             )
 
         self.assertFalse(result["ok"])
+        self.assertFalse(result["model_identity_verified"])
         self.assertFalse(result["exact_model_match"])
         self.assertEqual(result["reported_model"], "gpt-5.4-mini")
         self.assertEqual(result["identity_status"], "mismatch")
+        self.assertEqual(result["error_code"], "model_identity_mismatch")
 
     def test_live_probe_never_publishes_untrusted_provider_metadata(self) -> None:
         canary = "sk-" + "P" * 40
@@ -341,6 +358,7 @@ class ProviderRegistryTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
+        self.assertTrue(result["model_identity_verified"])
         self.assertTrue(result["tool_call_valid"])
         self.assertTrue(result["usage_valid"])
         self.assertEqual(result["identity_status"], "exact")
@@ -395,6 +413,7 @@ class ProviderRegistryTests(unittest.TestCase):
             )
 
         self.assertFalse(result["ok"])
+        self.assertTrue(result["model_identity_verified"])
         self.assertTrue(result["tool_call_valid"])
         self.assertFalse(result["usage_valid"])
         self.assertEqual(result["error_code"], "provider_usage_invalid")
@@ -420,9 +439,28 @@ class ProviderRegistryTests(unittest.TestCase):
             )
 
         self.assertFalse(result["ok"])
+        self.assertFalse(result["model_identity_verified"])
         self.assertTrue(result["tool_call_valid"])
         self.assertEqual(result["reported_model"], "different-model")
         self.assertEqual(result["identity_status"], "mismatch")
+        self.assertEqual(result["error_code"], "model_identity_mismatch")
+
+    def test_tool_probe_does_not_treat_a_route_alias_as_exact_identity(self) -> None:
+        response = _tool_probe_response(model="openai_compat/gpt-5.6-luna")
+        with mock.patch("openai.OpenAI") as client_type:
+            client_type.return_value.chat.completions.create.return_value = response
+            result = probe_openai_compatible_tool_call(
+                "openai_compat/gpt-5.6-luna",
+                env={
+                    "OPENAI_COMPAT_API_KEY": "test-key",
+                    "OPENAI_COMPAT_BASE_URL": "https://gateway.example/v1",
+                },
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["model_identity_verified"])
+        self.assertFalse(result["exact_model_match"])
+        self.assertEqual(result["identity_status"], "alias")
         self.assertEqual(result["error_code"], "model_identity_mismatch")
 
     def test_tool_probe_never_publishes_sensitive_provider_metadata(self) -> None:

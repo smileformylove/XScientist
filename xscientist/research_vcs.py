@@ -27,6 +27,7 @@ from .research_git import (
     research_diff,
     research_blame,
     research_log,
+    research_trajectory,
     research_stage,
     research_unstage,
     preview_research_merge,
@@ -35,6 +36,7 @@ from .research_git import (
     resolve_research_object_id,
     revert_research_checkpoint,
     switch_research_branch,
+    validate_complete_research_trajectory,
     verify_research_repository,
 )
 
@@ -204,6 +206,24 @@ class ResearchRepository:
     def log(self, *, limit: int = 20, ref: str = "HEAD") -> list[dict[str, Any]]:
         return research_log(self.path, limit=limit, ref=ref)
 
+    def trajectory(
+        self,
+        *,
+        limit: int = 50,
+        ref: str = "HEAD",
+        require_complete: bool = False,
+    ) -> dict[str, Any]:
+        """Return a bounded payload-free object/checkpoint trajectory projection.
+
+        ``require_complete`` uses the canonical maximum bound and fails closed
+        unless the projection reaches the initial Research VCS checkpoint.
+        ``limit`` remains the presentation bound for ordinary inspection.
+        """
+
+        if require_complete:
+            return validate_complete_research_trajectory(self.path, ref=ref)
+        return research_trajectory(self.path, limit=limit, ref=ref)
+
     def show(self, commit: str = "HEAD") -> dict[str, Any]:
         return show_checkpoint(self.path, commit)
 
@@ -246,6 +266,36 @@ class ResearchRepository:
             contradictory_evidence=contradictory_evidence,
             protocol_change=protocol_change,
             independent_replication=independent_replication,
+        )
+
+    def record_decision(
+        self,
+        *,
+        event: str,
+        name: str = "",
+        state: str = "",
+        source_branch: str | None = None,
+        competing_hypothesis: bool = False,
+        contradictory_evidence: bool = False,
+        protocol_change: bool = False,
+        independent_replication: bool = False,
+        actor_id: str = "research-transition-policy",
+    ) -> dict[str, Any]:
+        """Adopt and persist a transition decision with its evidence context."""
+
+        from .research_policy import record_research_transition_decision
+
+        return record_research_transition_decision(
+            self.path,
+            event=event,
+            name=name,
+            state=state,
+            source_branch=source_branch,
+            competing_hypothesis=competing_hypothesis,
+            contradictory_evidence=contradictory_evidence,
+            protocol_change=protocol_change,
+            independent_replication=independent_replication,
+            actor_id=actor_id,
         )
 
     def context(

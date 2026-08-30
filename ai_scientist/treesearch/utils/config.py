@@ -1,3 +1,5 @@
+# Modified by XScientist contributors from the AI-Scientist-v2/AIDE lineage.
+# See THIRD_PARTY_NOTICES.md for provenance and license details.
 """configuration and setup utils"""
 
 from __future__ import annotations
@@ -6,7 +8,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
-from typing import Hashable, cast, Literal, Optional
+from typing import Any, Hashable, cast, Literal, Optional
 
 import coolname
 import rich
@@ -95,6 +97,11 @@ class AgentConfig:
 
     summary: Optional[StageConfig] = None
     select_node: Optional[StageConfig] = None
+    # Scientific decisions (metric selection, experiment specifications,
+    # hyperparameters, ablations, and implementation conformance review) use
+    # this explicit route.  Legacy non-GLM configs may omit it and fall back to
+    # ``feedback``; execution-only GLM routes fail closed when it is absent.
+    judgment: Optional[StageConfig] = None
     evidence_gate: EvidenceGateConfig = field(default_factory=EvidenceGateConfig)
 
 
@@ -288,6 +295,45 @@ def prep_cfg(cfg: Config, *, base_dir: str | Path | None = None):
 
     if cfg.agent.type not in ["parallel", "sequential"]:
         raise ValueError("agent.type must be either 'parallel' or 'sequential'")
+
+    # GLM-5.3 is an implementation/execution route, not a scientific
+    # authority.  Enforce this in the central loader so direct BFTS entry
+    # points cannot bypass the higher-level project/start role contract.
+    from ai_scientist.utils.provider_registry import resolve_model_provider
+
+    def route_identity(section: Any) -> tuple[str, str] | None:
+        if section is None:
+            return None
+        model = str(getattr(section, "model", "") or "").strip()
+        if not model:
+            return None
+        if model == "__xscientist_non_glm_judgment_model_required__":
+            return None
+        spec = resolve_model_provider(model)
+        return str(spec.provider).casefold(), str(spec.client_model).casefold()
+
+    code_identity = route_identity(cfg.agent.code)
+    if code_identity is not None and code_identity[1] == "glm-5.3":
+        judgment_identity = route_identity(cfg.agent.judgment)
+        if judgment_identity is None or judgment_identity[1] == "glm-5.3":
+            raise ValueError(
+                "GLM-5.3 execution requires a distinct non-GLM agent.judgment "
+                "route before BFTS can run"
+            )
+        mismatched = []
+        for name in ("feedback", "vlm_feedback", "summary"):
+            if route_identity(getattr(cfg.agent, name, None)) != judgment_identity:
+                mismatched.append(name)
+        if (
+            cfg.agent.select_node is None
+            or route_identity(cfg.agent.select_node) != judgment_identity
+        ):
+            mismatched.append("select_node")
+        if mismatched:
+            raise ValueError(
+                "GLM-5.3 BFTS scientific roles must use agent.judgment: "
+                + ", ".join(mismatched)
+            )
 
     return cast(Config, cfg)
 

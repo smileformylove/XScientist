@@ -17,8 +17,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIN_PYTHON = (3, 10)
 _IGNORED_PATH_PARTS = {"__pycache__", "tests"}
 _GLM53_MODEL = "openai_compat/glm-5.3"
+_GLM53_JUDGMENT_REQUIRED = "__xscientist_non_glm_judgment_model_required__"
 _GLM53_MAX_TOTAL_TOKENS = 500_000
 _GLM53_MAX_WALL_TIME_SECONDS = 21_600
+_GLM53_ALLOWED_MODEL_ROUTES = frozenset(
+    {
+        "report.model",
+        "agent.code.model",
+        "agent.feedback.model",
+        "agent.vlm_feedback.model",
+        "agent.summary.model",
+        "agent.judgment.model",
+        "agent.select_node.model",
+    }
+)
+_GLM53_EVIDENCE_GATE = {
+    "minimum_datasets": 3,
+    "stage2_min_improved": 2,
+    "stage3_min_improved": 3,
+}
+_GLM53_MULTI_SEED_UNCERTAINTY = {
+    "max_relative_ci_half_width": 0.25,
+    "absolute_ci_floor": 0.01,
+}
 _GLM53_FORBIDDEN_CONFIG_KEY_FRAGMENTS = (
     "api_key",
     "apikey",
@@ -43,6 +64,25 @@ def _is_positive_limit(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
+def _model_routes(
+    value: object,
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, object]:
+    routes: dict[str, object] = {}
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = (*path, key)
+            if key.lower() == "model":
+                routes[".".join(child_path)] = child
+            routes.update(_model_routes(child, path=child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            routes.update(_model_routes(child, path=(*path, f"[{index}]")))
+    return routes
+
+
 def _validate_glm53_profile(profile: object) -> None:
     if not isinstance(profile, dict):
         raise RuntimeError("Installed GLM-5.3 BFTS profile is invalid")
@@ -50,14 +90,17 @@ def _validate_glm53_profile(profile: object) -> None:
     if not isinstance(agent, dict):
         raise RuntimeError("Installed GLM-5.3 BFTS agent profile is invalid")
 
-    models = [
-        ((profile.get("report") or {}).get("model")),
-        *(
-            (agent.get(role) or {}).get("model")
-            for role in ("code", "feedback", "vlm_feedback", "summary")
-        ),
-    ]
-    if models != [_GLM53_MODEL] * 5 or "select_node" in agent:
+    model_routes = _model_routes(profile)
+    expected_routes = {
+        "report.model": _GLM53_MODEL,
+        "agent.code.model": _GLM53_MODEL,
+        "agent.feedback.model": _GLM53_JUDGMENT_REQUIRED,
+        "agent.vlm_feedback.model": _GLM53_JUDGMENT_REQUIRED,
+        "agent.summary.model": _GLM53_JUDGMENT_REQUIRED,
+        "agent.judgment.model": _GLM53_JUDGMENT_REQUIRED,
+        "agent.select_node.model": _GLM53_JUDGMENT_REQUIRED,
+    }
+    if model_routes != expected_routes:
         raise RuntimeError("Installed GLM-5.3 BFTS model routing is invalid")
 
     forbidden_keys = {
@@ -92,6 +135,18 @@ def _validate_glm53_profile(profile: object) -> None:
         or 42 in seeds
     ):
         raise RuntimeError("Installed GLM-5.3 confirmation seeds are not held out")
+    if any(
+        multi_seed.get(name) != expected
+        for name, expected in _GLM53_MULTI_SEED_UNCERTAINTY.items()
+    ):
+        raise RuntimeError("Installed GLM-5.3 confirmation uncertainty gate is invalid")
+
+    evidence_gate = agent.get("evidence_gate") or {}
+    if any(
+        evidence_gate.get(name) != expected
+        for name, expected in _GLM53_EVIDENCE_GATE.items()
+    ):
+        raise RuntimeError("Installed GLM-5.3 deterministic evidence gate is invalid")
 
     budget = profile.get("llm_budget") or {}
     if (

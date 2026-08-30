@@ -13,15 +13,18 @@ import math
 import re
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.principal_identity import canonical_principal
 from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
     update_pipeline_artifact,
 )
 
 SCHEMA_VERSION = 1
+ADAPTIVE_STATE_FREEZE_SCHEMA = "xscientist.adaptive-state-freeze.v1"
 PLACEHOLDER_VALUES = {
     "dataset_to_be_selected",
     "primary_task_metric",
@@ -30,6 +33,7 @@ PLACEHOLDER_VALUES = {
     "unknown",
 }
 SUPPORTED_CORRECTIONS = {"bonferroni", "holm", "benjamini-hochberg"}
+EVIDENCE_PORTFOLIO_ROLES = frozenset({"primary", "ablation", "robustness"})
 
 # Keep this list in one place so a hand-written verification report cannot omit
 # a criterion that the publication gate silently assumes exists.
@@ -436,9 +440,7 @@ def _validate_analysis_plan_contract(
         errors.append("null_result_threshold_invalid")
     for field in ("equivalence_margin", "precision_target"):
         value = null_policy.get(field)
-        if value is not None and (
-            not _is_number(value) or float(value) <= 0
-        ):
+        if value is not None and (not _is_number(value) or float(value) <= 0):
             errors.append(f"null_result_{field}_invalid")
     if (
         str(null_policy.get("interpretation_status") or "").strip()
@@ -451,15 +453,12 @@ def _validate_analysis_plan_contract(
     return {
         "ok": not errors,
         "errors": sorted(set(errors)),
-        "estimand_ok": estimand_ok and not any(
-            error.startswith("estimand_") for error in errors
-        ),
-        "missing_data_policy_ok": missing_policy_ok and not any(
-            error.startswith("missing_data_") for error in errors
-        ),
-        "null_result_policy_ok": null_policy_ok and not any(
-            error.startswith("null_result_") for error in errors
-        ),
+        "estimand_ok": estimand_ok
+        and not any(error.startswith("estimand_") for error in errors),
+        "missing_data_policy_ok": missing_policy_ok
+        and not any(error.startswith("missing_data_") for error in errors),
+        "null_result_policy_ok": null_policy_ok
+        and not any(error.startswith("null_result_") for error in errors),
     }
 
 
@@ -539,7 +538,9 @@ def classify_result_interpretation(
     declared = str(summary.get("interpretation_status") or "").strip()
     if not is_null:
         direction = str(outcome.get("direction") or "higher_is_better")
-        improves = delta_value > 0 if direction != "lower_is_better" else delta_value < 0
+        improves = (
+            delta_value > 0 if direction != "lower_is_better" else delta_value < 0
+        )
         derived_status = "supports_effect" if improves else "opposes_effect"
         valid = not declared or declared == derived_status
         return {
@@ -600,8 +601,7 @@ def classify_result_interpretation(
     interval = _result_interval(summary)
     equivalence_test = summary.get("equivalence_test")
     equivalence_passed = (
-        isinstance(equivalence_test, dict)
-        and equivalence_test.get("passed") is True
+        isinstance(equivalence_test, dict) and equivalence_test.get("passed") is True
     ) or summary.get("equivalence_passed") is True
     interval_support = bool(
         interval
@@ -653,6 +653,692 @@ def _registration_core(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _adaptive_state_freeze_core(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable scientific state captured at phase transition.
+
+    The wall-clock timestamp is provenance, not identity. Everything that can
+    change what the confirmatory experiment means is content-addressed below.
+    """
+
+    return {
+        key: deepcopy(value)
+        for key, value in payload.items()
+        if key not in {"frozen_at", "state_hash"}
+    }
+
+
+def _adaptive_state_scientific_hashes(
+    preregistration: dict[str, Any],
+) -> dict[str, str]:
+    hypotheses = _object_or_empty(preregistration.get("hypotheses"))
+    outcomes = [
+        item
+        for item in _list_or_empty(preregistration.get("outcomes"))
+        if isinstance(item, dict)
+    ]
+    analysis_plan = _object_or_empty(preregistration.get("analysis_plan"))
+    data_policy = _object_or_empty(preregistration.get("data_policy"))
+    controls = _object_or_empty(preregistration.get("controls"))
+    return {
+        "hypothesis_hash": _canonical_hash(hypotheses),
+        "method_hash": _canonical_hash(
+            {
+                "idea_id": preregistration.get("idea_id"),
+                "plan_id": preregistration.get("plan_id"),
+                "research_question": preregistration.get("research_question"),
+                "hypotheses": hypotheses,
+                "outcomes": outcomes,
+                "controls": controls,
+            }
+        ),
+        "protocol_hash": _canonical_hash(
+            {
+                "outcomes": outcomes,
+                "analysis_plan": analysis_plan,
+                "data_policy": data_policy,
+                "controls": controls,
+            }
+        ),
+    }
+
+
+def _adaptive_research_state_hash(
+    *,
+    code_state_hash: str,
+    memory_state_hash: str,
+    evaluator_spec_hash: str,
+) -> str:
+    """Bind the independently addressable execution components as one state."""
+
+    return _canonical_hash(
+        {
+            "kind": "confirmatory_research_state",
+            "code_state_hash": code_state_hash,
+            "memory_state_hash": memory_state_hash,
+            "evaluator_spec_hash": evaluator_spec_hash,
+        }
+    )
+
+
+def derive_adaptive_state_hashes(
+    preregistration: dict[str, Any],
+    *,
+    research_vcs_head: str,
+) -> dict[str, str]:
+    """Derive every host-owned adaptive component from one inspectable state.
+
+    A caller-provided digest is not an attestation: an agent can invent a
+    syntactically valid ``sha256:...`` value without committing the bytes that
+    produced it. These identities are deterministic functions of the locked
+    scientific contract and the Research VCS commit that owns the code and
+    research memory. The publication gate separately proves that the commit
+    exists and is bound to a valid Research VCS checkpoint.
+    """
+
+    if not isinstance(preregistration, dict):
+        raise ResearchIntegrityError("preregistration payload must be an object")
+    frozen_head = str(research_vcs_head or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", frozen_head):
+        raise ResearchIntegrityError(
+            "adaptive state freeze requires a 40-64 character Research VCS head"
+        )
+
+    scientific = _adaptive_state_scientific_hashes(preregistration)
+    outcomes = [
+        deepcopy(item)
+        for item in _list_or_empty(preregistration.get("outcomes"))
+        if isinstance(item, dict)
+    ]
+    analysis_plan = deepcopy(_object_or_empty(preregistration.get("analysis_plan")))
+    data_policy = deepcopy(_object_or_empty(preregistration.get("data_policy")))
+    controls = deepcopy(_object_or_empty(preregistration.get("controls")))
+
+    code_state_hash = _canonical_hash(
+        {
+            "kind": "research_vcs_code_state",
+            "research_vcs_head": frozen_head,
+        }
+    )
+    memory_state_hash = _canonical_hash(
+        {
+            "kind": "research_vcs_memory_state",
+            "research_vcs_head": frozen_head,
+            "idea_id": preregistration.get("idea_id"),
+            "plan_id": preregistration.get("plan_id"),
+            "hypothesis_hash": scientific["hypothesis_hash"],
+            "method_hash": scientific["method_hash"],
+        }
+    )
+    evaluator_spec_hash = _canonical_hash(
+        {
+            "kind": "confirmatory_evaluator_spec",
+            "research_vcs_head": frozen_head,
+            "protocol_hash": scientific["protocol_hash"],
+            "outcomes": outcomes,
+            "analysis_plan": analysis_plan,
+            "data_policy": data_policy,
+            "controls": controls,
+        }
+    )
+    return {
+        "code_state_hash": code_state_hash,
+        "memory_state_hash": memory_state_hash,
+        "evaluator_spec_hash": evaluator_spec_hash,
+        "research_state_hash": _adaptive_research_state_hash(
+            code_state_hash=code_state_hash,
+            memory_state_hash=memory_state_hash,
+            evaluator_spec_hash=evaluator_spec_hash,
+        ),
+    }
+
+
+def _find_upward(
+    base_folder: str | Path,
+    predicate,
+) -> Path | None:
+    """Return the nearest ancestor accepted by ``predicate``."""
+
+    start = Path(base_folder).expanduser().resolve()
+    if not start.is_dir():
+        start = start.parent
+    for candidate in (start, *start.parents):
+        try:
+            if predicate(candidate):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def attest_adaptive_state_freeze(
+    base_folder: str | Path,
+    payload: Any,
+    *,
+    preregistration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Verify an adaptive freeze against the host-owned Research VCS repo.
+
+    This routine is deliberately exception-safe because it runs at a
+    publication boundary: an unreadable repository or malformed commit must
+    become a blocker, never crash the quality workflow or be treated as a
+    successful attestation.
+    """
+
+    errors: list[str] = []
+    internal = validate_adaptive_state_freeze(
+        payload,
+        preregistration=preregistration,
+    )
+    if internal.get("ok") is not True:
+        errors.extend(str(item) for item in internal.get("errors") or [])
+    if not isinstance(payload, dict) or not isinstance(preregistration, dict):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": sorted(set(errors or ["research_vcs_freeze_missing"])),
+            "repository_root": None,
+        }
+
+    repository_root = _find_upward(
+        base_folder,
+        lambda candidate: (candidate / ".git").exists()
+        and (candidate / ".xscientist").is_dir(),
+    )
+    if repository_root is None:
+        errors.append("research_vcs_repository_not_found")
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": sorted(set(errors)),
+            "repository_root": None,
+        }
+
+    frozen_head = str(payload.get("research_vcs_head") or "").strip().lower()
+    try:
+        # Import lazily so these contracts remain usable without importing the
+        # public CLI implementation during module initialization.
+        from xscientist.research_git import (
+            list_research_objects,
+            load_research_object,
+            research_blame,
+            show_checkpoint,
+        )
+
+        shown = show_checkpoint(repository_root, frozen_head)
+        resolved = str(shown.get("commit") or "").strip().lower()
+        if resolved != frozen_head:
+            errors.append("research_vcs_head_resolution_mismatch")
+        if shown.get("checkpoint_hash_valid") is not True:
+            errors.append("research_vcs_checkpoint_hash_invalid")
+        checkpoint = shown.get("checkpoint")
+        if not isinstance(checkpoint, dict) or not _is_content_hash(
+            checkpoint.get("content_hash")
+        ):
+            errors.append("research_vcs_checkpoint_binding_invalid")
+
+        registrations = list_research_objects(
+            repository_root,
+            kind="preregistration",
+            state="locked",
+            max_objects=4096,
+            max_bytes=64 * 1024 * 1024,
+        )
+        matching_registrations = [
+            item
+            for item in registrations
+            if isinstance(item, dict) and item.get("payload") == preregistration
+        ]
+        if len(matching_registrations) != 1:
+            errors.append("research_vcs_preregistration_object_missing_or_ambiguous")
+        else:
+            registration_object = matching_registrations[0]
+            registration_id = str(registration_object.get("object_id") or "")
+            registration_relations = [
+                item
+                for item in registration_object.get("relations") or []
+                if isinstance(item, dict)
+                and item.get("type") == "depends_on"
+                and str(item.get("target") or "").startswith("rso-")
+            ]
+            if len(registration_relations) != 1:
+                errors.append("research_vcs_preregistration_plan_binding_invalid")
+            else:
+                plan_id = str(registration_relations[0].get("target") or "")
+                plan_object = load_research_object(repository_root, plan_id)
+                plan_payload = plan_object.get("payload")
+                if (
+                    plan_object.get("kind") != "research_plan"
+                    or not isinstance(plan_payload, dict)
+                    or plan_payload.get("plan_id") != preregistration.get("plan_id")
+                ):
+                    errors.append("research_vcs_preregistration_plan_binding_invalid")
+                else:
+                    registration_origin = research_blame(
+                        repository_root,
+                        registration_id,
+                        commit="HEAD",
+                    )
+                    plan_origin = research_blame(
+                        repository_root,
+                        plan_id,
+                        commit="HEAD",
+                    )
+                    origin_commit = str(
+                        (registration_origin.get("origin") or {}).get("commit") or ""
+                    ).lower()
+                    plan_origin_commit = str(
+                        (plan_origin.get("origin") or {}).get("commit") or ""
+                    ).lower()
+                    origin_shown = show_checkpoint(repository_root, origin_commit)
+                    origin_checkpoint = origin_shown.get("checkpoint")
+                    expected_paths = {
+                        str(
+                            (registration_origin.get("object") or {}).get("path") or ""
+                        ),
+                        str((plan_origin.get("object") or {}).get("path") or ""),
+                    }
+                    if (
+                        origin_commit != plan_origin_commit
+                        or origin_shown.get("checkpoint_hash_valid") is not True
+                        or not isinstance(origin_checkpoint, dict)
+                    ):
+                        errors.append("research_vcs_preregistration_origin_invalid")
+                    else:
+                        if (
+                            str(origin_checkpoint.get("parent_commit") or "").lower()
+                            != frozen_head
+                        ):
+                            errors.append(
+                                "research_vcs_preregistration_parent_mismatch"
+                            )
+                        if (
+                            not all(expected_paths)
+                            or set(origin_checkpoint.get("changed_paths") or [])
+                            != expected_paths
+                        ):
+                            errors.append(
+                                "research_vcs_preregistration_checkpoint_paths_invalid"
+                            )
+    except Exception:
+        errors.append("research_vcs_head_not_resolvable")
+
+    try:
+        expected = derive_adaptive_state_hashes(
+            preregistration,
+            research_vcs_head=frozen_head,
+        )
+    except (ResearchIntegrityError, TypeError, ValueError):
+        expected = {}
+        errors.append("research_vcs_component_derivation_failed")
+    for field, expected_hash in expected.items():
+        if payload.get(field) != expected_hash:
+            errors.append(f"research_vcs_{field}_mismatch")
+
+    return {
+        "ok": not errors,
+        "status": "ready" if not errors else "blocked",
+        "errors": sorted(set(errors)),
+        "repository_root": str(repository_root),
+        "research_vcs_head": frozen_head if not errors else None,
+    }
+
+
+def _hash_file_bytes(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def validate_empirical_data_manifest(base_folder: str | Path) -> dict[str, Any]:
+    """Attest the nearest project data contract and immutable snapshot bytes."""
+
+    errors: list[str] = []
+    project_root = _find_upward(
+        base_folder,
+        lambda candidate: (candidate / "00_config" / "data_manifest.json").is_file(),
+    )
+    if project_root is None:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": ["data_manifest_not_found"],
+            "mode": None,
+            "project_root": None,
+        }
+
+    manifest_path = project_root / "00_config" / "data_manifest.json"
+    try:
+        if manifest_path.is_symlink():
+            raise ValueError("manifest_symlink_forbidden")
+        if manifest_path.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("manifest_too_large")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": ["data_manifest_unreadable"],
+            "mode": None,
+            "project_root": str(project_root),
+        }
+    if not isinstance(manifest, dict):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": ["data_manifest_not_object"],
+            "mode": None,
+            "project_root": str(project_root),
+        }
+
+    mode = str(manifest.get("mode") or "").strip()
+    required_fields = {
+        "schema_version",
+        "mode",
+        "ready",
+        "source_path_disclosed",
+        "snapshot_id",
+        "file_count",
+        "total_bytes",
+        "files",
+        "scientific_boundary",
+        "manifest_hash",
+    }
+    if not required_fields.issubset(manifest):
+        errors.append("data_manifest_required_fields_missing")
+    if manifest.get("schema_version") != "xscientist.data-contract.v1":
+        errors.append("data_manifest_schema_invalid")
+    manifest_core = {
+        key: deepcopy(value)
+        for key, value in manifest.items()
+        if key != "manifest_hash"
+    }
+    try:
+        expected_manifest_hash = canonical_content_hash(manifest_core)
+    except (TypeError, ValueError):
+        expected_manifest_hash = ""
+    if (
+        not _is_content_hash(manifest.get("manifest_hash"))
+        or manifest.get("manifest_hash") != expected_manifest_hash
+    ):
+        errors.append("data_manifest_hash_mismatch")
+    if manifest.get("ready") is not True:
+        errors.append("data_manifest_not_ready")
+    if manifest.get("source_path_disclosed") is not False:
+        errors.append("data_manifest_source_disclosure_invalid")
+    if not str(manifest.get("scientific_boundary") or "").strip():
+        errors.append("data_manifest_scientific_boundary_missing")
+
+    raw_files = manifest.get("files")
+    if not isinstance(raw_files, list):
+        errors.append("data_manifest_files_invalid")
+        raw_files = []
+    files: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, dict):
+            errors.append("data_manifest_file_entry_invalid")
+            continue
+        relative_text = str(item.get("path") or "")
+        relative = PurePosixPath(relative_text)
+        size = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (
+            not relative_text
+            or relative.is_absolute()
+            or "\\" in relative_text
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            errors.append("data_manifest_file_path_invalid")
+            continue
+        if relative_text in seen_paths:
+            errors.append("data_manifest_file_path_duplicate")
+            continue
+        seen_paths.add(relative_text)
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            errors.append("data_manifest_file_size_invalid")
+            continue
+        if not _is_content_hash(digest):
+            errors.append("data_manifest_file_hash_invalid")
+            continue
+        files.append(
+            {
+                "path": relative_text,
+                "size_bytes": size,
+                "sha256": str(digest),
+            }
+        )
+    if files != sorted(files, key=lambda item: item["path"]):
+        errors.append("data_manifest_files_not_canonical")
+    if manifest.get("file_count") != len(files):
+        errors.append("data_manifest_file_count_mismatch")
+    if manifest.get("total_bytes") != sum(item["size_bytes"] for item in files):
+        errors.append("data_manifest_total_bytes_mismatch")
+
+    if mode == "synthetic_explicit":
+        if raw_files or manifest.get("snapshot_id") is not None:
+            errors.append("synthetic_data_contract_malformed")
+        errors.append("synthetic_data_not_empirical")
+    elif mode != "content_addressed_snapshot_read_only":
+        errors.append("empirical_data_mode_invalid")
+    else:
+        snapshot_id = str(manifest.get("snapshot_id") or "")
+        try:
+            expected_snapshot_id = canonical_content_hash({"files": raw_files})
+        except (TypeError, ValueError):
+            expected_snapshot_id = ""
+        snapshot_id_valid = _is_content_hash(snapshot_id)
+        if not snapshot_id_valid or snapshot_id != expected_snapshot_id:
+            errors.append("data_snapshot_id_mismatch")
+        if not files:
+            errors.append("data_snapshot_files_empty")
+        snapshot = (
+            project_root
+            / ".ara-store"
+            / "datasets"
+            / snapshot_id.removeprefix("sha256:")
+            if snapshot_id_valid
+            else None
+        )
+        if snapshot is None or snapshot.is_symlink() or not snapshot.is_dir():
+            errors.append("data_snapshot_not_found")
+        else:
+            actual_paths: set[str] = set()
+            try:
+                for candidate in snapshot.rglob("*"):
+                    if candidate.is_symlink():
+                        errors.append("data_snapshot_symlink_forbidden")
+                        continue
+                    if candidate.is_dir():
+                        if candidate.stat().st_mode & 0o222:
+                            errors.append("data_snapshot_not_read_only")
+                        continue
+                    if candidate.is_file():
+                        actual_paths.add(candidate.relative_to(snapshot).as_posix())
+                if snapshot.stat().st_mode & 0o222:
+                    errors.append("data_snapshot_not_read_only")
+            except OSError:
+                errors.append("data_snapshot_scan_failed")
+            expected_paths = {item["path"] for item in files}
+            if actual_paths != expected_paths:
+                errors.append("data_snapshot_file_set_mismatch")
+            for item in files:
+                candidate = snapshot.joinpath(*PurePosixPath(item["path"]).parts)
+                try:
+                    if (
+                        not candidate.is_file()
+                        or candidate.stat().st_size != item["size_bytes"]
+                        or _hash_file_bytes(candidate) != item["sha256"]
+                    ):
+                        errors.append("data_snapshot_file_hash_mismatch")
+                except OSError:
+                    errors.append("data_snapshot_file_unreadable")
+
+    return {
+        "ok": not errors,
+        "status": "ready" if not errors else "blocked",
+        "errors": sorted(set(errors)),
+        "mode": mode or None,
+        "project_root": str(project_root),
+        "manifest_hash": manifest.get("manifest_hash") if not errors else None,
+        "snapshot_id": manifest.get("snapshot_id") if not errors else None,
+    }
+
+
+def build_adaptive_state_freeze(
+    preregistration: dict[str, Any],
+    *,
+    research_vcs_head: str,
+    code_state_hash: str,
+    memory_state_hash: str,
+    evaluator_spec_hash: str,
+    research_state_hash: str,
+) -> dict[str, Any]:
+    """Freeze adaptive exploration before any confirmatory observation.
+
+    Every component identity is derived from the locked scientific contract
+    and Research VCS head.  The explicit parameters remain part of the public
+    contract so older callers fail loudly when they submit invented digests.
+    """
+
+    supplied = {
+        "code_state_hash": code_state_hash,
+        "memory_state_hash": memory_state_hash,
+        "evaluator_spec_hash": evaluator_spec_hash,
+        "research_state_hash": research_state_hash,
+    }
+    frozen_head = str(research_vcs_head or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", frozen_head):
+        raise ResearchIntegrityError(
+            "adaptive state freeze requires a 40-64 character Research VCS head"
+        )
+    invalid = [name for name, value in supplied.items() if not _is_content_hash(value)]
+    if invalid:
+        raise ResearchIntegrityError(
+            "adaptive state freeze requires content hashes for: "
+            + ", ".join(sorted(invalid))
+        )
+    expected_research_state_hash = _adaptive_research_state_hash(
+        code_state_hash=code_state_hash,
+        memory_state_hash=memory_state_hash,
+        evaluator_spec_hash=evaluator_spec_hash,
+    )
+    if research_state_hash != expected_research_state_hash:
+        raise ResearchIntegrityError(
+            "research_state_hash must bind code_state_hash, memory_state_hash, "
+            "and evaluator_spec_hash"
+        )
+    derived = derive_adaptive_state_hashes(
+        preregistration,
+        research_vcs_head=frozen_head,
+    )
+    mismatched = [
+        field for field, expected in derived.items() if supplied[field] != expected
+    ]
+    if mismatched:
+        raise ResearchIntegrityError(
+            "adaptive state component hashes must be derived from the locked "
+            "preregistration and Research VCS head: " + ", ".join(sorted(mismatched))
+        )
+
+    freeze = {
+        "schema": ADAPTIVE_STATE_FREEZE_SCHEMA,
+        "status": "frozen",
+        "phase_boundary": "adaptive_exploration_to_confirmatory",
+        "frozen_at": _now_iso(),
+        "frozen_before_confirmatory": True,
+        "post_freeze_adaptation_allowed": False,
+        "research_vcs_head": frozen_head,
+        **_adaptive_state_scientific_hashes(preregistration),
+        **supplied,
+    }
+    freeze["state_hash"] = _canonical_hash(_adaptive_state_freeze_core(freeze))
+    return freeze
+
+
+def validate_adaptive_state_freeze(
+    payload: Any,
+    *,
+    preregistration: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a phase-boundary receipt without trusting its status text."""
+
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "errors": ["adaptive_state_freeze_not_object"],
+        }
+    errors: list[str] = []
+    if payload.get("schema") != ADAPTIVE_STATE_FREEZE_SCHEMA:
+        errors.append("adaptive_state_freeze_schema_invalid")
+    if payload.get("status") != "frozen":
+        errors.append("adaptive_state_not_frozen")
+    if payload.get("phase_boundary") != "adaptive_exploration_to_confirmatory":
+        errors.append("adaptive_state_phase_boundary_invalid")
+    if payload.get("frozen_before_confirmatory") is not True:
+        errors.append("adaptive_state_not_frozen_before_confirmation")
+    if payload.get("post_freeze_adaptation_allowed") is not False:
+        errors.append("post_freeze_adaptation_not_blocked")
+    if not re.fullmatch(
+        r"[0-9a-f]{40,64}",
+        str(payload.get("research_vcs_head") or "").strip().lower(),
+    ):
+        errors.append("adaptive_state_research_vcs_head_invalid")
+    frozen_at = str(payload.get("frozen_at") or "").strip()
+    try:
+        parsed = datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            errors.append("adaptive_state_frozen_at_timezone_missing")
+    except ValueError:
+        errors.append("adaptive_state_frozen_at_invalid")
+    for field in (
+        "hypothesis_hash",
+        "method_hash",
+        "protocol_hash",
+        "code_state_hash",
+        "memory_state_hash",
+        "evaluator_spec_hash",
+        "research_state_hash",
+        "state_hash",
+    ):
+        if not _is_content_hash(payload.get(field)):
+            errors.append(f"adaptive_state_{field}_invalid")
+    expected_research_state_hash = _adaptive_research_state_hash(
+        code_state_hash=str(payload.get("code_state_hash") or ""),
+        memory_state_hash=str(payload.get("memory_state_hash") or ""),
+        evaluator_spec_hash=str(payload.get("evaluator_spec_hash") or ""),
+    )
+    if payload.get("research_state_hash") != expected_research_state_hash:
+        errors.append("adaptive_state_research_state_components_mismatch")
+    expected_hash = _canonical_hash(_adaptive_state_freeze_core(payload))
+    if payload.get("state_hash") != expected_hash:
+        errors.append("adaptive_state_freeze_hash_mismatch")
+    if isinstance(preregistration, dict):
+        expected_scientific_hashes = _adaptive_state_scientific_hashes(preregistration)
+        for field, expected in expected_scientific_hashes.items():
+            if payload.get(field) != expected:
+                errors.append(f"adaptive_state_{field}_does_not_match_registration")
+        try:
+            expected_components = derive_adaptive_state_hashes(
+                preregistration,
+                research_vcs_head=str(payload.get("research_vcs_head") or ""),
+            )
+        except (ResearchIntegrityError, TypeError, ValueError):
+            errors.append("adaptive_state_component_derivation_failed")
+        else:
+            for field, expected in expected_components.items():
+                if payload.get(field) != expected:
+                    errors.append(f"adaptive_state_{field}_does_not_match_registration")
+    return {
+        "ok": not errors,
+        "status": "ready" if not errors else "blocked",
+        "errors": sorted(set(errors)),
+        "state_hash": payload.get("state_hash") if not errors else None,
+    }
+
+
 def _protocol_fidelity_hash(preregistration: dict[str, Any], task_id: str) -> str:
     """Hash the locked protocol fields that a confirmatory run must follow."""
 
@@ -671,8 +1357,29 @@ def _protocol_fidelity_hash(preregistration: dict[str, Any], task_id: str) -> st
             "analysis_plan": analysis_plan,
             "data_policy": data_policy,
             "controls": controls,
+            "adaptive_state_freeze": preregistration.get("adaptive_state_freeze"),
         }
     )
+
+
+def _outcome_transformation_contract(outcome: dict[str, Any]) -> dict[str, Any]:
+    """Return the locked intervention/stress semantics for one outcome."""
+
+    role = str(outcome.get("evidence_role") or "").strip().lower()
+    if not role:
+        return {}
+    return {
+        "evidence_role": role,
+        "paired_control_task_id": (
+            str(outcome.get("paired_control_task_id") or "").strip() or None
+        ),
+        "intervention_variant": (
+            str(outcome.get("intervention_variant") or "").strip() or None
+        ),
+        "stress_condition": (
+            str(outcome.get("stress_condition") or "").strip() or None
+        ),
+    }
 
 
 def build_preregistration(
@@ -691,19 +1398,36 @@ def build_preregistration(
     outcomes: list[dict[str, Any]] = []
     for index, task in enumerate(tasks):
         metric = str(task.get("metric") or "").strip()
-        outcomes.append(
-            {
-                "task_id": str(task.get("task_id") or f"task_{index}"),
-                "dataset": str(task.get("dataset") or "").strip(),
-                "metric": metric,
-                "baseline": str(task.get("baseline") or "").strip(),
-                "direction": _direction_for_metric(metric),
-                "primary": index == 0,
-                "minimum_effect": None,
-                "null_effect_threshold": 0.0,
-                "meaningful_effect_margin": None,
-            }
+        evidence_role = str(task.get("evidence_role") or "").strip().lower()
+        outcome = {
+            "task_id": str(task.get("task_id") or f"task_{index}"),
+            "dataset": str(task.get("dataset") or "").strip(),
+            "metric": metric,
+            "baseline": str(task.get("baseline") or "").strip(),
+            "direction": _direction_for_metric(metric),
+            "primary": index == 0,
+            "evidence_role": evidence_role or None,
+            "paired_control_task_id": (
+                str(task.get("paired_control_task_id") or "").strip() or None
+            ),
+            "intervention_variant": (
+                str(task.get("intervention_variant") or "").strip() or None
+            ),
+            "stress_condition": (
+                str(task.get("stress_condition") or "").strip() or None
+            ),
+            "minimum_effect": None,
+            "null_effect_threshold": 0.0,
+            "meaningful_effect_margin": None,
+        }
+        transformation_contract = _outcome_transformation_contract(outcome)
+        outcome["transformation_contract"] = transformation_contract or None
+        outcome["transformation_contract_hash"] = (
+            _canonical_hash(transformation_contract)
+            if transformation_contract
+            else None
         )
+        outcomes.append(outcome)
 
     alternative = str(
         idea_card.get("core_hypothesis")
@@ -748,6 +1472,11 @@ def build_preregistration(
             or ["The primary outcome fails to exceed the preregistered baseline."],
         },
         "outcomes": outcomes,
+        "evidence_portfolio": deepcopy(
+            research_plan.get("evidence_portfolio")
+            if isinstance(research_plan.get("evidence_portfolio"), dict)
+            else {"required": False, "required_roles": []}
+        ),
         "analysis_plan": {
             "alpha": float(alpha),
             "multiple_comparison_correction": "holm",
@@ -883,7 +1612,9 @@ def validate_preregistration(
     controls = raw_controls if isinstance(raw_controls, dict) else {}
 
     raw_external_validity = payload.get("external_validity")
-    if raw_external_validity is not None and not isinstance(raw_external_validity, dict):
+    if raw_external_validity is not None and not isinstance(
+        raw_external_validity, dict
+    ):
         errors.append("external_validity_not_object")
         external_validity: dict[str, Any] = {}
     else:
@@ -898,9 +1629,9 @@ def validate_preregistration(
             errors.append("external_validity_required_but_unassessed")
         if not str(external_validity.get("assessment_method") or "").strip():
             errors.append("external_validity_method_missing")
-        if not isinstance(external_validity.get("evidence_artifacts"), list) or not external_validity.get(
-            "evidence_artifacts"
-        ):
+        if not isinstance(
+            external_validity.get("evidence_artifacts"), list
+        ) or not external_validity.get("evidence_artifacts"):
             errors.append("external_validity_evidence_missing")
 
     raw_deviations = payload.get("deviations")
@@ -910,6 +1641,71 @@ def validate_preregistration(
         not isinstance(item, dict) for item in raw_deviations
     ):
         errors.append("deviation_entry_not_object")
+
+    campaign = payload.get("confirmatory_campaign")
+    if campaign is not None:
+        if not isinstance(campaign, dict):
+            errors.append("confirmatory_campaign_not_object")
+        else:
+            queue_contract = campaign.get("queue_contract")
+            if not isinstance(queue_contract, dict):
+                errors.append("confirmatory_queue_contract_missing")
+            else:
+                contract_core = {
+                    key: value
+                    for key, value in queue_contract.items()
+                    if key != "queue_contract_hash"
+                }
+                expected_contract_hash = _canonical_hash(contract_core)
+                if (
+                    queue_contract.get("schema")
+                    != "xscientist.confirmatory-queue-contract.v1"
+                    or queue_contract.get("queue_contract_hash")
+                    != expected_contract_hash
+                    or campaign.get("queue_contract_hash") != expected_contract_hash
+                ):
+                    errors.append("confirmatory_queue_contract_hash_invalid")
+                contract_tasks = queue_contract.get("tasks")
+                if not isinstance(contract_tasks, list) or any(
+                    not isinstance(item, dict) for item in contract_tasks
+                ):
+                    errors.append("confirmatory_queue_contract_tasks_invalid")
+                else:
+                    contract_task_ids: list[str] = []
+                    for contract_task in contract_tasks:
+                        task_id = str(contract_task.get("task_id") or "").strip()
+                        contract_task_ids.append(task_id)
+                        task_core = {
+                            key: value
+                            for key, value in contract_task.items()
+                            if key != "task_contract_hash"
+                        }
+                        command_template = contract_task.get("record_command_template")
+                        if (
+                            not task_id
+                            or contract_task.get("task_contract_hash")
+                            != _canonical_hash(task_core)
+                            or not isinstance(command_template, list)
+                            or "{TERMINAL_STATUS}" not in command_template
+                            or "completed" in command_template
+                        ):
+                            errors.append("confirmatory_queue_task_contract_invalid")
+                    outcome_ids = {
+                        str(item.get("task_id") or "").strip() for item in outcomes
+                    }
+                    if (
+                        len(contract_task_ids) != len(set(contract_task_ids))
+                        or set(contract_task_ids) != outcome_ids
+                    ):
+                        errors.append("confirmatory_queue_task_coverage_invalid")
+
+    freeze_report: dict[str, Any] | None = None
+    if "adaptive_state_freeze" in payload:
+        freeze_report = validate_adaptive_state_freeze(
+            payload.get("adaptive_state_freeze"),
+            preregistration=payload,
+        )
+        errors.extend(freeze_report.get("errors") or [])
 
     if not str(payload.get("research_question") or "").strip():
         errors.append("research_question_missing")
@@ -943,6 +1739,98 @@ def validate_preregistration(
                 errors.append(f"{task_id}_{field}_unresolved")
     if len(task_ids) != len(set(task_ids)):
         errors.append("duplicate_task_ids")
+
+    raw_portfolio = payload.get("evidence_portfolio")
+    if raw_portfolio is not None and not isinstance(raw_portfolio, dict):
+        errors.append("evidence_portfolio_not_object")
+        portfolio: dict[str, Any] = {}
+    else:
+        portfolio = raw_portfolio if isinstance(raw_portfolio, dict) else {}
+    outcome_by_id = {
+        str(item.get("task_id") or "").strip(): item
+        for item in outcomes
+        if str(item.get("task_id") or "").strip()
+    }
+    roles = {
+        str(item.get("evidence_role") or "").strip().lower()
+        for item in outcomes
+        if str(item.get("evidence_role") or "").strip()
+    }
+    if roles - EVIDENCE_PORTFOLIO_ROLES:
+        errors.append("evidence_role_invalid")
+    if roles:
+        role_primary = [
+            item
+            for item in outcomes
+            if str(item.get("evidence_role") or "").strip().lower() == "primary"
+        ]
+        if len(role_primary) != 1:
+            errors.append("evidence_primary_role_count_invalid")
+        elif role_primary[0].get("primary") is not True:
+            errors.append("evidence_primary_role_mismatch")
+        if any(
+            item.get("primary") is True
+            and str(item.get("evidence_role") or "").strip().lower() != "primary"
+            for item in outcomes
+        ):
+            errors.append("primary_flag_role_mismatch")
+    if portfolio.get("required") is True:
+        raw_required_roles = portfolio.get("required_roles")
+        required_roles = (
+            {
+                str(item).strip().lower()
+                for item in raw_required_roles
+                if str(item).strip()
+            }
+            if isinstance(raw_required_roles, list)
+            else set()
+        )
+        if not required_roles or required_roles - EVIDENCE_PORTFOLIO_ROLES:
+            errors.append("evidence_portfolio_required_roles_invalid")
+        elif not required_roles.issubset(roles):
+            errors.append("evidence_portfolio_role_missing")
+    for outcome in outcomes:
+        task_id = str(outcome.get("task_id") or "unknown").strip() or "unknown"
+        role = str(outcome.get("evidence_role") or "").strip().lower()
+        if not role:
+            continue
+        expected_contract = _outcome_transformation_contract(outcome)
+        if outcome.get("transformation_contract") != expected_contract:
+            errors.append(f"{task_id}_transformation_contract_mismatch")
+        if outcome.get("transformation_contract_hash") != _canonical_hash(
+            expected_contract
+        ):
+            errors.append(f"{task_id}_transformation_contract_hash_mismatch")
+        pair_id = str(outcome.get("paired_control_task_id") or "").strip()
+        intervention = str(outcome.get("intervention_variant") or "").strip()
+        stress = str(outcome.get("stress_condition") or "").strip()
+        if role == "primary":
+            if pair_id:
+                errors.append(f"{task_id}_primary_control_pair_disallowed")
+            if not intervention:
+                errors.append(f"{task_id}_primary_intervention_missing")
+        elif role == "ablation":
+            if (
+                not pair_id
+                or str(outcome_by_id.get(pair_id, {}).get("evidence_role") or "")
+                .strip()
+                .lower()
+                != "primary"
+            ):
+                errors.append(f"{task_id}_ablation_primary_pair_invalid")
+            if not intervention:
+                errors.append(f"{task_id}_ablation_intervention_missing")
+        elif role == "robustness":
+            if (
+                not pair_id
+                or str(outcome_by_id.get(pair_id, {}).get("evidence_role") or "")
+                .strip()
+                .lower()
+                != "primary"
+            ):
+                errors.append(f"{task_id}_robustness_primary_pair_invalid")
+            if not stress:
+                errors.append(f"{task_id}_robustness_stress_condition_missing")
     alpha = analysis.get("alpha")
     if (
         not isinstance(alpha, (int, float))
@@ -1036,6 +1924,7 @@ def validate_preregistration(
         "errors": sorted(set(errors)),
         "warnings": sorted(set(warnings)),
         "analysis_plan_contract": analysis_contract,
+        "adaptive_state_freeze": freeze_report,
     }
 
 
@@ -1044,6 +1933,7 @@ def lock_preregistration(
     *,
     split_hashes: dict[str, str],
     registered_by: str,
+    freeze_inputs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Seal a registration; subsequent edits invalidate its content hash."""
 
@@ -1060,6 +1950,29 @@ def lock_preregistration(
     locked["registered_by"] = str(registered_by or "").strip()
     if not locked["registered_by"]:
         raise ResearchIntegrityError("registered_by is required")
+    if freeze_inputs is not None:
+        required_freeze_inputs = {
+            "research_vcs_head",
+            "code_state_hash",
+            "memory_state_hash",
+            "evaluator_spec_hash",
+            "research_state_hash",
+        }
+        unknown = set(freeze_inputs) - required_freeze_inputs
+        missing = required_freeze_inputs - set(freeze_inputs)
+        if unknown or missing:
+            details = []
+            if missing:
+                details.append("missing=" + ",".join(sorted(missing)))
+            if unknown:
+                details.append("unknown=" + ",".join(sorted(unknown)))
+            raise ResearchIntegrityError(
+                "invalid adaptive state freeze inputs: " + "; ".join(details)
+            )
+        locked["adaptive_state_freeze"] = build_adaptive_state_freeze(
+            locked,
+            **freeze_inputs,
+        )
     locked["status"] = "locked"
     locked["locked_at"] = _now_iso()
     locked["registration_hash"] = _canonical_hash(_registration_core(locked))
@@ -1110,6 +2023,24 @@ def _verification_report_hash_payload(payload: dict[str, Any]) -> dict[str, Any]
         "registry_hash": payload.get("registry_hash"),
         "evidence_snapshot_hash": payload.get("evidence_snapshot_hash"),
         "manuscript_hash": payload.get("manuscript_hash"),
+        "data_manifest_hash": payload.get("data_manifest_hash"),
+        "data_snapshot_id": payload.get("data_snapshot_id"),
+        "trajectory_binding_hash": payload.get("trajectory_binding_hash"),
+        "research_vcs_frozen_head": payload.get("research_vcs_frozen_head"),
+        "research_vcs_lineage_head": payload.get("research_vcs_lineage_head"),
+        "research_vcs_attempt_object_ids": _string_list(
+            payload.get("research_vcs_attempt_object_ids")
+        ),
+        "research_vcs_binding_object_ids": _string_list(
+            payload.get("research_vcs_binding_object_ids")
+        ),
+        "research_vcs_checkpoint_hashes": _string_list(
+            payload.get("research_vcs_checkpoint_hashes")
+        ),
+        "failed_record_ids": _string_list(payload.get("failed_record_ids")),
+        "research_vcs_disposition_object_ids": _string_list(
+            payload.get("research_vcs_disposition_object_ids")
+        ),
         "criteria": _string_list(payload.get("criteria")),
         "required_failures": _string_list(payload.get("required_failures")),
     }
@@ -1157,12 +2088,17 @@ def _valid_reproduction_link(
     if record.get("holdout_access") != "verifier_only":
         return False
     producer_id = str(record.get("producer_id") or "").strip()
-    primary_producers = {
-        str(item.get("producer_id") or "").strip()
-        for item in primary_records_by_id.values()
-        if str(item.get("producer_id") or "").strip()
-    }
-    if not producer_id or producer_id in primary_producers:
+    try:
+        producer_principal = canonical_principal(
+            producer_id, label="reproduction producer_id"
+        )
+        primary_producers = {
+            canonical_principal(item.get("producer_id"), label="primary producer_id")
+            for item in primary_records_by_id.values()
+        }
+    except (TypeError, ValueError):
+        return False
+    if producer_principal in primary_producers:
         return False
     return (
         str(record.get("verifier_id") or "").strip() == verifier_id
@@ -1205,7 +2141,9 @@ def build_verification_report(
         records = []
     else:
         try:
-            records = [dict(item) for item in experiment_records if isinstance(item, dict)]
+            records = [
+                dict(item) for item in experiment_records if isinstance(item, dict)
+            ]
         except TypeError:
             # A malformed registry should produce a blocked report, not an
             # exception that prevents the CLI from showing recovery actions.
@@ -1213,21 +2151,33 @@ def build_verification_report(
     confirmatory = [
         item
         for item in records
-        if str(item.get("study_phase") or "").lower() == "confirmatory"
+        if item.get("record_type") != "attempt_disposition"
+        and str(item.get("study_phase") or "").lower() == "confirmatory"
         and str(item.get("status") or "").lower() in {"completed", "verified"}
     ]
-    confirmatory_attempts = [
+    reproductions = [
         item
         for item in records
-        if str(item.get("study_phase") or "").lower() == "confirmatory"
+        if item.get("record_type") != "attempt_disposition"
+        and item.get("independent_reproduction") is True
     ]
-    incomplete_confirmatory_attempts = [
+    # Publication closure covers every confirmatory or reproduction row,
+    # including unsuccessful attempts.  A failed reproduction is scientific
+    # history, not an optional attachment that can disappear from completeness
+    # or authority calculations.
+    publication_attempts = [
         item
-        for item in confirmatory_attempts
-        if str(item.get("status") or "").lower() not in {"completed", "verified"}
+        for item in records
+        if item.get("record_type") != "attempt_disposition"
+        and (
+            str(item.get("study_phase") or "").lower() == "confirmatory"
+            or item.get("independent_reproduction") is True
+        )
     ]
-    reproductions = [
-        item for item in records if item.get("independent_reproduction") is True
+    incomplete_publication_attempts = [
+        item
+        for item in publication_attempts
+        if str(item.get("status") or "").lower() not in {"completed", "verified"}
     ]
     outcomes = [
         item
@@ -1241,20 +2191,45 @@ def build_verification_report(
     data_policy = raw_data_policy if isinstance(raw_data_policy, dict) else {}
     raw_split_hashes = data_policy.get("split_hashes")
     split_hashes = raw_split_hashes if isinstance(raw_split_hashes, dict) else {}
+    declared_data_manifest_hash = str(
+        data_policy.get("data_manifest_hash") or ""
+    ).strip()
+    declared_data_snapshot_id = str(data_policy.get("data_snapshot_id") or "").strip()
+    if verification_root is not None:
+        try:
+            data_attestation = validate_empirical_data_manifest(verification_root)
+        except Exception:
+            data_attestation = {
+                "ok": False,
+                "errors": ["empirical_data_attestation_failed_closed"],
+            }
+    else:
+        data_attestation = {
+            "ok": False,
+            "errors": ["verification_root_missing"],
+        }
+    host_data_manifest_hash = str(data_attestation.get("manifest_hash") or "").strip()
+    host_data_snapshot_id = str(data_attestation.get("snapshot_id") or "").strip()
+    data_binding_required = bool(
+        declared_data_manifest_hash
+        or declared_data_snapshot_id
+        or data_attestation.get("ok") is True
+    )
+    trajectory_required = isinstance(preregistration.get("adaptive_state_freeze"), dict)
     minimum_seeds = _positive_int(analysis.get("minimum_independent_seeds"), 1)
     minimum_reproductions = _positive_int(
         analysis.get("minimum_independent_reproductions"), 1
     )
     producer_ids = {
         str(item.get("producer_id") or "").strip()
-        for item in confirmatory
+        for item in publication_attempts
         if str(item.get("producer_id") or "").strip()
     }
     confirmatory_record_ids = [
         str(item.get("record_id") or "").strip() for item in confirmatory
     ]
-    relevant_record_ids = confirmatory_record_ids + [
-        str(item.get("record_id") or "").strip() for item in reproductions
+    relevant_record_ids = [
+        str(item.get("record_id") or "").strip() for item in publication_attempts
     ]
     record_id_integrity = (
         bool(confirmatory)
@@ -1267,7 +2242,7 @@ def build_verification_report(
         if str(item.get("task_id") or "") not in outcome_by_task
     ]
     producer_identity = bool(confirmatory) and all(
-        str(item.get("producer_id") or "").strip() for item in confirmatory
+        str(item.get("producer_id") or "").strip() for item in publication_attempts
     )
     registered_task_ids = {str(item.get("task_id") or "").strip() for item in outcomes}
     confirmatory_task_ids = {
@@ -1349,13 +2324,6 @@ def build_verification_report(
             and all(_is_number(value) for value in interval)
             and float(interval[0]) <= float(interval[1])
         )
-        uncertainty = (
-            any(
-                _is_number(summary.get(key))
-                for key in ("effect_size", "p_value", "standard_error")
-            )
-            or interval_ok
-        )
         if p_value is not None and (
             not _is_number(p_value) or not 0 <= float(p_value) <= 1
         ):
@@ -1366,6 +2334,32 @@ def build_verification_report(
             return False
         if interval is not None and not interval_ok:
             return False
+        dispersion = any(
+            _is_number(summary.get(key)) and float(summary.get(key)) >= 0
+            for key in (
+                "standard_deviation",
+                "metric_std",
+                "std",
+                "variance",
+                "dispersion",
+            )
+        )
+        replicate_values = summary.get("replicate_values")
+        replicate_uncertainty = (
+            isinstance(replicate_values, (list, tuple))
+            and len(replicate_values) >= 2
+            and all(_is_number(value) for value in replicate_values)
+        )
+        # An effect-size point estimate describes magnitude, not uncertainty.
+        # Require an interval, error/dispersion estimate, replicate distribution,
+        # or an explicit valid hypothesis-test result.
+        uncertainty = bool(
+            interval_ok
+            or _is_number(p_value)
+            or _is_number(standard_error)
+            or dispersion
+            or replicate_uncertainty
+        )
         comparison = summary.get("comparison")
         if isinstance(comparison, dict):
             candidate = _first_numeric(comparison, ("candidate", "candidate_mean"))
@@ -1438,8 +2432,7 @@ def build_verification_report(
             if str(record.get("task_id") or "") == task_id
         ]
         input_hashes = [
-            str(record.get("evaluator_input_hash") or "")
-            for record in task_records
+            str(record.get("evaluator_input_hash") or "") for record in task_records
         ]
         valid_input_hashes = all(_is_content_hash(value) for value in input_hashes)
         seed_commitments_valid = True
@@ -1453,16 +2446,30 @@ def build_verification_report(
                 {"seed": seed, "evaluator_input_hash": input_hash}
             )
             explicit_commitment = record.get("seed_input_commitment")
-            if explicit_commitment is not None and explicit_commitment != expected_commitment:
+            if (
+                explicit_commitment is not None
+                and explicit_commitment != expected_commitment
+            ):
                 seed_commitments_valid = False
         # A copied evaluator input cannot become an independent seed run by
         # changing only the JSON seed label.
-        seed_independence = seed_independence and valid_input_hashes and len(
-            set(input_hashes)
-        ) == len(input_hashes) and seed_commitments_valid
-    verifier_independent = bool(normalized_verifier_id) and all(
-        normalized_verifier_id != producer_id for producer_id in producer_ids
-    )
+        seed_independence = (
+            seed_independence
+            and valid_input_hashes
+            and len(set(input_hashes)) == len(input_hashes)
+            and seed_commitments_valid
+        )
+    try:
+        verifier_principal = canonical_principal(
+            normalized_verifier_id, label="verifier_id"
+        )
+        producer_principals = {
+            canonical_principal(producer_id, label="producer_id")
+            for producer_id in producer_ids
+        }
+        verifier_independent = verifier_principal not in producer_principals
+    except (TypeError, ValueError):
+        verifier_independent = False
     primary_records_by_id = {
         str(record.get("record_id") or "").strip(): record
         for record in confirmatory
@@ -1482,8 +2489,7 @@ def build_verification_report(
         )
     ]
     valid_reproduction_links = {
-        str(item.get("record_id") or "").strip()
-        for item in valid_reproduction_records
+        str(item.get("record_id") or "").strip() for item in valid_reproduction_records
     }
     reproduction_task_counts = {
         task_id: sum(
@@ -1496,11 +2502,21 @@ def build_verification_report(
         count >= minimum_reproductions for count in reproduction_task_counts.values()
     )
     deviations = _list_or_empty(preregistration.get("deviations"))
-    deviation_ok = not any(
-        item.get("approved_before_unblinding") is not True
-        for item in deviations
-        if isinstance(item, dict)
-    ) and all(isinstance(item, dict) for item in deviations)
+    # The legacy deviations array is intentionally outside registration_hash,
+    # so a post-result edit can truthfully describe a deviation but cannot
+    # prove that approval preceded unblinding.  Publication-oriented frozen
+    # work therefore fails closed on any such entry until a future typed
+    # pre-approval object can prove its origin checkpoint.
+    deviation_ok = (
+        not deviations
+        if trajectory_required
+        else not any(
+            item.get("approved_before_unblinding") is not True
+            for item in deviations
+            if isinstance(item, dict)
+        )
+        and all(isinstance(item, dict) for item in deviations)
+    )
 
     interpretation_by_task: dict[str, dict[str, Any]] = {}
     null_result_ok = True
@@ -1579,6 +2595,64 @@ def build_verification_report(
         ),
     }
 
+    data_bound_records = [*confirmatory, *reproductions]
+    data_records_bound = bool(confirmatory) and all(
+        record.get("data_manifest_hash") == host_data_manifest_hash
+        and record.get("data_snapshot_id") == host_data_snapshot_id
+        for record in data_bound_records
+    )
+    data_contract_binding = (
+        data_attestation.get("ok") is True
+        and _is_content_hash(host_data_manifest_hash)
+        and _is_content_hash(host_data_snapshot_id)
+        and declared_data_manifest_hash == host_data_manifest_hash
+        and declared_data_snapshot_id == host_data_snapshot_id
+        and data_records_bound
+    )
+
+    if trajectory_required and verification_root is not None:
+        try:
+            from ai_scientist.utils.trajectory_binding import (
+                attest_structured_trajectory,
+            )
+
+            trajectory_attestation = attest_structured_trajectory(
+                verification_root,
+                preregistration,
+                records,
+            )
+        except Exception as exc:
+            trajectory_attestation = {
+                "ok": False,
+                "errors": [
+                    str(exc) or "structured_trajectory_attestation_failed_closed"
+                ],
+            }
+    elif trajectory_required:
+        trajectory_attestation = {
+            "ok": False,
+            "errors": ["structured_trajectory_verification_root_missing"],
+        }
+    else:
+        trajectory_attestation = {
+            "ok": True,
+            "errors": [],
+            "trajectory_hash": None,
+            "disposed_attempt_record_ids": [],
+            "publication_blocking_attempt_record_ids": [],
+            "publication_ready": True,
+        }
+    publication_blocking_attempt_ids = set(
+        trajectory_attestation.get("publication_blocking_attempt_record_ids") or []
+    )
+    confirmatory_attempts_complete = (
+        trajectory_attestation.get("ok") is True
+        and trajectory_attestation.get("publication_ready") is True
+        and not publication_blocking_attempt_ids
+        if trajectory_required
+        else not incomplete_publication_attempts
+    )
+
     criteria = [
         _criterion(
             "locked_preregistration",
@@ -1608,8 +2682,13 @@ def build_verification_report(
         ),
         _criterion(
             "confirmatory_attempt_completeness",
-            not incomplete_confirmatory_attempts,
-            "all confirmatory attempts are completed or verified",
+            confirmatory_attempts_complete,
+            (
+                "every unsuccessful confirmatory attempt has an immutable, "
+                "trajectory-bound disposition"
+                if trajectory_required
+                else "all confirmatory attempts are completed or verified"
+            ),
         ),
         _criterion(
             "record_id_integrity",
@@ -1695,16 +2774,55 @@ def build_verification_report(
         _criterion(
             "deviation_control",
             deviation_ok,
-            "all deviations approved before unblinding",
+            (
+                "frozen publication work has no mutable legacy deviations; "
+                "post-freeze failures use typed trajectory dispositions"
+                if trajectory_required
+                else "all deviations approved before unblinding"
+            ),
         ),
     ]
+    criteria.append(
+        _criterion(
+            "data_contract_binding",
+            data_contract_binding if data_binding_required else True,
+            (
+                "locked preregistration and every confirmatory/reproduction "
+                "record bind the host-verified data manifest and snapshot"
+            ),
+            required=data_binding_required,
+        )
+    )
+    criteria.append(
+        _criterion(
+            "trajectory_binding",
+            trajectory_attestation.get("ok") is True
+            and trajectory_attestation.get("publication_ready") is True
+            and not publication_blocking_attempt_ids,
+            ", ".join(trajectory_attestation.get("errors") or [])
+            or (
+                "publication blockers="
+                + ",".join(sorted(publication_blocking_attempt_ids))
+                if publication_blocking_attempt_ids
+                else ""
+            )
+            or (
+                "every confirmatory/reproduction registry row maps bijectively to "
+                "one typed attempt and origin checkpoint, and every failed attempt "
+                "has a publication-resolving bound outcome"
+            ),
+            required=trajectory_required,
+        )
+    )
     failures = [
         item["id"] for item in criteria if item["required"] and not item["passed"]
     ]
     status = "verified" if not failures else "blocked"
     registry_hash = None
     registry_records_match = True
-    snapshot_payload = evidence_snapshot if isinstance(evidence_snapshot, dict) else None
+    snapshot_payload = (
+        evidence_snapshot if isinstance(evidence_snapshot, dict) else None
+    )
     if verification_root is not None:
         root = Path(verification_root).expanduser().resolve()
         registry_path = root / "experiment_registry.jsonl"
@@ -1723,7 +2841,13 @@ def build_verification_report(
                 registry_records_match = registry_records_match and (
                     _canonical_hash(registry_rows) == _canonical_hash(records)
                 )
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+            ):
                 registry_records_match = False
         if snapshot_payload is None and (
             registry_path.is_file() or (root / "latex" / "template.tex").is_file()
@@ -1741,7 +2865,10 @@ def build_verification_report(
         required=registry_hash is not None,
     )
     criteria.append(registry_content_criterion)
-    if registry_content_criterion["required"] and not registry_content_criterion["passed"]:
+    if (
+        registry_content_criterion["required"]
+        and not registry_content_criterion["passed"]
+    ):
         failures.append(registry_content_criterion["id"])
     failures = sorted(set(failures))
     status = "verified" if not failures else "blocked"
@@ -1755,8 +2882,7 @@ def build_verification_report(
         "clean_room": clean_room_verified,
         "status": status,
         "claim_promotion_allowed": status == "verified"
-        and conclusion_status
-        in {"supports_effect", "supports_no_meaningful_effect"},
+        and conclusion_status in {"supports_effect", "supports_no_meaningful_effect"},
         "criteria": criteria,
         "required_failures": failures,
         "confirmatory_record_ids": [item.get("record_id") for item in confirmatory],
@@ -1772,6 +2898,32 @@ def build_verification_report(
         "manuscript_hash": (
             snapshot_payload.get("manuscript_hash") if snapshot_payload else None
         ),
+        "data_manifest_hash": (
+            host_data_manifest_hash if data_attestation.get("ok") is True else None
+        ),
+        "data_snapshot_id": (
+            host_data_snapshot_id if data_attestation.get("ok") is True else None
+        ),
+        "trajectory_binding_hash": trajectory_attestation.get("trajectory_hash"),
+        "research_vcs_frozen_head": trajectory_attestation.get("frozen_head"),
+        "research_vcs_lineage_head": trajectory_attestation.get("lineage_head"),
+        "research_vcs_attempt_object_ids": trajectory_attestation.get(
+            "attempt_object_ids"
+        )
+        or [],
+        "research_vcs_binding_object_ids": trajectory_attestation.get(
+            "binding_object_ids"
+        )
+        or [],
+        "research_vcs_checkpoint_hashes": trajectory_attestation.get(
+            "checkpoint_hashes"
+        )
+        or [],
+        "failed_record_ids": trajectory_attestation.get("failed_record_ids") or [],
+        "research_vcs_disposition_object_ids": trajectory_attestation.get(
+            "disposition_object_ids"
+        )
+        or [],
     }
     report["report_hash"] = _canonical_hash(_verification_report_hash_payload(report))
     return report
@@ -1866,12 +3018,18 @@ def save_verification_report(
 
 
 __all__ = [
+    "ADAPTIVE_STATE_FREEZE_SCHEMA",
     "ResearchIntegrityError",
     "assert_claim_promotion_allowed",
+    "attest_adaptive_state_freeze",
+    "build_adaptive_state_freeze",
     "build_preregistration",
     "build_verification_report",
+    "derive_adaptive_state_hashes",
     "lock_preregistration",
     "save_preregistration",
     "save_verification_report",
+    "validate_adaptive_state_freeze",
+    "validate_empirical_data_manifest",
     "validate_preregistration",
 ]
