@@ -47,24 +47,38 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install core package
-        run: |
-          python tools/privacy_exec.py -- python -m pip install --upgrade pip setuptools wheel
-          python tools/privacy_exec.py -- python -m pip install -e . -c requirements/constraints-ci.txt
-          python tools/privacy_exec.py -- python -m pip check
+      - name: Install packaging tools
+        run: python tools/privacy_exec.py -- python -m pip install --upgrade pip setuptools wheel
 
-      - name: Exercise core SDK and protocol
-        run: |
-          python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_protocol.py"
-          python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_config_paths_defaults.py"
-          python -c "import xscientist; from xscientist import ProjectRequest, XScientist; assert xscientist.__version__ and ProjectRequest and XScientist"
-          python -m xscientist info --json
+      - name: Install core package
+        run: python tools/privacy_exec.py -- python -m pip install -e . -c requirements/constraints-ci.txt
+
+      - name: Check core dependencies
+        run: python tools/privacy_exec.py -- python -m pip check
+
+      - name: Exercise protocol
+        run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_protocol.py"
+
+      - name: Exercise platform path defaults
+        run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_config_paths_defaults.py"
+
+      - name: Exercise canonical atomic writes
+        run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_atomic_io.py"
+
+      - name: Import the core SDK
+        run: python -c "import xscientist; from xscientist import ProjectRequest, XScientist; assert xscientist.__version__ and ProjectRequest and XScientist"
+
+      - name: Exercise core CLI metadata
+        run: python -m xscientist info --json
+
+      - name: Install the build frontend
+        run: python tools/privacy_exec.py -- python -m pip install build -c requirements/constraints-ci.txt
+
+      - name: Build distribution artifacts
+        run: python tools/privacy_exec.py -- python tools/build_distribution.py --outdir .ci-dist --no-isolation
 
       - name: Exercise the built-wheel offline first journey
-        run: |
-          python tools/privacy_exec.py -- python -m pip install build -c requirements/constraints-ci.txt
-          python tools/privacy_exec.py -- python tools/build_distribution.py --outdir .ci-dist --no-isolation
-          python tools/privacy_exec.py -- python tools/check_distribution.py --dist-dir .ci-dist --no-install-deps
+        run: python tools/privacy_exec.py -- python tools/check_distribution.py --dist-dir .ci-dist --no-install-deps
 
       - name: Exercise extended SDK behavior
         if: runner.os != 'Windows'
@@ -106,7 +120,9 @@ jobs:
           python tools/privacy_exec.py -- python -m pip check 2>&1 | tee .ci-output/logs/pip-check.log
 
       - name: Run engineering consistency checks
-        run: python tools/engineering_checks.py 2>&1 | tee .ci-output/logs/engineering.log
+        run: |
+          set -o pipefail
+          python tools/engineering_checks.py 2>&1 | tee .ci-output/logs/engineering.log
 
       - name: Seed login session for CI
         run: |

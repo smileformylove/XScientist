@@ -188,6 +188,16 @@ for its Python package; the ARA protocol has its own version in
   historical `as_of` projections exclude future signals, lineage, and source
   status events.
 
+### Fixed
+
+- Restored Windows initialization, onboarding, and provider transactions by
+  writing canonical encoded bytes without CRLF rewriting. Compatibility smoke
+  commands now fail independently and exercise the cross-platform byte
+  contract instead of hiding earlier native-command failures.
+- Aligned the full repository validator with fail-closed evidence gates: prose
+  terminology cannot stand in for an experiment registry, and manuscript
+  numbers cannot become key results without bound experimental evidence.
+
 ## [0.1.4] - 2026-08-23
 
 ### Changed
