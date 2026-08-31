@@ -50,7 +50,7 @@ Update dependencies in this order:
 ```bash
 make syntax          # compile Python and parse shell entrypoints
 make engineering     # metadata, dependencies, protocol docs, links, CI policy
-make test            # complete unittest suite
+make test            # complete pytest suite, including unittest-style cases
 make coverage        # branch-aware coverage; fails below the regression floor
 make package-check   # build wheel/sdist, inspect them, isolated wheel smoke
 make smoke           # syntax + engineering + tests + repository validation

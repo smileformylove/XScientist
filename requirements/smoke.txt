@@ -24,6 +24,7 @@ seaborn
 
 # Common runtime / validation dependencies
 coverage
+pytest
 numpy
 psutil
 PyYAML

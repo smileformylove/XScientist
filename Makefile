@@ -15,11 +15,11 @@ syntax:
 	bash -n start_research.sh
 
 test:
-	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m unittest discover -s tests -p "test_*.py"
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m pytest -q tests
 
 coverage:
 	$(PYTHON) -m coverage erase
-	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m coverage run -m unittest discover -s tests -p "test_*.py"
+	$(PYTHON) tools/privacy_exec.py -- $(PYTHON) -m coverage run -m pytest -q tests
 	@mkdir -p .ci-output
 	$(PYTHON) -m coverage xml
 	$(PYTHON) -m coverage report

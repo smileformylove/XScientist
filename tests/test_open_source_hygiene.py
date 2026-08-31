@@ -339,6 +339,26 @@ class OpenSourceHygieneTests(unittest.TestCase):
             msg="Smoke workflow should install the dedicated smoke dependency set",
         )
 
+    def test_smoke_executes_pytest_native_tests(self) -> None:
+        workflow_text = self.workflow_path.read_text(encoding="utf-8")
+        smoke_requirements = self.smoke_requirements_path.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            smoke_requirements,
+            r"(?m)^pytest(?:\s|$)",
+            msg="Smoke dependencies must include the runner imported by tests",
+        )
+        self.assertIn(
+            "coverage run -m pytest",
+            workflow_text,
+            msg="Full Smoke must execute pytest-native functions and fixtures",
+        )
+        self.assertNotIn(
+            "coverage run -m unittest discover",
+            workflow_text,
+            msg="unittest discovery silently omits pytest-native tests",
+        )
+
     def test_smoke_workflow_should_upload_ci_artifacts(self) -> None:
         workflow_text = self.workflow_path.read_text(encoding="utf-8")
         self.assertRegex(
