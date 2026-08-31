@@ -48,6 +48,7 @@ SUBCOMMANDS = {
     "capability": "list check",
     "privacy": "audit",
     "history": "list show diff save rollback",
+    "evolution": "candidate benchmark canary harness-audit attest deploy rollback",
     "research": RESEARCH_COMMANDS,
     "git": RESEARCH_COMMANDS,
 }
@@ -145,6 +146,7 @@ def _delegate_parsers(delegates: set[str]) -> dict[str, object]:
         list_writing_profiles,
     )
     from ai_scientist.utils.workflow_modes import list_workflow_modes
+    from xscientist.evolution_cli import _build_parser as build_evolution_parser
 
     common = {
         "default_writing_profile": DEFAULT_WRITING_PROFILE,
@@ -154,6 +156,7 @@ def _delegate_parsers(delegates: set[str]) -> dict[str, object]:
     available = {
         "auth": build_auth_parser(),
         "batch": build_batch_parser(default_research_dir=".", **common),
+        "evolution": build_evolution_parser(),
         "project": build_project_parser(default_output_root=".", **common),
     }
     return {

@@ -173,6 +173,7 @@ from ai_scientist.config.paths import (
     get_batch_dir,
     get_paper_dir,
     get_paper_type_config,
+    idea_storage_key,
     ensure_output_dirs,
     resolve_output_path,
 )
@@ -804,18 +805,19 @@ def _save_manuscript_contract_state(
 def _create_paper_workspace(
     *,
     idea: Dict[str, Any],
+    idea_index: int | None = None,
     paper_type: str,
     default_idea_name: str | None = None,
     timestamp: str | None = None,
     output_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    resolved_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved_timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     idea_name = idea.get(
         "Name",
         default_idea_name or f"idea_{resolved_timestamp}",
     )
     paper_dir = get_paper_dir(
-        idea_name,
+        idea_storage_key(idea, idea_index=idea_index),
         paper_type,
         resolved_timestamp,
         output_root=output_root,
@@ -2935,6 +2937,7 @@ def _process_single_paper(args):
 
         workspace = _create_paper_workspace(
             idea=idea,
+            idea_index=idea_idx,
             paper_type=paper_type,
             default_idea_name=f"idea_{idea_idx}",
             output_root=research_dir,

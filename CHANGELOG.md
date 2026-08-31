@@ -8,6 +8,22 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Added an EvoTrainer-inspired offline evolution harness audit and
+  `xscientist evolution harness-audit`: bounded content-addressed version
+  evidence is diagnosed across score, reward signal, behavior, and version
+  integrity; fixed blockers fail closed while failed branches and next-epoch
+  challenges are retained. Harness/evaluator changes are incomparable within
+  the current epoch, and neither the audit nor its skills can authorize
+  automatic production or evaluator mutation. Skills require independent
+  historical plus holdout validation in one domain, and two validated domains
+  for cross-domain status. This is an independent diagnostic contract, not an
+  implementation of EvoTrainer's online RL or automatic training runtime.
+- Bound every harness comparison to one epoch and canonical policy hash, retain
+  normalized evidence for deterministic replay validation, and keep rounded
+  presentation metrics out of threshold decisions.
+- Retain every distinct project harness audit in an idempotent, hash-chained
+  JSONL history. Same-epoch current updates now require an exact evidence-version
+  prefix extension unless an operator explicitly passes `--supersede`.
 - Made the structured scientific trajectory an explicit protocol invariant:
   observable hypotheses, decisions, tool executions, attempts, evidence,
   objections, failures, recoveries and gates are typed, content-addressed and
@@ -190,6 +206,18 @@ for its Python package; the ARA protocol has its own version in
 
 ### Fixed
 
+- Confined model- or caller-supplied project, idea, batch, experiment, and
+  paper labels to their artifact roots, with bounded slugs and content-derived
+  identities preventing traversal and duplicate-name collisions.
+- Prevented installed/PyPI executor builds from sending the research workspace
+  to the Docker daemon; only a temporary Dockerfile-only context is used, while
+  source-checkout builds retain their explicit source context.
+- Added a process-local workspace reservation so duplicate HTTP jobs cannot
+  concurrently mutate one project, with a stable HTTP 409 response and release
+  on completion, failure, or cancellation.
+- Required release tags to be reachable from `origin/main` and to pass the full
+  test suite before distribution build; Ubuntu CI now covers declared Python
+  3.13 support.
 - Restored Windows initialization, onboarding, and provider transactions by
   writing canonical encoded bytes without CRLF rewriting. Compatibility smoke
   commands now fail independently and exercise the cross-platform byte

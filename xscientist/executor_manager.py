@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -129,13 +130,22 @@ def inspect_executor(
     }
 
 
-def _source_build_arguments(workspace: Path) -> tuple[Path, list[str]]:
+def _source_build_arguments(_workspace: Path) -> tuple[Path | None, list[str]]:
+    """Return a source checkout context, or ``None`` for an installed package.
+
+    An installed package must not use the research workspace as its Docker build
+    context. Workspaces can contain private datasets and complete Git histories;
+    Docker sends the whole context to the daemon before evaluating ``COPY``.
+    ``build_executor`` replaces the ``None`` context with a temporary directory
+    containing only the explicitly selected Dockerfile.
+    """
+
     source_root = Path(__file__).resolve().parents[1]
     local_source = (source_root / "pyproject.toml").is_file() and (
         source_root / "xscientist"
     ).is_dir()
     if not local_source:
-        return workspace, []
+        return None, []
     revision_result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=source_root,
@@ -179,16 +189,40 @@ def build_executor(
         )
     image = _image_name(config)
     context, source_args = _source_build_arguments(root)
-    command = ["docker", "build", "-f", str(dockerfile), "-t", image]
-    if pull_base:
-        command.append("--pull")
-    command.extend(source_args)
-    command.append(str(context))
-    completed = run(command, cwd=context, text=True, check=False)
-    if completed.returncode:
-        raise ExecutorManagerError(
-            f"executor build failed with return code {completed.returncode}"
-        )
+
+    def run_build(*, build_context: Path, selected_dockerfile: Path) -> None:
+        command = [
+            "docker",
+            "build",
+            "-f",
+            str(selected_dockerfile),
+            "-t",
+            image,
+        ]
+        if pull_base:
+            command.append("--pull")
+        command.extend(source_args)
+        command.append(str(build_context))
+        completed = run(command, cwd=build_context, text=True, check=False)
+        if completed.returncode:
+            raise ExecutorManagerError(
+                f"executor build failed with return code {completed.returncode}"
+            )
+
+    if context is None:
+        # The Dockerfile's PyPI branch does not consume workspace files. Keep it
+        # inside an otherwise empty, private context so Docker never receives the
+        # research workspace merely because it needs to parse the Dockerfile.
+        with tempfile.TemporaryDirectory(prefix="xscientist-executor-build-") as raw:
+            safe_context = Path(raw)
+            safe_dockerfile = safe_context / "Dockerfile.executor"
+            shutil.copyfile(dockerfile, safe_dockerfile)
+            run_build(
+                build_context=safe_context,
+                selected_dockerfile=safe_dockerfile,
+            )
+    else:
+        run_build(build_context=context, selected_dockerfile=dockerfile)
     return inspect_executor(root, run=run)
 
 

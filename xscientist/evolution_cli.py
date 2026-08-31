@@ -7,8 +7,9 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from ai_scientist.protocol.attestation import (
     AttestationError,
@@ -24,11 +25,25 @@ from ai_scientist.utils.evolution_deployment import (
     LocalEvolutionDeployment,
     deploy_approved_candidate,
 )
+from ai_scientist.utils.evolution_harness import (
+    EvolutionHarnessError,
+    bind_skill_backtest,
+    bind_version_evidence,
+    build_evolution_harness_audit,
+    validate_evolution_harness_audit,
+)
 from ai_scientist.utils.evolution_runtime import (
     EvolutionRuntimeError,
     run_canary_suite,
     run_shadow_benchmark,
 )
+from ai_scientist.utils.pipeline_contracts import (
+    append_jsonl_artifact,
+    artifact_path,
+    save_contract_artifact,
+)
+
+_HARNESS_HISTORY_PATH = Path("knowledge/evolution_harness_history.jsonl")
 
 
 def _load_json(path_value: str) -> Any:
@@ -53,6 +68,237 @@ def _candidate(value: Any) -> dict[str, Any]:
     return (
         _object(nested, label="candidate.candidate") if nested is not None else payload
     )
+
+
+def _harness_audit_from_spec(value: Any) -> dict[str, Any]:
+    spec = _object(value, label="harness evidence")
+    allowed = {"versions", "backtests", "policy"}
+    unknown = set(spec) - allowed
+    if unknown:
+        raise EvolutionHarnessError(
+            "harness evidence has unsupported fields: " + ", ".join(sorted(unknown))
+        )
+    versions = spec.get("versions")
+    if not isinstance(versions, list):
+        raise EvolutionHarnessError("harness evidence versions must be an array")
+    bound_versions = [
+        (
+            dict(item)
+            if isinstance(item, Mapping) and "evidence_hash" in item
+            else bind_version_evidence(item)
+        )
+        for item in versions
+    ]
+    raw_backtests = spec.get("backtests", [])
+    if not isinstance(raw_backtests, list):
+        raise EvolutionHarnessError("harness evidence backtests must be an array")
+    bound_backtests = [
+        (
+            dict(item)
+            if isinstance(item, Mapping) and "backtest_hash" in item
+            else bind_skill_backtest(item)
+        )
+        for item in raw_backtests
+    ]
+    policy = spec.get("policy")
+    if policy is not None and not isinstance(policy, Mapping):
+        raise EvolutionHarnessError("harness evidence policy must be an object")
+    result = build_evolution_harness_audit(
+        bound_versions,
+        backtests=bound_backtests,
+        policy=policy,
+    )
+    validation = validate_evolution_harness_audit(result)
+    if not validation["ok"]:
+        raise EvolutionHarnessError(
+            "generated harness audit is invalid: " + ", ".join(validation["errors"])
+        )
+    return result
+
+
+def _validated_harness_audit(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise EvolutionRuntimeError(f"{label} must be a JSON object")
+    audit = dict(value)
+    validation = validate_evolution_harness_audit(audit)
+    if not validation["ok"]:
+        raise EvolutionRuntimeError(
+            f"{label} is invalid: " + ", ".join(validation["errors"])
+        )
+    return audit
+
+
+def _load_harness_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    previous_hash: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    raw_row = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise EvolutionRuntimeError(
+                        f"invalid harness history JSON at line {line_number}: {exc.msg}"
+                    ) from exc
+                if not isinstance(raw_row, Mapping):
+                    raise EvolutionRuntimeError(
+                        f"harness history line {line_number} must be a JSON object"
+                    )
+                required = {"previous_audit_hash", "epoch_id", "audit"}
+                if not required.issubset(raw_row):
+                    raise EvolutionRuntimeError(
+                        f"harness history line {line_number} is missing required fields"
+                    )
+                audit = _validated_harness_audit(
+                    raw_row["audit"], label=f"harness history line {line_number} audit"
+                )
+                audit_hash = audit["audit_hash"]
+                epoch_id = audit["evidence"]["epoch_id"]
+                if raw_row["epoch_id"] != epoch_id:
+                    raise EvolutionRuntimeError(
+                        f"harness history line {line_number} epoch_id does not match its audit"
+                    )
+                if raw_row["previous_audit_hash"] != previous_hash:
+                    raise EvolutionRuntimeError(
+                        f"harness history line {line_number} breaks the audit hash chain"
+                    )
+                if audit_hash in seen_hashes:
+                    raise EvolutionRuntimeError(
+                        f"harness history line {line_number} duplicates audit_hash {audit_hash}"
+                    )
+                rows.append(dict(raw_row))
+                seen_hashes.add(audit_hash)
+                previous_hash = audit_hash
+    except OSError as exc:
+        raise EvolutionRuntimeError(
+            f"harness history could not be read: {path}"
+        ) from exc
+    return rows
+
+
+def _is_exact_version_prefix_extension(
+    current: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> bool:
+    current_versions = current["evidence"]["versions"]
+    candidate_versions = candidate["evidence"]["versions"]
+    return len(candidate_versions) > len(current_versions) and (
+        candidate_versions[: len(current_versions)] == current_versions
+    )
+
+
+def _authorize_harness_current_update(
+    current: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any],
+    *,
+    supersede: bool,
+) -> None:
+    if current is None or current["audit_hash"] == candidate["audit_hash"]:
+        return
+    current_epoch = current["evidence"]["epoch_id"]
+    candidate_epoch = candidate["evidence"]["epoch_id"]
+    if current_epoch != candidate_epoch:
+        return
+    if _is_exact_version_prefix_extension(current, candidate):
+        return
+    if supersede:
+        return
+    raise EvolutionRuntimeError(
+        "refusing to replace the current evolution harness audit in epoch "
+        f"{candidate_epoch!r}: evidence versions are not an exact prefix extension; "
+        "pass --supersede to replace current while retaining append-only history"
+    )
+
+
+@contextmanager
+def _harness_history_lock(project_root: Path) -> Iterator[None]:
+    """Serialize current/history transitions made by cooperating CLI processes."""
+
+    lock_path = project_root / "knowledge" / ".evolution_harness.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows
+            import msvcrt
+
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _persist_harness_audit(
+    project_root: str | Path,
+    audit: Mapping[str, Any],
+    *,
+    supersede: bool,
+) -> str:
+    root = Path(project_root).expanduser().resolve()
+    candidate = _validated_harness_audit(audit, label="generated harness audit")
+    current_path = artifact_path(root, "evolution_harness")
+    history_path = root / _HARNESS_HISTORY_PATH
+
+    with _harness_history_lock(root):
+        current = None
+        if current_path.exists():
+            current = _validated_harness_audit(
+                _load_json(str(current_path)), label="current evolution harness audit"
+            )
+        history = _load_harness_history(history_path)
+        _authorize_harness_current_update(
+            current,
+            candidate,
+            supersede=supersede,
+        )
+
+        seen_hashes = {row["audit"]["audit_hash"] for row in history}
+        previous_hash = history[-1]["audit"]["audit_hash"] if history else None
+        for item in (current, candidate):
+            if item is None or item["audit_hash"] in seen_hashes:
+                continue
+            append_jsonl_artifact(
+                history_path,
+                {
+                    "previous_audit_hash": previous_hash,
+                    "epoch_id": item["evidence"]["epoch_id"],
+                    "audit": item,
+                },
+            )
+            previous_hash = item["audit_hash"]
+            seen_hashes.add(item["audit_hash"])
+
+        if current is not None and current["audit_hash"] == candidate["audit_hash"]:
+            return str(current_path)
+        return save_contract_artifact(
+            root,
+            "evolution_harness",
+            candidate,
+            producer="evolution_cli",
+            notes=(
+                "Offline four-layer evolution diagnostic; eligibility still "
+                "requires human review and evolution_gate authorization. "
+                "Distinct audits are retained in knowledge/evolution_harness_history.jsonl."
+            ),
+        )
 
 
 def _write_json(path_value: str | None, payload: Any, *, force: bool = False) -> None:
@@ -155,6 +401,23 @@ def _build_parser() -> argparse.ArgumentParser:
     canary.add_argument("--out")
     canary.add_argument("--force", action="store_true")
 
+    harness = subparsers.add_parser(
+        "harness-audit",
+        help="Diagnose content-addressed versions across score, signal, behavior, and version layers.",
+    )
+    harness.add_argument("--evidence", required=True)
+    harness.add_argument("--project-root")
+    harness.add_argument("--out")
+    harness.add_argument("--force", action="store_true")
+    harness.add_argument(
+        "--supersede",
+        action="store_true",
+        help=(
+            "Replace a same-epoch current audit that is not an exact evidence-version "
+            "prefix extension; append-only history is always retained."
+        ),
+    )
+
     attest = subparsers.add_parser("attest", help="Sign or verify one JSON artifact.")
     attest_subparsers = attest.add_subparsers(dest="attest_command", required=True)
     sign = attest_subparsers.add_parser("sign")
@@ -255,6 +518,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write_json(args.out, result, force=args.force)
             return 0 if result["status"] == "passed" else 3
+        if args.command == "harness-audit":
+            if args.supersede and not args.project_root:
+                raise EvolutionRuntimeError("--supersede requires --project-root")
+            result = _harness_audit_from_spec(_load_json(args.evidence))
+            output_path = Path(args.out).expanduser().resolve() if args.out else None
+            if output_path is not None and output_path.exists() and not args.force:
+                raise EvolutionRuntimeError(
+                    "output path exists; pass --force to replace it"
+                )
+            saved_path = None
+            if args.project_root:
+                saved_path = _persist_harness_audit(
+                    args.project_root,
+                    result,
+                    supersede=args.supersede,
+                )
+            if output_path is None or (
+                saved_path is None
+                or output_path != Path(saved_path).expanduser().resolve()
+            ):
+                _write_json(args.out, result, force=args.force)
+            return 0 if result["progression"]["controlled_progression_allowed"] else 3
         if args.command == "attest" and args.attest_command == "sign":
             payload = _load_json(args.payload)
             if args.key_env:
@@ -418,6 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AttestationError,
         EvolutionArtifactError,
         EvolutionDeploymentError,
+        EvolutionHarnessError,
         EvolutionRuntimeError,
         OSError,
         TypeError,

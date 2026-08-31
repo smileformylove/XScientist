@@ -28,6 +28,7 @@ XScientist is designed as a **research operating system** that can run continuou
 | Research engine | `ai_scientist/` | Internal | Ideation, experiments, writing, review, repair, orchestration |
 | Research integrity | `ai_scientist/utils/research_integrity.py` | Artifact-compatible | Immutable preregistration, blind verification, independent reproduction, claim promotion |
 | Discovery archive | `ai_scientist/utils/hypothesis_archive.py` | Artifact-compatible | Hypothesis lineage, proximity niches, Pareto fronts, quality-diverse selection, tournaments |
+| Evolution harness audit | `ai_scientist/utils/evolution_harness.py` | Constitution-bound diagnostic | Offline score/signal/behavior/version audit, content hashes, fixed blockers, next-epoch challenges, typed skill quarantine |
 | Evolution program | `ai_scientist/utils/evolution_program.py` | Constitution-bound | L0/L1/L2 separation, fixed-utility epochs, quality-diverse atomic intent portfolios, outcome feedback |
 | Evolution gate | `ai_scientist/utils/evolution_gate.py` | Constitution-bound | Mutation whitelist/blacklist, ablation, sealed and prospective tests, real-work canary, verified rollback |
 | Science constitution | `ai_scientist/utils/science_constitution.py` | Immutable core | Code-anchored scientific principles, protected assets, amendment proposals |
@@ -216,6 +217,7 @@ Multi-round review system:
 
 ### 5. Autonomous Evolution Engine
 **Location**: `ai_scientist/utils/self_evolution.py`,
+`ai_scientist/utils/evolution_harness.py`,
 `ai_scientist/utils/evolution_program.py`,
 `ai_scientist/utils/evolution_gate.py`
 
@@ -227,9 +229,23 @@ Self-improvement system that:
 
 **Key Features**:
 - No automatic production or evaluator mutation
+- Content-addressed score, signal, behavior, and version diagnostics
 - Exploration/exploitation and per-component budgets
 - Append-only negative-result and epoch archives
 - Ablation, independent benchmark, canary, rollback, and approval gates
+
+The harness audit diagnoses bounded multi-version evidence; it does not mutate
+the system. `self_evolution` retains its blockers and validated skill hashes as
+advisory lessons, `evolution_program` schedules atomic interventions for a
+later fixed-utility epoch, and `evolution_gate` remains the only promotion
+authority. Harness/evaluator hash changes make an epoch incomparable, so an
+evaluation-policy challenge can be reviewed only for the next epoch. Skills
+remain quarantined until independent historical and holdout backtests pass in
+one domain; two validated domains are required for cross-domain status.
+
+This diagnostic split is inspired by [EvoTrainer](https://arxiv.org/abs/2606.03108)
+and the [official DAMO-ConvAI/EvoTrainer code](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/EvoTrainer).
+XScientist does not implement or claim EvoTrainer's online RL training runtime.
 
 `ai_scientist/autonomous_evolution.py` remains a compatibility path for
 paper-level episodic actions. Its self-scored learning proposals are quarantined

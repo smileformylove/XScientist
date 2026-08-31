@@ -8,6 +8,7 @@ from tools.check_release import validate_release
 from tools.engineering_checks import (
     REPOSITORY_ROOT,
     _requirement_names,
+    check_action_pinning,
     check_markdown_links,
     run_checks,
 )
@@ -46,6 +47,32 @@ class EngineeringChecksTests(unittest.TestCase):
             if values
         }
         self.assertEqual(errors, {})
+
+    def test_release_workflow_requires_history_main_ancestry_and_full_tests(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "release.yml").write_text(
+                "publish: ${{ startsWith(github.ref, 'refs/tags/v') }}\n",
+                encoding="utf-8",
+            )
+
+            errors = check_action_pinning(root)
+
+        self.assertIn("release checkout must fetch complete Git history", errors)
+        self.assertIn(
+            "release tags must be verified as reachable from origin/main", errors
+        )
+        self.assertIn(
+            "release build must install test dependencies and run full pytest", errors
+        )
+        self.assertIn(
+            "release tests must install and import the HTTP service dependencies",
+            errors,
+        )
 
     def test_release_tag_is_bound_to_package_version(self) -> None:
         with tempfile.TemporaryDirectory() as td:

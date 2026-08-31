@@ -155,7 +155,9 @@ from ai_scientist.utils.gate_preconditions import (
 
 # 导入路径配置
 from ai_scientist.config.paths import (
+    confined_path,
     get_project_dir,
+    idea_storage_key,
     resolve_output_path,
 )
 
@@ -2176,7 +2178,8 @@ def process_single_idea(args):
         strict_writing_guardrails = bool(strict_writing_guardrails or high_quality_mode)
         guardrail_repair_rounds = max(0, int(guardrail_repair_rounds))
         research_root = Path(research_root).expanduser()
-        idea_name = idea.get("Name", f"idea_{idea_idx}")
+        idea_name = str(idea.get("Name", f"idea_{idea_idx}"))
+        idea_key = idea_storage_key(idea, idea_index=int(idea_idx))
         integrity_forensics_result = {"enabled": False, "status": "disabled"}
         workflow_spec, workflow_metadata, _, _ = _resolve_workflow_strategy(
             workflow_mode=workflow_mode,
@@ -2209,10 +2212,9 @@ def process_single_idea(args):
             timestamp = resumed_exp_dir.name.split("_", 1)[0]
             print(f"♻️ 从 BFTS checkpoint 恢复: {checkpoint}")
         else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            exp_dir = osp.join(
-                project_dir, "02_experiments", f"{timestamp}_{idea_name}"
-            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            experiments_root = confined_path(project_dir, "02_experiments")
+            exp_dir = str(confined_path(experiments_root, f"{timestamp}_{idea_key}"))
             os.makedirs(exp_dir, exist_ok=True)
 
         # Turn on LLM tracing NOW: every prompt from ideation → writeup →
@@ -2988,14 +2990,14 @@ def process_single_idea(args):
                     )
 
             # 复制最终PDF到papers目录
-            final_pdf_name = f"{idea_name}_final.pdf"
-            final_pdf_dst = osp.join(project_dir, "03_papers", final_pdf_name)
+            final_pdf_name = f"{idea_key}_final.pdf"
+            final_pdf_dst = str(confined_path(project_dir, "03_papers", final_pdf_name))
             if osp.exists(pdf_path):
                 shutil.copy(pdf_path, final_pdf_dst)
 
         integrity_forensics_result = run_integrity_forensics_for_manuscript(
             root=exp_dir,
-            paper_id=f"{idea_idx}_{idea_name}",
+            paper_id=idea_key,
             enabled=bool(integrity_forensics_enabled),
         )
         if integrity_forensics_result.get("status") == "completed":

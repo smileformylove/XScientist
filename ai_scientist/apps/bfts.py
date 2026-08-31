@@ -470,7 +470,14 @@ def main() -> int:
     for candidate_idx in candidate_indices:
         idea = ideas[candidate_idx]
 
-        idea_dir = str(get_experiment_dir(idea["Name"], args.attempt_id))
+        idea_dir = str(
+            get_experiment_dir(
+                idea.get("Name", f"idea_{candidate_idx}"),
+                args.attempt_id,
+                idea_identity=idea,
+                idea_index=candidate_idx,
+            )
+        )
         print(f"Results will be saved in {idea_dir}")
         print(
             "(Relative to project root: "

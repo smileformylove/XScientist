@@ -491,7 +491,14 @@ def main() -> int:
         idea = ideas[candidate_idx]
         print(f"选择想法 #{candidate_idx}: {idea.get('Name', 'Unknown')}")
 
-        idea_dir = str(get_experiment_dir(idea["Name"], args.attempt_id))
+        idea_dir = str(
+            get_experiment_dir(
+                idea.get("Name", f"idea_{candidate_idx}"),
+                args.attempt_id,
+                idea_identity=idea,
+                idea_index=candidate_idx,
+            )
+        )
         print(f"结果将保存在 {idea_dir}")
         print(
             "(相对于项目根目录: "

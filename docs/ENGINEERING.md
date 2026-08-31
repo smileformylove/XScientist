@@ -6,7 +6,7 @@ research-integrity documents.
 
 ## Supported environments
 
-- Python: 3.10, 3.11, and 3.12.
+- Python: 3.10, 3.11, 3.12, and 3.13.
 - Core SDK/protocol CI platforms: Ubuntu, macOS, and Windows on Python 3.11,
   plus Ubuntu on every supported Python version.
 - The complete research-runtime lane runs on Ubuntu/Python 3.11; portable
@@ -88,9 +88,10 @@ a release:
 5. Push the tag and review the GitHub Actions environment approval.
 
 The release workflow fails if the tag, changelog, and citation version disagree,
-or if the `Unreleased` section still contains entries. It builds, checks,
-smoke-installs, and hashes the artifacts before PyPI trusted publishing. A
-manual workflow dispatch builds artifacts but cannot publish a branch
+if the tag commit is not reachable from `origin/main`, or if the `Unreleased`
+section still contains entries. It runs the complete pytest suite, builds,
+checks, smoke-installs, and hashes the artifacts before PyPI trusted publishing.
+A manual workflow dispatch builds artifacts but cannot publish a branch
 accidentally.
 
 ## Protocol changes

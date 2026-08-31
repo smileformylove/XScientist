@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -23,17 +25,35 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            requirements/smoke.txt
             requirements/constraints-ci.txt
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade build twine
+      - name: Install release and test tooling
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[service,dev]" -r requirements/smoke.txt -c requirements/constraints-ci.txt
+          python -c "import fastapi, httpx"
+          python -m pip check
 
       - name: Validate tagged release metadata
         if: github.ref_type == 'tag'
         run: python tools/check_release.py --tag "$GITHUB_REF_NAME"
 
+      - name: Verify release tag is reachable from main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main; then
+            echo "Release tag commit is not reachable from origin/main" >&2
+            exit 1
+          fi
+
       - name: Run engineering checks
         run: python tools/engineering_checks.py
+
+      - name: Run complete pytest suite
+        run: python tools/privacy_exec.py -- python -m pytest -q tests
 
       - name: Build distributions
         run: python tools/build_distribution.py --outdir dist

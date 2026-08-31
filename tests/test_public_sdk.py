@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 import sys
+import threading
 import time
 import tempfile
 import unittest
@@ -454,6 +455,130 @@ class PublicSdkTests(unittest.TestCase):
         self.assertEqual(payload["result"]["stdout"], "6789")
         self.assertEqual(payload["result"]["stderr"], "ghij")
 
+    def test_service_rejects_a_second_active_job_for_the_same_workspace(
+        self,
+    ) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def run_project(_request, **_kwargs):
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return xscientist.CommandResult(
+                command=("python", "-m", "run_project"),
+                returncode=0,
+                stdout="done",
+                stderr="",
+                started_at="start",
+                finished_at="finish",
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            settings = ServiceSettings(
+                output_root=Path(td) / "output",
+                state_dir=Path(td) / "state",
+                max_workers=2,
+            )
+            with mock.patch.object(XScientist, "run_project", side_effect=run_project):
+                app = xscientist.create_app(settings)
+                with TestClient(app) as client:
+                    try:
+                        first = client.post(
+                            "/v1/projects",
+                            json={"project": "demo", "topic": "topic.md"},
+                        )
+                        self.assertEqual(first.status_code, 202)
+                        self.assertTrue(entered.wait(timeout=2))
+                        second = client.post(
+                            "/v1/projects",
+                            json={"project": "demo", "topic": "topic.md"},
+                        )
+                    finally:
+                        release.set()
+
+        self.assertEqual(second.status_code, 409)
+        detail = second.json()["detail"]
+        self.assertEqual(detail["code"], "workspace_busy")
+        self.assertEqual(detail["active_job_id"], first.json()["id"])
+        self.assertNotIn(str(Path(td)), second.text)
+
+    def test_resume_workspace_conflict_uses_structured_409(self) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except ModuleNotFoundError:
+            self.skipTest("service extras not installed")
+
+        active_entered = threading.Event()
+        release = threading.Event()
+        call_count = 0
+
+        def run_project(_request, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return xscientist.CommandResult(
+                    command=("python", "-m", "run_project"),
+                    returncode=1,
+                    stdout="",
+                    stderr="failed",
+                    started_at="start-1",
+                    finished_at="finish-1",
+                )
+            active_entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            return xscientist.CommandResult(
+                command=("python", "-m", "run_project"),
+                returncode=0,
+                stdout="done",
+                stderr="",
+                started_at="start-2",
+                finished_at="finish-2",
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            settings = ServiceSettings(
+                output_root=Path(td) / "output",
+                state_dir=Path(td) / "state",
+                max_workers=2,
+            )
+            with mock.patch.object(XScientist, "run_project", side_effect=run_project):
+                app = xscientist.create_app(settings)
+                with TestClient(app) as client:
+                    try:
+                        failed = client.post(
+                            "/v1/projects",
+                            json={"project": "demo", "question": "first"},
+                        )
+                        self.assertEqual(failed.status_code, 202, failed.text)
+                        failed_id = failed.json()["id"]
+                        for _ in range(100):
+                            status = client.get(f"/v1/jobs/{failed_id}").json()
+                            if status["status"] == "failed":
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(status["status"], "failed")
+
+                        active = client.post(
+                            "/v1/projects",
+                            json={"project": "demo", "question": "second"},
+                        )
+                        self.assertEqual(active.status_code, 202, active.text)
+                        self.assertTrue(active_entered.wait(timeout=2))
+                        resumed = client.post(f"/v1/jobs/{failed_id}/resume")
+                    finally:
+                        release.set()
+
+        self.assertEqual(resumed.status_code, 409)
+        detail = resumed.json()["detail"]
+        self.assertEqual(detail["code"], "workspace_busy")
+        self.assertEqual(detail["active_job_id"], active.json()["id"])
+        self.assertNotIn(str(Path(td)), resumed.text)
+
     def test_http_service_supports_optional_api_key(self) -> None:
         try:
             from fastapi.testclient import TestClient
@@ -784,6 +909,10 @@ class PublicSdkTests(unittest.TestCase):
             payloads = [
                 {"project": "../escape", "topic": "topic.md"},
                 {"project": "nested/demo", "topic": "topic.md"},
+                {"project": "CON", "topic": "topic.md"},
+                {"project": "nul.txt", "topic": "topic.md"},
+                {"project": "demo.", "topic": "topic.md"},
+                {"project": "bad:name", "topic": "topic.md"},
                 {"project": "~", "topic": "topic.md"},
                 {"project": "--output-root", "topic": "topic.md"},
                 {"project": " demo ", "topic": "topic.md"},

@@ -10,14 +10,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.config.paths import (
+    is_windows_reserved_component,
+    is_windows_unsafe_component,
+    resolve_output_path,
+)
 from ai_scientist.utils.atomic_io import atomic_write_json
-from ai_scientist.config.paths import resolve_output_path
 
 from ._version import __version__
 from .client import XScientist
 from .models import ProjectRequest, ServiceSettings
 from .service_jobs import Job as _Job
 from .service_jobs import JobStore as _JobStore
+from .service_jobs import WorkspaceBusyError
 
 try:
     from pydantic import BaseModel, ConfigDict, Field
@@ -66,6 +71,8 @@ def _validate_project_name(project: str, *, output_root: Path) -> str:
         or "/" in name
         or "\\" in name
         or any(ord(char) < 32 for char in raw_name)
+        or is_windows_reserved_component(name)
+        or is_windows_unsafe_component(name)
     ):
         raise ValueError("project must be a single directory name")
     projects_root = (output_root / "projects").resolve()
@@ -459,7 +466,17 @@ def create_app(settings: ServiceSettings | None = None):
             request.to_argv()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return store.submit(request).to_dict()
+        try:
+            return store.submit(request).to_dict()
+        except WorkspaceBusyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": exc.code,
+                    "active_job_id": exc.active_job_id,
+                    "message": "project workspace already has an active job",
+                },
+            ) from exc
 
     @app.get("/v1/projects/{project}/research/status")
     def research_status(project: str) -> dict[str, Any]:
@@ -579,6 +596,15 @@ def create_app(settings: ServiceSettings | None = None):
     def resume_job(job_id: str) -> dict[str, Any]:
         try:
             job = store.resume(job_id)
+        except WorkspaceBusyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": exc.code,
+                    "active_job_id": exc.active_job_id,
+                    "message": "project workspace already has an active job",
+                },
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if job is None:

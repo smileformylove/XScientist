@@ -187,6 +187,7 @@ def _source_snapshot(
             "self_check": deepcopy(self_evolution.get("self_check") or {}),
             "lessons": deepcopy(self_evolution.get("lessons") or []),
             "stage_risks": deepcopy(self_evolution.get("stage_risks") or []),
+            "harness_snapshot": deepcopy(self_evolution.get("harness_snapshot") or {}),
         },
         "playbook": {
             "project_count": int(playbook.get("project_count") or 0),
@@ -208,6 +209,37 @@ def _route_for_lesson(lesson: dict[str, Any]) -> dict[str, str]:
     risk = str(lesson.get("risk") or "unclassified_failure").strip()
     if risk in RISK_ROUTING:
         return deepcopy(RISK_ROUTING[risk])
+    if risk.startswith("harness_"):
+        if "cost_budget" in risk:
+            return {
+                "component_type": "resource_allocation",
+                "target_metric": "cost_per_task",
+                "operator": "restore the declared resource boundary without changing evaluation rules",
+            }
+        if any(
+            token in risk
+            for token in (
+                "behavior_regression",
+                "score_divergence",
+                "threshold_violation",
+            )
+        ):
+            return {
+                "component_type": "agent_scaffold",
+                "target_metric": "false_discovery_rate",
+                "operator": "make process-behavior regressions block score-only promotion",
+            }
+        if "score_no_improvement" in risk:
+            return {
+                "component_type": "search_policy",
+                "target_metric": "objective_score",
+                "operator": "explore a distinct causal intervention under the frozen objective",
+            }
+        return {
+            "component_type": "tool",
+            "target_metric": "reproducibility_rate",
+            "operator": "enforce content-addressed harness comparability and fail-closed diagnostics",
+        }
     stage = str(lesson.get("stage") or "review").strip()
     component_by_stage = {
         "ideation": "search_policy",
@@ -475,7 +507,9 @@ def _evaluation_challenges(
     }
     challenges = []
     for signal in signals:
-        if signal["risk"] not in challenge_risks:
+        if signal["risk"] not in challenge_risks and not str(signal["risk"]).startswith(
+            "harness_"
+        ):
             continue
         challenge_seed = {"epoch_id": epoch_id, "fingerprint": signal["fingerprint"]}
         challenges.append(
@@ -487,6 +521,11 @@ def _evaluation_challenges(
                 "status": "epoch_boundary_human_review",
                 "automatic_application_allowed": False,
                 "earliest_application_epoch": "next",
+                "protected_component": (
+                    "evaluation_policy"
+                    if "evaluator_mismatch" in str(signal["risk"])
+                    else None
+                ),
             }
         )
     return challenges

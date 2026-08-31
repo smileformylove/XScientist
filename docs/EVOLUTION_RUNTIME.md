@@ -26,6 +26,70 @@ The local adapter is deliberately bounded to directory deployment. Container,
 Kubernetes, hosted-agent, HSM, transparency-log, and remote benchmark-custody
 integrations should implement the same receipt and authorization interfaces.
 
+## 0. Audit the evolution harness
+
+The EvoTrainer-inspired harness audit is an offline diagnostic, not a trainer.
+It accepts one parent-linked lineage of 2–32 content-addressed versions and
+examines four non-compensable layers:
+
+- **score**: primary-score movement and score-contract consistency;
+- **signal**: reward-group variance, ties, and low-information groups;
+- **behavior**: threshold violations, regressions, and score/behavior divergence;
+- **version**: one frozen epoch, lineage, integrity, cost, and frozen
+  harness/policy/evaluator/task/resource/seed hashes.
+
+The expected CLI contract is:
+
+```text
+xscientist evolution harness-audit --evidence evidence.json [--project-root ROOT] [--supersede] [--out report.json]
+```
+
+`evidence.json` contains `versions` plus optional `backtests` and `policy`.
+Each version supplies an `epoch_id`, scores, grouped rewards, behavior metrics
+and thresholds, integrity checks, comparison hashes, and cost. Its
+`comparison_hashes.policy_hash` is the canonical commitment returned by
+`build_harness_policy_hash(policy)` (use the default policy when `policy` is
+omitted). The adapter content-addresses unbound rows before auditing them.
+Without `--out`, the canonical JSON report is written to stdout;
+`--project-root` additionally saves it as the project's `evolution_harness`
+contract artifact and appends every distinct `audit_hash` to
+`knowledge/evolution_harness_history.jsonl`. Re-running the same audit is
+idempotent. Within one epoch, current may advance automatically only when the
+new evidence `versions` are an exact, strict prefix extension of current;
+other same-epoch replacements fail closed unless the operator passes
+`--supersede`. Superseding changes current but never removes either audit from
+history. Moving to a different epoch may update current without that flag. A
+clean audit exits zero, while a held lineage exits 3 without deleting the
+evidence or failed versions.
+
+The report contains the four diagnostic layers, fixed blocker risk codes,
+`next_epoch_harness_challenges`, typed skill validation, governance flags, and
+an `audit_hash`. The bounded normalized diagnostics remain embedded so the
+validator can replay the pure builder instead of trusting a rehashed summary.
+Any blocker yields `decision: hold`; even a clean report is
+only `eligible_for_human_review`. A changed harness or evaluator hash makes the
+transition incomparable. Evaluation-policy changes are protected challenges
+for a later epoch: the candidate may never rewrite its evaluator in the epoch
+being scored.
+
+Skill backtests are also fail-closed. A skill is `domain_validated` only when
+both historical and holdout evidence pass for one domain under evaluators that
+are independent of the producer. At least two such domains are required for
+`cross_domain_validated`; everything else remains quarantined. Validated skills
+are advisory and still require a fresh evolution gate before use.
+
+The control boundary is one-way: `self_evolution` validates and retains the
+audit as lessons; `evolution_program` may turn those lessons into bounded
+next-epoch intents; `evolution_gate` alone evaluates a candidate with ablation,
+sealed/prospective benchmarks, canary, rollback, and human authorization. The
+harness audit performs no model call, network call, online reinforcement
+learning, weight update, deployment, or automatic evaluator mutation.
+
+Design inspiration comes from the [EvoTrainer paper](https://arxiv.org/abs/2606.03108)
+and its [official DAMO-ConvAI implementation](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/EvoTrainer).
+XScientist independently implements only the bounded audit pattern; it does not
+import EvoTrainer's ROLL/PPO runtime, training data, weights, or reported scores.
+
 ## 1. Build a real candidate
 
 Create `candidate-build.json`:

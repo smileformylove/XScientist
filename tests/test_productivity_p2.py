@@ -35,6 +35,7 @@ from xscientist.completion import (
     completion_script,
 )
 from xscientist.conformance import check_conformance, init_conformance_kit
+from xscientist.evolution_cli import _build_parser as build_evolution_parser
 from xscientist.provider_config import CONFIG_RELATIVE_PATH, CONFIG_SCHEMA_VERSION
 from xscientist.research_git import REPOSITORY_SCHEMA, ResearchGitError
 from xscientist.research_cli import _build_parser as build_research_parser
@@ -353,7 +354,10 @@ class ProductivityP2Tests(unittest.TestCase):
         # Delegate stubs accept REMAINDER and intentionally expose no real
         # options. Only delegates with lightweight executable parser contracts
         # are included, and auth is checked against that actual parser here.
-        self.assertEqual(option_roots & set(_DELEGATES), {"auth", "batch", "project"})
+        self.assertEqual(
+            option_roots & set(_DELEGATES),
+            {"auth", "batch", "evolution", "project"},
+        )
         expected_auth = self._parser_option_tables("auth", build_auth_parser())
         actual_auth = {
             key: set(options.split())
@@ -371,6 +375,24 @@ class ProductivityP2Tests(unittest.TestCase):
         self.assertEqual(
             set(SUBCOMMANDS["auth"].split()),
             set(self._subparser_choices(build_auth_parser())),
+        )
+        evolution_parser = build_evolution_parser()
+        self.assertEqual(
+            set(SUBCOMMANDS["evolution"].split()),
+            set(self._subparser_choices(evolution_parser)),
+        )
+        expected_evolution = self._parser_option_tables("evolution", evolution_parser)
+        actual_evolution = {
+            key: set(options.split())
+            for key, options in OPTIONS.items()
+            if key == "evolution" or key.startswith("evolution::")
+        }
+        self.assertEqual(actual_evolution, expected_evolution)
+        harness_options = set(OPTIONS["evolution::harness-audit"].split())
+        self.assertTrue(
+            {"--evidence", "--project-root", "--out", "--supersede"}.issubset(
+                harness_options
+            )
         )
 
         research_parser = build_research_parser()
@@ -420,6 +442,7 @@ class ProductivityP2Tests(unittest.TestCase):
             self.assertIn("provider::check", script)
             self.assertIn("auth::status", script)
             self.assertIn("auth::login", script)
+            self.assertIn("evolution::harness-audit", script)
 
         bash_list = next(
             line
@@ -464,6 +487,15 @@ class ProductivityP2Tests(unittest.TestCase):
         self.assertFalse(any("-l live" in line for line in fish_provider_list))
         self.assertFalse(any("-l user" in line for line in fish_auth_status))
         self.assertFalse(any("-l ttl-hours" in line for line in fish_auth_status))
+        fish_harness = [
+            line
+            for line in fish.splitlines()
+            if "__xscientist_word_is 2 evolution" in line
+            and "__xscientist_word_is 3 harness-audit" in line
+        ]
+        self.assertTrue(fish_harness)
+        for option in ("evidence", "project-root", "out", "supersede"):
+            self.assertTrue(any(f"-l {option}" in line for line in fish_harness))
 
     def test_conformance_kit_expects_the_bad_fixture_to_fail(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

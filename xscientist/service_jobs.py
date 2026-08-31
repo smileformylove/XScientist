@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
+import re
+import sys
 import threading
+import unicodedata
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -11,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from ai_scientist.config.paths import resolve_output_path
 from ai_scientist.utils.atomic_io import atomic_write_json
 
 from .client import XScientist
@@ -19,6 +25,20 @@ from .models import CommandResult, ProjectRequest
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class WorkspaceBusyError(ValueError):
+    """Raised when an active in-process job already owns a project workspace."""
+
+    code = "workspace_busy"
+
+    def __init__(self, *, workspace: Path, active_job_id: str) -> None:
+        self.workspace = workspace
+        self.active_job_id = active_job_id
+        super().__init__(
+            f"{self.code}: project workspace already has an active job "
+            f"({active_job_id})"
+        )
 
 
 @dataclass
@@ -101,6 +121,10 @@ class JobStore:
         self.jobs: dict[str, Job] = {}
         self.futures: dict[str, Future[None]] = {}
         self.cancel_events: dict[str, threading.Event] = {}
+        # Deliberately process-local: this prevents concurrent workers in one
+        # service instance without pretending to be a cross-process lease.
+        self.active_workspaces: dict[str, str] = {}
+        self.job_workspaces: dict[str, str] = {}
         self.lock = threading.Lock()
         self.state_dir = Path(state_dir).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -108,6 +132,75 @@ class JobStore:
 
     def _job_path(self, job_id: str) -> Path:
         return self.state_dir / f"{job_id}.json"
+
+    def _workspace_for(self, request: ProjectRequest) -> Path:
+        client_output_root = getattr(self.client, "output_root", None)
+        if not isinstance(client_output_root, (str, Path)):
+            client_output_root = None
+        output_root = request.output_root or client_output_root
+        if output_root is None:
+            client_env = getattr(self.client, "env", None)
+            client_env = client_env if isinstance(client_env, dict) else {}
+            output_root = client_env.get("RESEARCH_OUTPUT_DIR") or os.environ.get(
+                "RESEARCH_OUTPUT_DIR"
+            )
+            if output_root is None:
+                output_root = client_env.get(
+                    "AI_SCIENTIST_OUTPUT_DIR"
+                ) or os.environ.get("AI_SCIENTIST_OUTPUT_DIR")
+        root = Path(output_root or resolve_output_path()).expanduser()
+        if not root.is_absolute():
+            client_work_dir = getattr(self.client, "work_dir", None)
+            if not isinstance(client_work_dir, (str, Path)):
+                client_work_dir = None
+            root = (client_work_dir or Path.cwd()) / root
+        return (root / "projects" / request.project).resolve()
+
+    @staticmethod
+    def _workspace_reservation_key(workspace: Path) -> str:
+        """Canonicalize aliases that address one workspace on supported hosts."""
+
+        normalized = os.path.normcase(str(workspace))
+        if sys.platform == "darwin":
+            # Default APFS/HFS+ volumes are case-insensitive and normalize
+            # Unicode spellings even though pathlib's POSIX equality does not.
+            normalized = unicodedata.normalize("NFC", normalized).casefold()
+        elif sys.platform == "win32":
+            # Win32 strips trailing dots/spaces from ordinary path components.
+            # Normalize those aliases defensively even when JobStore is called
+            # directly without the HTTP name validator.
+            windows_path = ntpath.normcase(str(workspace))
+            drive, tail = ntpath.splitdrive(windows_path)
+            components = [
+                component.rstrip(" .")
+                for component in re.split(r"[\\/]+", tail)
+                if component
+            ]
+            normalized = unicodedata.normalize(
+                "NFC", drive + "\\" + "\\".join(components)
+            ).casefold()
+        return normalized
+
+    def _reserve_workspace(self, job_id: str, workspace: Path) -> None:
+        reservation_key = self._workspace_reservation_key(workspace)
+        with self.lock:
+            active_job_id = self.active_workspaces.get(reservation_key)
+            if active_job_id is not None:
+                raise WorkspaceBusyError(
+                    workspace=workspace,
+                    active_job_id=active_job_id,
+                )
+            self.active_workspaces[reservation_key] = job_id
+            self.job_workspaces[job_id] = reservation_key
+
+    def _release_workspace(self, job_id: str) -> None:
+        with self.lock:
+            reservation_key = self.job_workspaces.pop(job_id, None)
+            if (
+                reservation_key is not None
+                and self.active_workspaces.get(reservation_key) == job_id
+            ):
+                del self.active_workspaces[reservation_key]
 
     def _persist(self, job: Job) -> None:
         self.write_json(self._job_path(job.id), job.to_dict())
@@ -140,11 +233,17 @@ class JobStore:
 
     def submit(self, request: ProjectRequest, *, resume_of: str | None = None) -> Job:
         job = Job(id=uuid.uuid4().hex, request=request, resume_of=resume_of)
-        self._persist(job)
-        with self.lock:
-            self.jobs[job.id] = job
-            self.cancel_events[job.id] = threading.Event()
-            self.futures[job.id] = self.executor.submit(self._run, job.id)
+        workspace = self._workspace_for(request)
+        self._reserve_workspace(job.id, workspace)
+        try:
+            self._persist(job)
+            with self.lock:
+                self.jobs[job.id] = job
+                self.cancel_events[job.id] = threading.Event()
+                self.futures[job.id] = self.executor.submit(self._run, job.id)
+        except BaseException:
+            self._release_workspace(job.id)
+            raise
         return job
 
     def _run(self, job_id: str) -> None:
@@ -223,6 +322,8 @@ class JobStore:
                         setattr(job, name, value)
                     job.status = "failed"
                     job.error = f"StatePersistenceError: {exc}"
+            finally:
+                self._release_workspace(job_id)
 
     def get(self, job_id: str) -> Job | None:
         with self.lock:
@@ -246,12 +347,15 @@ class JobStore:
         if event is not None:
             event.set()
         if future is not None and future.cancel():
-            return self._persist_transition(
-                job_id,
-                status="cancelled",
-                finished_at=_now_iso(),
-                error="Cancelled before execution started",
-            )
+            try:
+                return self._persist_transition(
+                    job_id,
+                    status="cancelled",
+                    finished_at=_now_iso(),
+                    error="Cancelled before execution started",
+                )
+            finally:
+                self._release_workspace(job_id)
         return self._persist_transition(job_id, status="cancelling")
 
     def resume(self, job_id: str) -> Job | None:

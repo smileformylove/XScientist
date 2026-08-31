@@ -472,6 +472,33 @@ users do not need to learn them before the first result. See the
 [deep-research protocol](https://github.com/smileformylove/XScientist/blob/main/docs/DEEP_RESEARCH_PROTOCOL.md)
 and [method-discovery protocol](https://github.com/smileformylove/XScientist/blob/main/docs/METHOD_DISCOVERY_PROTOCOL.md).
 
+### Offline evolution harness audit
+
+An EvoTrainer-inspired, deterministic audit can compare a content-addressed
+version lineage before any candidate reaches the promotion gate:
+
+```text
+xscientist evolution harness-audit --evidence evidence.json [--project-root ROOT] [--supersede] [--out report.json]
+```
+
+The report separates score, reward-signal, behavior, and version integrity.
+High scores cannot compensate for behavioral regression, tied/low-information
+reward groups, Git leakage, cost violations, or changed harness/evaluator
+hashes. Failures and next-epoch challenges are retained; a healthy result is
+only eligible for human review. Every lineage binds one frozen `epoch_id` and
+canonical policy hash, and the validator deterministically replays the bounded
+normalized evidence. With `--project-root`, every distinct audit is retained in
+`knowledge/evolution_harness_history.jsonl`; same-epoch current replacement is
+limited to exact evidence-version prefix extensions unless an operator passes
+`--supersede`. The current epoch cannot modify its evaluator.
+Skills remain quarantined until independent historical and holdout backtests
+pass in one domain, and need two validated domains for cross-domain status.
+`self_evolution` consumes the audit as advisory lessons,
+`evolution_program` proposes bounded later-epoch intents, and
+`evolution_gate` remains the sole promotion authority. See the
+[runtime contract](https://github.com/smileformylove/XScientist/blob/main/docs/EVOLUTION_RUNTIME.md).
+This is not online RL or automatic training.
+
 ### FAR-inspired opportunity funnel
 
 For literature-to-open-problem discovery, the [FAR-inspired opportunity
@@ -1277,6 +1304,7 @@ implementation equivalent.
 | [Belief Context Graph](https://github.com/bigai-nlco/belief-context-graph) | Bounded belief projection with conflict, temporal state, and provenance over immutable research objects | Independent implementation; ordinal state is not calibrated confidence |
 | [AutoResearchEval](https://arxiv.org/abs/2608.14905) · [code](https://github.com/PrentisAI/AutoResearchEval) | Offline artifact/process coverage and explicit local conformance | No official rollout, annotated trajectory, judge score, or cross-system comparison |
 | [MLS-Bench](https://arxiv.org/abs/2605.08678) · [code](https://github.com/Imbernoulli/MLS-Bench) | Gates that distinguish local engineering gains from transferable methods | No benchmark tasks, code, or scores included |
+| [EvoTrainer paper](https://arxiv.org/abs/2606.03108) · [official code](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/EvoTrainer) | Four-layer harness diagnosis, backtested interventions, and domain-aware reusable-skill admission | Independent offline audit only; no ROLL/PPO runtime, online RL, training data, weights, or reported score inherited |
 | [Reflexion](https://arxiv.org/abs/2303.11366), [AI co-scientist](https://arxiv.org/abs/2502.18864), [Darwin Gödel Machine](https://arxiv.org/abs/2505.22954), [Red Queen Gödel Machine](https://arxiv.org/abs/2606.26294), [AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) | L0/L1/L2 adaptation, fixed evaluators, shadow candidates, sealed evaluation, canary and rollback | Independent synthesis; model self-scores cannot authorize promotion |
 | [Recuris paper](https://arxiv.org/abs/2608.24876) · [code](https://github.com/Gen-Verse/Recuris) · [audited commit](https://github.com/Gen-Verse/Recuris/tree/a0479b27a2d08b7fbf2607acf1841a06b121ee91) | **Newly assessed convergent reference:** state-grounded `M=(E,W,ρ,C)`, structured step evidence and paired held-out admission informed the explicit host-owned exploration/confirmation freeze and typed primary/ablation/robustness portfolio | No Recuris code or benchmark imported. Component-local repair and activation-fingerprint scoring are not claimed as implemented. Older XScientist memory/evolution work predates Recuris and is not retroactively attributed to it |
 

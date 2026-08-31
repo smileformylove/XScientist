@@ -7,6 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.evolution_harness import (
+    validate_evolution_harness_audit,
+)
 from ai_scientist.utils.pipeline_contracts import (
     append_jsonl_artifact,
     artifact_path,
@@ -78,6 +81,25 @@ ROLE_DEFAULTS = {
         "risk": "reproducibility_gap",
         "action": "Make the method, setup, and artifacts reproducible enough for an independent team to rerun them.",
     },
+}
+
+HARNESS_RISK_ACTIONS = {
+    "SCORE.CONTRACT_MISMATCH": "Freeze one score contract for the epoch and rerun the lineage under identical metrics.",
+    "SCORE.NO_IMPROVEMENT": "Keep the objective fixed and diagnose the failed intervention instead of relaxing the evaluator.",
+    "SIGNAL.ALL_TIED": "Treat tied rewards as missing information and challenge the signal design for the next epoch.",
+    "SIGNAL.LOW_INFORMATION": "Increase diagnostic signal resolution in a backtested next-epoch harness candidate.",
+    "BEHAVIOR.CONTRACT_MISMATCH": "Freeze behavior probes and thresholds before comparing another candidate.",
+    "BEHAVIOR.REGRESSION": "Block the apparent gain and isolate the process behavior that regressed.",
+    "BEHAVIOR.SCORE_DIVERGENCE": "Reject score-only promotion until score and process behavior improve together.",
+    "BEHAVIOR.THRESHOLD_VIOLATION": "Repair the unhealthy process behavior before allocating another promotion trial.",
+    "VERSION.COST_BUDGET_EXCEEDED": "Constrain the intervention to the declared resource budget before rerunning it.",
+    "VERSION.EVALUATOR_MISMATCH": "Do not compare across evaluator hashes; review any evaluator revision only at the next epoch boundary.",
+    "VERSION.GIT_LEAKAGE": "Rebuild leak-free evidence and invalidate any promotion influenced by Git or reference-patch leakage.",
+    "VERSION.HARNESS_MISMATCH": "Restore the frozen harness hash or open a separately evaluated next epoch.",
+    "VERSION.INTEGRITY_FAILURE": "Hold the lineage until every declared integrity check passes on fresh evidence.",
+    "VERSION.RESOURCE_MISMATCH": "Re-establish an identical resource boundary before interpreting the version delta.",
+    "VERSION.SEED_POLICY_MISMATCH": "Re-establish the frozen seed policy before interpreting the version delta.",
+    "VERSION.TASK_MISMATCH": "Re-establish the identical task set before interpreting the version delta.",
 }
 
 
@@ -322,6 +344,91 @@ def _build_metric_lessons(
     return lessons
 
 
+def _harness_risk_name(code: str) -> str:
+    normalized = "".join(
+        character.lower() if character.isalnum() else "_" for character in code
+    )
+    return "harness_" + "_".join(part for part in normalized.split("_") if part)
+
+
+def _build_harness_lessons(
+    harness_audit: dict[str, Any],
+    *,
+    audit_valid: bool,
+    validation_errors: list[str],
+) -> list[dict[str, Any]]:
+    audit_hash = str(harness_audit.get("audit_hash") or "").strip() or None
+    if not audit_valid:
+        return [
+            {
+                "lesson_id": "harness::invalid_audit",
+                "source": "evolution_harness",
+                "priority_tier": "p0",
+                "stage": "experiment",
+                "focus": "harness_integrity",
+                "risk": "harness_audit_invalid",
+                "signal": "Harness audit validation failed: "
+                + ", ".join(validation_errors[:8]),
+                "recommended_action": "Rebuild the deterministic harness audit from content-addressed evidence before interpreting version scores.",
+                "agentic_default_update": "Require a valid canonical harness audit before planning another evolution intervention.",
+                "audit_hash": audit_hash,
+            }
+        ]
+
+    challenges_by_code: dict[str, list[str]] = {}
+    for challenge in harness_audit.get("next_epoch_harness_challenges") or []:
+        if not isinstance(challenge, dict):
+            continue
+        code = str(challenge.get("risk_code") or "").strip()
+        challenge_hash = str(challenge.get("challenge_hash") or "").strip()
+        if code and challenge_hash:
+            challenges_by_code.setdefault(code, []).append(challenge_hash)
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for finding in harness_audit.get("risks") or []:
+        if not isinstance(finding, dict):
+            continue
+        code = str(finding.get("code") or "").strip()
+        if code:
+            grouped.setdefault(code, []).append(finding)
+
+    lessons: list[dict[str, Any]] = []
+    for code in sorted(grouped):
+        findings = grouped[code]
+        details = _dedupe([str(item.get("detail") or "").strip() for item in findings])
+        version_ids = _dedupe(
+            [str(item.get("version_id") or "").strip() for item in findings]
+        )
+        layer = str(findings[0].get("layer") or "version").strip()
+        risk = _harness_risk_name(code)
+        action = HARNESS_RISK_ACTIONS.get(
+            code,
+            "Keep the lineage on hold and test one bounded repair under the frozen evaluation contract.",
+        )
+        lessons.append(
+            {
+                "lesson_id": f"harness::{code.lower()}",
+                "source": "evolution_harness",
+                "priority_tier": "p0",
+                "stage": "experiment",
+                "focus": f"harness_{layer}",
+                "risk": risk,
+                "harness_risk_code": code,
+                "signal": (
+                    f"{code} blocks versions {', '.join(version_ids) or 'unknown'}: "
+                    + "; ".join(details[:3])
+                ),
+                "recommended_action": action,
+                "agentic_default_update": action,
+                "audit_hash": audit_hash,
+                "next_epoch_challenge_hashes": sorted(
+                    set(challenges_by_code.get(code, []))
+                ),
+            }
+        )
+    return lessons
+
+
 def _build_next_cycle_defaults(lessons: list[dict[str, Any]]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {}
     for lesson in lessons:
@@ -340,7 +447,10 @@ def build_self_evolution(
     review_state: dict[str, Any] | None = None,
     repair_plan: dict[str, Any] | None = None,
     stage_standards: dict[str, Any] | None = None,
+    harness_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if harness_audit is not None and not isinstance(harness_audit, dict):
+        raise TypeError("harness_audit must be a dictionary or None")
     resolved_root = Path(project_root).expanduser().resolve()
     manifest = load_pipeline_manifest(resolved_root)
     review_state_payload = (
@@ -357,6 +467,29 @@ def build_self_evolution(
         stage_standards
         if isinstance(stage_standards, dict)
         else load_contract_artifact(resolved_root, "stage_standards", default={}) or {}
+    )
+    harness_payload = (
+        harness_audit
+        if isinstance(harness_audit, dict)
+        else load_contract_artifact(resolved_root, "evolution_harness", default={})
+        or {}
+    )
+    harness_present = bool(harness_payload)
+    harness_validation = (
+        validate_evolution_harness_audit(harness_payload)
+        if harness_present
+        else {"ok": True, "errors": []}
+    )
+    harness_valid = bool(harness_validation.get("ok"))
+    harness_validation_errors = _coerce_list(harness_validation.get("errors"))
+    harness_risks = (
+        [
+            item
+            for item in (harness_payload.get("risks") or [])
+            if isinstance(item, dict)
+        ]
+        if harness_valid
+        else []
     )
     review_metrics = review_state_payload.get("repair_metrics")
     if not isinstance(review_metrics, dict):
@@ -474,6 +607,23 @@ def build_self_evolution(
             required=bool(standards_payload),
         ),
     ]
+    if harness_present:
+        harness_decision = (
+            harness_payload.get("progression", {}).get("decision")
+            if isinstance(harness_payload.get("progression"), dict)
+            else None
+        )
+        criteria.append(
+            _criterion(
+                "evolution_harness_health",
+                "Evolution evidence passes score, signal, behavior, and version diagnostics",
+                passed=harness_valid and not harness_risks,
+                detail=(
+                    f"valid={harness_valid} decision={harness_decision or 'invalid'} "
+                    f"blocking_risks={len(harness_risks)}"
+                ),
+            )
+        )
     self_check = _finalize_self_check(criteria)
     lessons = _build_lane_lessons(lane_counts, lane_rows=lane_rows)
     lessons.extend(_build_role_lessons(role_counts))
@@ -484,6 +634,14 @@ def build_self_evolution(
             top_stage_risks=_coerce_list(standards_summary.get("top_risks")),
         )
     )
+    if harness_present:
+        lessons.extend(
+            _build_harness_lessons(
+                harness_payload,
+                audit_valid=harness_valid,
+                validation_errors=harness_validation_errors,
+            )
+        )
     lessons.sort(
         key=lambda item: (
             {"p0": 0, "p1": 1, "p2": 2}.get(str(item.get("priority_tier") or "p2"), 9),
@@ -498,6 +656,23 @@ def build_self_evolution(
     next_cycle_defaults = _build_next_cycle_defaults(lessons)
     dominant_lane = lane_counts.most_common(1)[0][0] if lane_counts else None
     dominant_role = role_counts.most_common(1)[0][0] if role_counts else None
+    harness_skills = (
+        [
+            item
+            for item in (harness_payload.get("skills") or [])
+            if isinstance(item, dict)
+        ]
+        if harness_valid
+        else []
+    )
+    harness_skill_counts = Counter(
+        str(item.get("status") or "unknown") for item in harness_skills
+    )
+    harness_progression = (
+        harness_payload.get("progression")
+        if harness_valid and isinstance(harness_payload.get("progression"), dict)
+        else {}
+    )
     summary = {
         "status": self_check["status"],
         "score": self_check["score"],
@@ -519,6 +694,11 @@ def build_self_evolution(
         "repair_targeted_coverage": repair_targeted_coverage,
         "verification_ready_rate": verification_ready_rate,
         "blocked_stage_count": blocked_stage_count,
+        "harness_present": harness_present,
+        "harness_valid": harness_valid if harness_present else None,
+        "harness_decision": harness_progression.get("decision"),
+        "harness_blocking_risk_count": len(harness_risks),
+        "harness_skill_status_counts": dict(harness_skill_counts),
         "lesson_count": len(lessons),
     }
     return {
@@ -535,6 +715,31 @@ def build_self_evolution(
         "lessons": lessons,
         "stage_risks": _coerce_list(standards_summary.get("top_risks")),
         "blocked_stages": _coerce_list(standards_summary.get("blocked_stages")),
+        "harness_snapshot": {
+            "present": harness_present,
+            "valid": harness_valid if harness_present else None,
+            "audit_hash": (
+                str(harness_payload.get("audit_hash") or "").strip() or None
+                if harness_present
+                else None
+            ),
+            "decision": harness_progression.get("decision"),
+            "blocking_risk_codes": sorted(
+                {
+                    str(item.get("code") or "")
+                    for item in harness_risks
+                    if str(item.get("code") or "")
+                }
+            ),
+            "validation_errors": harness_validation_errors,
+            "skill_status_counts": dict(harness_skill_counts),
+            "validated_skill_hashes": sorted(
+                str(item.get("skill_hash") or "")
+                for item in harness_skills
+                if item.get("status") in {"domain_validated", "cross_domain_validated"}
+                and str(item.get("skill_hash") or "")
+            ),
+        },
         "adaptation_model": {
             "episodic": "Current-run reflection; never a persistent system update.",
             "playbook": "Cross-project advisory memory; outcomes must accumulate before use.",
@@ -578,6 +783,10 @@ def _snapshot_for_history(evolution_payload: dict[str, Any]) -> dict[str, Any]:
         "active_issue_count": summary.get("active_issue_count"),
         "persistent_issue_count": summary.get("persistent_issue_count"),
         "resolution_rate": summary.get("resolution_rate"),
+        "harness_present": summary.get("harness_present"),
+        "harness_valid": summary.get("harness_valid"),
+        "harness_decision": summary.get("harness_decision"),
+        "harness_blocking_risk_count": summary.get("harness_blocking_risk_count"),
         "lane_counts": evolution_payload.get("lane_counts") or {},
         "role_counts": evolution_payload.get("role_counts") or {},
         "stage_risks": evolution_payload.get("stage_risks") or [],
@@ -676,8 +885,20 @@ def save_self_evolution(
     review_state: dict[str, Any] | None = None,
     repair_plan: dict[str, Any] | None = None,
     stage_standards: dict[str, Any] | None = None,
+    harness_audit: dict[str, Any] | None = None,
     producer: str = "self_evolution",
 ) -> str:
+    if harness_audit is not None and not isinstance(harness_audit, dict):
+        raise TypeError("harness_audit must be a dictionary or None")
+    validated_harness = None
+    if isinstance(harness_audit, dict):
+        harness_check = validate_evolution_harness_audit(harness_audit)
+        if not harness_check.get("ok"):
+            raise ValueError(
+                "evolution harness audit is invalid: "
+                + ", ".join(_coerce_list(harness_check.get("errors")))
+            )
+        validated_harness = harness_audit
     constitution_path = artifact_path(project_root, "science_constitution")
     constitution = load_contract_artifact(
         project_root, "science_constitution", default={}
@@ -693,18 +914,30 @@ def save_self_evolution(
             project_name=Path(project_root).expanduser().resolve().name
         )
         save_science_constitution(project_root, constitution, producer=producer)
+    if validated_harness is not None:
+        save_contract_artifact(
+            project_root,
+            "evolution_harness",
+            validated_harness,
+            producer=producer,
+            notes="Four-layer score, signal, behavior, and version diagnostic.",
+        )
     payload = build_self_evolution(
         project_root,
         review_state=review_state,
         repair_plan=repair_plan,
         stage_standards=stage_standards,
+        harness_audit=harness_audit,
     )
+    dependencies = ["review_state", "repair_plan"]
+    if artifact_path(project_root, "evolution_harness").exists():
+        dependencies.append("evolution_harness")
     output_path = save_contract_artifact(
         project_root,
         "self_evolution",
         payload,
         producer=producer,
-        depends_on=["review_state", "repair_plan"],
+        depends_on=dependencies,
     )
     knowledge_dir = _resolve_knowledge_dir(project_root)
     knowledge_dir.mkdir(parents=True, exist_ok=True)

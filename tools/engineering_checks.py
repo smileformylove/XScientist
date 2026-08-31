@@ -37,7 +37,7 @@ REQUIRED_REPOSITORY_FILES = (
     ".github/ISSUE_TEMPLATE/bug_report.yml",
     ".github/ISSUE_TEMPLATE/research_reproduction.yml",
 )
-SUPPORTED_PYTHON = ("3.10", "3.11", "3.12")
+SUPPORTED_PYTHON = ("3.10", "3.11", "3.12", "3.13")
 _REQUIREMENT_NAME = re.compile(r"^([A-Za-z0-9_.-]+)")
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 _PINNED_ACTION = re.compile(r"^\s*-?\s*uses:\s*[^\s@]+@([0-9a-f]{40})(?:\s+#.*)?$")
@@ -210,6 +210,21 @@ def check_action_pinning(root: Path) -> list[str]:
     )
     if "startsWith(github.ref, 'refs/tags/v')" not in release:
         errors.append("release publishing must be restricted to v* tag refs")
+    if "fetch-depth: 0" not in release:
+        errors.append("release checkout must fetch complete Git history")
+    if (
+        "git merge-base --is-ancestor" not in release
+        or "refs/remotes/origin/main" not in release
+    ):
+        errors.append("release tags must be verified as reachable from origin/main")
+    if "python -m pytest" not in release or "requirements/smoke.txt" not in release:
+        errors.append(
+            "release build must install test dependencies and run full pytest"
+        )
+    if ".[service,dev]" not in release or "import fastapi, httpx" not in release:
+        errors.append(
+            "release tests must install and import the HTTP service dependencies"
+        )
     return errors
 
 

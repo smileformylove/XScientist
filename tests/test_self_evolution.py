@@ -5,6 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
+from ai_scientist.utils.evolution_harness import (
+    bind_version_evidence,
+    build_evolution_harness_audit,
+    build_harness_policy_hash,
+)
 from ai_scientist.utils.pipeline_contracts import (
     initialize_pipeline_contracts,
     save_contract_artifact,
@@ -18,6 +24,54 @@ from ai_scientist.utils.science_constitution import (
     build_science_constitution,
     save_science_constitution,
 )
+
+
+def _harness_version(
+    version_id: str,
+    parent_version_id: str | None,
+    *,
+    score: float,
+    loop_rate: float,
+    test_rate: float,
+) -> dict:
+    digest = canonical_content_hash({"fixture": "self-evolution-harness"})
+    return bind_version_evidence(
+        {
+            "epoch_id": "epoch:self-evolution-test",
+            "version_id": version_id,
+            "parent_version_id": parent_version_id,
+            "scores": {"objective": score},
+            "reward_groups": [[0.0, 0.4, 1.0], [0.1, 0.5, 0.8]],
+            "behavior": {"loop_rate": loop_rate, "test_rate": test_rate},
+            "behavior_thresholds": {
+                "loop_rate": {
+                    "direction": "lower",
+                    "healthy_bound": 0.25,
+                    "max_regression": 0.05,
+                },
+                "test_rate": {
+                    "direction": "higher",
+                    "healthy_bound": 0.5,
+                    "max_regression": 0.05,
+                },
+            },
+            "integrity_checks": {
+                "evidence_bound": True,
+                "environment_isolated": True,
+                "evaluation_frozen": True,
+                "git_leakage_absent": True,
+            },
+            "comparison_hashes": {
+                "harness_hash": digest,
+                "policy_hash": build_harness_policy_hash(),
+                "evaluator_hash": digest,
+                "task_hash": digest,
+                "resource_hash": digest,
+                "seed_policy_hash": digest,
+            },
+            "cost": {"observed": 4.0, "budget": 10.0, "unit": "tokens"},
+        }
+    )
 
 
 class SelfEvolutionTests(unittest.TestCase):
@@ -196,6 +250,111 @@ class SelfEvolutionTests(unittest.TestCase):
                 any(
                     lesson.get("risk") == "stage_standard_blocker"
                     for lesson in payload["lessons"]
+                )
+            )
+
+    def test_harness_score_behavior_divergence_blocks_self_evolution(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "harness_project"
+            project_root.mkdir(parents=True)
+            initialize_pipeline_contracts(project_root)
+            audit = build_evolution_harness_audit(
+                [
+                    _harness_version(
+                        "v1", None, score=0.5, loop_rate=0.1, test_rate=0.8
+                    ),
+                    _harness_version(
+                        "v2", "v1", score=0.8, loop_rate=0.5, test_rate=0.2
+                    ),
+                ]
+            )
+
+            payload = build_self_evolution(
+                project_root,
+                review_state={
+                    "repair_metrics": {
+                        "active_issue_count": 0,
+                        "persistent_issue_count": 0,
+                        "resolution_rate": 1.0,
+                    }
+                },
+                repair_plan={"summary": {}},
+                harness_audit=audit,
+            )
+
+            self.assertEqual(payload["self_check"]["status"], "blocked")
+            self.assertEqual(payload["summary"]["harness_decision"], "hold")
+            self.assertGreater(payload["summary"]["harness_blocking_risk_count"], 0)
+            self.assertIn(
+                "BEHAVIOR.SCORE_DIVERGENCE",
+                payload["harness_snapshot"]["blocking_risk_codes"],
+            )
+            self.assertTrue(
+                any(
+                    lesson.get("risk") == "harness_behavior_score_divergence"
+                    for lesson in payload["lessons"]
+                )
+            )
+
+    def test_explicit_invalid_harness_argument_fails_without_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "invalid_harness"
+            project_root.mkdir(parents=True)
+            initialize_pipeline_contracts(project_root)
+
+            with self.assertRaisesRegex(TypeError, "harness_audit"):
+                build_self_evolution(project_root, harness_audit=[])  # type: ignore[arg-type]
+            with self.assertRaisesRegex(TypeError, "harness_audit"):
+                save_self_evolution(project_root, harness_audit=[])  # type: ignore[arg-type]
+
+            self.assertFalse((project_root / "evolution_harness.json").exists())
+            self.assertFalse((project_root / "self_evolution.json").exists())
+            self.assertFalse((project_root / "science_constitution.json").exists())
+
+    def test_saving_harness_evidence_feeds_next_epoch_challenges(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "harness_program"
+            project_root.mkdir(parents=True)
+            initialize_pipeline_contracts(project_root)
+            audit = build_evolution_harness_audit(
+                [
+                    _harness_version(
+                        "v1", None, score=0.5, loop_rate=0.1, test_rate=0.8
+                    ),
+                    _harness_version(
+                        "v2", "v1", score=0.8, loop_rate=0.5, test_rate=0.2
+                    ),
+                ]
+            )
+
+            save_self_evolution(
+                project_root,
+                review_state={
+                    "repair_metrics": {
+                        "active_issue_count": 0,
+                        "persistent_issue_count": 0,
+                        "resolution_rate": 1.0,
+                    }
+                },
+                repair_plan={"summary": {}},
+                harness_audit=audit,
+                producer="test_harness_integration",
+            )
+
+            self.assertTrue((project_root / "evolution_harness.json").exists())
+            program = json.loads(
+                (project_root / "evolution_program.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(
+                    str(item.get("risk") or "").startswith("harness_")
+                    for item in program["evaluation_challenges"]
+                )
+            )
+            self.assertTrue(
+                all(
+                    item["automatic_application_allowed"] is False
+                    for item in program["evaluation_challenges"]
                 )
             )
 
