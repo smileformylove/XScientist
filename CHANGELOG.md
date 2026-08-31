@@ -197,6 +197,10 @@ for its Python package; the ARA protocol has its own version in
 - Replaced selector-based bounded Git capture with a cross-platform dual-pipe
   reader that preserves the combined byte ceiling, wall-clock deadline, and
   fail-closed audit semantics on Windows.
+- Resized Full Smoke for the expanded integration suite and made unittest
+  progress identify each case, so long-running scientific Git audits retain
+  full coverage and expose the exact failing test instead of timing out behind
+  buffered progress dots.
 - Aligned the full repository validator with fail-closed evidence gates: prose
   terminology cannot stand in for an experiment registry, and manuscript
   numbers cannot become key results without bound experimental evidence.
