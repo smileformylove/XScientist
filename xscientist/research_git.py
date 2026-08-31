@@ -576,6 +576,15 @@ def _run_git_bounded(
     overflow_event = threading.Event()
     capture_error_event = threading.Event()
 
+    def stop_process() -> None:
+        """Wake the bounded wait when a pipe reader rejects the command."""
+
+        try:
+            if process.poll() is None:
+                process.kill()
+        except OSError:
+            pass
+
     def drain(name: str, stream: Any) -> None:
         """Drain one pipe without relying on Windows-incompatible selectors."""
 
@@ -584,15 +593,21 @@ def _run_git_bounded(
                 chunk = os.read(stream.fileno(), 65536)
                 if not chunk:
                     return
+                overflowed = False
                 with capture_lock:
                     room = max_output_bytes - capture_state["total"]
                     if len(chunk) > room:
                         overflow_event.set()
-                        break
-                    buffers[name].extend(chunk)
-                    capture_state["total"] += len(chunk)
+                        overflowed = True
+                    else:
+                        buffers[name].extend(chunk)
+                        capture_state["total"] += len(chunk)
+                if overflowed:
+                    stop_process()
+                    return
         except (OSError, ValueError):
             capture_error_event.set()
+            stop_process()
 
     drain_threads = [
         threading.Thread(
@@ -618,14 +633,15 @@ def _run_git_bounded(
                 break
             started_threads.append(thread)
 
-        while not capture_setup_failed and process.poll() is None:
-            if overflow_event.is_set() or capture_error_event.is_set():
-                break
+        if not capture_setup_failed and process.poll() is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                break
-            time.sleep(min(remaining, 0.01))
+            else:
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
     finally:
         if process.poll() is None:
             try:
