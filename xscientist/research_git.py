@@ -15,13 +15,13 @@ import mimetypes
 import os
 import platform
 import re
-import selectors
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -558,6 +558,7 @@ def _run_git_bounded(
     try:
         process = subprocess.Popen(
             command,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=False,
@@ -568,73 +569,101 @@ def _run_git_bounded(
     except OSError as exc:
         raise ResearchGitError("cannot start bounded Git audit command") from exc
 
-    selector = selectors.DefaultSelector()
-    streams = []
-    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
-        if stream is not None:
-            selector.register(stream, selectors.EVENT_READ, name)
-            streams.append(stream)
-    total = 0
+    streams = [stream for stream in (process.stdout, process.stderr) if stream]
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    capture_lock = threading.Lock()
+    capture_state = {"total": 0}
+    overflow_event = threading.Event()
+    capture_error_event = threading.Event()
+
+    def drain(name: str, stream: Any) -> None:
+        """Drain one pipe without relying on Windows-incompatible selectors."""
+
+        try:
+            while not overflow_event.is_set():
+                chunk = os.read(stream.fileno(), 65536)
+                if not chunk:
+                    return
+                with capture_lock:
+                    room = max_output_bytes - capture_state["total"]
+                    if len(chunk) > room:
+                        overflow_event.set()
+                        break
+                    buffers[name].extend(chunk)
+                    capture_state["total"] += len(chunk)
+        except (OSError, ValueError):
+            capture_error_event.set()
+
+    drain_threads = [
+        threading.Thread(
+            target=drain,
+            args=(name, stream),
+            daemon=True,
+            name=f"xscientist-git-{name}",
+        )
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        if stream is not None
+    ]
     deadline = time.monotonic() + float(timeout_seconds)
     timed_out = False
-    overflowed = False
+    capture_setup_failed = False
+    reap_failed = False
+    started_threads: list[threading.Thread] = []
     try:
-        while selector.get_map():
+        for thread in drain_threads:
+            try:
+                thread.start()
+            except Exception:  # fail closed if the capture boundary cannot start
+                capture_setup_failed = True
+                break
+            started_threads.append(thread)
+
+        while not capture_setup_failed and process.poll() is None:
+            if overflow_event.is_set() or capture_error_event.is_set():
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
                 break
-            events = selector.select(min(remaining, 0.25))
-            if not events:
-                continue
-            for key, _ in events:
-                stream = key.fileobj
-                try:
-                    chunk = os.read(stream.fileno(), min(65536, max_output_bytes + 1))
-                except (OSError, ValueError):
-                    chunk = b""
-                if not chunk:
-                    try:
-                        selector.unregister(stream)
-                    except (KeyError, ValueError):
-                        pass
-                    continue
-                room = max_output_bytes - total
-                if len(chunk) > room:
-                    overflowed = True
-                    break
-                buffers[key.data].extend(chunk)
-                total += len(chunk)
-            if overflowed:
-                break
-        if timed_out or overflowed:
-            try:
-                process.kill()
-            except OSError:
-                pass
-        try:
-            process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except OSError:
-                pass
-            process.wait(timeout=1.0)
+            time.sleep(min(remaining, 0.01))
     finally:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
         try:
-            selector.close()
-        finally:
-            for stream in streams:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            process.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                reap_failed = True
+        for thread in started_threads:
+            thread.join(timeout=1.0)
+        for stream in streams:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        for thread in started_threads:
+            if thread.is_alive():
+                thread.join(timeout=0.1)
 
     if timed_out:
         raise ResearchGitError("bounded Git command exceeded time limit")
-    if overflowed:
+    if overflow_event.is_set():
         raise ResearchGitError("bounded Git command exceeded output limit")
+    if reap_failed:
+        raise ResearchGitError("bounded Git command did not terminate")
+    if capture_setup_failed or capture_error_event.is_set():
+        raise ResearchGitError("bounded Git command output capture failed")
+    if any(thread.is_alive() for thread in started_threads):
+        raise ResearchGitError("bounded Git command output capture did not finish")
     completed = subprocess.CompletedProcess(
         command,
         process.returncode,

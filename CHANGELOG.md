@@ -194,6 +194,9 @@ for its Python package; the ARA protocol has its own version in
   writing canonical encoded bytes without CRLF rewriting. Compatibility smoke
   commands now fail independently and exercise the cross-platform byte
   contract instead of hiding earlier native-command failures.
+- Replaced selector-based bounded Git capture with a cross-platform dual-pipe
+  reader that preserves the combined byte ceiling, wall-clock deadline, and
+  fail-closed audit semantics on Windows.
 - Aligned the full repository validator with fail-closed evidence gates: prose
   terminology cannot stand in for an experiment registry, and manuscript
   numbers cannot become key results without bound experimental evidence.
