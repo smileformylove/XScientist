@@ -23,21 +23,9 @@ def _fsync_directory(path: Path) -> None:
 def atomic_write_text(
     path: str | Path, content: str, *, encoding: str = "utf-8"
 ) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        with temp_path.open("w", encoding=encoding) as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp_path.replace(path)
-        _fsync_directory(path.parent)
-    finally:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    """Write deterministic encoded bytes without OS newline translation."""
+
+    atomic_write_bytes(path, content.encode(encoding))
 
 
 def atomic_write_bytes(path: str | Path, content: bytes) -> None:

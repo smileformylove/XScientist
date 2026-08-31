@@ -119,14 +119,15 @@ class ExportMinimalARATest(unittest.TestCase):
         )
 
     def test_provenance_survives_manifest_write(self) -> None:
+        parent_ara_root = self.tmp / "parent"
         provenance = {
-            "parent_ara_root": "/tmp/parent",
+            "parent_ara_root": str(parent_ara_root),
             "parent_node_id": "n1",
             "parent_content_hash": "sha256:" + "a" * 64,
             "parents": [
                 {
                     "role": "code",
-                    "parent_ara_root": "/tmp/parent",
+                    "parent_ara_root": str(parent_ara_root),
                     "parent_node_id": "n1",
                     "parent_content_hash": "sha256:" + "a" * 64,
                 },

@@ -393,7 +393,7 @@ class ARARoundTripTest(unittest.TestCase):
             tmp_path = Path(tmp)
             exp_dir = _minimal_project(tmp_path)
             provenance = {
-                "parent_ara_root": "/tmp/parent-ara",
+                "parent_ara_root": str(tmp_path / "parent-ara"),
                 "parent_node_id": "n42",
                 "parent_content_hash": "sha256:" + "a" * 64,
             }

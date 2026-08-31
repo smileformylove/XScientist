@@ -42,7 +42,9 @@ class ConfigPathsDefaultTests(unittest.TestCase):
             legacy_documents_dir_exists=False,
             prefer_project_sibling=False,
         )
-        self.assertEqual(result, home_dir / "AppData" / "Local" / "ai_scientist" / "research")
+        self.assertEqual(
+            result, home_dir / "AppData" / "Local" / "ai_scientist" / "research"
+        )
 
     def test_should_use_xdg_data_home_when_provided_in_compat_mode(self) -> None:
         home_dir = Path("/tmp/home")
@@ -67,7 +69,9 @@ class ConfigPathsDefaultTests(unittest.TestCase):
         )
         self.assertEqual(result, Path("/tmp/xdg-data/ai_scientist/research"))
 
-    def test_should_fallback_to_local_share_when_xdg_missing_in_compat_mode(self) -> None:
+    def test_should_fallback_to_local_share_when_xdg_missing_in_compat_mode(
+        self,
+    ) -> None:
         home_dir = Path("/tmp/home")
         result = _resolve_default_research_dir(
             home_dir=home_dir,
@@ -76,7 +80,9 @@ class ConfigPathsDefaultTests(unittest.TestCase):
             legacy_documents_dir_exists=False,
             prefer_project_sibling=False,
         )
-        self.assertEqual(result, home_dir / ".local" / "share" / "ai_scientist" / "research")
+        self.assertEqual(
+            result, home_dir / ".local" / "share" / "ai_scientist" / "research"
+        )
 
     def test_should_resolve_output_path_from_runtime_env_override(self) -> None:
         with mock.patch.dict(
@@ -90,10 +96,11 @@ class ConfigPathsDefaultTests(unittest.TestCase):
             )
 
     def test_cache_env_vars_should_follow_explicit_output_root(self) -> None:
-        cache_env = config_paths.get_cache_env_vars(output_root="/tmp/research-root")
-        self.assertEqual(cache_env["HF_HOME"], "/tmp/research-root/cache/huggingface")
-        self.assertEqual(cache_env["TORCH_HOME"], "/tmp/research-root/cache/torch")
-        self.assertEqual(cache_env["WANDB_DIR"], "/tmp/research-root/cache/wandb")
+        output_root = Path("/tmp/research-root")
+        cache_env = config_paths.get_cache_env_vars(output_root=output_root)
+        self.assertEqual(cache_env["HF_HOME"], str(output_root / "cache/huggingface"))
+        self.assertEqual(cache_env["TORCH_HOME"], str(output_root / "cache/torch"))
+        self.assertEqual(cache_env["WANDB_DIR"], str(output_root / "cache/wandb"))
 
 
 if __name__ == "__main__":

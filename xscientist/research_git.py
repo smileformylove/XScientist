@@ -455,12 +455,14 @@ def _now_iso() -> str:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write canonical UTF-8 bytes without platform newline rewriting."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp = Path(raw_temp)
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(text.encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
         temp.replace(path)

@@ -406,6 +406,7 @@ def _atomic_provider_text_replace(
 ) -> _ProviderFileState:
     """Replace a file after rechecking the snapshot at the rename boundary."""
 
+    encoded = content.encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp = Path(raw_temp)
@@ -414,8 +415,8 @@ def _atomic_provider_text_replace(
             os.fchmod(descriptor, mode)
         except (AttributeError, OSError):
             pass
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
             stat_result = os.fstat(handle.fileno())
@@ -437,7 +438,7 @@ def _atomic_provider_text_replace(
                 os.close(directory_descriptor)
         return _ProviderFileState(
             kind="file",
-            content=content.encode("utf-8"),
+            content=encoded,
             mode=stat_result.st_mode & 0o7777,
             device=stat_result.st_dev,
             inode=stat_result.st_ino,
