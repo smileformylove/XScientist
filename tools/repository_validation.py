@@ -1190,13 +1190,26 @@ def run_helper_smoke() -> None:
         )
         claim_alignment = assess_claim_alignment(ledger)
         assert "审查要求" in instruction
-        assert rigor["score"] >= 4
+        # Scientific terminology is advisory, not experimental evidence.  The
+        # helper fixture deliberately has no registry, so the fail-closed rigor
+        # result is the contract being smoke-tested here.
+        assert rigor["score"] == 1.0
+        assert rigor["source"] == "textual_advisory_only"
+        assert "experiment_registry_missing" in rigor["hard_failures"]
+        assert rigor["textual_signals"]["baseline"] is True
+        assert rigor["textual_signals"]["ablation"] is True
+        assert rigor["textual_signals"]["statistics"] is True
+        assert rigor["textual_signals"]["reproducibility"] is True
         assert claim_support["score"] >= 3
         assert numeric_coverage["score"] >= 4
         assert evidence["num_figures"] == 1
         assert evidence["num_tables"] == 1
         assert evidence["evidence_density_score"] >= 2
-        assert key_results["count"] >= 3
+        # Manuscript numbers are claims, not evidence.  Without a registry the
+        # extractor must refuse to promote the prose values into key results.
+        assert key_results["count"] == 0
+        assert key_results["values"] == []
+        assert key_results["evidence_scope"] == "none"
         assert isinstance(key_results.get("structured_results"), list)
         assert len(ledger) >= 1
         assert len(contribution_map) >= 1
