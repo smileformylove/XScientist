@@ -201,6 +201,9 @@ for its Python package; the ARA protocol has its own version in
   pytest dependency, and made pytest execute every unittest-style and
   pytest-native case with per-test progress and slow-test diagnostics instead
   of silently omitting pytest functions or timing out behind buffered dots.
+- Kept the isolated wheel journey bounded while giving cold Windows runners a
+  120-second budget; observed successful and timed-out runs straddled the old
+  60-second ceiling even though the same offline journey was making progress.
 - Aligned the full repository validator with fail-closed evidence gates: prose
   terminology cannot stand in for an experiment registry, and manuscript
   numbers cannot become key results without bound experimental evidence.

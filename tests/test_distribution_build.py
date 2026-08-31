@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 from tools.build_distribution import GENERATED_TARGETS, REPOSITORY_ROOT
-from tools.check_distribution import smoke_install
+from tools.check_distribution import (
+    ISOLATED_WHEEL_SMOKE_TIMEOUT_SECONDS,
+    smoke_install,
+)
 
 
 class DistributionBuildTests(unittest.TestCase):
@@ -32,6 +35,10 @@ class DistributionBuildTests(unittest.TestCase):
         install_command = run.call_args_list[0].args[0]
         self.assertNotIn("--no-deps", install_command)
         self.assertIn("--target", install_command)
+        self.assertEqual(
+            run.call_args_list[1].kwargs["timeout"],
+            ISOLATED_WHEEL_SMOKE_TIMEOUT_SECONDS,
+        )
 
     def test_clean_build_targets_are_narrow_and_generated(self) -> None:
         self.assertEqual(

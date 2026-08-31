@@ -19,6 +19,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from tools.engineering_checks import _project_version  # noqa: E402
 
+ISOLATED_WHEEL_SMOKE_TIMEOUT_SECONDS = 120
+
 
 def _find_one(dist_dir: Path, pattern: str) -> Path:
     matches = sorted(dist_dir.glob(pattern))
@@ -291,11 +293,12 @@ print(json.dumps({
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=ISOLATED_WHEEL_SMOKE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
-                "isolated wheel demo smoke timed out after 60 seconds"
+                "isolated wheel demo smoke timed out after "
+                f"{ISOLATED_WHEEL_SMOKE_TIMEOUT_SECONDS} seconds"
             ) from exc
         if smoke.returncode:
             raise RuntimeError(f"isolated wheel import failed:\n{smoke.stderr}")
