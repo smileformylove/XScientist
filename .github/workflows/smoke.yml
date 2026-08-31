@@ -65,6 +65,9 @@ jobs:
       - name: Exercise canonical atomic writes
         run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_atomic_io.py"
 
+      - name: Exercise bounded Git capture
+        run: python tools/privacy_exec.py -- python -m unittest discover -s tests -p "test_bounded_git.py"
+
       - name: Import the core SDK
         run: python -c "import xscientist; from xscientist import ProjectRequest, XScientist; assert xscientist.__version__ and ProjectRequest and XScientist"
 
