@@ -30,73 +30,53 @@
   <a href="../README.md">English</a>
 </p>
 
-XScientist 既是本地优先的自主科研系统，也是一套开放科学协议。它可以比较竞争
-解释、选择更有信息量的实验、通过配置好的执行器边界运行、主动批判结果，并把整个
-过程保存为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；
-只有证据和评审门禁真正通过后，系统才会把它标记为已验证。
+<a id="quick-start"></a>
 
-这套 Git 式科研的架构前提是**结构化科研轨迹**。问题定义、假设、决策、工具调用、
-实验尝试、证据、反对意见、失败、恢复与门禁等可观察步骤，都会外化为带类型、内容
-哈希、关系、生产者和状态迁移的对象。Research VCS 因而可以对“科研含义”执行
-commit、diff、branch、merge、blame 与 revert，而不是给一团聊天日志做版本控制。
-系统不需要也不保存隐藏思维链；可审计基础是显式的决策—证据轨迹。这条轨迹就是
-Research Git/Research VCS 对象与 checkpoint 模型的有序投影，不是额外维护的一份自由
-文本日志。在投稿导向流程中，它还是发布硬门槛：每条确认或独立复现 registry 记录都
-必须唯一绑定一个有类型的 attempt 及其来源 checkpoint，每次失败也必须保留一条不可变
-处置决策。
+## 三条命令开始
 
-版本控制建议默认只预览；一旦决定采纳，加 `--record` 就会把所选策略、被拒动作和当时
-可见的有界证据上下文写成有类型的决策对象与 checkpoint。进入确认性冻结后，通用记录
-入口会关闭，只接受协议明确的绑定或失败处置决策：
+PyPI 正式版 `0.1.4` 需要 Python 3.10+ 和 Git。第一步不需要模型、API Key、Docker
+或付费服务：
 
 ```bash
-xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
-xscientist research trajectory --repo ./my-study
+python -m pip install "xscientist==0.1.4"
+xscientist explore ./my-study --lang zh
+xscientist status ./my-study --lang zh
 ```
 
-`research trajectory` 会给出有界且不暴露语义 payload 的轨迹投影，包括对象身份、关系、
-行为者、checkpoint 哈希和 checkpoint 父边。它的投影哈希用于检查与交换；投稿授权仍
-必须经过更严格的实时轨迹证明和外部权限签名。
+`explore` 只保存你亲自提供的内容；`status` 只突出当前优先级最高的下一步。
 
-权威历史来自 checkpoint-parent DAG，而不是 `created_at`。轨迹投影始终先展示父节点、
-再展示子节点；无法比较因果先后的兄弟节点只使用确定性规则稳定展示，不因此获得先后或
-权限。分支内 `@latest:<kind>` 按 first-parent 引入顺序解析；如果同一个 checkpoint
-引入多个同类型的最新对象，系统会安全拒绝猜测，此时必须使用明确对象 ID。
+> **版本边界：** 明确标为 **PyPI 0.1.4** 的章节只使用正式版支持的命令。本页其余
+> 内容还会记录 `main` 分支尚未发布的协议能力；运行这些功能前需从源码安装：
+> `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"`。
+> 开发版标识为 `0.1.5.dev0`，避免误复用 `0.1.4` 的执行器镜像。需要严格复现时，
+> 请固定源码 commit，不要跟随变化中的 `main`。
 
-> **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用付费模型；
-> 生成代码必须经过配置好的隔离执行器；机器生成的结论只有补齐证据和独立评审
-> 门禁后，才能成为“已验证”。
+> **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用
+> 付费模型；生成代码必须经过配置好的隔离执行器；机器生成的结论在补齐证据和独立
+> 评审门禁前都不是已验证事实。
 
-PyPI 当前提供已发布的 `0.1.4` 正式版；`main` README 同时明确记录 changelog 中
-`Unreleased` 的协议加固。0.1.4 新增受 FAR 启发、按来源核对的研究机会漏斗，同时保留既有来源追踪、隔离和
-科研评审门禁。需要严格复现实验时，请固定软件版本或源码 commit。
-
-## 先选最短路径
+## 先选最短路径 — PyPI 0.1.4
 
 | 你的起点 | 先运行 | Provider 或成本 | 立即得到什么 |
 | --- | --- | --- | --- |
 | 有想法，但没有模型或 API Key | `xscientist explore ./my-study --lang zh` | 无 | 本地保存、带版本、可证伪的科研起点 |
 | 想先看看系统是否实用 | `xscientist demo ./first-study --autopilot --lang zh --open` | 无；`$0.00` | 完整但故意保留争议的证据历史 |
 | 已有本地 Ollama 模型 | `xscientist provider list` | 本地算力；无需托管 Key | 可用模型和下一条配置命令 |
-| 已有托管模型 Key | `xscientist start ./my-study` | 可能产生模型费用 | 在同一历史中启动受控自主科研 |
+| 已有托管模型 Key | `xscientist start ./my-study --prepare-only` | 不调用模型 | 在正式运行前检查就绪状态 |
+| 需要投稿导向检查 | `xscientist start ./my-study --autopilot publication --max-cost-usd 10` | 可能产生模型费用 | 投稿导向流程，不承诺论文或录用 |
 
 如果不确定，从 `explore` 开始。它只记录你真正知道的内容，未知项会诚实保持为空。
+
+Publication autopilot 会组织科研、写作和评审门禁，但不承诺完成论文、科学验证、
+实际投稿或被任何会议、期刊录用。
 
 如果只想完成配置、暂不启动研究，运行 `xscientist setup ./my-study`。这一条引导命令
 会创建工作区，只询问尚缺的 Provider、模型和凭据选项，再按顺序给出就绪修复动作。
 它负责诊断前置条件，不会把“配置完成”表述成“已经通过科研质量门禁”。
 
-<a id="quick-start"></a>
-
 ## 从自己的想法开始：不需要 API Key
 
-只需要 Python 3.10+ 和 Git。安装完成后，不需要 API Key、模型、Docker 或网络调用。
-
-```bash
-python -m pip install \
-  "xscientist==0.1.4"
-xscientist explore ./my-study --lang zh
-```
+上面的 `explore` 命令不需要 API Key、模型、Docker 或网络调用。
 
 引导过程不要求理解 Provider 或科研协议，只会问四个普通问题：
 
@@ -155,7 +135,7 @@ xscientist demo ./first-study --autopilot --lang zh --open
 xscientist status ./first-study --lang zh
 ```
 
-演示会诚实停在“运行完成，仍需补充证据”，因为留出结果挑战了过度宽泛的结论。
+演示会诚实停在“已记录实验，仍需补充证据”，因为留出结果挑战了过度宽泛的结论。
 保留冲突是正确的科学行为，不是程序失败。
 
 日常只看 `status` 即可。需要分支、流水线、Token 或后台任务细节时再加
@@ -167,7 +147,32 @@ xscientist status ./first-study --lang zh
 审查；PDF、结果表等二进制产物不塞进 Git。若存在未绑定产物，`status` 会把准确的
 CAS 绑定命令放在“下一步”的首位。
 
-记录实验时可以同时保存真实结果文件，而不只留下一个脱离内容的哈希：
+可移植 JSON 不会嵌入被检查工作区的宿主机路径。每个 `primary_action` 或
+`next_steps[]` 行都包含 `action` 契约：已有对象使用精确的 `rso-...` ID，并明确
+给出 `argv_template`、`workspace_binding`、`cwd_binding` 与 `input_binding`。
+调用方必须把 `{workspace}` 绑定到本次命令收到的工作区。若仍有待填写的人类输入，
+则 `input_binding.required=true` 且 `executable_after_binding=false`；自动化程序
+在这些值由人提供之前不得执行该模板。
+
+## 开发版 main：结构化科研历史
+
+本节描述 `main` 分支尚未发布的协议能力；运行其中命令前，请先按上方版本说明安装
+源码版。从这个标题开始，除非代码块明确标为 **PyPI 0.1.4**，命令示例都以源码版
+为准。
+
+执行完 `explore` 建议的比较后，用一条引导命令记录实际做了什么、终止状态、观察
+结果，以及你愿意提供的结果文件或复现命令：
+
+```bash
+xscientist record ./my-study --lang zh
+xscientist status ./my-study --lang zh
+```
+
+结果会成为同一条不可变 Research Git 历史中的有类型证据。缺少必要科研上下文，
+或研究已进入确证性阶段时，`record` 会停止并给出更严格的协议命令，不会自行猜测。
+
+需要直接使用底层协议时，也可以在记录实验的同时保存真实结果文件，而不只留下一个
+脱离内容的哈希：
 
 ```bash
 xscientist research experiment "留出集评估" \
@@ -180,12 +185,38 @@ xscientist research experiment "留出集评估" \
 实验记录，并在同一个 checkpoint 中保存。失败、超时和取消的运行同样会成为可追溯
 的实验结果，而不是历史中的空白。
 
-可移植 JSON 不会嵌入被检查工作区的宿主机路径。每个 `primary_action` 或
-`next_steps[]` 行都包含 `action` 契约：已有对象使用精确的 `rso-...` ID，并明确
-给出 `argv_template`、`workspace_binding`、`cwd_binding` 与 `input_binding`。
-调用方必须把 `{workspace}` 绑定到本次命令收到的工作区。若仍有待填写的人类输入，
-则 `input_binding.required=true` 且 `executable_after_binding=false`；自动化程序
-在这些值由人提供之前不得执行该模板。
+XScientist 既是本地优先的自主科研系统，也是一套开放科学协议。它可以比较竞争
+解释、选择更有信息量的实验、通过配置好的执行器边界运行、主动批判结果，并把整个
+过程保存为带类型、机器可读的科研对象。一次运行完成，并不等于科学结论已经成立；
+只有证据和评审门禁真正通过后，系统才会把它标记为已验证。
+
+这套 Git 式科研的架构前提是**结构化科研轨迹**。问题定义、假设、决策、工具调用、
+实验尝试、证据、反对意见、失败、恢复与门禁等可观察步骤，都会外化为带类型、内容
+哈希、关系、生产者和状态迁移的对象。Research VCS 因而可以对“科研含义”执行
+commit、diff、branch、merge、blame 与 revert，而不是给一团聊天日志做版本控制。
+系统不需要也不保存隐藏思维链；可审计基础是显式的决策—证据轨迹。这条轨迹就是
+Research Git/Research VCS 对象与 checkpoint 模型的有序投影，不是额外维护的一份自由
+文本日志。在投稿导向流程中，它还是发布硬门槛：每条确认或独立复现 registry 记录都
+必须唯一绑定一个有类型的 attempt 及其来源 checkpoint，每次失败也必须保留一条不可变
+处置决策。
+
+版本控制建议默认只预览；一旦决定采纳，加 `--record` 就会把所选策略、被拒动作和当时
+可见的有界证据上下文写成有类型的决策对象与 checkpoint。进入确认性冻结后，通用记录
+入口会关闭，只接受协议明确的绑定或失败处置决策：
+
+```bash
+xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
+xscientist research trajectory --repo ./my-study
+```
+
+`research trajectory` 会给出有界且不暴露语义 payload 的轨迹投影，包括对象身份、关系、
+行为者、checkpoint 哈希和 checkpoint 父边。它的投影哈希用于检查与交换；投稿授权仍
+必须经过更严格的实时轨迹证明和外部权限签名。
+
+权威历史来自 checkpoint-parent DAG，而不是 `created_at`。轨迹投影始终先展示父节点、
+再展示子节点；无法比较因果先后的兄弟节点只使用确定性规则稳定展示，不因此获得先后或
+权限。分支内 `@latest:<kind>` 按 first-parent 引入顺序解析；如果同一个 checkpoint
+引入多个同类型的最新对象，系统会安全拒绝猜测，此时必须使用明确对象 ID。
 
 ## 运行自主研究
 
@@ -212,8 +243,9 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible]==0.1.4"
+  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist provider list
+xscientist start ./my-study --prepare-only
 xscientist start ./my-study
 ```
 
@@ -228,9 +260,10 @@ xscientist start ./my-study
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.4"
+  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
 export OPENAI_API_KEY="..."
-xscientist start ./hosted-study
+xscientist start ./hosted-study --prepare-only
+xscientist start ./hosted-study --max-cost-usd 10
 ```
 
 客户端 extra 包括 `openai`、`anthropic`、`zhipu`、`bedrock`、`vertex` 和
@@ -243,7 +276,8 @@ xscientist start ./hosted-study
 `.env`：
 
 ```bash
-python -m pip install "xscientist[research,openai-compatible]"
+python -m pip install \
+  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 export OPENAI_COMPAT_API_KEY="..."
 xscientist init ./compatible-study \
   --provider custom \
@@ -307,7 +341,11 @@ xscientist provider test custom \
 # 在独立 Provider 环境中配置一个非 GLM 的判断路由。
 export OPENAI_API_KEY="..."
 xscientist start ./glm53-study \
-  --judgment-model openai/gpt-4.1
+  --judgment-model openai/gpt-4.1 \
+  --prepare-only
+xscientist start ./glm53-study \
+  --judgment-model openai/gpt-4.1 \
+  --max-cost-usd 10
 ```
 
 当执行模型解析为 GLM-5.3 时，必须显式提供 `--judgment-model`。这个模型负责 idea
@@ -977,11 +1015,13 @@ xscientist research merge challenge/boundary --repo ./first-study --preview
 
 ## 投稿准备度是门禁，不是录用承诺
 
-一条命令可以启动投稿导向的研究 campaign：
+先完成准备检查，再用明确的模型成本上限启动投稿导向的研究 campaign：
 
 ```bash
+xscientist start ./paper-study --prepare-only
 xscientist start ./paper-study \
   --autopilot publication \
+  --max-cost-usd 10 \
   --target-venue icml \
   --data-dir ./data
 ```
@@ -1134,7 +1174,7 @@ claim-evidence closure。完整内容见[研究谱系](RESEARCH_LINEAGE.md)、
 
 ```mermaid
 flowchart TB
-  U["explore · start · status"] --> O["自主科研循环"]
+  U["explore · record · start · status"] --> O["自主科研循环"]
   O --> E["隔离实验与模型来源"]
   O --> R["有类型的科研 Git 历史"]
   E --> D["证据 DAG 与 ARA 产物"]
@@ -1142,9 +1182,9 @@ flowchart TB
   D --> A["审计 · 历史 · 复现"]
 ```
 
-日常入口只保留 `explore`、`start`、`status`、`audit` 和 `history`。环境修复放在
-`doctor`，后台运行放在 `runs`，完整科研协议放在 `research`。文档开头的路径表就是
-新用户需要的全部决策树。
+日常入口只保留 `explore`、`record`、`start` 和 `status`。环境修复放在 `doctor`，
+后台运行放在 `runs`，审查与恢复放在 `audit` / `history`，完整科研协议放在
+`research`。文档开头的路径表就是新用户需要的全部决策树。
 
 公开编排层位于 `xscientist/`，实验工作流位于 `ai_scientist/`，版本化协议位于
 `ai_scientist/protocol/`。更多细节见[架构文档](ARCHITECTURE.md)。
@@ -1154,7 +1194,7 @@ flowchart TB
 | 渠道 | 命令 |
 | --- | --- |
 | PyPI 正式版 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
-| 开发版 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| 开发版 `main`（`0.1.5.dev0`） | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 需要实验严格复现时，请固定 commit，不要跟随变化中的 `main`。
@@ -1168,8 +1208,8 @@ flowchart TB
 | `trust` | 可选签名能力 |
 | `full` | 向后兼容的全量环境 |
 
-核心协议和 CLI 支持 Python 3.10–3.13。自主实验还取决于具体 Provider、Docker 和
-研究所需的实验栈。
+安装要求为 Python 3.10+；当前 CI 覆盖 Python 3.10–3.13。自主实验还取决于具体
+Provider、Docker 和研究所需的实验栈。
 
 ## 产物与边界
 
@@ -1209,7 +1249,7 @@ print(result.returncode)
 
 | 需求 | 文档 |
 | --- | --- |
-| 第一个项目与恢复 | [入门](GETTING_STARTED.md) · [长任务指南](LONG_RUNNING_GUIDE.md) |
+| 第一个项目与恢复 | [中文入门](GETTING_STARTED.zh.md) · [长任务指南](LONG_RUNNING_GUIDE.md) |
 | 科研历史与协议 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) · [协议 v2](RESEARCH_PROTOCOL_V2.md) |
 | 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
 | 研究策略 Rollout | [Rollout 契约](RESEARCH_ROLLOUTS.zh.md) · [Faraday 论文](https://arxiv.org/abs/2608.13331) |

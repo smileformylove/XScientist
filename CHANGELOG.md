@@ -6,8 +6,19 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
+## [0.1.5.dev0] - 2026-09-01
+
 ### Added
 
+- Added a deliberately small first-research path: `explore` records the
+  question, `record` saves one experiment plus its observed result and optional
+  immutable artifact, and `status` returns one next action. The recorder keeps
+  Research Git checkpoints and reproduction metadata visible while failing
+  closed for confirmatory studies and conflicting or incomplete input.
+- Simplified the English and Chinese first-run documentation around install,
+  zero-cost exploration, explicit paid-run preparation, and publication
+  boundaries; unreleased `main` commands are now separated from the published
+  PyPI `0.1.4` surface.
 - Added a compact `xscientist status` research-output view that pairs the
   latest experiment with its own result contract, surfaces paper/review/repair
   readiness, distinguishes checkpointed, pending, and unbound artifacts, and
@@ -218,14 +229,54 @@ for its Python package; the ARA protocol has its own version in
   historical `as_of` projections exclude future signals, lineage, and source
   status events.
 
+### Changed
+
+- Identified the unreleased source tree as `0.1.5.dev0`, preventing its
+  executor image and readiness cache from being mistaken for published
+  `0.1.4` while keeping the stable installation path explicit.
+- Made the compact guide follow one explicit current chain from attempt through
+  evidence, inference, independent review, and claim. Older unrelated objects
+  no longer hide a missing link, and ambiguous latest objects fail closed.
+
 ### Fixed
 
+- Made compact experiment recording fail closed for confirmatory plans and
+  conflicting retry input. Predictable privacy failures now happen before the
+  attempt is committed; unavoidable second-stage failures disclose the
+  preserved attempt and a portable recovery action, including inherited
+  reproduction metadata. HEAD, branch, selected-attempt, and latest-object
+  assumptions are rechecked under the repository lock; interrupts and evidence
+  checkpoint failures preserve an explicit, immediately executable recovery
+  path while rolling back only invocation-owned uncommitted evidence.
+- Made first-use `explore` validate every supplied research field before any
+  workspace write and recheck target identity before publication. Provider-free
+  `demo` and read-only `status` no longer depend on an unrelated current
+  directory's provider configuration, and their machine errors stay structured
+  and path-redacted.
+- Made workspace output auditing require the current blob or CAS pointer to be
+  explicitly introduced by a hash-valid Research checkpoint; ordinary Git
+  commits cannot be retroactively certified by a later initialization. Status
+  rejects symlinked or malformed managed state without resolving private
+  targets, while history JSON uses portable `.` actions and recursively redacts
+  nested errors.
+- Preserved complete project progress while resuming, rechecked explicit review
+  blockers and current submission thresholds, and stopped treating a cached
+  selection as complete unless every selected result owns a structurally valid
+  in-workspace PDF with a complete PDF trailer. Progress is atomically bound to
+  the canonical ideas hash, managed directories and leaves reject symlinks, and
+  concurrent idea changes cannot publish stale serial or parallel progress.
+  Malformed review fields, non-finite scores, partial projects, and
+  `--skip-experiment` runs now fail closed or describe exactly what was and was
+  not produced.
 - Confined model- or caller-supplied project, idea, batch, experiment, and
   paper labels to their artifact roots, with bounded slugs and content-derived
   identities preventing traversal and duplicate-name collisions.
-- Prevented installed/PyPI executor builds from sending the research workspace
-  to the Docker daemon; only a temporary Dockerfile-only context is used, while
-  source-checkout builds retain their explicit source context.
+- Prevented executor builds from sending research workspaces or full source
+  checkouts to the Docker daemon. Installed builds use a Dockerfile-only
+  context; source builds use a bounded package allowlist. Version, install
+  source, revision, controlled-source digest, and capability recipe are all
+  cache identities, and the same strict check now guards preflight and actual
+  experiment execution instead of accepting a stale same-tag image.
 - Added a process-local workspace reservation so duplicate HTTP jobs cannot
   concurrently mutate one project, with a stable HTTP 409 response and release
   on completion, failure, or cancellation.
@@ -642,6 +693,7 @@ for its Python package; the ARA protocol has its own version in
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
 [Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.4...HEAD
+[0.1.5.dev0]: https://github.com/smileformylove/XScientist/compare/v0.1.4...HEAD
 [0.1.4]: https://github.com/smileformylove/XScientist/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/smileformylove/XScientist/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/smileformylove/XScientist/compare/v0.1.1...v0.1.2

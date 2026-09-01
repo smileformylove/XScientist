@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import shutil
 import tempfile
@@ -14,6 +16,7 @@ from ai_scientist.apps.project import (
     _initialize_local_research_git,
     _manuscript_artifact_bindings,
     _paper_result_artifact_fields,
+    _print_project_completion,
     _record_local_research_attempt_objects,
     _record_local_research_checkpoint,
     _record_local_research_handoff_objects,
@@ -290,6 +293,7 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
 
     def test_failed_publication_gate_is_checkpointed_before_handoff_exits(self) -> None:
         args = argparse.Namespace(
+            project_dir=".",
             require_quality_gate=True,
             min_submission_priority=None,
             max_submission_blockers=None,
@@ -327,8 +331,45 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
         dag_mock.assert_called_once()
 
     def test_successful_publication_handoff_uses_completed_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paper = root / "03_papers" / "paper.pdf"
+            paper.parent.mkdir()
+            paper.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            args = argparse.Namespace(
+                project_dir=str(root),
+                require_quality_gate=True,
+                min_submission_priority=None,
+                max_submission_blockers=None,
+                strict_writing_guardrails=False,
+                high_quality_mode=False,
+            )
+            with (
+                mock.patch(
+                    "ai_scientist.apps.project._record_local_research_checkpoint"
+                ) as checkpoint_mock,
+                mock.patch("ai_scientist.apps.project._export_project_research_dag"),
+            ):
+                failure = _finalize_local_research_handoff(
+                    args,
+                    results=[
+                        {
+                            "status": "success",
+                            "pdf_path": str(paper),
+                            "submission_acceptance_passed": True,
+                            "quality_gate_passed": True,
+                        }
+                    ],
+                    ara_paths=[],
+                )
+
+        self.assertIsNone(failure)
+        self.assertEqual(checkpoint_mock.call_args.kwargs["status"], "completed")
+
+    def test_no_successful_pdf_fails_without_strict_publication_gates(self) -> None:
         args = argparse.Namespace(
-            require_quality_gate=True,
+            project_dir=".",
+            require_quality_gate=False,
             min_submission_priority=None,
             max_submission_blockers=None,
             strict_writing_guardrails=False,
@@ -342,12 +383,35 @@ class ProjectResearchGitIntegrationTests(unittest.TestCase):
         ):
             failure = _finalize_local_research_handoff(
                 args,
-                results=[{"submission_acceptance_passed": True}],
+                results=[{"idea_idx": 0, "status": "failed", "stage": "writeup"}],
                 ara_paths=[],
             )
 
-        self.assertIsNone(failure)
-        self.assertEqual(checkpoint_mock.call_args.kwargs["status"], "completed")
+        self.assertIn("没有成功生成可检查的 PDF", failure or "")
+        self.assertEqual(checkpoint_mock.call_args.kwargs["status"], "failed")
+
+    def test_partial_success_prints_an_honest_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paper = root / "03_papers" / "paper.pdf"
+            paper.parent.mkdir()
+            paper.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            output = io.StringIO()
+
+            with contextlib.redirect_stdout(output):
+                _print_project_completion(
+                    root,
+                    [
+                        {"idea_idx": 0, "status": "success", "pdf_path": str(paper)},
+                        {"idea_idx": 1, "status": "failed", "stage": "writeup"},
+                    ],
+                )
+
+            rendered = output.getvalue()
+            self.assertIn("本次流程部分完成", rendered)
+            self.assertIn("1/2", rendered)
+            self.assertNotIn("🎉 项目完成", rendered)
+            self.assertIn(f"📄 PDF: {paper}", rendered)
 
     def test_milestone_policy_records_ideation_and_experiment(self) -> None:
         with tempfile.TemporaryDirectory() as td:

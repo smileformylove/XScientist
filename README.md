@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="#start-with-your-own-idea--no-api-key">Quick start</a> ·
+  <a href="#start-in-three-commands">Quick start</a> ·
   <a href="#run-an-autonomous-study">Autonomous study</a> ·
   <a href="#far-inspired-opportunity-funnel">Opportunity funnel</a> ·
   <a href="#belief-context-projection-bcg-inspired">Belief context</a> ·
@@ -31,74 +31,49 @@
   <a href="https://github.com/smileformylove/XScientist/blob/main/docs/README.zh.md">中文</a>
 </p>
 
-XScientist is a local-first research system and an open scientific protocol. It
-can explore competing explanations, choose informative experiments, execute
-them through a configured executor boundary, criticize its own results, and
-preserve the whole path as typed, machine-readable research objects. A
-completed run is never presented as a verified scientific claim unless its
-evidence and review gates actually pass.
+## Start in three commands
 
-The architectural prerequisite for this Git-like workflow is a **structured
-research trajectory**. Observable steps—question framing, hypotheses,
-decisions, tool calls, experiment attempts, evidence, objections, failures,
-recoveries and gates—are externalized as typed objects with content hashes,
-relations, producers and state transitions. Research VCS can therefore commit,
-diff, branch, merge, blame and revert scientific meaning instead of versioning
-an opaque chat transcript. Hidden chain-of-thought is neither required nor
-stored; the auditable substrate is the explicit decision and evidence trail.
-This trajectory is the ordered projection of the Research Git/Research VCS
-object-and-checkpoint model, not a second free-form log. In publication-oriented
-work, it is also a hard gate: every confirmatory or reproduction registry row
-must bind one typed attempt and its origin checkpoint, and every unsuccessful
-attempt must remain visible with one immutable disposition.
-
-Transition advice is preview-only until it is adopted. Add `--record` to turn
-the selected policy, rejected actions, and exact bounded evidence context into
-a typed decision plus checkpoint; after a confirmatory freeze, the generic
-path closes and only protocol-specific binding/disposition decisions are
-accepted:
+Published `0.1.4` needs Python 3.10+ and Git. This first path uses no model,
+API key, Docker, or paid service:
 
 ```bash
-xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
-xscientist research trajectory --repo ./my-study
+python -m pip install "xscientist==0.1.4"
+xscientist explore ./my-study
+xscientist status ./my-study
 ```
 
-`research trajectory` returns a bounded, payload-free projection of typed
-object identities, relations, actors, checkpoint hashes and checkpoint-parent
-edges. Its projection hash is for inspection and exchange; publication still
-requires the stricter live trajectory attestation and external authority
-receipt.
+`explore` asks plain-language questions and saves only what you provide;
+`status` shows the single highest-priority next action.
 
-The checkpoint-parent DAG—not `created_at`—is the authoritative history.
-Trajectory views always place parents before children; a deterministic sibling
-tie-break is display order only. Branch-local `@latest:<kind>` follows
-first-parent introduction order and fails closed when one checkpoint introduces
-multiple latest objects of that kind. Use an explicit object ID in that case.
+> **Version boundary:** Sections explicitly labeled **Published 0.1.4** use the
+> PyPI wheel. The rest of this `main` README also documents unreleased protocol
+> work and requires a source install:
+> `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"`.
+> Development builds identify as `0.1.5.dev0`, so they cannot reuse a `0.1.4`
+> executor image by mistake. Pin a source commit instead of `main` for
+> repeatable research.
 
 > **Important:** XScientist is alpha research software, not an oracle.
-> Autonomous runs may use
-> paid models. Generated code requires the configured isolated executor.
-> Machine-generated claims remain unverified until their evidence and
-> independent review gates are complete.
+> Autonomous runs may use paid models. Generated code requires the configured
+> isolated executor. Machine-generated claims remain unverified until their
+> evidence and independent review gates are complete.
 
-PyPI currently serves the published `0.1.4` release; the `main` README also
-documents the changelog's explicitly Unreleased protocol hardening. Version
-0.1.4 added a FAR-inspired,
-source-audited opportunity funnel while keeping the existing provenance,
-isolation, and scientific review gates. Pin the package version or a source
-commit when an experiment must remain exactly reproducible.
-
-## Choose the shortest path
+## Choose the shortest path — Published 0.1.4
 
 | Your starting point | Run first | Provider or cost | Immediate result |
 | --- | --- | --- | --- |
 | An idea, but no model or API key | `xscientist explore ./my-study` | None | A local, versioned, falsifiable research start |
 | You want to see the system before using your idea | `xscientist demo ./first-study --autopilot --open` | None; `$0.00` | A complete but deliberately contested evidence history |
 | You have a local Ollama model | `xscientist provider list` | Local compute; no hosted key | Detected models and the next setup command |
-| You have a hosted-model key | `xscientist start ./my-study` | May incur provider cost | A guarded autonomous study in the same history |
+| You have a hosted-model key | `xscientist start ./my-study --prepare-only` | No model call | Readiness checks before an autonomous run |
+| You want publication-oriented checks | `xscientist start ./my-study --autopilot publication --max-cost-usd 10` | May incur provider cost | A publication-oriented workflow, not a paper or acceptance promise |
 
 If you are unsure, start with `explore`. It records what you know and leaves
 unknown fields honestly incomplete.
+
+Publication autopilot organizes research, writeup, and review gates. It does
+not promise manuscript completion, scientific verification, venue submission,
+or acceptance.
 
 To configure a provider without starting a study, run
 `xscientist setup ./my-study`. This single guided command creates the workspace,
@@ -108,14 +83,7 @@ has passed the scientific quality gates.
 
 ## Start with your own idea — no API key
 
-Requirements: Python 3.10+ and Git. No API key, model, Docker, or network call
-is needed after installation.
-
-```bash
-python -m pip install \
-  "xscientist==0.1.4"
-xscientist explore ./my-study
-```
+The `explore` command above needs no API key, model, Docker, or network call.
 
 The guided flow uses ordinary questions instead of provider or protocol terms:
 
@@ -209,6 +177,70 @@ placeholders remain, `input_binding.required=true` and
 `executable_after_binding=false`; automation must not execute that template
 until those values have been supplied by a person.
 
+## Development main: structured research history
+
+This section describes unreleased protocol work on `main`; install the source
+build shown in the version note above before running its commands. From this
+heading onward, command examples target the source build unless a block is
+explicitly labeled **Published 0.1.4**.
+
+After you run the comparison proposed by `explore`, one guided command records
+what ran, its terminal status, the observed result, and any result file or
+reproduction command you choose to provide:
+
+```bash
+xscientist record ./my-study
+xscientist status ./my-study
+```
+
+The result becomes typed evidence in the same immutable Research Git history.
+If required scientific context is missing or the study is confirmatory,
+`record` stops and points to the stricter protocol command instead of guessing.
+
+XScientist is a local-first research system and an open scientific protocol. It
+can explore competing explanations, choose informative experiments, execute
+them through a configured executor boundary, criticize its own results, and
+preserve the whole path as typed, machine-readable research objects. A
+completed run is never presented as a verified scientific claim unless its
+evidence and review gates actually pass.
+
+The architectural prerequisite for this Git-like workflow is a **structured
+research trajectory**. Observable steps—question framing, hypotheses,
+decisions, tool calls, experiment attempts, evidence, objections, failures,
+recoveries and gates—are externalized as typed objects with content hashes,
+relations, producers and state transitions. Research VCS can therefore commit,
+diff, branch, merge, blame and revert scientific meaning instead of versioning
+an opaque chat transcript. Hidden chain-of-thought is neither required nor
+stored; the auditable substrate is the explicit decision and evidence trail.
+This trajectory is the ordered projection of the Research Git/Research VCS
+object-and-checkpoint model, not a second free-form log. In publication-oriented
+work, it is also a hard gate: every confirmatory or reproduction registry row
+must bind one typed attempt and its origin checkpoint, and every unsuccessful
+attempt must remain visible with one immutable disposition.
+
+Transition advice is preview-only until it is adopted. Add `--record` to turn
+the selected policy, rejected actions, and exact bounded evidence context into
+a typed decision plus checkpoint; after a confirmatory freeze, the generic
+path closes and only protocol-specific binding/disposition decisions are
+accepted:
+
+```bash
+xscientist research decide hypothesis --name rival-mechanism --record --repo ./my-study
+xscientist research trajectory --repo ./my-study
+```
+
+`research trajectory` returns a bounded, payload-free projection of typed
+object identities, relations, actors, checkpoint hashes and checkpoint-parent
+edges. Its projection hash is for inspection and exchange; publication still
+requires the stricter live trajectory attestation and external authority
+receipt.
+
+The checkpoint-parent DAG—not `created_at`—is the authoritative history.
+Trajectory views always place parents before children; a deterministic sibling
+tie-break is display order only. Branch-local `@latest:<kind>` follows
+first-parent introduction order and fails closed when one checkpoint introduces
+multiple latest objects of that kind. Use an explicit object ID in that case.
+
 ## Run an autonomous study
 
 Offline guidance can structure user-supplied reasoning, but it cannot honestly
@@ -236,8 +268,9 @@ ollama pull gemma3
 ollama ls
 
 python -m pip install \
-  "xscientist[research,openai-compatible]==0.1.4"
+  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 xscientist provider list
+xscientist start ./my-study --prepare-only
 xscientist start ./my-study
 ```
 
@@ -254,9 +287,10 @@ Install the research runtime plus one provider client:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.4"
+  "xscientist[research,openai] @ git+https://github.com/smileformylove/XScientist.git@main"
 export OPENAI_API_KEY="..."
-xscientist start ./hosted-study
+xscientist start ./hosted-study --prepare-only
+xscientist start ./hosted-study --max-cost-usd 10
 ```
 
 Available client extras are `openai`, `anthropic`, `zhipu`, `bedrock`,
@@ -270,7 +304,8 @@ the command never copies an exported secret into workspace files. The endpoint
 is stored in the workspace's permission-restricted, Git-ignored `.env` file:
 
 ```bash
-python -m pip install "xscientist[research,openai-compatible]"
+python -m pip install \
+  "xscientist[research,openai-compatible] @ git+https://github.com/smileformylove/XScientist.git@main"
 export OPENAI_COMPAT_API_KEY="..."
 xscientist init ./compatible-study \
   --provider custom \
@@ -342,7 +377,11 @@ xscientist provider test custom \
 # Configure a non-GLM judgment route in its own provider environment.
 export OPENAI_API_KEY="..."
 xscientist start ./glm53-study \
-  --judgment-model openai/gpt-4.1
+  --judgment-model openai/gpt-4.1 \
+  --prepare-only
+xscientist start ./glm53-study \
+  --judgment-model openai/gpt-4.1 \
+  --max-cost-usd 10
 ```
 
 `--judgment-model` is required when the execution model resolves to GLM-5.3.
@@ -1160,11 +1199,14 @@ xscientist research merge challenge/boundary --repo ./first-study --preview
 
 ## Submission preparation is a gate, not an acceptance promise
 
-One command starts a publication-oriented research campaign:
+Prepare first, then start a publication-oriented research campaign with an
+explicit model-cost ceiling:
 
 ```bash
+xscientist start ./paper-study --prepare-only
 xscientist start ./paper-study \
   --autopilot publication \
+  --max-cost-usd 10 \
   --target-venue icml \
   --data-dir ./data
 ```
@@ -1348,7 +1390,7 @@ and machine-readable [upstream provenance](https://github.com/smileformylove/XSc
 
 ```mermaid
 flowchart TB
-  U["explore · start · status"] --> O["Autonomous research loop"]
+  U["explore · record · start · status"] --> O["Autonomous research loop"]
   O --> E["Isolated experiments and providers"]
   O --> R["Typed Research Git history"]
   E --> D["Evidence DAG and ARA artifacts"]
@@ -1356,10 +1398,11 @@ flowchart TB
   D --> A["audit · history · reproduce"]
 ```
 
-The everyday surface stays small: `explore`, `start`, `status`, `audit`, and
-`history`. Readiness repair lives under `doctor`, detached execution under
-`runs`, and the complete scientific protocol under `research`. The first table
-in this README is the only decision tree a new user needs.
+The everyday surface stays small: `explore`, `record`, `start`, and `status`.
+Readiness repair lives under `doctor`, detached execution under `runs`, review
+and recovery under `audit` / `history`, and the complete scientific protocol
+under `research`. The first table in this README is the only decision tree a
+new user needs.
 
 The public orchestration surface lives in `xscientist/`, the experiment
 workflow in `ai_scientist/`, and versioned schemas in
@@ -1370,7 +1413,7 @@ workflow in `ai_scientist/`, and versioned schemas in
 | Channel | Command |
 | --- | --- |
 | Published 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
-| Development `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| Development `main` (`0.1.5.dev0`) | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 Pin a commit rather than `main` for an exactly repeatable experiment.
@@ -1386,8 +1429,9 @@ Install optional capabilities only when a study needs them:
 | `trust` | Optional signing primitives |
 | `full` | Backward-compatible all-in-one environment |
 
-Core protocol and CLI support Python 3.10–3.13. Autonomous execution also
-depends on the selected provider, Docker, and the study's experiment stack.
+The package requires Python 3.10+; CI currently tests Python 3.10–3.13.
+Autonomous execution also depends on the selected provider, Docker, and the
+study's experiment stack.
 
 ## Outputs and boundaries
 

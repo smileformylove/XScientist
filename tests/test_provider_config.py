@@ -911,6 +911,10 @@ class ProviderConfigTests(unittest.TestCase):
                     os.environ["AI_SCIENTIST_DEFAULT_MODEL"],
                     "openai/research-model",
                 )
+                self.assertEqual(
+                    os.environ["XSCIENTIST_WORKSPACE"],
+                    str(workspace.resolve()),
+                )
 
     def test_provider_add_hides_secret_and_updates_active_models(self) -> None:
         with tempfile.TemporaryDirectory() as td:

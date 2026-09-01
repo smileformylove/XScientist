@@ -171,6 +171,22 @@ def create_demo(
         },
         commit=False,
     )["attempt"]
+    failure_evidence = lifecycle.evidence(
+        {
+            "summary": (
+                "The initial run produced no usable measurement because the "
+                "fixture records were malformed."
+            ),
+            "result": "No scientific direction was inferred from the failed run.",
+            "failure_reason": "The first fixture contained malformed records.",
+            "scope": "initial parser-backed evaluation",
+            "measurement_hash": _fixture_hash(
+                "initial-parser-evaluation:failed:malformed-records:no-measurement"
+            ),
+        },
+        attempt_ids=[failed_attempt.object_id],
+        commit=False,
+    )["evidence"]
     development_attempt = lifecycle.experiment_attempt(
         {
             "name": "development-set retrieval comparison",
@@ -262,7 +278,11 @@ def create_demo(
             "held-out result does not support a transferable reduction in "
             "unsupported factual claims."
         ),
-        premises=[supporting.object_id, refuting.object_id],
+        premises=[
+            failure_evidence.object_id,
+            supporting.object_id,
+            refuting.object_id,
+        ],
         warrant=(
             "A claim about transfer requires improvement on the held-out "
             "condition; a development-only gain cannot outweigh a reversed "
@@ -288,6 +308,7 @@ def create_demo(
         evaluates=[
             claim.object_id,
             inference.object_id,
+            failure_evidence.object_id,
             supporting.object_id,
             refuting.object_id,
         ],
@@ -332,6 +353,7 @@ def create_demo(
             "hypothesis": hypothesis_id,
             "plan": plan.object_id,
             "failed_attempt": failed_attempt.object_id,
+            "failure_evidence": failure_evidence.object_id,
             "supporting_evidence": supporting.object_id,
             "refuting_evidence": refuting.object_id,
             "bounded_inference": inference.object_id,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 COMMANDS = (
     "project batch daemon manager ara auth feedback validate bfts zhipu preflight "
-    "research evolution git serve info explore demo status audit history runs "
+    "research evolution git serve info explore demo record status audit history runs "
     "executor upgrade completion conformance benchmark metrics init start setup "
     "doctor capability provider privacy evolution-gate help"
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import locale
+import re
 import shlex
 from collections import Counter
 from copy import deepcopy
@@ -32,6 +33,16 @@ _COMMAND_PLACEHOLDER_TRANSLATIONS = {
     "WHAT TO TEST": "要检验什么",
     "WHAT RESULT SEPARATES THE EXPLANATIONS": "什么结果能区分这些解释",
     "NAME=VALUE": "名称=数值",
+    "LABEL=PATH": "标签=路径",
+    "TASK_ID": "任务_ID",
+    "ACTOR_ID": "执行者_ID",
+    "COMMAND": "命令",
+    "TERMINAL_STATUS": "终态",
+    "FAILURE_CLASS": "失败类型",
+    "EXPERIMENT_ATTEMPT_ID": "实验_ID",
+    "EVIDENCE_ID": "证据_ID",
+    "INFERENCE_ID": "推理_ID",
+    "CLAIM_ID": "主张_ID",
     "DATASET": "数据集",
     "METRIC": "指标",
     "BASELINE": "基线",
@@ -40,7 +51,7 @@ _COMMAND_PLACEHOLDER_TRANSLATIONS = {
     "WHAT YOU RAN": "运行了什么",
     "WHAT THE RESULT SHOWS": "结果说明了什么",
     "BOUNDED CONCLUSION": "有边界的结论",
-    "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION": "该证据为何支持这一结论",
+    "HOW THIS EVIDENCE BOUNDS THE CONCLUSION": "该证据如何限定结论边界",
     "REVIEW SUMMARY": "复核摘要",
     "REVIEWER": "复核人",
     "BOUNDED CLAIM": "有边界的主张",
@@ -102,18 +113,27 @@ def _step(
     why_en: str,
     why_zh: str,
     command: str,
-) -> dict[str, str]:
-    return {
+    target_object_id: str | None = None,
+    candidate_object_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    step: dict[str, Any] = {
         "code": code,
         "title": _text(language, title_en, title_zh),
         "why": _text(language, why_en, why_zh),
         "command": _localize_command(language, command),
     }
+    if target_object_id is not None:
+        step["target_object_id"] = str(target_object_id)
+    if candidate_object_ids:
+        step["candidate_object_ids"] = [str(value) for value in candidate_object_ids]
+    return step
 
 
 def _localize_command(language: str, command: str) -> str:
     if language != "zh":
         return command
+    if command == "xscientist record .":
+        return command + " --lang zh"
     rendered = command
     for source, target in _COMMAND_PLACEHOLDER_TRANSLATIONS.items():
         rendered = rendered.replace(source, target)
@@ -129,12 +149,20 @@ def _command_input_placeholders(command: str) -> list[str]:
         for placeholder in pair
         if placeholder in command
     }
+    found.update(re.findall(r"\bSEED_[1-9][0-9]*\b", command))
     return sorted(found)
 
 
 def _command_for_repo(command: str, repo: str | Path) -> str:
     """Keep copy/paste guidance bound to the repository the user inspected."""
 
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = []
+    if len(argv) >= 3 and argv[:3] == ["xscientist", "record", "."]:
+        argv[2] = str(repo)
+        return shlex.join(argv)
     if command == "xscientist explore .":
         return "xscientist explore " + shlex.quote(str(repo))
     if command == "xscientist explore . --lang zh":
@@ -194,6 +222,8 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
 
     binding_mode = "none"
     cwd_mode = "caller"
+    record_requires_interactive_input = False
+    record_requires_argument_input = False
     workspace_relative_object_source = bool(
         len(argv) >= 5
         and argv[:4] == ["xscientist", "research", "object", "add"]
@@ -212,12 +242,72 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
     if binding_mode == "none" and len(argv) >= 3:
         if argv[:2] in (
             ["xscientist", "explore"],
+            ["xscientist", "record"],
             ["xscientist", "start"],
             ["xscientist", "status"],
             ["xscientist", "audit"],
         ):
             argv[2] = WORKSPACE_PLACEHOLDER
             binding_mode = "argument"
+            if argv[:2] == ["xscientist", "record"]:
+                record_tokens = list(argv[3:])
+
+                def has_value(*names: str) -> bool:
+                    for index, token in enumerate(record_tokens):
+                        for name in names:
+                            if token.startswith(name + "="):
+                                return bool(token.partition("=")[2].strip())
+                            if token == name and index + 1 < len(record_tokens):
+                                value = record_tokens[index + 1]
+                                return bool(value.strip()) and not value.startswith(
+                                    "--"
+                                )
+                    return False
+
+                has_summary = has_value("--summary", "--ran")
+                has_status = has_value("--status")
+                has_result = has_value("--result")
+                has_scientific_input = any(
+                    token
+                    in {
+                        "--summary",
+                        "--ran",
+                        "--status",
+                        "--result",
+                        "--metric",
+                        "--artifact",
+                        "--result-artifact",
+                        "--reproduce-command",
+                        "--seed",
+                    }
+                    or any(
+                        token.startswith(name + "=")
+                        for name in (
+                            "--summary",
+                            "--ran",
+                            "--status",
+                            "--result",
+                            "--metric",
+                            "--artifact",
+                            "--result-artifact",
+                            "--reproduce-command",
+                            "--seed",
+                        )
+                    )
+                    for token in record_tokens
+                )
+                forced_noninteractive = (
+                    "--non-interactive" in record_tokens or "--json" in record_tokens
+                )
+                sufficient_noninteractive_input = (
+                    has_summary and has_status
+                ) or has_result
+                if forced_noninteractive:
+                    record_requires_argument_input = not (
+                        has_scientific_input and sufficient_noninteractive_input
+                    )
+                else:
+                    record_requires_interactive_input = not has_scientific_input
         elif argv[:2] == ["xscientist", "history"] and len(argv) >= 4:
             argv[3] = WORKSPACE_PLACEHOLDER
             binding_mode = "argument"
@@ -274,11 +364,16 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
     )
     workspace_required = binding_mode in {"argument", "cwd"}
     input_placeholders = _command_input_placeholders(command_template)
+    input_required = (
+        bool(input_placeholders)
+        or record_requires_interactive_input
+        or record_requires_argument_input
+    )
     return {
         "schema_version": WORKSPACE_ACTION_SCHEMA,
         "command_template": command_template,
         "argv_template": argv,
-        "executable_after_binding": not input_placeholders,
+        "executable_after_binding": not input_required,
         "workspace_binding": {
             "mode": binding_mode,
             "source": "invocation_workspace" if workspace_required else None,
@@ -293,8 +388,16 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
             ),
         },
         "input_binding": {
-            "mode": "template" if input_placeholders else "none",
-            "required": bool(input_placeholders),
+            "mode": (
+                "template"
+                if input_placeholders
+                else (
+                    "interactive"
+                    if record_requires_interactive_input
+                    else "arguments" if record_requires_argument_input else "none"
+                )
+            ),
+            "required": input_required,
             "placeholders": input_placeholders,
         },
     }
@@ -351,9 +454,14 @@ _ACTION_OWNERS = {
     "lock_method_discovery": "researcher",
     "run_experiment": "experimenter",
     "bind_evidence": "experimenter",
+    "select_attempt_for_evidence": "experimenter",
     "record_inference": "researcher",
+    "select_evidence_for_inference": "researcher",
     "independent_review": "independent_reviewer",
+    "select_inference_for_review": "independent_reviewer",
     "state_claim": "researcher",
+    "select_inference_for_claim": "researcher",
+    "select_claim_for_reproduction": "independent_reproducer",
     "resolve_contested_claim": "researcher",
     "run_resolution_experiment": "experimenter",
     "bind_resolution_evidence": "experimenter",
@@ -388,9 +496,30 @@ _ACTION_INPUTS = {
     "lock_method_discovery": ["intervention", "rival_explanation", "transfer_test"],
     "run_experiment": ["command_or_run_description", "seed", "result_artifact"],
     "bind_evidence": ["experiment_attempt", "result_artifact", "direction"],
+    "select_attempt_for_evidence": [
+        "experiment_attempt",
+        "result_artifact",
+        "direction",
+    ],
     "record_inference": ["evidence", "warrant", "bounded_conclusion"],
+    "select_evidence_for_inference": ["evidence", "warrant", "bounded_conclusion"],
     "independent_review": ["reviewer_identity", "review_decision", "review_scope"],
+    "select_inference_for_review": [
+        "inference",
+        "reviewer_identity",
+        "review_decision",
+    ],
     "state_claim": ["reviewed_inference", "tested_conditions", "claim_scope"],
+    "select_inference_for_claim": [
+        "reviewed_inference",
+        "tested_conditions",
+        "claim_scope",
+    ],
+    "select_claim_for_reproduction": [
+        "claim",
+        "independent_executor",
+        "receipt",
+    ],
     "reproduce": ["checkpoint_or_ref", "independent_executor", "receipt"],
     "strengthen_research_program": [
         "rival_hypothesis",
@@ -402,7 +531,7 @@ _ACTION_INPUTS = {
 
 def _primary_action(
     language: str,
-    next_steps: list[dict[str, str]],
+    next_steps: list[dict[str, Any]],
     completed_stages: int,
 ) -> dict[str, Any]:
     """Expose one deterministic action while retaining alternatives for experts."""
@@ -424,11 +553,11 @@ def _primary_action(
         }
     step = next_steps[0]
     code = str(step.get("code") or "unknown")
-    blocking = completed_stages < 8 and code not in {
+    blocking = code not in {
         "strengthen_research_program",
         "inspect_dag",
     }
-    return {
+    action = {
         "code": code,
         "title": step.get("title"),
         "why": step.get("why"),
@@ -438,6 +567,10 @@ def _primary_action(
         "owner": _ACTION_OWNERS.get(code, "researcher"),
         "required_inputs": list(_ACTION_INPUTS.get(code, [])),
     }
+    for field in ("target_object_id", "candidate_object_ids"):
+        if field in step:
+            action[field] = deepcopy(step[field])
+    return action
 
 
 def _object_sequences(
@@ -574,9 +707,129 @@ def build_research_guide(
     latest_claim = guide_latest("claim")
     latest_hypothesis = guide_latest("hypothesis")
     latest_plan = guide_latest("research_plan")
-    latest_attempt = guide_latest("experiment_attempt")
-    latest_evidence = guide_latest("evidence") or guide_latest("passage_evidence")
-    latest_inference = guide_latest("inference")
+
+    def ordered_kind(kind: str) -> list[dict[str, Any]]:
+        return sorted(
+            (item for item in objects if item.get("kind") == kind),
+            key=lambda item: (
+                sequences[str(item["object_id"])],
+                str(item["object_id"]),
+            ),
+        )
+
+    def targets(item: Mapping[str, Any], relation_type: str) -> set[str]:
+        return {
+            str(relation.get("target"))
+            for relation in item.get("relations") or []
+            if relation.get("type") == relation_type and relation.get("target")
+        }
+
+    attempts = ordered_kind("experiment_attempt")
+    attempt_ids = {str(item["object_id"]) for item in attempts}
+    evidence_objects = ordered_kind("evidence")
+    experimental_evidence = [
+        item for item in evidence_objects if targets(item, "derived_from") & attempt_ids
+    ]
+    bound_attempt_ids = {
+        target
+        for item in experimental_evidence
+        for target in targets(item, "derived_from")
+        if target in attempt_ids
+    }
+    unbound_attempts = [
+        item for item in attempts if str(item["object_id"]) not in bound_attempt_ids
+    ]
+
+    experimental_evidence_ids = {
+        str(item["object_id"]) for item in experimental_evidence
+    }
+    inferences = ordered_kind("inference")
+    experimental_inferences = [
+        item
+        for item in inferences
+        if targets(item, "has_premise") & experimental_evidence_ids
+    ]
+    interpreted_evidence_ids = {
+        target
+        for item in experimental_inferences
+        for target in targets(item, "has_premise")
+        if target in experimental_evidence_ids
+    }
+    uninterpreted_evidence = [
+        item
+        for item in experimental_evidence
+        if str(item["object_id"]) not in interpreted_evidence_ids
+    ]
+
+    experimental_inference_ids = {
+        str(item["object_id"]) for item in experimental_inferences
+    }
+    reviews = ordered_kind("review")
+    reviewed_inference_ids = {
+        target
+        for item in reviews
+        for target in targets(item, "evaluates")
+        if target in experimental_inference_ids
+    }
+    unreviewed_inferences = [
+        item
+        for item in experimental_inferences
+        if str(item["object_id"]) not in reviewed_inference_ids
+    ]
+
+    claims = ordered_kind("claim")
+
+    # A bounded claim may cite the reviewed inference itself or one of the
+    # experiment-evidence premises that the reviewed inference interprets.
+    # Keep that linkage explicit in either case: an unrelated historical claim
+    # must never close the current experiment's review chain.
+    reviewed_chain_targets_by_inference = {
+        str(item["object_id"]): {
+            str(item["object_id"]),
+            *(targets(item, "has_premise") & experimental_evidence_ids),
+        }
+        for item in experimental_inferences
+        if str(item["object_id"]) in reviewed_inference_ids
+    }
+    claim_dependencies = {
+        str(item["object_id"]): targets(item, "depends_on") for item in claims
+    }
+    claimed_inference_ids = {
+        inference_id
+        for inference_id, accepted_targets in reviewed_chain_targets_by_inference.items()
+        if any(
+            dependencies & accepted_targets
+            for dependencies in claim_dependencies.values()
+        )
+    }
+    unclaimed_reviewed_inferences = [
+        item
+        for item in experimental_inferences
+        if str(item["object_id"]) in reviewed_inference_ids
+        and str(item["object_id"]) not in claimed_inference_ids
+    ]
+    reviewed_chain_targets = (
+        set().union(*reviewed_chain_targets_by_inference.values())
+        if reviewed_chain_targets_by_inference
+        else set()
+    )
+    experimental_claims = [
+        item
+        for item in claims
+        if claim_dependencies[str(item["object_id"])] & reviewed_chain_targets
+    ]
+    experimental_claim_ids = {str(item["object_id"]) for item in experimental_claims}
+    reproduced_claim_ids = {
+        target
+        for item in ordered_kind("reproduction")
+        for target in targets(item, "reproduces")
+        if target in experimental_claim_ids
+    }
+    unreproduced_claims = [
+        item
+        for item in experimental_claims
+        if str(item["object_id"]) not in reproduced_claim_ids
+    ]
 
     if latest_hypothesis is None and ambiguous_latest.get("hypothesis"):
         portfolios = [
@@ -621,8 +874,8 @@ def build_research_guide(
         )
         else None
     )
-    next_steps: list[dict[str, str]] = []
-    warnings: list[dict[str, str]] = []
+    next_steps: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
 
     for kind, object_ids in sorted(ambiguous_latest.items()):
         warnings.append(
@@ -638,6 +891,52 @@ def build_research_guide(
                     (
                         f"最新 checkpoint 同时包含 {len(object_ids)} 个 {kind} 对象。"
                         "指南不会虚构先后顺序；需要使用该类型时，请显式选择对象 ID。"
+                    ),
+                ),
+                "object_ids": object_ids,
+            }
+        )
+
+    pending_chain_groups = (
+        (
+            "unbound_experiment_attempt",
+            "experiment attempts without evidence",
+            unbound_attempts,
+        ),
+        (
+            "uninterpreted_evidence",
+            "evidence objects without an inference",
+            uninterpreted_evidence,
+        ),
+        (
+            "unreviewed_inference",
+            "inferences without an explicit review",
+            unreviewed_inferences,
+        ),
+        (
+            "unclaimed_reviewed_inference",
+            "reviewed inferences without a dependent claim",
+            unclaimed_reviewed_inferences,
+        ),
+        ("unreproduced_claim", "claims without a reproduction", unreproduced_claims),
+    )
+    for code, english_label, candidates in pending_chain_groups:
+        if len(candidates) <= 1:
+            continue
+        object_ids = [str(item["object_id"]) for item in candidates]
+        warnings.append(
+            {
+                "code": f"ambiguous_{code}",
+                "message": _text(
+                    selected_language,
+                    (
+                        f"There are {len(object_ids)} {english_label}. The guide "
+                        "will not guess which research object to advance; choose an "
+                        "explicit object ID."
+                    ),
+                    (
+                        f"当前有 {len(object_ids)} 个待处理的科研对象。指南不会猜测"
+                        "应推进哪一个；请显式选择对象 ID。"
                     ),
                 ),
                 "object_ids": object_ids,
@@ -800,12 +1099,7 @@ def build_research_guide(
                 ),
             )
         )
-    elif not counts["experiment_attempt"]:
-        plan_selector = (
-            str(latest_plan["object_id"])
-            if latest_plan is not None
-            else "RESEARCH_PLAN_ID"
-        )
+    elif not attempts:
         next_steps.append(
             _step(
                 selected_language,
@@ -814,75 +1108,129 @@ def build_research_guide(
                 title_zh="记录第一次实验",
                 why_en="Successes, failures, and timeouts are all evidence about the research path.",
                 why_zh="成功、失败和超时都属于研究路径中的有效信息。",
-                command=(
-                    'xscientist research experiment "WHAT YOU RAN" --status completed '
-                    f"--plan {shlex.quote(plan_selector)} "
-                    "--metric NAME=VALUE --seed 1"
-                ),
+                command="xscientist record .",
             )
         )
-    elif not (counts["evidence"] or counts["passage_evidence"]):
-        attempt_selector = (
-            str(latest_attempt["object_id"])
-            if latest_attempt is not None
-            else "EXPERIMENT_ATTEMPT_ID"
-        )
-        next_steps.append(
-            _step(
-                selected_language,
-                code="bind_evidence",
-                title_en="Record the result before interpreting its direction",
-                title_zh="先记录结果，再判断它的方向",
-                why_en=(
-                    "Bind the result to the exact attempt first. Add --supports or "
-                    "--refutes only after comparing it with the locked prediction."
-                ),
-                why_zh=(
-                    "先把结果绑定到确切实验；与锁定预测比较后，再明确添加 "
-                    "--supports 或 --refutes。"
-                ),
-                command=(
-                    'xscientist research evidence "WHAT THE RESULT SHOWS" '
-                    f"--attempt {shlex.quote(attempt_selector)}"
-                ),
+    elif unbound_attempts:
+        attempt_ids_to_bind = [str(item["object_id"]) for item in unbound_attempts]
+        if len(attempt_ids_to_bind) == 1:
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="bind_evidence",
+                    title_en="Record the result before interpreting its direction",
+                    title_zh="先记录结果，再判断它的方向",
+                    why_en=(
+                        "Bind the result to the exact attempt first. Add --supports or "
+                        "--refutes only after comparing it with the locked prediction."
+                    ),
+                    why_zh=(
+                        "先把结果绑定到确切实验；与锁定预测比较后，再明确添加 "
+                        "--supports 或 --refutes。"
+                    ),
+                    command='xscientist record . --result "WHAT THE RESULT SHOWS"',
+                    target_object_id=attempt_ids_to_bind[0],
+                )
             )
-        )
-    elif not counts["inference"]:
+        else:
+            next_steps.append(
+                _step(
+                    selected_language,
+                    code="select_attempt_for_evidence",
+                    title_en="Choose the exact experiment attempt whose result you are recording",
+                    title_zh="选择这次结果对应的确切实验",
+                    why_en=(
+                        "Several attempts still lack evidence. Binding to the latest "
+                        "one by guess would corrupt the reviewable research lineage."
+                    ),
+                    why_zh="多个实验仍未绑定证据；猜测“最新”对象会破坏可审查谱系。",
+                    command=(
+                        'xscientist research evidence "WHAT THE RESULT SHOWS" '
+                        "--attempt EXPERIMENT_ATTEMPT_ID"
+                    ),
+                    candidate_object_ids=attempt_ids_to_bind,
+                )
+            )
+    elif uninterpreted_evidence:
+        evidence_ids_to_interpret = [
+            str(item["object_id"]) for item in uninterpreted_evidence
+        ]
         evidence_selector = (
-            str(latest_evidence["object_id"])
-            if latest_evidence is not None
+            evidence_ids_to_interpret[0]
+            if len(evidence_ids_to_interpret) == 1
             else "EVIDENCE_ID"
         )
         next_steps.append(
             _step(
                 selected_language,
-                code="record_inference",
-                title_en="State why the evidence supports the conclusion",
-                title_zh="明确证据为何能够支持结论",
-                why_en=(
-                    "Separating evidence from the warrant exposes assumptions and makes "
-                    "the scientific argument reviewable."
+                code=(
+                    "record_inference"
+                    if len(evidence_ids_to_interpret) == 1
+                    else "select_evidence_for_inference"
                 ),
-                why_zh="把证据和推理依据分开，才能暴露隐藏假设并让科学论证可审查。",
+                title_en=(
+                    "Interpret the evidence with a bounded conclusion"
+                    if len(evidence_ids_to_interpret) == 1
+                    else "Choose the evidence to interpret"
+                ),
+                title_zh=(
+                    "写下有边界的证据解释"
+                    if len(evidence_ids_to_interpret) == 1
+                    else "选择要解释的证据"
+                ),
+                why_en=(
+                    "State what the result supports, does not support, or leaves "
+                    "uncertain. Separating evidence from the warrant exposes "
+                    "assumptions and keeps the argument reviewable."
+                ),
+                why_zh=(
+                    "说明结果支持什么、不支持什么、仍有哪些不确定性；把证据和推理依据"
+                    "分开，才能暴露隐藏假设并让科学论证可审查。"
+                ),
                 command=(
                     'xscientist research infer "BOUNDED CONCLUSION" '
                     f"--premise {shlex.quote(evidence_selector)} "
-                    '--warrant "WHY THIS EVIDENCE JUSTIFIES THE CONCLUSION"'
+                    '--warrant "HOW THIS EVIDENCE BOUNDS THE CONCLUSION"'
+                ),
+                target_object_id=(
+                    evidence_ids_to_interpret[0]
+                    if len(evidence_ids_to_interpret) == 1
+                    else None
+                ),
+                candidate_object_ids=(
+                    evidence_ids_to_interpret
+                    if len(evidence_ids_to_interpret) > 1
+                    else ()
                 ),
             )
         )
-    elif not counts["review"]:
+    elif unreviewed_inferences:
+        inference_ids_to_review = [
+            str(item["object_id"]) for item in unreviewed_inferences
+        ]
         inference_selector = (
-            str(latest_inference["object_id"])
-            if latest_inference is not None
+            inference_ids_to_review[0]
+            if len(inference_ids_to_review) == 1
             else "INFERENCE_ID"
         )
         next_steps.append(
             _step(
                 selected_language,
-                code="independent_review",
-                title_en="Ask an independent person or service to review",
-                title_zh="请独立的人或服务进行复核",
+                code=(
+                    "independent_review"
+                    if len(inference_ids_to_review) == 1
+                    else "select_inference_for_review"
+                ),
+                title_en=(
+                    "Ask an independent person or service to review"
+                    if len(inference_ids_to_review) == 1
+                    else "Choose the inference for independent review"
+                ),
+                title_zh=(
+                    "请独立的人或服务进行复核"
+                    if len(inference_ids_to_review) == 1
+                    else "选择需要独立复核的推理"
+                ),
                 why_en="The producer must not be the only judge of whether its evidence passed.",
                 why_zh="证据生产者不能同时成为判断证据是否通过的唯一裁判。",
                 command=(
@@ -890,26 +1238,57 @@ def build_research_guide(
                     f"--evaluates {shlex.quote(inference_selector)} "
                     "--verifier human:REVIEWER --decision hold"
                 ),
+                target_object_id=(
+                    inference_ids_to_review[0]
+                    if len(inference_ids_to_review) == 1
+                    else None
+                ),
+                candidate_object_ids=(
+                    inference_ids_to_review if len(inference_ids_to_review) > 1 else ()
+                ),
             )
         )
-    elif not counts["claim"]:
+    elif unclaimed_reviewed_inferences:
+        inference_ids_to_claim = [
+            str(item["object_id"]) for item in unclaimed_reviewed_inferences
+        ]
         inference_selector = (
-            str(latest_inference["object_id"])
-            if latest_inference is not None
+            inference_ids_to_claim[0]
+            if len(inference_ids_to_claim) == 1
             else "INFERENCE_ID"
         )
         next_steps.append(
             _step(
                 selected_language,
-                code="state_claim",
-                title_en="State only the claim supported by the evidence",
-                title_zh="只陈述证据能够支持的结论",
+                code=(
+                    "state_claim"
+                    if len(inference_ids_to_claim) == 1
+                    else "select_inference_for_claim"
+                ),
+                title_en=(
+                    "State only the claim supported by the reviewed inference"
+                    if len(inference_ids_to_claim) == 1
+                    else "Choose the reviewed inference for the next bounded claim"
+                ),
+                title_zh=(
+                    "只陈述已复核推理能够支持的结论"
+                    if len(inference_ids_to_claim) == 1
+                    else "选择下一个有边界主张对应的已复核推理"
+                ),
                 why_en="Keep the scope no broader than the tested data, metric, and conditions.",
                 why_zh="结论范围不能超过实际检验的数据、指标和条件。",
                 command=(
                     'xscientist research claim "BOUNDED CLAIM" '
                     f"--evidence {shlex.quote(inference_selector)} "
                     '--scope "TESTED CONDITIONS"'
+                ),
+                target_object_id=(
+                    inference_ids_to_claim[0]
+                    if len(inference_ids_to_claim) == 1
+                    else None
+                ),
+                candidate_object_ids=(
+                    inference_ids_to_claim if len(inference_ids_to_claim) > 1 else ()
                 ),
             )
         )
@@ -970,12 +1349,7 @@ def build_research_guide(
                 title_zh="运行已规划的边界实验",
                 why_en="The new plan advances only after its result is recorded.",
                 why_zh="只有记录新计划对应的实验结果，争议解决流程才会继续。",
-                command=(
-                    'xscientist research experiment "RESOLUTION EXPERIMENT" '
-                    "--status completed "
-                    f"--plan {shlex.quote(str(resolution_plan['object_id']))} "
-                    "--metric RESOLUTION_METRIC=0 --seed 1"
-                ),
+                command="xscientist record .",
             )
         elif resolution_evidence is None:
             step = _step(
@@ -985,10 +1359,7 @@ def build_research_guide(
                 title_zh="把边界实验结果绑定为证据",
                 why_en="Record what the new attempt supports or refutes.",
                 why_zh="明确新实验支持或反驳了什么。",
-                command=(
-                    'xscientist research evidence "RESOLUTION RESULT" '
-                    f"--attempt {shlex.quote(str(resolution_attempt['object_id']))}"
-                ),
+                command='xscientist record . --result "RESOLUTION RESULT"',
             )
         elif resolution_inference is None:
             step = _step(
@@ -1034,22 +1405,47 @@ def build_research_guide(
                 ),
             )
         next_steps.append(step)
-    elif not counts["reproduction"]:
+    elif unreproduced_claims:
+        claim_ids_to_reproduce = [
+            str(item["object_id"]) for item in unreproduced_claims
+        ]
         claim_selector = (
-            str(latest_claim["object_id"]) if latest_claim is not None else "CLAIM_ID"
+            claim_ids_to_reproduce[0]
+            if len(claim_ids_to_reproduce) == 1
+            else "CLAIM_ID"
         )
         next_steps.append(
             _step(
                 selected_language,
-                code="reproduce",
-                title_en="Re-run and preserve a reproduction receipt",
-                title_zh="重新运行并保存复现回执",
+                code=(
+                    "reproduce"
+                    if len(claim_ids_to_reproduce) == 1
+                    else "select_claim_for_reproduction"
+                ),
+                title_en=(
+                    "Re-run and preserve a reproduction receipt"
+                    if len(claim_ids_to_reproduce) == 1
+                    else "Choose the exact claim to reproduce"
+                ),
+                title_zh=(
+                    "重新运行并保存复现回执"
+                    if len(claim_ids_to_reproduce) == 1
+                    else "选择需要复现的确切主张"
+                ),
                 why_en="A saved claim is traceable; a successful independent rerun makes it verifiable.",
                 why_zh="已保存的结论只是可追踪；独立重跑成功后才具备更强的可验证性。",
                 command=(
                     "xscientist research reproduce HEAD --execute --record "
                     f"--reproduces {shlex.quote(claim_selector)} "
                     "--verifier human:REPRODUCER"
+                ),
+                target_object_id=(
+                    claim_ids_to_reproduce[0]
+                    if len(claim_ids_to_reproduce) == 1
+                    else None
+                ),
+                candidate_object_ids=(
+                    claim_ids_to_reproduce if len(claim_ids_to_reproduce) > 1 else ()
                 ),
             )
         )
@@ -1125,6 +1521,21 @@ def build_research_guide(
             "reproduction",
         )
     )
+    if unbound_attempts:
+        completed_stages = min(completed_stages, 3)
+    elif uninterpreted_evidence:
+        completed_stages = min(completed_stages, 4)
+    elif unreviewed_inferences:
+        completed_stages = min(completed_stages, 5)
+    elif unclaimed_reviewed_inferences:
+        completed_stages = min(completed_stages, 6)
+    elif unreproduced_claims and contested_claim is None:
+        completed_stages = min(completed_stages, 7)
+    experiment_states = Counter(
+        str(item.get("state") or "unknown").strip().lower()
+        for item in objects
+        if item.get("kind") == "experiment_attempt"
+    )
     primary_action = _primary_action(selected_language, next_steps, completed_stages)
     return {
         "schema_version": GUIDE_SCHEMA,
@@ -1138,6 +1549,7 @@ def build_research_guide(
         },
         "primary_action": primary_action,
         "counts": dict(sorted(counts.items())),
+        "experiment_states": dict(sorted(experiment_states.items())),
         "next_steps": next_steps,
         "warnings": warnings,
         "program_review": {
@@ -1273,6 +1685,21 @@ def explore_research_idea(
     disconfirming_text = _optional(disconfirming_result)
     first_test_text = _optional(first_test)
     success_rule_text = _optional(success_rule)
+
+    prospective = {
+        "idea": idea_text,
+        "expectation": expectation_text,
+        "disconfirming_result": disconfirming_text,
+        "first_test": first_test_text,
+        "success_rule": success_rule_text,
+        "name": name,
+        "actor": actor_id,
+    }
+    if redact_sensitive_payload(prospective) != prospective:
+        raise ResearchGitError(
+            "guided exploration inputs must not contain credentials, host-local "
+            "paths, email addresses, or other private literals"
+        )
 
     if bool(expectation_text) != bool(disconfirming_text):
         raise ResearchGitError(

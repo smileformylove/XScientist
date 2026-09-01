@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from ai_scientist.config.venues import DEFAULT_TARGET_VENUE, TARGET_VENUES
 
@@ -102,6 +104,35 @@ _TASK_CHOICES = [
 ]
 
 _SPECIAL_COMMAND_OPTIONS = {"help": ("--all",)}
+
+_ROOT_COMMANDS = frozenset(
+    {
+        *_DELEGATES,
+        "serve",
+        "info",
+        "explore",
+        "demo",
+        "record",
+        "status",
+        "audit",
+        "history",
+        "runs",
+        "executor",
+        "upgrade",
+        "completion",
+        "conformance",
+        "benchmark",
+        "metrics",
+        "init",
+        "start",
+        "setup",
+        "doctor",
+        "capability",
+        "provider",
+        "privacy",
+        "evolution-gate",
+    }
+)
 
 
 class _ArgumentParseFailure(ValueError):
@@ -198,8 +229,22 @@ def _build_parser() -> argparse.ArgumentParser:
     explore_parser = subparsers.add_parser(
         "explore",
         help="Turn your own idea into a testable offline research start.",
+        description=(
+            "Create or continue one local, provider-free research history. "
+            "The guided prompts record only answers you supply."
+        ),
+        epilog=(
+            "Example: xscientist explore ./my-study\n"
+            "Then:   xscientist status ./my-study"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    explore_parser.add_argument("directory", nargs="?", default="./my-study")
+    explore_parser.add_argument(
+        "directory",
+        nargs="?",
+        default="./my-study",
+        help="workspace to create or continue (default: ./my-study)",
+    )
     explore_parser.add_argument(
         "--idea", help="the idea or question you want to investigate"
     )
@@ -222,11 +267,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--success-rule",
         help="the rule for deciding what the first test means",
     )
-    explore_parser.add_argument("--name")
-    explore_parser.add_argument("--actor", default="human:researcher")
-    explore_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
-    explore_parser.add_argument("--git-user-name")
-    explore_parser.add_argument("--git-user-email")
+    explore_parser.add_argument("--name", help="optional workspace name")
+    explore_parser.add_argument(
+        "--actor",
+        default="human:researcher",
+        help="local accountable actor ID (default: human:researcher)",
+    )
+    explore_parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "zh"],
+        default="auto",
+        help="prompt and output language (default: detect locale)",
+    )
+    explore_parser.add_argument(
+        "--git-user-name", help="repository-local Git author name"
+    )
+    explore_parser.add_argument(
+        "--git-user-email", help="repository-local Git author email"
+    )
     explore_parser.add_argument(
         "--non-interactive",
         action="store_true",
@@ -236,10 +294,34 @@ def _build_parser() -> argparse.ArgumentParser:
     demo_parser = subparsers.add_parser(
         "demo",
         help="Create a complete provider-free evidence demo and offline DAG.",
+        description=(
+            "Create a safe, deterministic example that demonstrates contested "
+            "evidence without a provider, API key, or model cost."
+        ),
+        epilog=(
+            "Example: xscientist demo ./first-study --autopilot\n"
+            "Then:   xscientist status ./first-study"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    demo_parser.add_argument("directory", nargs="?", default="./xscientist-demo")
-    demo_parser.add_argument("--lang", choices=["auto", "en", "zh"], default="auto")
-    demo_parser.add_argument("--open", action="store_true", dest="open_browser")
+    demo_parser.add_argument(
+        "directory",
+        nargs="?",
+        default="./xscientist-demo",
+        help="demo workspace to create (default: ./xscientist-demo)",
+    )
+    demo_parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "zh"],
+        default="auto",
+        help="output language (default: detect locale)",
+    )
+    demo_parser.add_argument(
+        "--open",
+        action="store_true",
+        dest="open_browser",
+        help="open the generated evidence DAG in a browser",
+    )
     demo_parser.add_argument(
         "--autopilot",
         action="store_true",
@@ -250,9 +332,86 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["balanced", "discovery", "publication"],
         default="balanced",
     )
-    demo_parser.add_argument("--git-user-name")
-    demo_parser.add_argument("--git-user-email")
+    demo_parser.add_argument("--git-user-name", help="repository-local Git author name")
+    demo_parser.add_argument(
+        "--git-user-email", help="repository-local Git author email"
+    )
     demo_parser.add_argument("--json", action="store_true", dest="as_json")
+    record_parser = subparsers.add_parser(
+        "record",
+        help="Record one experiment and its observed result.",
+        description=(
+            "Save an experiment attempt, optional immutable result file, and "
+            "observed evidence without requiring Research VCS object IDs as input."
+        ),
+        epilog=(
+            "Interactive: xscientist record ./my-study\n"
+            'Scripted:    xscientist record ./my-study --summary "held-out test" '
+            '--status completed --result "accuracy improved" '
+            "--metric accuracy=0.91 --non-interactive"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    record_parser.add_argument(
+        "workspace",
+        nargs="?",
+        default=".",
+        help="research workspace (default: current directory)",
+    )
+    record_parser.add_argument(
+        "--summary",
+        "--ran",
+        dest="summary",
+        help="what was actually run",
+    )
+    record_parser.add_argument(
+        "--status",
+        choices=["completed", "failed", "timed_out", "cancelled"],
+        help="terminal experiment status",
+    )
+    record_parser.add_argument(
+        "--result",
+        help="what the observed result showed; creates a bound evidence object",
+    )
+    record_parser.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="observed metric (repeatable)",
+    )
+    record_parser.add_argument(
+        "--artifact",
+        "--result-artifact",
+        action="append",
+        default=[],
+        dest="artifact",
+        metavar="LABEL=PATH",
+        help="immutable result file to ingest into local CAS (repeatable)",
+    )
+    record_parser.add_argument(
+        "--reproduce-command",
+        help="command metadata for a later explicit reproduction; not run now",
+    )
+    record_parser.add_argument(
+        "--seed",
+        action="append",
+        type=int,
+        default=[],
+        help="random seed used by the experiment (repeatable)",
+    )
+    record_parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "zh"],
+        default="auto",
+        help="prompt and output language (default: detect locale)",
+    )
+    record_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="never prompt; --summary and --status are required for a new attempt",
+    )
+    record_parser.add_argument("--json", action="store_true", dest="as_json")
     status_parser = subparsers.add_parser(
         "status",
         help="Show research progress, budget use, outputs, and the next action.",
@@ -967,10 +1126,16 @@ def _build_start_parser() -> argparse.ArgumentParser:
 def _print_curated_help(*, include_advanced: bool = False) -> None:
     print("usage: xscientist COMMAND [options]")
     print()
+    print("Shortest path:")
+    print("  xscientist explore ./my-study       Start offline with your idea")
+    print("  xscientist record ./my-study        After the test, record its result")
+    print("  xscientist status ./my-study        See progress and one next action")
+    print()
     print("Start here:")
     print("  explore    Make your own idea testable; no API key needed")
     print("  demo       Create a free, offline contested-evidence example")
-    print("  start      Prepare and run one guarded autonomous study")
+    print("  record     Record one experiment, result, and optional result file")
+    print("  start      Run a provider-backed autonomous study; may incur model cost")
     print("  status     Show progress, budget, outputs, and the next action")
     print("  runs       Watch, inspect, cancel, or resume detached runs")
     print("  doctor     Diagnose setup and print copyable repairs")
@@ -996,6 +1161,10 @@ def _print_curated_help(*, include_advanced: bool = False) -> None:
     else:
         print()
         print("Run `xscientist help --all` for advanced and compatibility commands.")
+    print(
+        "Publication path: `xscientist start ./paper-study --autopilot publication "
+        "--max-cost-usd 10`."
+    )
     print("Run `xscientist COMMAND --help` for command-specific options.")
 
 
@@ -1086,6 +1255,619 @@ def _interactive_explore_inputs(
         ).strip()
 
 
+def _interactive_record_inputs(
+    parsed: argparse.Namespace,
+    *,
+    needs_attempt: bool,
+    language: str,
+) -> None:
+    """Collect only the missing facts for the compact experiment recorder."""
+
+    interactive = (
+        not parsed.non_interactive and not parsed.as_json and sys.stdin.isatty()
+    )
+    if needs_attempt and not str(parsed.summary or "").strip() and interactive:
+        parsed.summary = input(
+            "这次实验实际做了什么？ "
+            if language == "zh"
+            else "What did you actually run? "
+        ).strip()
+    if needs_attempt and not parsed.status and interactive:
+        answer = input(
+            (
+                "实验状态 [completed/failed/timed_out/cancelled，默认 completed]： "
+                if language == "zh"
+                else (
+                    "Experiment status "
+                    "[completed/failed/timed_out/cancelled; completed]: "
+                )
+            )
+        ).strip()
+        parsed.status = answer or "completed"
+    if not str(parsed.result or "").strip() and interactive:
+        parsed.result = input(
+            (
+                "观察到的结果是什么？（可留空，稍后再记录） "
+                if language == "zh"
+                else "What did the result show? (Optional; press Enter to add later) "
+            )
+        ).strip()
+    if needs_attempt and not parsed.metric and interactive:
+        metric = input(
+            (
+                "关键指标 NAME=VALUE（可选）： "
+                if language == "zh"
+                else "Key metric as NAME=VALUE (Optional): "
+            )
+        ).strip()
+        if metric:
+            parsed.metric.append(metric)
+    if needs_attempt and not parsed.artifact and interactive:
+        artifact = input(
+            (
+                "结果文件路径（可选，将保存不可变快照）： "
+                if language == "zh"
+                else "Result file path (Optional; saved as an immutable snapshot): "
+            )
+        ).strip()
+        if artifact:
+            parsed.artifact.append(f"result={artifact}")
+    if needs_attempt and not parsed.reproduce_command and interactive:
+        parsed.reproduce_command = input(
+            (
+                "复现实验的命令（可选，此处不会执行）： "
+                if language == "zh"
+                else "Command that reproduces the run (Optional; not executed now): "
+            )
+        ).strip()
+
+    if needs_attempt and not str(parsed.summary or "").strip():
+        raise ValueError("--summary is required when recording a new experiment")
+    if needs_attempt and not parsed.status:
+        raise ValueError("--status is required when recording a new experiment")
+    if not needs_attempt and not str(parsed.result or "").strip():
+        raise ValueError("--result is required for the experiment already on record")
+
+
+def _saved_checkpoint_id(result: dict[str, object] | None) -> str | None:
+    if not result:
+        return None
+    checkpoint = result.get("checkpoint")
+    return str(getattr(checkpoint, "checkpoint_id", "") or "") or None
+
+
+def _confirmatory_preregistration_for_plan(
+    repository: Any, plan_id: str
+) -> dict[str, object] | None:
+    """Return the unique locked preregistration that owns a plan, if any."""
+
+    candidates: list[dict[str, object]] = []
+    for item in repository.objects(kind="preregistration", state="locked"):
+        if any(
+            relation.get("type") == "depends_on"
+            and str(relation.get("target") or "") == plan_id
+            for relation in item.get("relations") or []
+        ):
+            candidates.append(item)
+    candidates = sorted(
+        (item for item in candidates if str(item.get("object_id") or "")),
+        key=lambda item: str(item.get("object_id") or ""),
+    )
+    if len(candidates) > 1:
+        raise ValueError(
+            "the selected plan has multiple locked preregistrations; use an explicit "
+            "advanced Research VCS experiment command"
+        )
+    return candidates[0] if candidates else None
+
+
+def _confirmatory_minimum_seeds(registration: dict[str, object]) -> int:
+    payload = registration.get("payload") or {}
+    analysis_plan = payload.get("analysis_plan") if isinstance(payload, dict) else {}
+    raw_minimum = (
+        analysis_plan.get("minimum_independent_seeds")
+        if isinstance(analysis_plan, dict)
+        else None
+    )
+    if isinstance(raw_minimum, bool) or not isinstance(raw_minimum, int):
+        raise ValueError("locked preregistration has an invalid minimum seed count")
+    if raw_minimum < 1:
+        raise ValueError("locked preregistration has an invalid minimum seed count")
+    return raw_minimum
+
+
+def _confirmatory_recovery_command(
+    parsed: argparse.Namespace,
+    *,
+    workspace: Path,
+    plan_id: str,
+    registration: dict[str, object],
+) -> str:
+    """Build a truthful status-specific handoff to the advanced command."""
+
+    status = str(parsed.status or "").strip()
+    supplied_seeds = list(dict.fromkeys(int(seed) for seed in parsed.seed))
+    if not status:
+        # The quick path deliberately checks a locked plan before prompting. Ask
+        # for the terminal state first so the next handoff can select the correct
+        # completed/unsuccessful contract without inventing provenance.
+        argv = [
+            "xscientist",
+            "record",
+            str(workspace),
+            "--summary",
+            "WHAT YOU RAN",
+            "--status",
+            "TERMINAL_STATUS",
+        ]
+        for seed in supplied_seeds:
+            argv.extend(["--seed", str(seed)])
+        argv.append("--non-interactive")
+        return shlex.join(argv)
+
+    registration_id = str(registration.get("object_id") or "")
+    argv = [
+        "xscientist",
+        "research",
+        "experiment",
+        "WHAT YOU RAN",
+        "--status",
+        status,
+        "--study-phase",
+        "confirmatory",
+        "--plan",
+        plan_id,
+        "--preregistration",
+        registration_id,
+        "--task",
+        "TASK_ID",
+        "--producer-id",
+        "ACTOR_ID",
+    ]
+    if status == "completed":
+        argv.extend(
+            [
+                "--metric",
+                "NAME=VALUE",
+                "--config",
+                "NAME=VALUE",
+                "--result-artifact",
+                "LABEL=PATH",
+            ]
+        )
+        minimum_seeds = _confirmatory_minimum_seeds(registration)
+        seed_values: list[str] = [str(seed) for seed in supplied_seeds]
+        seed_values.extend(
+            f"SEED_{index}" for index in range(len(seed_values) + 1, minimum_seeds + 1)
+        )
+    else:
+        argv.extend(["--failure-class", "FAILURE_CLASS"])
+        seed_values = [str(seed) for seed in supplied_seeds]
+    for seed in seed_values:
+        argv.extend(["--seed", seed])
+    argv.extend(
+        [
+            "--reproduce-command",
+            "COMMAND",
+            "--repo",
+            str(workspace),
+        ]
+    )
+    return shlex.join(argv)
+
+
+def _run_record(parsed: argparse.Namespace) -> int:
+    """Record a first experiment and its evidence without exposing object plumbing."""
+
+    from ai_scientist.utils.privacy import redact_sensitive_text
+    from .research_cli import _parse_assignments, _parse_path_assignments
+    from .research_commands import save_evidence, save_experiment
+    from .research_git import ResearchGitError, research_object_origin_checkpoint
+    from .research_journey import build_research_guide, workspace_action_contract
+    from .research_vcs import ResearchRepository
+
+    language = _selected_language(parsed.lang)
+    workspace = Path(parsed.workspace).expanduser()
+    attempt_result: dict[str, object] | None = None
+    evidence_result: dict[str, object] | None = None
+    effective_reproduce_command: str | None = None
+    stable_workspace: Path | None = None
+    evidence_expected_head: str | None = None
+    evidence_expected_branch: str | None = None
+    failure_next_command = "xscientist status " + shlex.quote(str(workspace))
+    failure_next_action = workspace_action_contract("xscientist status .")
+
+    def partial_recovery() -> tuple[str, dict[str, Any] | None]:
+        experiment_id = str(attempt_result["object"].object_id)
+        quick_recovery_is_safe = False
+        if (
+            stable_workspace is not None
+            and evidence_expected_head is not None
+            and evidence_expected_branch is not None
+        ):
+            try:
+                recovery_repository = ResearchRepository(stable_workspace)
+                recovery_status = recovery_repository.status()
+                quick_recovery_is_safe = (
+                    str(recovery_status.get("head") or "") == evidence_expected_head
+                    and str(recovery_status.get("branch") or "")
+                    == evidence_expected_branch
+                    and recovery_repository.resolve("@latest:experiment_attempt")
+                    == experiment_id
+                )
+            except (OSError, ResearchGitError, ValueError):
+                quick_recovery_is_safe = False
+        if quick_recovery_is_safe:
+            command = (
+                "xscientist record "
+                + shlex.quote(str(workspace))
+                + ' --result "WHAT THE RESULT SHOWS"'
+            )
+            if language == "zh":
+                command += " --lang zh"
+            action = workspace_action_contract(
+                'xscientist record . --result "WHAT THE RESULT SHOWS"'
+                + (" --lang zh" if language == "zh" else "")
+            )
+            portable_command = str((action or {}).get("command_template") or command)
+            return portable_command, action
+
+        argv = [
+            "xscientist",
+            "research",
+            "evidence",
+            "WHAT THE RESULT SHOWS",
+            "--attempt",
+            experiment_id,
+        ]
+        for metric in parsed.metric:
+            argv.extend(["--metric", str(metric)])
+        if effective_reproduce_command:
+            argv.extend(["--reproduce-command", effective_reproduce_command])
+        argv.extend(["--repo", str(workspace)])
+        command = shlex.join(argv)
+        action = workspace_action_contract(command)
+        portable_command = str((action or {}).get("command_template") or command)
+        return portable_command, action
+
+    try:
+        repository = ResearchRepository(workspace)
+        stable_workspace = repository.path
+        selection_status = repository.status()
+        selection_head = str(selection_status.get("head") or "")
+        selection_branch = str(selection_status.get("branch") or "")
+        guide = build_research_guide(stable_workspace, language=language)
+        current_selection_status = repository.status()
+        if (
+            str(current_selection_status.get("head") or "") != selection_head
+            or str(current_selection_status.get("branch") or "") != selection_branch
+        ):
+            raise ResearchGitError(
+                "research history changed while record input was collected; run "
+                "`xscientist status` and retry `xscientist record`"
+            )
+        primary = guide.get("primary_action") or {}
+        action_code = str(primary.get("code") or "")
+        needs_attempt = action_code in {
+            "run_experiment",
+            "run_resolution_experiment",
+        }
+        needs_evidence = action_code in {
+            "bind_evidence",
+            "bind_resolution_evidence",
+        }
+        if not needs_attempt and not needs_evidence:
+            title = str(primary.get("title") or "complete the current research step")
+            command = str(primary.get("command") or "xscientist status .")
+            raise ValueError(
+                f"not ready to record a result; next: {title}; run: {command}"
+            )
+
+        plan_id: str | None = None
+        attempt_id: str | None = None
+        evidence_expected_head = selection_head
+        evidence_expected_branch = selection_branch
+        if needs_attempt:
+            plan_id = repository.resolve("@latest:research_plan")
+            preregistration = _confirmatory_preregistration_for_plan(
+                repository, plan_id
+            )
+            if preregistration is not None:
+                advanced_command = _confirmatory_recovery_command(
+                    parsed,
+                    workspace=workspace,
+                    plan_id=plan_id,
+                    registration=preregistration,
+                )
+                failure_next_command = advanced_command
+                failure_next_action = workspace_action_contract(advanced_command)
+                raise ValueError(
+                    "this plan is locked for confirmatory research; quick record "
+                    "refuses to downgrade it to exploratory"
+                )
+        else:
+            selected_attempt_id = str(primary.get("target_object_id") or "").strip()
+            if not selected_attempt_id:
+                raise ResearchGitError(
+                    "multiple experiment attempts need evidence; run `xscientist "
+                    "status` and choose an explicit attempt with `xscientist "
+                    "research evidence --attempt EXPERIMENT_ATTEMPT_ID`"
+                )
+            selected_attempt = repository.get(selected_attempt_id)
+            if selected_attempt.get("kind") != "experiment_attempt":
+                raise ResearchGitError(
+                    "record guide selected an invalid experiment attempt; run "
+                    "`xscientist status` and retry"
+                )
+            attempt_id = str(selected_attempt["object_id"])
+
+        _interactive_record_inputs(
+            parsed,
+            needs_attempt=needs_attempt,
+            language=language,
+        )
+        metrics = _parse_assignments(parsed.metric, label="metric")
+        artifacts = _parse_path_assignments(
+            parsed.artifact,
+            label="result artifact",
+        )
+        if needs_evidence and artifacts:
+            raise ValueError(
+                "the experiment is already immutable; attach result files when "
+                "recording the attempt, or use the advanced Research VCS object flow"
+            )
+        if needs_evidence and parsed.reproduce_command:
+            raise ValueError(
+                "the experiment is already immutable; a reproduce command cannot be "
+                "added retroactively"
+            )
+        if needs_evidence and (
+            parsed.summary is not None or parsed.status is not None or parsed.seed
+        ):
+            raise ValueError(
+                "an experiment is already on record; --summary, --status, and --seed "
+                "cannot be supplied while recording its evidence; rerun with only "
+                "--result and optional --metric"
+            )
+
+        effective_reproduce_command = (
+            str(parsed.reproduce_command).strip() if parsed.reproduce_command else None
+        )
+        if needs_evidence:
+            assert attempt_id is not None
+            origin_checkpoint = (
+                research_object_origin_checkpoint(
+                    str(stable_workspace), attempt_id, kind="experiment_attempt"
+                ).get("checkpoint")
+                or {}
+            )
+            reproduce = origin_checkpoint.get("reproduce") or {}
+            if not isinstance(reproduce, dict):
+                raise ResearchGitError(
+                    "experiment checkpoint reproduction metadata is invalid"
+                )
+            effective_reproduce_command = (
+                str(reproduce.get("command") or "").strip() or None
+            )
+
+        if needs_attempt:
+            assert plan_id is not None
+            result_summary = str(parsed.result or "").strip()
+            prospective_evidence = {
+                "result": result_summary,
+                **({"metrics": metrics} if metrics else {}),
+            }
+            if result_summary and (
+                _safe_public_json_payload(prospective_evidence) != prospective_evidence
+            ):
+                raise ValueError(
+                    "privacy gate refused the evidence; matched values were not displayed"
+                )
+            attempt_result = save_experiment(
+                str(stable_workspace),
+                summary=str(parsed.summary).strip(),
+                status=str(parsed.status),
+                plan_id=plan_id,
+                metrics=metrics,
+                result_artifact_paths=artifacts,
+                seeds=parsed.seed,
+                reproduce_command=effective_reproduce_command,
+                expected_head=selection_head,
+                expected_branch=selection_branch,
+                expected_latest_plan_id=plan_id,
+                commit=True,
+            )
+            attempt_id = str(attempt_result["object"].object_id)
+            attempt_checkpoint = attempt_result.get("checkpoint")
+            evidence_expected_head = str(
+                getattr(attempt_checkpoint, "commit", "") or ""
+            )
+            if not evidence_expected_head:
+                raise ResearchGitError(
+                    "experiment checkpoint did not record a Git commit; run "
+                    "`xscientist status` before recording evidence"
+                )
+
+        result_summary = str(parsed.result or "").strip()
+        if result_summary:
+            assert attempt_id is not None
+            evidence_result = save_evidence(
+                str(stable_workspace),
+                result_summary=result_summary,
+                attempt_ids=[attempt_id],
+                metrics=metrics,
+                reproduce_command=effective_reproduce_command,
+                expected_head=evidence_expected_head,
+                expected_branch=evidence_expected_branch,
+                expected_latest_attempt_id=(attempt_id if needs_attempt else None),
+                commit=True,
+            )
+
+        status_command = "xscientist status " + shlex.quote(str(workspace))
+        if language == "zh":
+            status_command += " --lang zh"
+        next_command = status_command
+        if evidence_result is None:
+            next_command = (
+                "xscientist record "
+                + shlex.quote(str(workspace))
+                + ' --result "WHAT THE RESULT SHOWS"'
+                + (" --lang zh" if language == "zh" else "")
+            )
+
+        checkpoint_ids = [
+            checkpoint_id
+            for checkpoint_id in (
+                _saved_checkpoint_id(attempt_result),
+                _saved_checkpoint_id(evidence_result),
+            )
+            if checkpoint_id
+        ]
+        payload = {
+            "schema_version": "xscientist.quick-record.v1",
+            "ok": True,
+            "workspace": ".",
+            "experiment_id": attempt_id,
+            "experiment_created": attempt_result is not None,
+            "evidence_id": (
+                str(evidence_result["object"].object_id)
+                if evidence_result is not None
+                else None
+            ),
+            "checkpoint_ids": checkpoint_ids,
+            "artifacts_bound": len(artifacts),
+            "reproduce_command_recorded": bool(effective_reproduce_command),
+            "next_action": workspace_action_contract(
+                "xscientist status ."
+                if evidence_result is not None
+                else 'xscientist record . --result "WHAT THE RESULT SHOWS"'
+            ),
+            "host_paths_disclosed": False,
+        }
+        if parsed.as_json:
+            print(
+                json.dumps(
+                    _safe_public_json_payload(payload),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            if language == "zh":
+                if attempt_result is not None:
+                    print(f"已记录实验：{attempt_id}（{parsed.status}）")
+                if artifacts:
+                    print(f"不可变结果文件：已绑定 {len(artifacts)} 个")
+                if evidence_result is not None:
+                    print(f"已记录证据：{evidence_result['object'].object_id}")
+                if checkpoint_ids:
+                    print("Research Git：" + "、".join(checkpoint_ids))
+                if attempt_result is not None and not effective_reproduce_command:
+                    print("审查提示：未记录复现命令；当前结果只能检查，不能自动复算。")
+                print(f"下一步：{next_command}")
+            else:
+                if attempt_result is not None:
+                    print(f"Recorded experiment: {attempt_id} ({parsed.status})")
+                if artifacts:
+                    print(f"Immutable result files: {len(artifacts)} bound")
+                if evidence_result is not None:
+                    print(f"Recorded evidence: {evidence_result['object'].object_id}")
+                if checkpoint_ids:
+                    print("Research Git: " + ", ".join(checkpoint_ids))
+                if attempt_result is not None and not effective_reproduce_command:
+                    print(
+                        "Audit note: no reproduce command was recorded; this result "
+                        "is inspectable but cannot be rerun automatically."
+                    )
+                print(f"Next: {next_command}")
+        _record_local_metric("record", ok=True)
+        return 0
+    except KeyboardInterrupt:
+        if attempt_result is None:
+            print("xscientist record: interrupted", file=sys.stderr)
+        else:
+            recovery_command, recovery_action = partial_recovery()
+            experiment_id = str(attempt_result["object"].object_id)
+            if parsed.as_json:
+                interrupted_payload = {
+                    "schema_version": "xscientist.quick-record.v1",
+                    "ok": False,
+                    "error_code": "record_interrupted",
+                    "error": "interrupted",
+                    "partial_success": True,
+                    "experiment_id": experiment_id,
+                    "next_action": recovery_action,
+                    "host_paths_disclosed": False,
+                }
+                print(
+                    json.dumps(
+                        _safe_public_json_payload(interrupted_payload),
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print("xscientist record: interrupted", file=sys.stderr)
+                print(
+                    (
+                        "实验 checkpoint 已保留："
+                        if language == "zh"
+                        else "Experiment checkpoint preserved: "
+                    )
+                    + experiment_id,
+                    file=sys.stderr,
+                )
+                print(
+                    "下一步：" if language == "zh" else "Next:",
+                    redact_sensitive_text(recovery_command),
+                    file=sys.stderr,
+                )
+        _record_local_metric("record", ok=False)
+        return 130
+    except (EOFError, OSError, ResearchGitError, ValueError) as exc:
+        safe_error = redact_sensitive_text(str(exc)) or "interactive input ended"
+        partial_success = attempt_result is not None
+        if partial_success:
+            failure_next_command, failure_next_action = partial_recovery()
+        if parsed.as_json:
+            error_payload = {
+                "schema_version": "xscientist.quick-record.v1",
+                "ok": False,
+                "error_code": "record_failed",
+                "error": safe_error,
+                "partial_success": partial_success,
+                "experiment_id": (
+                    str(attempt_result["object"].object_id)
+                    if attempt_result is not None
+                    else None
+                ),
+                "next_action": failure_next_action,
+                "host_paths_disclosed": False,
+            }
+            print(
+                json.dumps(
+                    _safe_public_json_payload(error_payload),
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(f"xscientist record: {safe_error}", file=sys.stderr)
+            if partial_success:
+                print(
+                    "Experiment checkpoint preserved: "
+                    f"{attempt_result['object'].object_id}",
+                    file=sys.stderr,
+                )
+            print(
+                "下一步：" if language == "zh" else "Next:",
+                failure_next_command,
+                file=sys.stderr,
+            )
+        _record_local_metric("record", ok=False)
+        return 2
+
+
 def _command_with_workspace(
     command: str,
     workspace: str | Path | None,
@@ -1103,6 +1885,13 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
     if workspace is None:
         return command
     quoted = shlex.quote(str(workspace))
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = []
+    if len(argv) >= 3 and argv[:3] == ["xscientist", "record", "."]:
+        argv[2] = str(workspace)
+        return shlex.join(argv)
     # ``status`` is commonly invoked from a parent directory (or a CI job)
     # while its guide emits the intentionally short ``explore .`` command.
     # Keep the next action bound to the workspace the user just inspected;
@@ -4743,44 +5532,77 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if raw_argv and raw_argv[0] in _DELEGATES:
         return _DELEGATES[raw_argv[0]](raw_argv[1:])
+    if (
+        raw_argv
+        and not raw_argv[0].startswith("-")
+        and raw_argv[0] not in _ROOT_COMMANDS
+    ):
+        from ai_scientist.utils.privacy import redact_sensitive_text
+
+        command = redact_sensitive_text(raw_argv[0])
+        suggestions = difflib.get_close_matches(
+            raw_argv[0],
+            sorted(_ROOT_COMMANDS),
+            n=1,
+            cutoff=0.55,
+        )
+        print(f"xscientist: unknown command {command!r}", file=sys.stderr)
+        if suggestions:
+            print(f"Did you mean `{suggestions[0]}`?", file=sys.stderr)
+        print(
+            "Run `xscientist` for the shortest path or `xscientist help --all` "
+            "for every command.",
+            file=sys.stderr,
+        )
+        return 2
 
     workspace_state = (
         {"loaded": False}
         if raw_argv
-        and raw_argv[0]
-        in {
-            "provider",
-            "init",
-            "explore",
-            "audit",
-            "history",
-            "start",
-            "runs",
-            "executor",
-            "upgrade",
-            "completion",
-            "conformance",
-            "benchmark",
-            "metrics",
-            "setup",
-            "doctor",
-            "capability",
-        }
+        and (
+            raw_argv[0]
+            in {
+                "provider",
+                "init",
+                "explore",
+                "demo",
+                "record",
+                "status",
+                "audit",
+                "history",
+                "start",
+                "runs",
+                "executor",
+                "upgrade",
+                "completion",
+                "conformance",
+                "benchmark",
+                "metrics",
+                "setup",
+                "doctor",
+                "capability",
+            }
+        )
         else _bootstrap_workspace_environment()
     )
     if workspace_state.get("error") and (
         not raw_argv
-        or raw_argv[0]
-        not in {
-            "provider",
-            "info",
-            "init",
-            "explore",
-            "start",
-            "setup",
-            "doctor",
-            "capability",
-        }
+        or (
+            raw_argv[0]
+            not in {
+                "provider",
+                "info",
+                "init",
+                "explore",
+                "demo",
+                "record",
+                "status",
+                "start",
+                "setup",
+                "doctor",
+                "capability",
+            }
+        )
     ):
         print(
             f"XScientist workspace configuration error: {workspace_state['error']}",
@@ -5031,11 +5853,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if getattr(parsed, "as_json", False):
                 print(
                     json.dumps(
-                        {
-                            "schema": "xscientist.run-error.v1",
-                            "ok": False,
-                            "error": str(exc),
-                        },
+                        _safe_json_error_payload(
+                            exc,
+                            schema="xscientist.run-error.v1",
+                        ),
                         ensure_ascii=False,
                     ),
                     file=sys.stderr,
@@ -5138,20 +5959,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     update=parsed.executor_command == "update",
                 )
         except (OSError, ExecutorManagerError, ValueError) as exc:
+            error_payload = _safe_json_error_payload(
+                exc,
+                schema="xscientist.executor-error.v1",
+            )
             if parsed.as_json:
                 print(
-                    json.dumps(
-                        {
-                            "schema": "xscientist.executor-error.v1",
-                            "ok": False,
-                            "error": str(exc),
-                        },
-                        ensure_ascii=False,
-                    ),
+                    json.dumps(error_payload, ensure_ascii=False),
                     file=sys.stderr,
                 )
             else:
-                print(f"xscientist executor: {exc}", file=sys.stderr)
+                print(
+                    f"xscientist executor: {error_payload['error']}",
+                    file=sys.stderr,
+                )
             return 2
         if parsed.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -5743,6 +6564,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for event in payload["events"]:
                     print(json.dumps(event, sort_keys=True))
         return 0
+    if parsed.command == "record":
+        return _run_record(parsed)
     if parsed.command == "explore":
         from .research_git import ResearchGitError
         from .research_journey import (
@@ -5750,15 +6573,113 @@ def main(argv: Sequence[str] | None = None) -> int:
             inspect_idea_research,
             public_exploration_payload,
         )
+        from .research_vcs import ResearchRepository
 
         try:
-            destination = Path(parsed.directory).expanduser()
-            existing = (
-                inspect_idea_research(destination)
-                if (destination / "research.yaml").is_file()
-                else None
-            )
+            requested_destination = Path(parsed.directory).expanduser().absolute()
+            if requested_destination.is_symlink():
+                raise ResearchGitError(
+                    "research destination must not be a symlink; choose the real "
+                    "workspace path"
+                )
+
+            existing_repository = (requested_destination / "research.yaml").is_file()
+            if existing_repository:
+                selected_repository = ResearchRepository(requested_destination)
+                destination = selected_repository.path
+                selected_leaf_identity = requested_destination.lstat()
+                selected_leaf_key = (
+                    selected_leaf_identity.st_dev,
+                    selected_leaf_identity.st_ino,
+                )
+                existing = inspect_idea_research(destination)
+                new_target_anchor = None
+                initially_missing: list[Path] = []
+            else:
+                destination = requested_destination
+                if destination.exists():
+                    if not destination.is_dir():
+                        raise ResearchGitError(
+                            "research destination must be absent or an empty directory"
+                        )
+                    if any(destination.iterdir()):
+                        raise ResearchGitError(
+                            "research destination must be absent or empty; choose a "
+                            "new directory"
+                        )
+                    new_target_anchor = destination
+                    initially_missing = []
+                else:
+                    initially_missing = []
+                    new_target_anchor = destination
+                    while not new_target_anchor.exists():
+                        if new_target_anchor.is_symlink():
+                            raise ResearchGitError(
+                                "research destination path changed through a symlink"
+                            )
+                        initially_missing.append(new_target_anchor)
+                        parent = new_target_anchor.parent
+                        if parent == new_target_anchor:
+                            raise ResearchGitError(
+                                "research destination has no stable parent directory"
+                            )
+                        new_target_anchor = parent
+                if not new_target_anchor.resolve(strict=True).is_dir():
+                    raise ResearchGitError(
+                        "research destination parent is not a directory"
+                    )
+                anchor_stat = new_target_anchor.lstat()
+                new_target_anchor_key = (anchor_stat.st_dev, anchor_stat.st_ino)
+                new_target_anchor_resolved = new_target_anchor.resolve(strict=True)
+                new_target_anchor_was_symlink = new_target_anchor.is_symlink()
+                selected_leaf_key = None
+                existing = None
+
             _interactive_explore_inputs(parsed, existing=existing)
+            if existing_repository:
+                if (
+                    requested_destination.is_symlink()
+                    or not requested_destination.is_dir()
+                ):
+                    raise ResearchGitError(
+                        "research destination changed while input was collected; retry"
+                    )
+                current_leaf = requested_destination.lstat()
+                if (
+                    current_leaf.st_dev,
+                    current_leaf.st_ino,
+                ) != selected_leaf_key or requested_destination.resolve(
+                    strict=True
+                ) != destination:
+                    raise ResearchGitError(
+                        "research destination changed while input was collected; retry"
+                    )
+            else:
+                if new_target_anchor.is_symlink() != new_target_anchor_was_symlink:
+                    # A symlink/non-symlink transition is already an identity change,
+                    # even if it happens to resolve to the same directory.
+                    raise ResearchGitError(
+                        "research destination changed while input was collected; retry"
+                    )
+                try:
+                    current_anchor_stat = new_target_anchor.lstat()
+                    current_anchor_resolved = new_target_anchor.resolve(strict=True)
+                except OSError as exc:
+                    raise ResearchGitError(
+                        "research destination changed while input was collected; retry"
+                    ) from exc
+                if (
+                    (current_anchor_stat.st_dev, current_anchor_stat.st_ino)
+                    != new_target_anchor_key
+                    or current_anchor_resolved != new_target_anchor_resolved
+                    or any(
+                        path.exists() or path.is_symlink() for path in initially_missing
+                    )
+                    or (destination.exists() and any(destination.iterdir()))
+                ):
+                    raise ResearchGitError(
+                        "research destination changed while input was collected; retry"
+                    )
             payload = explore_research_idea(
                 destination,
                 idea=parsed.idea,
@@ -5776,12 +6697,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if parsed.as_json:
                 print(
                     json.dumps(
-                        {
-                            "schema_version": "xscientist.idea-exploration.v1",
-                            "ok": False,
-                            "error_code": "idea_exploration_failed",
-                            "error": str(exc),
-                        },
+                        _safe_json_error_payload(
+                            exc,
+                            schema_version="xscientist.idea-exploration.v1",
+                            error_code="idea_exploration_failed",
+                        ),
                         ensure_ascii=False,
                     ),
                     file=sys.stderr,
@@ -5834,7 +6754,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "提醒：这只是第一版探索计划；运行前仍要检查替代解释、"
                         "真实数据、指标和独立复核。"
                     )
-                    print("下一步：先准备真实数据或执行已记录的比较，再记录结果。")
+                    print("下一步：执行已记录的比较，然后一次保存实验和结果。")
+                    print(
+                        "运行：xscientist record "
+                        + shlex.quote(str(destination))
+                        + " --lang zh"
+                    )
                     print(f"查看：{payload['status_command']}")
                 else:
                     print("下一步：继续回答当前缺少的一个问题。")
@@ -5874,9 +6799,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "before drawing conclusions."
                     )
                     print(
-                        "Next: prepare real data or run the recorded comparison, "
-                        "then record the result."
+                        "Next: run the recorded comparison, then save the attempt "
+                        "and result together."
                     )
+                    print("Run: xscientist record " + shlex.quote(str(destination)))
                     print(f"Inspect: {payload['status_command']}")
                 else:
                     print("Next: answer the next missing framing question.")
@@ -5913,12 +6839,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if parsed.as_json:
                 print(
                     json.dumps(
-                        {
-                            "schema": "xscientist.demo.v1",
-                            "ok": False,
-                            "error_code": "demo_creation_failed",
-                            "error": str(exc),
-                        },
+                        _safe_json_error_payload(
+                            exc,
+                            schema="xscientist.demo.v1",
+                            error_code="demo_creation_failed",
+                        ),
                         ensure_ascii=False,
                     ),
                     file=sys.stderr,
@@ -6028,18 +6953,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "invalid": "invalid workspace state",
                     "needs_attention": "needs attention",
                     "running": "running",
-                    "scientific_followup": "run complete; more evidence needed",
+                    "scientific_followup": "experiment recorded; more evidence needed",
                     "complete": "complete and independently verified",
-                    "ready": "ready",
+                    "ready": "ready for the next research step",
                     "not_started": "not started",
                 },
                 "zh": {
                     "invalid": "工作区状态无效",
                     "needs_attention": "需要处理",
                     "running": "运行中",
-                    "scientific_followup": "运行完成，仍需补充证据",
+                    "scientific_followup": "已记录实验，仍需补充证据",
                     "complete": "已完成并通过独立验证",
-                    "ready": "已就绪",
+                    "ready": "已准备进入下一研究步骤",
                     "not_started": "尚未开始",
                 },
             }

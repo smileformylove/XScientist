@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -20,11 +21,18 @@ PYPI_JSON_URL = "https://pypi.org/pypi/xscientist/json"
 def _version_key(value: str) -> tuple[int, ...]:
     """Return a conservative numeric key for the project's release versions."""
 
-    release = str(value or "").strip().split("+", 1)[0].split("-", 1)[0]
-    try:
-        return tuple(int(part) for part in release.split("."))
-    except ValueError:
+    release = str(value or "").strip().split("+", 1)[0]
+    match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)(?:\.?(dev|a|b|rc)(\d+))?",
+        release,
+    )
+    if match is None:
         return ()
+    major, minor, patch = (int(match.group(index)) for index in range(1, 4))
+    qualifier = match.group(4)
+    stage = {"dev": 0, "a": 1, "b": 2, "rc": 3, None: 4}[qualifier]
+    serial = int(match.group(5) or 0)
+    return major, minor, patch, stage, serial
 
 
 def _read_mapping(

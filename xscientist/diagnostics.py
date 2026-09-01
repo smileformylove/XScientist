@@ -248,7 +248,9 @@ def diagnose(
                 }
             )
         else:
-            for result in check_bfts_config(str(root / "bfts_config.yaml")):
+            for result in check_bfts_config(
+                str(root / "bfts_config.yaml"), workspace=root
+            ):
                 code = "runtime_" + re.sub(
                     r"[^a-z0-9]+", "_", str(result.label).lower()
                 ).strip("_")

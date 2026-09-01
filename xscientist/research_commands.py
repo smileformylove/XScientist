@@ -443,6 +443,41 @@ def _ensure_direct_save_is_safe(
         )
 
 
+def _require_recording_selection_unchanged(
+    repository: ResearchRepository,
+    *,
+    expected_head: str | None,
+    expected_branch: str | None,
+    expected_kind: str,
+    expected_object_id: str | None,
+) -> None:
+    """Fail closed when a guided recording target changed during user input."""
+
+    changed_message = (
+        "research history changed while record input was collected; run "
+        "`xscientist status` and retry `xscientist record`"
+    )
+    if expected_head is None and expected_branch is None and expected_object_id is None:
+        return
+    current_status = repository.status()
+    current_head = str(current_status.get("head") or "")
+    if expected_head is not None and current_head != str(expected_head):
+        raise ResearchGitError(changed_message)
+    current_branch = str(current_status.get("branch") or "")
+    if expected_branch is not None and current_branch != str(expected_branch):
+        raise ResearchGitError(changed_message)
+    if expected_object_id is None:
+        return
+    try:
+        current_object_id = repository.resolve(
+            f"@latest:{expected_kind}", kind=expected_kind
+        )
+    except ResearchGitError as exc:
+        raise ResearchGitError(changed_message) from exc
+    if current_object_id != str(expected_object_id):
+        raise ResearchGitError(changed_message)
+
+
 def _finish(
     repository: ResearchRepository,
     result: ResearchObjectResult,
@@ -1077,6 +1112,9 @@ def save_experiment(
     boundary_condition: str = "",
     boundary_role: str = "",
     reproduce_command: str | None = None,
+    expected_head: str | None = None,
+    expected_branch: str | None = None,
+    expected_latest_plan_id: str | None = None,
     message: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
@@ -1203,6 +1241,20 @@ def save_experiment(
 
     with _repository_lock(repository.path):
         _ensure_direct_save_is_safe(repository, commit=commit)
+        _require_recording_selection_unchanged(
+            repository,
+            expected_head=expected_head,
+            expected_branch=expected_branch,
+            expected_kind="research_plan",
+            expected_object_id=expected_latest_plan_id,
+        )
+        if expected_latest_plan_id is not None and str(plan_id or "") != str(
+            expected_latest_plan_id
+        ):
+            raise ResearchGitError(
+                "research history changed while record input was collected; run "
+                "`xscientist status` and retry `xscientist record`"
+            )
         transaction_head = str(repository.status().get("head") or "")
         if not code_commit and str(study_phase).strip().lower() != "confirmatory":
             provenance["code_commit"] = transaction_head
@@ -2347,11 +2399,14 @@ def save_evidence(
     structured_scope: Mapping[str, Any] | None = None,
     verified: bool = False,
     verifier_id: str | None = None,
+    reproduce_command: str | None = None,
+    expected_head: str | None = None,
+    expected_branch: str | None = None,
+    expected_latest_attempt_id: str | None = None,
     message: str | None = None,
     commit: bool = True,
 ) -> dict[str, Any]:
     repository = ResearchRepository(repo)
-    _ensure_direct_save_is_safe(repository, commit=commit)
     payload: dict[str, Any] = {
         "result": _required_text(result_summary, label="evidence result")
     }
@@ -2364,25 +2419,55 @@ def save_evidence(
     payload["measurement_hash"] = content_hash(
         {"result": payload["result"], "metrics": payload.get("metrics") or {}}
     )
-    lifecycle = ResearchLifecycle(repository)
-    recorded = lifecycle.evidence(
-        payload,
-        attempt_ids=attempt_ids,
-        supports=supports,
-        refutes=refutes,
-        verified=verified,
-        verifier_id=verifier_id,
-        commit=False,
-    )
-    result = recorded["evidence"]
-    return _finish(
-        repository,
-        result,
-        stage="evidence",
-        subject=message or "bind experiment evidence",
-        status=result.state,
-        commit=commit,
-    )
+    with _repository_lock(repository.path):
+        _ensure_direct_save_is_safe(repository, commit=commit)
+        _require_recording_selection_unchanged(
+            repository,
+            expected_head=expected_head,
+            expected_branch=expected_branch,
+            expected_kind="experiment_attempt",
+            expected_object_id=expected_latest_attempt_id,
+        )
+        if expected_latest_attempt_id is not None and list(attempt_ids) != [
+            str(expected_latest_attempt_id)
+        ]:
+            raise ResearchGitError(
+                "research history changed while record input was collected; run "
+                "`xscientist status` and retry `xscientist record`"
+            )
+        transaction_head = str(repository.status().get("head") or "")
+        recorded_result: ResearchObjectResult | None = None
+        try:
+            lifecycle = ResearchLifecycle(repository)
+            recorded = lifecycle.evidence(
+                payload,
+                attempt_ids=attempt_ids,
+                supports=supports,
+                refutes=refutes,
+                verified=verified,
+                verifier_id=verifier_id,
+                commit=False,
+            )
+            result = recorded["evidence"]
+            recorded_result = result
+            return _finish(
+                repository,
+                result,
+                stage="evidence",
+                subject=message or "bind experiment evidence",
+                status=result.state,
+                commit=commit,
+                reproduce_command=reproduce_command,
+            )
+        except BaseException:
+            current_head = str(repository.status().get("head") or "")
+            if (
+                current_head == transaction_head
+                and recorded_result is not None
+                and recorded_result.created
+            ):
+                recorded_result.path.unlink(missing_ok=True)
+            raise
 
 
 def save_estimand(

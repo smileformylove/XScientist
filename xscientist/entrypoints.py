@@ -6,9 +6,45 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+_BOOTSTRAPPED_EXECUTOR_WORKSPACE: str | None = None
+_PROJECT_BFTS_CONFIG_EXPLICIT = False
+
+
+def _executor_workspace_was_bootstrapped() -> bool:
+    current = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    return bool(
+        _BOOTSTRAPPED_EXECUTOR_WORKSPACE and current == _BOOTSTRAPPED_EXECUTOR_WORKSPACE
+    )
+
+
+def _project_bfts_config_was_explicit() -> bool:
+    return _PROJECT_BFTS_CONFIG_EXPLICIT
+
+
+def _rebind_bootstrapped_executor_workspace(workspace: str | Path | None) -> None:
+    global _BOOTSTRAPPED_EXECUTOR_WORKSPACE
+
+    if not _executor_workspace_was_bootstrapped():
+        return
+    if workspace is None:
+        os.environ.pop("XSCIENTIST_WORKSPACE", None)
+        _BOOTSTRAPPED_EXECUTOR_WORKSPACE = None
+        return
+    resolved = str(Path(workspace).expanduser().resolve())
+    os.environ["XSCIENTIST_WORKSPACE"] = resolved
+    _BOOTSTRAPPED_EXECUTOR_WORKSPACE = resolved
+
 
 def _bootstrap_workspace_environment() -> str | None:
-    explicit = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    global _BOOTSTRAPPED_EXECUTOR_WORKSPACE
+
+    current = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    previously_bootstrapped = bool(
+        _BOOTSTRAPPED_EXECUTOR_WORKSPACE and current == _BOOTSTRAPPED_EXECUTOR_WORKSPACE
+    )
+    if current and not previously_bootstrapped:
+        _BOOTSTRAPPED_EXECUTOR_WORKSPACE = None
+    explicit = current if current and not previously_bootstrapped else ""
     if explicit:
         candidate = Path(explicit).expanduser()
     else:
@@ -25,6 +61,9 @@ def _bootstrap_workspace_environment() -> str | None:
         candidate is None
         or not (candidate / ".xscientist" / "providers.json").is_file()
     ):
+        if previously_bootstrapped:
+            os.environ.pop("XSCIENTIST_WORKSPACE", None)
+            _BOOTSTRAPPED_EXECUTOR_WORKSPACE = None
         return None
     from .provider_config import ProviderConfigError, load_workspace_environment
 
@@ -32,6 +71,13 @@ def _bootstrap_workspace_environment() -> str | None:
         state = load_workspace_environment(candidate)
     except ProviderConfigError as exc:
         return str(exc)
+    # Provider environment and executor identity must come from the same
+    # discovered workspace, including when project outputs live elsewhere.
+    # This mirrors the process-wide provider variables loaded just above.
+    if not explicit:
+        resolved = str(candidate.resolve())
+        os.environ["XSCIENTIST_WORKSPACE"] = resolved
+        _BOOTSTRAPPED_EXECUTOR_WORKSPACE = resolved
     return str(state.get("error") or "") or None
 
 
@@ -153,17 +199,28 @@ def _call_main(
 
 
 def project_main(argv: Sequence[str] | None = None) -> int:
-    workspace_error = _bootstrap_workspace_environment()
-    if workspace_error:
-        print(
-            f"XScientist workspace configuration error: {workspace_error}",
-            file=sys.stderr,
-        )
-        return 2
-    help_result = _workflow_help_main("project", argv)
-    if help_result is not None:
-        return help_result
-    return _call_main("ai_scientist.apps.project", argv, bootstrap_workspace=False)
+    global _PROJECT_BFTS_CONFIG_EXPLICIT
+
+    invocation_args = list(sys.argv[1:] if argv is None else argv)
+    previous_explicit = _PROJECT_BFTS_CONFIG_EXPLICIT
+    _PROJECT_BFTS_CONFIG_EXPLICIT = any(
+        item == "--bfts-config" or item.startswith("--bfts-config=")
+        for item in invocation_args
+    )
+    try:
+        workspace_error = _bootstrap_workspace_environment()
+        if workspace_error:
+            print(
+                f"XScientist workspace configuration error: {workspace_error}",
+                file=sys.stderr,
+            )
+            return 2
+        help_result = _workflow_help_main("project", argv)
+        if help_result is not None:
+            return help_result
+        return _call_main("ai_scientist.apps.project", argv, bootstrap_workspace=False)
+    finally:
+        _PROJECT_BFTS_CONFIG_EXPLICIT = previous_explicit
 
 
 def batch_main(argv: Sequence[str] | None = None) -> int:

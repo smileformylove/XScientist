@@ -11,8 +11,11 @@ import argparse
 import json
 import shlex
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+from ai_scientist.utils.privacy import redact_sensitive_payload, redact_sensitive_text
 
 from .research_git import (
     ResearchGitError,
@@ -29,6 +32,77 @@ HISTORY_SCHEMA = "xscientist.workspace-history.v1"
 CHECKPOINT_SCHEMA = "xscientist.workspace-checkpoint-inspection.v1"
 DIFF_SCHEMA = "xscientist.workspace-history-diff.v1"
 ROLLBACK_PREVIEW_SCHEMA = "xscientist.rollback-preview.v1"
+
+
+def _workspace_literals(
+    workspace: str | Path,
+    payload: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return concrete workspace spellings that must not cross the CLI boundary."""
+
+    values = {str(Path(workspace).expanduser())}
+    try:
+        values.add(str(Path(workspace).expanduser().resolve()))
+    except OSError:
+        pass
+    if isinstance(payload, dict):
+        published = payload.get("workspace")
+        if isinstance(published, (str, Path)):
+            values.add(str(published))
+    return tuple(
+        sorted(
+            (value for value in values if Path(value).is_absolute()),
+            key=len,
+            reverse=True,
+        )
+    )
+
+
+def _portable_history_text(value: Any, *, workspace_literals: tuple[str, ...]) -> str:
+    """Replace this invocation's workspace before applying general redaction."""
+
+    safe = str(value)
+    for literal in workspace_literals:
+        # Commands may contain a shell-quoted path.  Replacing the quoted form
+        # first avoids publishing awkward ``'.'`` action arguments.
+        quoted = shlex.quote(literal)
+        if quoted != literal:
+            safe = safe.replace(quoted, ".")
+        safe = safe.replace(f'"{literal}"', ".")
+        safe = safe.replace(f"'{literal}'", ".")
+        safe = safe.replace(literal, ".")
+    return redact_sensitive_text(safe)
+
+
+def public_workspace_history_payload(
+    payload: dict[str, Any],
+    *,
+    workspace: str | Path,
+) -> dict[str, Any]:
+    """Return a portable, recursively redacted history CLI payload."""
+
+    workspace_literals = _workspace_literals(workspace, payload)
+
+    def transform(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                _portable_history_text(
+                    key, workspace_literals=workspace_literals
+                ): transform(nested)
+                for key, nested in value.items()
+            }
+        if isinstance(value, list):
+            return [transform(nested) for nested in value]
+        if isinstance(value, tuple):
+            return tuple(transform(nested) for nested in value)
+        if isinstance(value, (str, Path)):
+            return _portable_history_text(value, workspace_literals=workspace_literals)
+        return value
+
+    safe = transform(deepcopy(payload))
+    if "workspace" in safe:
+        safe["workspace"] = "."
+    return redact_sensitive_payload(safe)
 
 
 def inspect_workspace_history(
@@ -347,6 +421,11 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
                 commit=parsed.commit,
             )
     except (OSError, ResearchGitError, ValueError) as exc:
+        workspace_literals = _workspace_literals(parsed.workspace)
+        safe_error = _portable_history_text(
+            exc,
+            workspace_literals=workspace_literals,
+        )
         if parsed.as_json:
             print(
                 json.dumps(
@@ -355,7 +434,7 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
                         "ok": False,
                         "error": {
                             "command": f"history {parsed.history_command}",
-                            "message": str(exc),
+                            "message": safe_error,
                         },
                     },
                     indent=2,
@@ -363,8 +442,9 @@ def run_history_cli(parsed: argparse.Namespace) -> int:
                 )
             )
         else:
-            print(f"xscientist history: {exc}", file=sys.stderr)
+            print(f"xscientist history: {safe_error}", file=sys.stderr)
         return 2
+    payload = public_workspace_history_payload(payload, workspace=parsed.workspace)
     if parsed.as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -479,6 +559,7 @@ __all__ = [
     "inspect_workspace_checkpoint",
     "inspect_workspace_history",
     "preview_workspace_rollback",
+    "public_workspace_history_payload",
     "rollback_workspace_checkpoint",
     "run_history_cli",
     "save_workspace_checkpoint",

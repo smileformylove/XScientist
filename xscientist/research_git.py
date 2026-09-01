@@ -2377,13 +2377,26 @@ def _checkpoint_by_id_at_commit(
     repo: Path,
     commit: str,
     checkpoint_id: str,
+    *,
+    candidate_paths: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
-    for checkpoint_path in sorted(
+    tree = (
+        list(candidate_paths)
+        if candidate_paths is not None
+        else _run_git(
+            repo, ["ls-tree", "-r", "--name-only", commit]
+        ).stdout.splitlines()
+    )
+    checkpoint_paths = sorted(
         path
         for path in tree
         if path.startswith("checkpoints/") and path.endswith(".json")
-    ):
+    )
+    if candidate_paths is not None and len(checkpoint_paths) > 32:
+        raise ResearchGitError(
+            f"too many checkpoint candidates for {checkpoint_id} at {commit}"
+        )
+    for checkpoint_path in checkpoint_paths:
         try:
             payload = json.loads(
                 _run_git(repo, ["show", f"{commit}:{checkpoint_path}"]).stdout
@@ -4619,6 +4632,7 @@ def _checkpoint_at_commit(
     commit: str,
     *,
     validate_rollback_edge: bool = True,
+    checkpoint_candidates: Sequence[str] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     resolved = _run_git(
         repo,
@@ -4651,7 +4665,12 @@ def _checkpoint_at_commit(
             )
 
     checkpoint_id = trailers["Research-Checkpoint"][0]
-    record = _checkpoint_by_id_at_commit(repo, resolved, checkpoint_id)
+    record = _checkpoint_by_id_at_commit(
+        repo,
+        resolved,
+        checkpoint_id,
+        candidate_paths=checkpoint_candidates,
+    )
     if record is None:
         raise ResearchGitError(
             f"commit {resolved} is not bound to research checkpoint "
@@ -4783,6 +4802,155 @@ def show_checkpoint(repo: str | Path, commit: str = "HEAD") -> dict[str, Any]:
         "path": path,
         "checkpoint_hash_valid": _checkpoint_hash_valid(payload),
         "checkpoint": payload,
+    }
+
+
+def _checkpoint_json_paths_changed_in_commit(
+    repo: Path,
+    commit: str,
+) -> list[str]:
+    """Return only checkpoint JSON paths changed by one exact first-parent edge."""
+
+    ancestry = _run_git(
+        repo,
+        ["rev-list", "--parents", "-n", "1", commit],
+    ).stdout.split()
+    first_parent = ancestry[1] if len(ancestry) > 1 else None
+    if first_parent is None:
+        raw_paths = _run_git(
+            repo,
+            ["ls-tree", "-r", "--name-only", commit, "--", "checkpoints"],
+        ).stdout.splitlines()
+    else:
+        raw_paths = _run_git(
+            repo,
+            [
+                "diff",
+                "--no-renames",
+                "--name-only",
+                first_parent,
+                commit,
+                "--",
+                "checkpoints",
+            ],
+        ).stdout.splitlines()
+    candidates = sorted(
+        path
+        for path in raw_paths
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    )
+    if not candidates or len(candidates) > 32:
+        raise ResearchGitError(
+            f"cannot resolve a bounded checkpoint set at commit {commit}"
+        )
+    return candidates
+
+
+def research_object_origin_checkpoint(
+    repo: str | Path,
+    object_id: str,
+    *,
+    kind: str,
+    commit: str = "HEAD",
+) -> dict[str, Any]:
+    """Resolve one exact object and its introducing checkpoint in bounded work.
+
+    Unlike ``research_blame``, this narrow recovery helper does not construct a
+    repository-wide reverse-relation view. It is intended for delayed evidence
+    binding, where the caller already holds the full immutable object ID and
+    only needs reproduction metadata from the introducing checkpoint.
+    """
+
+    selector = str(object_id or "").strip()
+    if re.fullmatch(r"rso-[0-9a-f]{16}", selector) is None:
+        raise ResearchGitError(
+            "origin checkpoint lookup requires a full research object ID"
+        )
+    selected_kind = str(kind or "").strip()
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,127}", selected_kind) is None:
+        raise ResearchGitError("origin checkpoint lookup requires a valid object kind")
+    root = _repository_root(repo)
+    resolved_commit = _run_git(
+        root, ["rev-parse", "--verify", f"{commit}^{{commit}}"]
+    ).stdout.strip()
+    path = f".xscientist/objects/{selected_kind}/{selector}.json"
+    object_blob = _run_git(
+        root,
+        ["show", f"{resolved_commit}:{path}"],
+        check=False,
+    )
+    if object_blob.returncode:
+        raise ResearchGitError(f"research object not found at {commit}: {selector}")
+    try:
+        payload = validate_research_object(json.loads(object_blob.stdout))
+    except (json.JSONDecodeError, ResearchObjectError) as exc:
+        raise ResearchGitError(
+            f"invalid typed research object at {resolved_commit}:{path}"
+        ) from exc
+    if str(payload.get("object_id") or "") != selector:
+        raise ResearchGitError(
+            f"research object identity disagrees with its path at {commit}: {selector}"
+        )
+    if str(payload.get("kind") or "") != selected_kind:
+        raise ResearchGitError(
+            f"research object kind disagrees with its path at {commit}: {selector}"
+        )
+
+    raw_origin = _run_git(
+        root,
+        [
+            "log",
+            "--full-history",
+            "--topo-order",
+            "--max-count=2",
+            "--diff-filter=A",
+            "--format=%H%x00%aI%x00%an%x00%s",
+            resolved_commit,
+            "--",
+            path,
+        ],
+    ).stdout.splitlines()
+    if not raw_origin:
+        raise ResearchGitError(f"cannot locate research object origin: {selector}")
+    if len(raw_origin) != 1:
+        raise ResearchGitError(
+            "research object has multiple reachable origins at the selected ref; "
+            "select a branch or parent ref with a unique origin: " + selector
+        )
+    fields = raw_origin[0].split("\0", 3)
+    if len(fields) != 4:
+        raise ResearchGitError(f"cannot parse research object origin: {selector}")
+    origin_commit, authored_at, author, subject = fields
+    checkpoint_path, checkpoint = _checkpoint_at_commit(
+        root,
+        origin_commit,
+        checkpoint_candidates=_checkpoint_json_paths_changed_in_commit(
+            root, origin_commit
+        ),
+    )
+    if path not in {str(item) for item in checkpoint.get("changed_paths") or []}:
+        raise ResearchGitError(
+            f"object origin is not bound to its research checkpoint: {selector}"
+        )
+    return {
+        "resolved_object_id": selector,
+        "object": {
+            "object_id": selector,
+            "kind": payload["kind"],
+            "state": payload["state"],
+            "content_hash": payload["content_hash"],
+            "path": path,
+        },
+        "origin": {
+            "commit": origin_commit,
+            "authored_at": authored_at,
+            "author": author,
+            "subject": subject,
+            "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "checkpoint_hash": checkpoint.get("content_hash"),
+        },
+        "checkpoint_path": checkpoint_path,
+        "checkpoint": checkpoint,
     }
 
 
@@ -6313,7 +6481,6 @@ def research_blame(
             "log",
             "--full-history",
             "--topo-order",
-            "--reverse",
             "--max-count=2",
             "--diff-filter=A",
             "--format=%H%x00%aI%x00%an%x00%s",
@@ -7952,7 +8119,20 @@ def reproduce_checkpoint(
             verdict = "materialized"
         else:
             reproduction_level = "inspection"
-            verdict = "ready" if result["objects_complete"] else "failed"
+            if not result["objects_complete"]:
+                verdict = "failed"
+            elif result["command"]:
+                verdict = "ready"
+            else:
+                verdict = "warning"
+                result["limitation"] = (
+                    "No reproduction command was recorded; this inspection only "
+                    "checks the checkpoint and bound objects."
+                )
+                result["next_action"] = (
+                    "Create a checkpoint with a shell-free reproduction command, "
+                    "then run `xscientist research reproduce HEAD --dest PATH --execute`."
+                )
         if mismatch_fields and verdict in {"ready", "materialized", "passed"}:
             verdict = "warning"
         receipt_base: dict[str, Any] = {
@@ -8238,6 +8418,7 @@ __all__ = [
     "revert_research_checkpoint",
     "research_diff",
     "research_blame",
+    "research_object_origin_checkpoint",
     "research_log",
     "research_trajectory",
     "research_stage",

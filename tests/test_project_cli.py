@@ -61,6 +61,10 @@ class ProjectCliTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertIn("Start from a plain-language question", rendered)
+        self.assertIn(
+            "skip the entire per-idea experiment -> plot -> writeup -> review pipeline",
+            " ".join(rendered.split()),
+        )
         self.assertNotRegex(rendered, r"[\u4e00-\u9fff]")
 
     def test_project_main_rejects_glm53_scientific_judgment_before_login(

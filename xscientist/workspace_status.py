@@ -22,7 +22,7 @@ from .research_closure import (
     closure_level_summary,
     summarize_closure_levels,
 )
-from .research_git import ResearchGitError, repository_status
+from .research_git import ResearchGitError, repository_status, show_checkpoint
 from .research_journey import (
     build_research_guide,
     public_workspace_action,
@@ -48,6 +48,7 @@ _DELIVERABLE_CONTRACT_FILES = (
 )
 _MAX_DELIVERABLE_ROOTS = 512
 _MAX_POINTER_RECORDS = 4096
+_MAX_CHECKPOINT_BINDING_COMMITS = 512
 _SUCCESSFUL_EXPERIMENT_STATES = {"success", "succeeded", "completed"}
 _FAILED_EXPERIMENT_STATES = {
     "failed",
@@ -64,7 +65,50 @@ _FAILED_EXPERIMENT_STATES = {
 }
 
 
-def _read_json(path: Path) -> tuple[dict[str, Any], str | None]:
+def _state_path_error(path: Path, *, root: Path | None) -> str | None:
+    """Reject state paths that leave the workspace or cross a symlink."""
+
+    if root is None:
+        return "state path must not be a symlink" if path.is_symlink() else None
+    lexical_root = Path(os.path.abspath(root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError:
+        return "state path escapes the workspace"
+    cursor = lexical_root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            return "state path must not use symlinks"
+    try:
+        lexical_path.resolve(strict=False).relative_to(lexical_root.resolve())
+    except (OSError, ValueError):
+        return "state path escapes the workspace"
+    return None
+
+
+def _workspace_state_label(path: Path, *, root: Path) -> str:
+    """Name a managed state file without resolving a rejected symlink target."""
+
+    try:
+        return (
+            Path(os.path.abspath(path))
+            .relative_to(Path(os.path.abspath(root)))
+            .as_posix()
+        )
+    except ValueError:
+        return "[REDACTED_PATH]"
+
+
+def _read_json(
+    path: Path,
+    *,
+    root: Path | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    path_error = _state_path_error(path, root=root)
+    if path_error:
+        return {}, path_error
     if not path.exists():
         return {}, None
     try:
@@ -76,6 +120,71 @@ def _read_json(path: Path) -> tuple[dict[str, Any], str | None]:
     if not isinstance(value, dict):
         return {}, "state root must be a JSON object"
     return value, None
+
+
+def _state_shape_error(
+    payload: dict[str, Any],
+    *,
+    label: str,
+    sequence_fields: tuple[str, ...] = (),
+    mapping_fields: tuple[str, ...] = (),
+    text_fields: tuple[str, ...] = (),
+    mapping_item_fields: tuple[str, ...] = (),
+) -> str | None:
+    """Validate only fields consumed by the compact status view."""
+
+    for field in sequence_fields:
+        if (
+            field in payload
+            and payload[field] is not None
+            and not isinstance(payload[field], list)
+        ):
+            return f"{label}.{field} must be a JSON array"
+    for field in mapping_fields:
+        if (
+            field in payload
+            and payload[field] is not None
+            and not isinstance(payload[field], dict)
+        ):
+            return f"{label}.{field} must be a JSON object"
+    for field in text_fields:
+        if (
+            field in payload
+            and payload[field] is not None
+            and not isinstance(payload[field], str)
+        ):
+            return f"{label}.{field} must be a string"
+    for field in mapping_item_fields:
+        values = payload.get(field)
+        if isinstance(values, list) and any(
+            not isinstance(item, dict) for item in values
+        ):
+            return f"{label}.{field} entries must be JSON objects"
+    return None
+
+
+def _validated_state_json(
+    path: Path,
+    *,
+    root: Path,
+    label: str,
+    sequence_fields: tuple[str, ...] = (),
+    mapping_fields: tuple[str, ...] = (),
+    text_fields: tuple[str, ...] = (),
+    mapping_item_fields: tuple[str, ...] = (),
+) -> tuple[dict[str, Any], str | None]:
+    payload, error = _read_json(path, root=root)
+    if error:
+        return {}, error
+    shape_error = _state_shape_error(
+        payload,
+        label=label,
+        sequence_fields=sequence_fields,
+        mapping_fields=mapping_fields,
+        text_fields=text_fields,
+        mapping_item_fields=mapping_item_fields,
+    )
+    return ({}, shape_error) if shape_error else (payload, None)
 
 
 def _workspace_identity(root: Path) -> tuple[str, str]:
@@ -104,8 +213,15 @@ def _workspace_identity(root: Path) -> tuple[str, str]:
     return name, "ws-" + hashlib.sha256(identity_source).hexdigest()[:12]
 
 
-def _first_existing(paths: list[Path]) -> Path | None:
-    return next((path for path in paths if path.is_file()), None)
+def _first_existing(paths: list[Path], *, root: Path) -> Path | None:
+    return next(
+        (
+            path
+            for path in paths
+            if _state_path_error(path, root=root) is None and path.is_file()
+        ),
+        None,
+    )
 
 
 def _count(value: Any, *, default: int = 0) -> int:
@@ -235,25 +351,140 @@ def _latest_project_pdf(
     return candidates[-1] if candidates else None
 
 
-def _git_tracked_paths(root: Path, paths: list[str]) -> set[str]:
+def _head_is_exact_research_checkpoint(
+    root: Path,
+    repo_status: dict[str, Any],
+) -> bool:
+    """Return whether HEAD itself is a hash-valid Research Git checkpoint."""
+
+    head = str(repo_status.get("head") or "").strip()
+    if not head:
+        return False
+    try:
+        shown = show_checkpoint(root, head)
+    except (OSError, ResearchGitError, ValueError):
+        return False
+    return bool(
+        shown.get("checkpoint_hash_valid") is True
+        and str(shown.get("commit") or "") == head
+    )
+
+
+def _git_tree_blobs(root: Path, commit: str, paths: list[str]) -> dict[str, str]:
+    """Return Git blob identities for a bounded set of exact paths."""
+
     if not paths:
-        return set()
+        return {}
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--cached", "-z", "--", *paths],
+            ["git", "-C", str(root), "ls-tree", "-z", commit, "--", *paths],
             check=False,
             capture_output=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return set()
+        return {}
     if completed.returncode:
-        return set()
-    return {
-        item.decode("utf-8", errors="surrogateescape")
-        for item in completed.stdout.split(b"\0")
-        if item
-    }
+        return {}
+    blobs: dict[str, str] = {}
+    for record in completed.stdout.split(b"\0"):
+        if not record or b"\t" not in record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[1] != b"blob":
+            continue
+        path = raw_path.decode("utf-8", errors="surrogateescape")
+        blobs[path] = fields[2].decode("ascii", errors="ignore")
+    return blobs
+
+
+def _research_checkpoint_bindings(
+    root: Path,
+    *,
+    repo_status: dict[str, Any],
+    paths: list[str],
+) -> dict[str, set[str]]:
+    """Prove current path contents were recorded by an exact Research checkpoint.
+
+    Being tracked by Git is insufficient: a raw Git commit followed by a semantic
+    Research checkpoint must not retroactively bind unrelated artifacts.  The
+    current blob therefore has to match a version named in ``changed_paths`` by
+    a hash-valid checkpoint on HEAD's first-parent history.
+    """
+
+    head = str(repo_status.get("head") or "").strip()
+    requested = sorted(
+        {
+            path
+            for path in paths
+            if path and not Path(path).is_absolute() and ".." not in Path(path).parts
+        }
+    )
+    if (
+        not head
+        or not requested
+        or not _head_is_exact_research_checkpoint(root, repo_status)
+    ):
+        return {}
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "log",
+                "--first-parent",
+                "--format=%H",
+                f"--max-count={_MAX_CHECKPOINT_BINDING_COMMITS}",
+                head,
+                "--",
+                *requested,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if completed.returncode:
+        return {}
+
+    current_blobs = _git_tree_blobs(root, head, requested)
+    bindings: dict[str, set[str]] = {}
+    requested_set = set(requested)
+    for commit in completed.stdout.splitlines():
+        commit = commit.strip()
+        if not commit:
+            continue
+        try:
+            shown = show_checkpoint(root, commit)
+        except (OSError, ResearchGitError, ValueError):
+            continue
+        if (
+            shown.get("checkpoint_hash_valid") is not True
+            or str(shown.get("commit") or "") != commit
+        ):
+            continue
+        checkpoint = shown.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            continue
+        declared = requested_set & {
+            str(path) for path in checkpoint.get("changed_paths") or []
+        }
+        checkpoint_blobs = _git_tree_blobs(root, commit, sorted(declared))
+        object_refs = {
+            str(item)
+            for item in checkpoint.get("object_refs") or []
+            if str(item).startswith("sha256:")
+        }
+        for path in declared:
+            if current_blobs.get(path) and current_blobs[path] == checkpoint_blobs.get(
+                path
+            ):
+                bindings.setdefault(path, set()).update(object_refs)
+    return bindings
 
 
 def _cas_logical_bindings(
@@ -269,11 +500,6 @@ def _cas_logical_bindings(
     pointer_root = root / "research-objects"
     if not pointer_root.is_dir() or pointer_root.is_symlink():
         return {}
-    checkpoint_refs = {
-        str(item)
-        for item in (repo_status.get("last_checkpoint") or {}).get("object_refs") or []
-        if str(item).startswith("sha256:")
-    }
     pointers: list[Path] = []
     try:
         with os.scandir(pointer_root) as entries:
@@ -292,7 +518,7 @@ def _cas_logical_bindings(
     pointer_relatives: list[str] = []
     rows: list[tuple[str, str, str]] = []
     for pointer in pointers:
-        payload, error = _read_json(pointer)
+        payload, error = _read_json(pointer, root=root)
         object_hash = str(payload.get("object_hash") or "")
         logical_path = str(payload.get("logical_path") or "").strip()
         if (
@@ -306,11 +532,15 @@ def _cas_logical_bindings(
         relative = pointer.relative_to(root).as_posix()
         pointer_relatives.append(relative)
         rows.append((logical_path, object_hash, relative))
-    tracked_pointers = _git_tracked_paths(root, pointer_relatives)
+    checkpoint_bindings = _research_checkpoint_bindings(
+        root,
+        repo_status=repo_status,
+        paths=pointer_relatives,
+    )
     for logical_path, object_hash, pointer_relative in rows:
         if pointer_relative in pending_paths:
             bindings[logical_path] = "pending"
-        elif pointer_relative in tracked_pointers and object_hash in checkpoint_refs:
+        elif object_hash in checkpoint_bindings.get(pointer_relative, set()):
             bindings[logical_path] = "checkpointed"
         else:
             bindings.setdefault(logical_path, "unbound")
@@ -333,6 +563,7 @@ def _deliverable_audit(
     if repo_status is None:
         return {
             "available": False,
+            "research_checkpoint_head": None,
             "total": len(relative_paths),
             "checkpointed": 0,
             "pending": 0,
@@ -341,6 +572,7 @@ def _deliverable_audit(
             "pending_paths": [],
             "unbound_paths": relative_paths,
         }
+    checkpoint_head_valid = _head_is_exact_research_checkpoint(root, repo_status)
     pending_set = {
         str(path)
         for path in (
@@ -350,7 +582,11 @@ def _deliverable_audit(
             + list(repo_status.get("eligible_changes") or [])
         )
     }
-    tracked = _git_tracked_paths(root, relative_paths)
+    checkpoint_bindings = _research_checkpoint_bindings(
+        root,
+        repo_status=repo_status,
+        paths=relative_paths,
+    )
     cas_bindings = _cas_logical_bindings(
         root,
         repo_status=repo_status,
@@ -362,12 +598,16 @@ def _deliverable_audit(
     for relative in relative_paths:
         if relative in pending_set or cas_bindings.get(relative) == "pending":
             pending.append(relative)
-        elif relative in tracked or cas_bindings.get(relative) == "checkpointed":
+        elif checkpoint_head_valid and (
+            relative in checkpoint_bindings
+            or cas_bindings.get(relative) == "checkpointed"
+        ):
             checkpointed.append(relative)
         else:
             unbound.append(relative)
     return {
         "available": True,
+        "research_checkpoint_head": checkpoint_head_valid,
         "total": len(relative_paths),
         "checkpointed": len(checkpointed),
         "pending": len(pending),
@@ -382,6 +622,7 @@ def _deliverables_summary(
     root: Path,
     *,
     progress: dict[str, Any],
+    research: dict[str, Any],
     review: dict[str, Any],
     repo_status: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -395,11 +636,40 @@ def _deliverables_summary(
         if (contract_root / filename).is_file()
         and not (contract_root / filename).is_symlink()
     ]
-    manifest, manifest_error = _read_json(contract_root / "pipeline_manifest.json")
-    manuscript, manuscript_error = _read_json(contract_root / "manuscript_state.json")
-    figure_spec, figure_error = _read_json(contract_root / "figure_spec.json")
-    review_state, review_error = _read_json(contract_root / "review_state.json")
-    repair_plan, repair_error = _read_json(contract_root / "repair_plan.json")
+    manifest, manifest_error = _validated_state_json(
+        contract_root / "pipeline_manifest.json",
+        root=root,
+        label="pipeline_manifest",
+        mapping_fields=("artifacts",),
+    )
+    manuscript, manuscript_error = _validated_state_json(
+        contract_root / "manuscript_state.json",
+        root=root,
+        label="manuscript_state",
+        mapping_fields=("evidence_summary",),
+    )
+    figure_spec, figure_error = _validated_state_json(
+        contract_root / "figure_spec.json",
+        root=root,
+        label="figure_spec",
+        sequence_fields=("figures",),
+        mapping_fields=("summary",),
+        mapping_item_fields=("figures",),
+    )
+    review_state, review_error = _validated_state_json(
+        contract_root / "review_state.json",
+        root=root,
+        label="review_state",
+        sequence_fields=("active_issue_records", "active_issues"),
+        mapping_fields=("repair_metrics", "lane_summaries"),
+        mapping_item_fields=("active_issue_records", "active_issues"),
+    )
+    repair_plan, repair_error = _validated_state_json(
+        contract_root / "repair_plan.json",
+        root=root,
+        label="repair_plan",
+        mapping_fields=("summary",),
+    )
     warnings: list[dict[str, str]] = []
     for path, error in (
         (contract_root / "pipeline_manifest.json", manifest_error),
@@ -412,7 +682,7 @@ def _deliverables_summary(
             warnings.append(
                 {
                     "code": "deliverable_contract_unreadable",
-                    "detail": f"{portable_path(path, base=root)}: {error}",
+                    "detail": f"{_workspace_state_label(path, root=root)}: {error}",
                     "remediation": "restore the contract from Research Git or rerun its producing stage",
                 }
             )
@@ -428,7 +698,25 @@ def _deliverables_summary(
     )
     failed_runs = sum(state in _FAILED_EXPERIMENT_STATES for state in run_states)
     counts = review.get("object_counts") or {}
-    recorded_attempts = _count(counts.get("experiment_attempt"))
+    attempt_states = (research.get("guide") or {}).get("experiment_states") or {}
+    recorded_attempts = max(
+        _count(counts.get("experiment_attempt")),
+        sum(_count(value) for value in attempt_states.values()),
+    )
+    recorded_successes = sum(
+        _count(attempt_states.get(state)) for state in _SUCCESSFUL_EXPERIMENT_STATES
+    )
+    recorded_failures = sum(
+        _count(attempt_states.get(state)) for state in _FAILED_EXPERIMENT_STATES
+    )
+    if not progress_results:
+        successful_runs = recorded_successes
+        failed_runs = recorded_failures
+    else:
+        # Project progress and Research Git can overlap, so do not add their
+        # counts.  Never let a coarse successful project row hide a recorded
+        # terminal failure, though: preserve at least the larger failure count.
+        failed_runs = max(failed_runs, recorded_failures)
     manuscript_revisions = _count(counts.get("manuscript"))
 
     figure_summary = (
@@ -545,10 +833,15 @@ def _deliverables_summary(
                 else None
             ),
             "experiment": {
-                "runs": len(progress_results),
+                "runs": max(
+                    len(progress_results),
+                    recorded_attempts,
+                    successful_runs + failed_runs,
+                ),
                 "successful": successful_runs,
                 "failed": failed_runs,
                 "recorded_attempts": recorded_attempts,
+                "terminal_states": dict(sorted(attempt_states.items())),
                 "registry_status": (
                     (artifact_entries.get("experiment_registry") or {}).get("status")
                     if isinstance(artifact_entries.get("experiment_registry"), dict)
@@ -610,8 +903,11 @@ def _empty_closure_levels(status: str = "unavailable") -> dict[str, dict[str, An
 
 def _selected_background_run(root: Path) -> dict[str, Any] | None:
     candidates: list[tuple[str, dict[str, Any]]] = []
-    for path in (root / "04_logs" / "runs").glob("*.json"):
-        payload, error = _read_json(path)
+    runs_root = root / "04_logs" / "runs"
+    if _state_path_error(runs_root, root=root) or not runs_root.is_dir():
+        return None
+    for path in runs_root.glob("*.json"):
+        payload, error = _read_json(path, root=root)
         if error or payload.get("schema") != RUN_SCHEMA:
             continue
         candidates.append((path.name, payload))
@@ -747,7 +1043,7 @@ def _dag_view_status(
             "refresh_command": None,
         }
     metadata_path = dag_path.with_name("research-dag.json")
-    metadata, error = _read_json(metadata_path)
+    metadata, error = _read_json(metadata_path, root=root)
     recorded_commit = str(metadata.get("commit") or "") or None
     current = bool(recorded_commit and head and recorded_commit == head)
     warning = None
@@ -823,6 +1119,8 @@ def build_workspace_status(
                     "last_checkpoint": repo_status.get("last_checkpoint"),
                     "guide": {
                         "progress": guide.get("progress"),
+                        "counts": guide.get("counts"),
+                        "experiment_states": guide.get("experiment_states"),
                         "next_steps": guide.get("next_steps"),
                         "warnings": guide.get("warnings"),
                         "program_review": guide.get("program_review"),
@@ -832,16 +1130,64 @@ def build_workspace_status(
         except (OSError, ResearchGitError, ValueError) as exc:
             errors.append({"code": "research_status_unavailable", "detail": str(exc)})
 
+    if (
+        repo_status is not None
+        and repo_status.get("head")
+        and not _head_is_exact_research_checkpoint(root, repo_status)
+    ):
+        errors.append(
+            {
+                "code": "research_head_not_checkpointed",
+                "detail": (
+                    "Git HEAD is not an exact, hash-valid Research Git checkpoint; "
+                    "ordinary Git commits cannot certify scientific artifacts"
+                ),
+                "remediation": (
+                    "restore or switch to a valid Research Git checkpoint, or use "
+                    "the explicit Research Git migration workflow"
+                ),
+            }
+        )
+
     progress_path = root / "04_logs" / "progress.json"
     budget_path = root / "04_logs" / "llm_budget.json"
     insight_path = root / "04_logs" / "insight_report.json"
     readiness_path = root / ".xscientist" / "readiness.json"
     strategy_followups_path = root / "04_logs" / "research_strategy_followups.json"
-    progress, progress_error = _read_json(progress_path)
-    budget, budget_error = _read_json(budget_path)
-    insight, insight_error = _read_json(insight_path)
-    readiness, readiness_error = _read_json(readiness_path)
-    strategy_followups, strategy_followups_error = _read_json(strategy_followups_path)
+    progress, progress_error = _validated_state_json(
+        progress_path,
+        root=root,
+        label="progress",
+        sequence_fields=("results", "selected_indices"),
+        text_fields=("current_stage",),
+        mapping_item_fields=("results",),
+    )
+    budget, budget_error = _validated_state_json(
+        budget_path,
+        root=root,
+        label="llm_budget",
+        mapping_fields=("limits", "used", "reserved"),
+    )
+    insight, insight_error = _validated_state_json(
+        insight_path,
+        root=root,
+        label="insight_report",
+        text_fields=("epistemic_status",),
+    )
+    readiness, readiness_error = _validated_state_json(
+        readiness_path,
+        root=root,
+        label="readiness",
+        sequence_fields=("remediations",),
+        mapping_item_fields=("remediations",),
+    )
+    strategy_followups, strategy_followups_error = _validated_state_json(
+        strategy_followups_path,
+        root=root,
+        label="research_strategy_followups",
+        sequence_fields=("active", "queued"),
+        mapping_item_fields=("active", "queued"),
+    )
     for path, detail in (
         (progress_path, progress_error),
         (budget_path, budget_error),
@@ -853,7 +1199,7 @@ def build_workspace_status(
             errors.append(
                 {
                     "code": "workspace_state_corrupted",
-                    "file": portable_path(path, base=root),
+                    "file": _workspace_state_label(path, root=root),
                     "detail": detail,
                     "remediation": (
                         "restore this file from a known-good checkpoint or move it "
@@ -870,7 +1216,8 @@ def build_workspace_status(
             / root.name
             / "research-dag"
             / "research-dag.html",
-        ]
+        ],
+        root=root,
     )
     review = (
         _review_summary(root, repo_status)
@@ -913,6 +1260,7 @@ def build_workspace_status(
     deliverables, deliverable_warnings = _deliverables_summary(
         root,
         progress=progress,
+        research=research,
         review=review,
         repo_status=repo_status,
     )
@@ -1055,13 +1403,28 @@ def build_workspace_status(
         ]
     workspace_name, workspace_id = _workspace_identity(root)
     background_status = str((background_run or {}).get("status") or "")
-    guide_progress = (research.get("guide") or {}).get("progress") or {}
-    scientific_work_exists = _count(guide_progress.get("completed_stages")) > 0 or bool(
-        deliverables.get("available")
+    guide_counts = (research.get("guide") or {}).get("counts") or {}
+    scientific_work_exists = any(
+        _count(guide_counts.get(kind)) > 0
+        for kind in (
+            "experiment_attempt",
+            "evidence",
+            "passage_evidence",
+            "inference",
+            "review",
+            "claim",
+            "reproduction",
+        )
+    ) or bool(deliverables.get("available"))
+    contract_attention = any(
+        str(item.get("code") or "") == "deliverable_contract_unreadable"
+        for item in warnings
+        if isinstance(item, dict)
     )
     attention_required = bool(
         errors
         or readiness_blockers
+        or contract_attention
         or background_status in {"failed", "cancelled", "interrupted"}
     )
     if errors:

@@ -230,7 +230,7 @@ class ProductivityP2Tests(unittest.TestCase):
 
     def test_upgrade_explains_an_unreleased_installed_version(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            response = _PyPIResponse(json.dumps({"info": {"version": "0.1.2"}}))
+            response = _PyPIResponse(json.dumps({"info": {"version": "0.1.4"}}))
             with mock.patch("urllib.request.urlopen", return_value=response):
                 payload = check_upgrade(raw, online=True)
 

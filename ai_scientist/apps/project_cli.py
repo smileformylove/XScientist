@@ -191,7 +191,14 @@ Examples:
     )
 
     parser.add_argument("--skip-ideation", action="store_true")
-    parser.add_argument("--skip-experiment", action="store_true")
+    parser.add_argument(
+        "--skip-experiment",
+        action="store_true",
+        help=(
+            "skip the entire per-idea experiment -> plot -> writeup -> review "
+            "pipeline; this run does not generate a paper"
+        ),
+    )
     parser.add_argument(
         "--bfts-config",
         type=str,

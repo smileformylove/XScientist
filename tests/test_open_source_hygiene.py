@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from xscientist._version import __version__
+from xscientist._version import PUBLISHED_VERSION
+from xscientist.cli import main as cli_main
 
 try:
     import tomllib
@@ -14,6 +18,24 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 
 
 class OpenSourceHygieneTests(unittest.TestCase):
+    def test_executor_json_errors_redact_host_paths(self) -> None:
+        stderr = io.StringIO()
+        private_path = "/" + "Users" + "/alice/private-lab/token.txt"
+        with (
+            mock.patch(
+                "xscientist.executor_manager.inspect_executor",
+                side_effect=OSError(f"cannot read {private_path}"),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = cli_main(["executor", "check", "--workspace", ".", "--json"])
+
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertNotIn(private_path, stderr.getvalue())
+        self.assertIn("[REDACTED_PATH]", payload["error"])
+
     def test_bilingual_docs_define_structured_trajectory_as_git_substrate(
         self,
     ) -> None:
@@ -236,11 +258,11 @@ class OpenSourceHygieneTests(unittest.TestCase):
             self.assertIn("PyPI", text)
         english = self.readme_path.read_text(encoding="utf-8")
         chinese = self.chinese_readme_path.read_text(encoding="utf-8")
-        install_spec = f"xscientist=={__version__}"
+        install_spec = f"xscientist=={PUBLISHED_VERSION}"
         self.assertIn(install_spec, english)
-        self.assertIn(f"published `{__version__}` release", english)
+        self.assertIn(f"Published `{PUBLISHED_VERSION}`", english)
         self.assertIn(install_spec, chinese)
-        self.assertIn(f"`{__version__}` 正式版", chinese)
+        self.assertIn(f"正式版 `{PUBLISHED_VERSION}`", chinese)
 
     def test_readmes_use_public_workflow_commands(self) -> None:
         forbidden = (

@@ -4,6 +4,9 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +17,7 @@ from unittest import mock
 
 import yaml
 
+from xscientist import cli as cli_module
 from xscientist._version import __version__
 from xscientist.cli import (
     _interactive_start_inputs,
@@ -23,12 +27,17 @@ from xscientist.cli import (
     main as cli_main,
 )
 from xscientist.diagnostics import diagnose
+from xscientist.executor_manager import _executor_recipe_digest_from_text
 from xscientist.onboarding import (
     WORKSPACE_FILES,
     WorkspaceInitError,
+    _checkout_vcs_source,
+    _installed_runtime_source,
     _installed_vcs_source,
     _render_dockerfile,
     _render_readme,
+    _runtime_install_source,
+    _workspace_installation_command,
     create_workspace,
 )
 from xscientist.provider_config import (
@@ -39,6 +48,46 @@ from xscientist.provider_config import (
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_public_docs_lead_with_the_published_three_command_path(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        for relative in ("README.md", "docs/README.zh.md"):
+            text = (repository / relative).read_text(encoding="utf-8")
+            install = text.index('python -m pip install "xscientist==0.1.4"')
+            explore = text.index("xscientist explore ./my-study", install)
+            status = text.index("xscientist status ./my-study", explore)
+            development = text.index(
+                "Development main" if relative == "README.md" else "开发版 main"
+            )
+            self.assertLess(install, explore)
+            self.assertLess(explore, status)
+            self.assertLess(status, development)
+            self.assertIn("--autopilot publication --max-cost-usd 10", text)
+
+    def test_getting_started_guides_keep_paid_and_advanced_steps_out_of_first_run(
+        self,
+    ) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        for relative in (
+            "docs/GETTING_STARTED.md",
+            "docs/GETTING_STARTED.zh.md",
+        ):
+            text = (repository / relative).read_text(encoding="utf-8")
+            install = text.index('python -m pip install "xscientist==0.1.4"')
+            explore = text.index("xscientist explore ./my-study", install)
+            status = text.index("xscientist status ./my-study", explore)
+            prepare = text.index("xscientist start ./my-study --prepare-only")
+            paid = text.index("xscientist start ./my-study --max-cost-usd 10")
+            self.assertLess(install, explore)
+            self.assertLess(explore, status)
+            self.assertLess(prepare, paid)
+            self.assertNotIn("xscientist benchmark", text)
+            self.assertNotIn("xscientist audit", text)
+            self.assertNotIn("xscientist history", text)
+            self.assertIn("--autopilot publication --max-cost-usd 10", text)
+
+        chinese_readme = (repository / "docs/README.zh.md").read_text(encoding="utf-8")
+        self.assertIn("[中文入门](GETTING_STARTED.zh.md)", chinese_readme)
+
     def test_glm53_workspace_keeps_custom_route_and_optional_sections(self) -> None:
         self.assertEqual(
             validate_provider_model("custom", "glm-5.3"),
@@ -290,6 +339,261 @@ class OnboardingTests(unittest.TestCase):
                     self.assertIn("[REDACTED_PATH]", payload["error"])
                     self.assertNotIn(sentinel, rendered)
                     self.assertNotIn(str(root.resolve()), rendered)
+
+    def test_first_use_json_errors_do_not_disclose_destination_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sentinel = "SENTINEL_PRIVATE_FIRST_USE"
+            scenarios = (
+                (
+                    "explore",
+                    [
+                        "--idea",
+                        "Does X change Y?",
+                        "--expect",
+                        "Y changes.",
+                        "--disprove",
+                        "Y does not change.",
+                        "--test",
+                        "Compare X with a control.",
+                        "--non-interactive",
+                    ],
+                ),
+                ("demo", []),
+            )
+            for command, arguments in scenarios:
+                with self.subTest(command=command):
+                    destination = root / f"{sentinel}-{command}"
+                    destination.write_text("not a directory\n", encoding="utf-8")
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        code = cli_main(
+                            [
+                                command,
+                                str(destination),
+                                *arguments,
+                                "--json",
+                            ]
+                        )
+
+                    self.assertEqual(code, 2)
+                    rendered = stderr.getvalue()
+                    payload = json.loads(rendered)
+                    self.assertEqual(payload["workspace"], ".")
+                    self.assertTrue(payload["error"])
+                    self.assertNotIn(sentinel, rendered)
+                    self.assertNotIn(str(root.resolve()), rendered)
+
+    def test_explore_privacy_failure_is_zero_write_and_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = cli_main(
+                    [
+                        "explore",
+                        str(workspace),
+                        "--idea",
+                        "Does X change Y?",
+                        "--expect",
+                        "Contact alice@example.com if Y changes.",
+                        "--disprove",
+                        "Y does not change.",
+                        "--non-interactive",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 2)
+            self.assertFalse(workspace.exists())
+            self.assertNotIn("alice@example.com", stderr.getvalue())
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                retry = cli_main(
+                    [
+                        "explore",
+                        str(workspace),
+                        "--idea",
+                        "Does X change Y?",
+                        "--expect",
+                        "Y changes.",
+                        "--disprove",
+                        "Y does not change.",
+                        "--test",
+                        "Compare X with a control.",
+                        "--non-interactive",
+                    ]
+                )
+            self.assertEqual(retry, 0)
+            self.assertTrue((workspace / "research.yaml").is_file())
+
+    def test_explore_refuses_destination_identity_changes_during_input(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            parent_a = root / "a"
+            parent_b = root / "b"
+            parent_a.mkdir()
+            parent_b.mkdir()
+            study_a = parent_a / "study"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(study_a),
+                            "--idea",
+                            "Does X change Y?",
+                            "--expect",
+                            "Y changes.",
+                            "--disprove",
+                            "Y does not change.",
+                            "--test",
+                            "Compare X with a control.",
+                            "--non-interactive",
+                        ]
+                    ),
+                    0,
+                )
+            study_b = parent_b / "study"
+            shutil.copytree(study_a, study_b)
+            original_inputs = cli_module._interactive_explore_inputs
+
+            for existing in (True, False):
+                with self.subTest(existing=existing):
+                    alias = root / ("current-existing" if existing else "current-new")
+                    alias.symlink_to(parent_a, target_is_directory=True)
+                    destination = alias / ("study" if existing else "new-study")
+                    heads_before = {
+                        path: subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=path,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                        for path in (study_a, study_b)
+                    }
+
+                    def switch_parent(parsed, *, existing):
+                        alias.unlink()
+                        alias.symlink_to(parent_b, target_is_directory=True)
+                        return original_inputs(parsed, existing=existing)
+
+                    stderr = io.StringIO()
+                    with (
+                        mock.patch.object(
+                            cli_module,
+                            "_interactive_explore_inputs",
+                            side_effect=switch_parent,
+                        ),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        code = cli_main(
+                            [
+                                "explore",
+                                str(destination),
+                                "--idea",
+                                "Does X change Y?",
+                                "--non-interactive",
+                                "--json",
+                            ]
+                        )
+
+                    self.assertEqual(code, 2)
+                    self.assertIn("destination changed", stderr.getvalue())
+                    if not existing:
+                        self.assertFalse((parent_a / "new-study").exists())
+                        self.assertFalse((parent_b / "new-study").exists())
+                    for path, head in heads_before.items():
+                        self.assertEqual(
+                            subprocess.run(
+                                ["git", "rev-parse", "HEAD"],
+                                cwd=path,
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                            ).stdout.strip(),
+                            head,
+                        )
+
+            leaf_target = root / "empty-leaf-target"
+            leaf_target.mkdir()
+            leaf_alias = root / "leaf-workspace"
+            leaf_alias.symlink_to(leaf_target, target_is_directory=True)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(leaf_alias),
+                            "--idea",
+                            "Does X change Y?",
+                            "--non-interactive",
+                            "--json",
+                        ]
+                    ),
+                    2,
+                )
+            self.assertEqual(list(leaf_target.iterdir()), [])
+
+    def test_demo_and_status_ignore_an_unrelated_broken_cwd_provider(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace_a = root / "workspace-a"
+            status_target = root / "status-target"
+            demo_target = root / "demo-target"
+            create_workspace(workspace_a)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli_main(
+                        [
+                            "explore",
+                            str(status_target),
+                            "--idea",
+                            "Does X change Y?",
+                            "--non-interactive",
+                        ]
+                    ),
+                    0,
+                )
+            metadata_path = workspace_a / ".xscientist" / "providers.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["providers"]["zhipu"]["model"] = "openai/wrong-provider"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            previous = Path.cwd()
+            try:
+                os.chdir(workspace_a)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    demo_output = io.StringIO()
+                    with contextlib.redirect_stdout(demo_output):
+                        self.assertEqual(
+                            cli_main(["demo", str(demo_target), "--json"]),
+                            0,
+                        )
+                    self.assertTrue(json.loads(demo_output.getvalue())["ok"])
+
+                    status_output = io.StringIO()
+                    with contextlib.redirect_stdout(status_output):
+                        self.assertEqual(
+                            cli_main(["status", str(status_target), "--json"]),
+                            0,
+                        )
+                    self.assertTrue(json.loads(status_output.getvalue())["ok"])
+
+                    cwd_status_output = io.StringIO()
+                    with contextlib.redirect_stdout(cwd_status_output):
+                        cwd_status_code = cli_main(["status", "--json"])
+                    self.assertIn(cwd_status_code, {0, 1})
+                    cwd_status = json.loads(cwd_status_output.getvalue())
+                    self.assertEqual(
+                        cwd_status["schema"], "xscientist.workspace-status.v1"
+                    )
+                    self.assertNotEqual(cwd_status.get("operational_state"), "unknown")
+            finally:
+                os.chdir(previous)
 
     def test_start_json_redacts_the_final_execution_error_and_workspace_name(
         self,
@@ -868,7 +1172,22 @@ class OnboardingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            with (
+                mock.patch(
+                    "xscientist.onboarding._source_checkout_root", return_value=None
+                ),
+                mock.patch(
+                    "xscientist.onboarding._runtime_install_source",
+                    return_value=SimpleNamespace(
+                        install_source="pypi-release",
+                        revision="release",
+                        source_url=None,
+                        reproducible=True,
+                        error="",
+                    ),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
                 exit_code = cli_main(["init", str(workspace), "--json"])
 
             self.assertEqual(exit_code, 0)
@@ -917,6 +1236,20 @@ class OnboardingTests(unittest.TestCase):
             )
             self.assertIn("ARG XSCIENTIST_INSTALL_MODE=pypi", dockerfile)
             self.assertIn(
+                "ARG XSCIENTIST_RUNTIME_SPEC=xscientist[research,zhipu]"
+                "==${XSCIENTIST_VERSION}",
+                dockerfile,
+            )
+            recipe_match = re.search(
+                r"(?m)^ARG XSCIENTIST_RECIPE_DIGEST=([0-9a-f]{64})$",
+                dockerfile,
+            )
+            self.assertIsNotNone(recipe_match)
+            self.assertEqual(
+                recipe_match.group(1), _executor_recipe_digest_from_text(dockerfile)
+            )
+            self.assertIn("org.xscientist.executor-recipe", dockerfile)
+            self.assertIn(
                 "/tmp/xscientist-build-context[research,zhipu]",
                 dockerfile,
             )
@@ -958,9 +1291,15 @@ class OnboardingTests(unittest.TestCase):
             }
         )
         distribution = SimpleNamespace(read_text=lambda _name: direct_url)
-        with mock.patch(
-            "xscientist.onboarding.importlib_metadata.distribution",
-            return_value=distribution,
+        with (
+            mock.patch(
+                "xscientist.onboarding.importlib_metadata.distribution",
+                return_value=distribution,
+            ),
+            mock.patch("xscientist.onboarding._checkout_vcs_source", return_value=None),
+            mock.patch(
+                "xscientist.onboarding._source_checkout_root", return_value=None
+            ),
         ):
             self.assertEqual(
                 _installed_vcs_source(),
@@ -989,6 +1328,136 @@ class OnboardingTests(unittest.TestCase):
             "git+https://github.com/example/XScientist.git@" + "a" * 40,
             readme,
         )
+
+    def test_source_checkout_onboarding_pins_safe_origin_without_dev_release(
+        self,
+    ) -> None:
+        source_root = Path("/private/host/XScientist")
+        head = "c" * 40
+        remote = subprocess.CompletedProcess(
+            ["git", "remote", "get-url", "origin"],
+            0,
+            "git@github.com:example/XScientist.git\n",
+            "",
+        )
+
+        def git_run(command, **_kwargs):
+            if command[1] == "status":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return remote
+
+        with (
+            mock.patch(
+                "xscientist.onboarding._source_checkout_root",
+                return_value=source_root,
+            ),
+            mock.patch(
+                "xscientist.onboarding._source_checkout_revision", return_value=head
+            ),
+            mock.patch("xscientist.onboarding.subprocess.run", side_effect=git_run),
+            mock.patch(
+                "xscientist.onboarding._installed_vcs_source", return_value=None
+            ),
+        ):
+            self.assertEqual(
+                _checkout_vcs_source(),
+                ("https://github.com/example/XScientist.git", head),
+            )
+            install = _workspace_installation_command(
+                provider="zhipu",
+                capabilities=("research",),
+                provider_required=True,
+            )
+            dockerfile = _render_dockerfile("zhipu")
+
+        expected_pin = f"git+https://github.com/example/XScientist.git@{head}"
+        self.assertIn(expected_pin, install)
+        self.assertIn(expected_pin, dockerfile)
+        self.assertNotIn(f"=={__version__}", install)
+        self.assertNotIn("==${XSCIENTIST_VERSION}", dockerfile)
+        self.assertNotIn(str(source_root), install)
+        self.assertNotIn(str(source_root), dockerfile)
+
+    def test_checkout_without_safe_origin_uses_path_free_local_build(self) -> None:
+        source_root = Path("/private/host/XScientist")
+        dirty = subprocess.CompletedProcess(
+            ["git", "status", "--porcelain"],
+            0,
+            " M README.md\n",
+            "",
+        )
+        with (
+            mock.patch(
+                "xscientist.onboarding._source_checkout_root",
+                return_value=source_root,
+            ),
+            mock.patch(
+                "xscientist.onboarding._source_checkout_revision",
+                return_value="d" * 40 + "-dirty.0123456789abcdef",
+            ),
+            mock.patch(
+                "xscientist.onboarding.subprocess.run", return_value=dirty
+            ) as git_run,
+        ):
+            install = _workspace_installation_command(
+                provider="zhipu",
+                capabilities=("research",),
+                provider_required=True,
+            )
+            dockerfile = _render_dockerfile("zhipu")
+
+        self.assertEqual(install, "xscientist executor prepare --workspace .")
+        self.assertIn("ARG XSCIENTIST_INSTALL_MODE=local", dockerfile)
+        self.assertIn("ARG XSCIENTIST_INSTALL_SOURCE=local-source", dockerfile)
+        self.assertIn(
+            "ARG XSCIENTIST_RUNTIME_SPEC=xscientist[research,zhipu]", dockerfile
+        )
+        self.assertIn("org.xscientist.executor-recipe", dockerfile)
+        self.assertNotIn(f"=={__version__}", dockerfile)
+        self.assertNotIn(str(source_root), dockerfile)
+        self.assertTrue(git_run.call_args_list)
+        self.assertTrue(
+            all(call.args[0][1] == "status" for call in git_run.call_args_list)
+        )
+
+    def test_source_archive_without_git_uses_snapshot_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            source_root = Path(td) / "XScientist-source"
+            for directory in ("xscientist", "ai_scientist", "compat"):
+                (source_root / directory).mkdir(parents=True, exist_ok=True)
+            (source_root / "pyproject.toml").write_text(
+                "[project]\nname = 'xscientist'\n", encoding="utf-8"
+            )
+            (source_root / "xscientist" / "runtime.py").write_text(
+                "VALUE = 1\n", encoding="utf-8"
+            )
+
+            no_repository = subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"], 128, "", "not a git repository"
+            )
+            with (
+                mock.patch(
+                    "xscientist.onboarding._source_checkout_root",
+                    return_value=source_root,
+                ),
+                mock.patch(
+                    "xscientist.onboarding.subprocess.run",
+                    return_value=no_repository,
+                ),
+            ):
+                source = _runtime_install_source()
+                install = _workspace_installation_command(
+                    provider="zhipu",
+                    capabilities=("research",),
+                    provider_required=True,
+                )
+                dockerfile = _render_dockerfile("zhipu")
+
+        self.assertEqual(source.install_source, "local-source")
+        self.assertRegex(source.revision, r"^snapshot\.[0-9a-f]{16}$")
+        self.assertTrue(source.reproducible)
+        self.assertEqual(install, "xscientist executor prepare --workspace .")
+        self.assertIn(f"ARG XSCIENTIST_SOURCE_REVISION={source.revision}", dockerfile)
 
     def test_provider_refresh_does_not_create_formatting_only_research_changes(
         self,
@@ -1038,11 +1507,25 @@ class OnboardingTests(unittest.TestCase):
             }
         )
         distribution = SimpleNamespace(read_text=lambda _name: direct_url)
-        with mock.patch(
-            "xscientist.onboarding.importlib_metadata.distribution",
-            return_value=distribution,
+        with (
+            mock.patch(
+                "xscientist.onboarding.importlib_metadata.distribution",
+                return_value=distribution,
+            ),
+            mock.patch(
+                "xscientist.onboarding._source_checkout_root", return_value=None
+            ),
         ):
             self.assertIsNone(_installed_vcs_source())
+            source = _installed_runtime_source()
+            self.assertFalse(source.reproducible)
+            self.assertIn("refusing to assume PyPI", source.error)
+            with self.assertRaisesRegex(WorkspaceInitError, "refusing to assume PyPI"):
+                _workspace_installation_command(
+                    provider="zhipu",
+                    capabilities=("research",),
+                    provider_required=True,
+                )
 
     def test_non_default_provider_requires_matching_explicit_model(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2024,7 +2507,20 @@ class OnboardingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "study"
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            source_revision = "e" * 40
+            with (
+                mock.patch(
+                    "xscientist.onboarding._runtime_install_source",
+                    return_value=SimpleNamespace(
+                        install_source="vcs-commit",
+                        revision=source_revision,
+                        source_url="https://github.com/example/XScientist.git",
+                        reproducible=True,
+                        error="",
+                    ),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
                 exit_code = cli_main(
                     [
                         "setup",
@@ -2055,7 +2551,12 @@ class OnboardingTests(unittest.TestCase):
             self.assertIsNone(provider_config["active_provider"])
             self.assertEqual(provider_config["providers"], {})
             dockerfile = (workspace / "Dockerfile.executor").read_text()
-            self.assertIn(f"xscientist==${{XSCIENTIST_VERSION}}", dockerfile)
+            self.assertIn(
+                "xscientist @ git+https://github.com/example/XScientist.git@"
+                + source_revision,
+                dockerfile,
+            )
+            self.assertNotIn(f"xscientist==${{XSCIENTIST_VERSION}}", dockerfile)
             self.assertNotIn("torch --index-url", dockerfile)
             self.assertNotIn("xscientist[research", dockerfile)
             generated_readme = (workspace / "README.md").read_text()

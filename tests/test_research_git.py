@@ -41,6 +41,33 @@ from xscientist.research_interop import export_research_interop
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for research history tests")
 class LocalResearchGitTests(unittest.TestCase):
+    def test_commandless_inspection_warns_but_declared_command_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+
+            commandless = reproduce_checkpoint(root)
+
+            self.assertEqual(commandless["receipt"]["reproduction_level"], "inspection")
+            self.assertEqual(commandless["receipt"]["verdict"], "warning")
+            self.assertIn("No reproduction command", commandless["limitation"])
+            self.assertIn("--execute", commandless["next_action"])
+
+            hypothesis = root / "hypotheses" / "h1.json"
+            hypothesis.write_text('{"hypothesis":"H1"}\n', encoding="utf-8")
+            checkpoint = create_checkpoint(
+                root,
+                stage="experiment",
+                subject="declare rerun",
+                reproduce_command="python verify.py",
+            )
+            declared = reproduce_checkpoint(root, commit=checkpoint.commit or "HEAD")
+
+            self.assertEqual(declared["receipt"]["reproduction_level"], "inspection")
+            self.assertEqual(declared["receipt"]["verdict"], "ready")
+            self.assertNotIn("limitation", declared)
+            self.assertNotIn("next_action", declared)
+
     def test_manifest_delta_reports_added_changed_and_unchanged_paths(self) -> None:
         delta = research_git_module._manifest_delta(
             [

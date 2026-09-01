@@ -1,129 +1,86 @@
 # Getting started
 
-## 1. Start with your own idea at zero cost
+This guide follows the published `0.1.4` release. You need Python 3.10+ and Git.
+
+## 1. Install, save your idea, and inspect it
 
 No model, API key, Docker installation, or provider configuration is needed:
 
 ```bash
+python -m pip install "xscientist==0.1.4"
 xscientist explore ./my-study
+xscientist status ./my-study
 ```
 
-Answer only what you know. The command records the idea first, then guides you
-through an expected observation, a disconfirming result, and a fair first test.
-It does not invent missing answers, evidence, or conclusions.
+`explore` asks for an expected observation, a result that would change your
+mind, and a fair first test. Answer only what you know. `status` then shows one
+highest-priority next action without inventing evidence or conclusions.
 
-To inspect a complete provider-free example as well:
+To inspect a complete provider-free example:
 
 ```bash
 xscientist demo ./first-study --autopilot
 xscientist status ./first-study
-xscientist benchmark first-run --max-seconds 30
 ```
 
-Expected outcome: an offline DAG, deterministic runtime receipts, zero model
-cost, and a next action that asks the user to resolve a contested claim.
+The demo costs `$0.00` and intentionally ends with “more evidence needed.” Its
+held-out result challenges an over-broad claim; preserving that conflict is a
+successful scientific outcome, not a software failure.
 
 ## 2. Optionally add a model
 
-Install the published 0.1.4 release with exactly one provider extra:
+Install the research runtime plus exactly one provider client. This example uses
+OpenAI; choose the matching provider extra for another service:
+
+```bash
+python -m pip install "xscientist[research,openai]==0.1.4"
+export OPENAI_API_KEY="..."
+xscientist start ./my-study --prepare-only
+```
+
+The question saved by `explore` is reused. `--prepare-only` creates or updates
+the workspace and validates local prerequisites without starting the study.
+Resolve the reported blocker before continuing.
+
+When the workspace is ready, set an explicit budget and start the run:
+
+```bash
+xscientist start ./my-study --max-cost-usd 10
+xscientist status ./my-study
+```
+
+A local Ollama model needs no hosted key, but generated experiment code still
+requires the configured isolated executor. Provider presence and scientific
+verification are separate states.
+
+## 3. Publication-oriented workflow
+
+Use the same safe preparation step first. Then select publication autopilot
+with an explicit budget:
+
+```bash
+xscientist start ./my-study --prepare-only
+xscientist start ./my-study --autopilot publication --max-cost-usd 10
+xscientist status ./my-study
+```
+
+Publication autopilot organizes research, writeup, and review gates. It does
+not promise manuscript completion, scientific verification, venue submission,
+or acceptance.
+
+## Continue only when needed
+
+- [Long-running guide](LONG_RUNNING_GUIDE.md): detach, watch, cancel, and resume.
+- [Local Research Git](LOCAL_RESEARCH_GIT.md): inspect, save, diff, and recover checkpoints.
+- [Research integrity](RESEARCH_INTEGRITY.md): traceability and independent review boundaries.
+- [Configuration reference](CONFIG_REFERENCE.md): providers, executors, and specialist capabilities.
+
+The `main` branch also documents unreleased protocol work. Install it from
+source only when you need a feature explicitly labeled **Development main**:
 
 ```bash
 python -m pip install \
-  "xscientist[research,openai]==0.1.4"
-xscientist start ./my-study
+  "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"
 ```
 
-In a terminal, the question saved by `explore` is reused. Remaining inputs are
-prompted progressively: ready provider/model, evidence mode, and optional cost
-limit. A local Ollama model needs no API key. Automation should pass the same
-choices explicitly with `--non-interactive`.
-
-Before spending money:
-
-```bash
-xscientist provider check --workspace ./my-study --max-cost-usd 10
-xscientist executor prepare --workspace ./my-study
-xscientist doctor --workspace ./my-study --deep
-```
-
-Credential presence and live API validation are different states. The provider
-check does not make a paid request. When you explicitly approve one minimal
-remote verification, use `xscientist provider check --workspace ./my-study
---live --json`; it reports model identity without storing response content.
-
-## 3. Detach, inspect, and resume
-
-```bash
-xscientist start ./my-study \
-  --question "Which mechanism best explains the held-out failure?" \
-  --allow-synthetic-data --max-cost-usd 10 --detach
-
-xscientist runs list --workspace ./my-study
-xscientist runs watch RUN_ID --workspace ./my-study
-xscientist runs logs RUN_ID --workspace ./my-study --tail 100
-xscientist runs cancel RUN_ID --workspace ./my-study
-xscientist runs resume RUN_ID --workspace ./my-study
-```
-
-Detached run metadata is local and private. Public run views omit the research
-question and exact resume arguments.
-
-## 4. Audit, save, and recover
-
-The everyday history surface is intentionally small:
-
-```bash
-xscientist status ./my-study
-xscientist history list ./my-study
-xscientist history show ./my-study --commit HEAD
-xscientist history diff ./my-study --from HEAD^ --to HEAD
-xscientist audit ./my-study --level trace
-xscientist audit ./my-study --level replay
-xscientist audit ./my-study --level verify
-
-xscientist history save ./my-study -m "record corrected measurement rule"
-xscientist history rollback ./my-study --commit HEAD
-```
-
-`status` is the default review page: it shows the current checkpoint, pending
-research changes, latest experiment failures, paper/review readiness, artifact
-checkpoint coverage, and the trace/replay/verify check ladder. It keeps one
-highest-priority action under `Next`; `show` inspects one checkpoint and `diff`
-explains the scientific change between two checkpoints.
-
-Text contracts for experiments, manuscripts, reviews, and repairs are eligible
-for normal checkpoints. Keep generated PDFs, result tables, and other large
-outputs in the local content-addressed store:
-
-```bash
-xscientist research experiment "held-out evaluation" \
-  --status success --metric accuracy=0.91 \
-  --result-artifact metrics=./results/heldout.json \
-  --repo ./my-study
-```
-
-This records the experiment, immutable result snapshot, portable pointer, and
-content hash together. If a paper or result is still unbound, `status` prints
-the exact `research object add` command before asking for a checkpoint.
-
-The rollback command above is a read-only preview. It reports the exact target,
-scientific impact, blockers, and an apply command. `--apply` appends a reversal
-checkpoint instead of deleting history. It refuses tracked, staged, selected,
-or policy-eligible unsaved research changes and never permits the repository's
-first checkpoint to be reversed. Generated DAG views are preserved; if a view
-represents an older checkpoint, `status` marks it stale and prints the refresh
-command.
-
-Use `xscientist research --help` only when you need branching, deep semantic
-diffs, reproduction execution, bundles, or other protocol-level controls.
-
-## 5. Keep the installation healthy
-
-```bash
-xscientist upgrade check --workspace ./my-study
-xscientist upgrade check --workspace ./my-study --online
-source <(xscientist completion zsh)
-```
-
-Upgrade checks are read-only and offline unless `--online` is present. Shell
-completion is printed to stdout and never edits a shell profile.
+Pin a source commit instead of `main` for repeatable research.

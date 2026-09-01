@@ -30,7 +30,11 @@ from ai_scientist.utils.research_integrity import (
 )
 from xscientist import ResearchLifecycle, ResearchRepository
 from xscientist.research_cli import main as research_main
-from xscientist.research_git import ResearchGitError, _create_checkpoint_locked
+from xscientist.research_git import (
+    ResearchGitError,
+    _create_checkpoint_locked,
+    research_object_origin_checkpoint,
+)
 from xscientist.research_git import add_research_object
 from xscientist.research_authority import require_independent_evaluator
 from xscientist.research_semantics import claim_scope_hash, normalize_claim_scope
@@ -531,6 +535,39 @@ class ResearchRepositoryTests(unittest.TestCase):
             )
             self.assertEqual(main_blame["origin"]["commit"], main_checkpoint.commit)
             self.assertEqual(side_blame["origin"]["commit"], side_checkpoint.commit)
+
+    def test_origin_lookup_rejects_linear_revert_and_reintroduction(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            repository = self._init(root)
+            hypothesis = repository.record("hypothesis", {"statement": "H1"})
+            object_bytes = hypothesis.path.read_bytes()
+            introduced = repository.commit(
+                stage="ideation",
+                subject="introduce H1",
+            )
+            repository.revert(introduced.commit or "HEAD")
+            hypothesis.path.parent.mkdir(parents=True, exist_ok=True)
+            hypothesis.path.write_bytes(object_bytes)
+            repository.commit(
+                stage="ideation",
+                subject="reintroduce H1",
+            )
+
+            with self.assertRaisesRegex(
+                ResearchGitError,
+                "multiple reachable origins",
+            ):
+                repository.blame(hypothesis.object_id)
+            with self.assertRaisesRegex(
+                ResearchGitError,
+                "multiple reachable origins",
+            ):
+                research_object_origin_checkpoint(
+                    root,
+                    hypothesis.object_id,
+                    kind="hypothesis",
+                )
 
     def test_privacy_gate_rejects_secret_without_persisting_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -262,7 +262,13 @@ def _saved_object_json(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) -> None:
+def _print_saved_object(
+    label: str,
+    result: dict[str, Any],
+    *,
+    as_json: bool,
+    guide_repo: str | Path | None = None,
+) -> None:
     recorded = result["object"]
     related = result.get("related") or []
     checkpoint = result.get("checkpoint")
@@ -282,6 +288,8 @@ def _print_saved_object(label: str, result: dict[str, Any], *, as_json: bool) ->
         print(f"Checkpoint: {checkpoint.checkpoint_id}")
     else:
         print(f"Checkpoint skipped: {checkpoint.reason}")
+    if guide_repo is not None:
+        print("Next: xscientist research guide --repo " + shlex.quote(str(guide_repo)))
 
 
 def _add_scope_arguments(
@@ -1165,6 +1173,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     evidence_parser.add_argument(
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
+    evidence_parser.add_argument(
+        "--reproduce-command",
+        help="Shell-free command inherited from the bound experiment checkpoint.",
+    )
     evidence_parser.add_argument("--verified", action="store_true")
     _add_scope_arguments(evidence_parser)
     evidence_parser.add_argument(
@@ -1957,7 +1969,9 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("hypothesis", result, as_json=args.as_json)
+            _print_saved_object(
+                "hypothesis", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "plan":
@@ -1972,7 +1986,9 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("research plan", result, as_json=args.as_json)
+            _print_saved_object(
+                "research plan", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "discovery":
@@ -2897,7 +2913,9 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("experiment", result, as_json=args.as_json)
+            _print_saved_object(
+                "experiment", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "preregister":
@@ -2934,10 +2952,13 @@ def main(
                 structured_scope=_scope_from_args(args),
                 verified=args.verified,
                 verifier_id=args.verifier,
+                reproduce_command=args.reproduce_command,
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("evidence", result, as_json=args.as_json)
+            _print_saved_object(
+                "evidence", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "estimand":
@@ -2991,7 +3012,12 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("scientific inference", result, as_json=args.as_json)
+            _print_saved_object(
+                "scientific inference",
+                result,
+                as_json=args.as_json,
+                guide_repo=args.repo,
+            )
             return 0
 
         if args.command == "ingest":
@@ -3028,7 +3054,9 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("claim", result, as_json=args.as_json)
+            _print_saved_object(
+                "claim", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "review":
@@ -3044,7 +3072,9 @@ def main(
                 message=args.message,
                 commit=not args.no_commit,
             )
-            _print_saved_object("gate decision", result, as_json=args.as_json)
+            _print_saved_object(
+                "gate decision", result, as_json=args.as_json, guide_repo=args.repo
+            )
             return 0
 
         if args.command == "init":
@@ -4043,6 +4073,10 @@ def main(
                     "Command:          "
                     f"{_display_text(payload['command'] or '(not declared)')}"
                 )
+                if payload.get("limitation"):
+                    print(f"Limitation:       {_display_text(payload['limitation'])}")
+                if payload.get("next_action"):
+                    print(f"Next:             {_display_text(payload['next_action'])}")
                 if (
                     args.environment_policy == "warn"
                     and payload["environment"]["mismatches"]

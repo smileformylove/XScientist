@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from jsonschema import validate
 
@@ -25,12 +26,13 @@ from xscientist.research_dag import (
     export_research_dag,
     render_research_dag_html,
 )
-from xscientist.research_git import ResearchGitError
+from xscientist.research_git import ResearchGitError, ResearchObjectResult
 from xscientist.research_journey import (
     _command_for_repo,
     build_research_guide,
     public_research_guide_payload,
     start_guided_research,
+    workspace_action_contract,
 )
 
 
@@ -48,6 +50,48 @@ class ResearchDagTests(unittest.TestCase):
             _command_for_repo("xscientist research program review", "/tmp/study"),
             "xscientist research program review --repo /tmp/study",
         )
+        self.assertEqual(
+            _command_for_repo("xscientist record . --lang zh", "/tmp/study"),
+            "xscientist record /tmp/study --lang zh",
+        )
+
+    def test_record_action_binds_positional_workspace_and_requires_interaction(
+        self,
+    ) -> None:
+        action = workspace_action_contract(
+            "xscientist record /private/host/study --lang zh"
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(
+            action["argv_template"],
+            ["xscientist", "record", "{workspace}", "--lang", "zh"],
+        )
+        self.assertEqual(action["workspace_binding"]["mode"], "argument")
+        self.assertFalse(action["executable_after_binding"])
+        self.assertEqual(action["input_binding"]["mode"], "interactive")
+        self.assertTrue(action["input_binding"]["required"])
+        self.assertEqual(action["input_binding"]["placeholders"], [])
+        self.assertNotIn("/private/host/study", json.dumps(action))
+
+        for control_flag in ("--json", "--non-interactive"):
+            with self.subTest(control_flag=control_flag):
+                controlled = workspace_action_contract(
+                    f"xscientist record /private/host/study {control_flag}"
+                )
+                assert controlled is not None
+                self.assertFalse(controlled["executable_after_binding"])
+                self.assertEqual(controlled["input_binding"]["mode"], "arguments")
+                self.assertTrue(controlled["input_binding"]["required"])
+
+        scripted = workspace_action_contract(
+            'xscientist record /private/host/study --summary "run" '
+            "--status completed --non-interactive"
+        )
+        assert scripted is not None
+        self.assertTrue(scripted["executable_after_binding"])
+        self.assertFalse(scripted["input_binding"]["required"])
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -903,9 +947,18 @@ class ResearchDagTests(unittest.TestCase):
                 ["guide", "--repo", str(cli_repo), "--lang", "en", "--json"]
             )
         self.assertEqual(code, 0)
+        guide_payload = json.loads(output.getvalue())
+        self.assertEqual(guide_payload["next_steps"][0]["code"], "run_experiment")
+        run_step = guide_payload["next_steps"][0]
+        self.assertEqual(run_step["command"], "xscientist record {workspace}")
+        self.assertFalse(run_step["action"]["executable_after_binding"])
+        self.assertEqual(run_step["action"]["input_binding"]["mode"], "interactive")
+        self.assertTrue(run_step["action"]["input_binding"]["required"])
+
+        chinese_guide = build_research_guide(cli_repo, language="zh", command_repo=".")
         self.assertEqual(
-            json.loads(output.getvalue())["next_steps"][0]["code"],
-            "run_experiment",
+            chinese_guide["next_steps"][0]["command"],
+            "xscientist record . --lang zh",
         )
 
         output = io.StringIO()
@@ -915,6 +968,88 @@ class ResearchDagTests(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertFalse(json.loads(output.getvalue())["content_disclosed"])
+
+    def test_guided_writers_print_copyable_next_without_changing_json(self) -> None:
+        recorded = ResearchObjectResult(
+            created=True,
+            path=self.repo_path / "research-objects" / "fake.json",
+            object_id="rso-fake",
+            qualified_id=None,
+            object_hash="sha256:" + "f" * 64,
+            kind="test",
+            state="draft",
+        )
+        result = {"object": recorded, "related": [], "checkpoint": None}
+        cases = [
+            (
+                "xscientist.research_commands.save_hypothesis",
+                ["hypothesis", "H", "--falsifier", "not H"],
+            ),
+            (
+                "xscientist.research_commands.save_research_plan",
+                ["plan", "rso-h", "Plan"],
+            ),
+            (
+                "xscientist.research_commands.save_experiment",
+                ["experiment", "Run", "--status", "completed"],
+            ),
+            (
+                "xscientist.research_commands.save_evidence",
+                ["evidence", "Result", "--attempt", "rso-a"],
+            ),
+            (
+                "xscientist.research_commands.save_inference",
+                ["infer", "Conclusion", "--premise", "rso-e", "--warrant", "W"],
+            ),
+            (
+                "xscientist.research_commands.save_review",
+                [
+                    "review",
+                    "Review",
+                    "--evaluates",
+                    "rso-i",
+                    "--verifier",
+                    "human:reviewer",
+                    "--decision",
+                    "hold",
+                ],
+            ),
+            (
+                "xscientist.research_commands.save_claim",
+                ["claim", "Claim", "--evidence", "rso-i"],
+            ),
+        ]
+        expected_next = f"Next: xscientist research guide --repo {self.repo_path}"
+        for target, command in cases:
+            with (
+                self.subTest(command=command[0]),
+                mock.patch(target, return_value=result),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = research_main([*command, "--repo", str(self.repo_path)])
+                self.assertEqual(code, 0)
+                self.assertIn(expected_next, output.getvalue())
+
+        with mock.patch(
+            "xscientist.research_commands.save_hypothesis", return_value=result
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = research_main(
+                    [
+                        "hypothesis",
+                        "H-json",
+                        "--falsifier",
+                        "not H",
+                        "--repo",
+                        str(self.repo_path),
+                        "--json",
+                    ]
+                )
+        self.assertEqual(code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(set(payload), {"object", "related_objects", "checkpoint"})
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import os.path as osp
 import shutil
@@ -278,13 +279,106 @@ def resolve_project_path(
     return get_project_dir(project_dir, output_root=output_root)
 
 
+_MANAGED_PROJECT_DIRECTORY_NAMES = (
+    "00_config",
+    "01_ideas",
+    "02_experiments",
+    "03_papers",
+    "04_logs",
+)
+_PROJECT_PROGRESS_FILENAME = "progress.json"
+
+
+def _assert_managed_project_layout(project_dir: str | Path) -> Path:
+    """Reject managed project directories that escape through a symlink."""
+
+    root = Path(os.path.abspath(Path(project_dir).expanduser()))
+    resolved_root = root.resolve(strict=False)
+    for name in _MANAGED_PROJECT_DIRECTORY_NAMES:
+        candidate = root / name
+        if candidate.is_symlink():
+            raise ValueError(f"managed project directory {name} must not be a symlink")
+        try:
+            candidate.resolve(strict=False).relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"managed project directory {name} escapes the project root"
+            ) from exc
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError(f"managed project directory {name} is not a directory")
+    return root
+
+
+def _managed_project_file(
+    project_dir: str | Path,
+    directory_name: str,
+    filename: str,
+) -> Path:
+    """Return one regular managed leaf without following a leaf symlink."""
+
+    if directory_name not in _MANAGED_PROJECT_DIRECTORY_NAMES:
+        raise ValueError("unsupported managed project directory")
+    if Path(filename).name != filename:
+        raise ValueError("managed project filename must be a single path component")
+    root = _assert_managed_project_layout(project_dir)
+    candidate = root / directory_name / filename
+    if candidate.is_symlink():
+        raise ValueError(
+            f"managed project file {directory_name}/{filename} must not be a symlink"
+        )
+    try:
+        candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"managed project file {directory_name}/{filename} escapes the project root"
+        ) from exc
+    if candidate.exists() and not candidate.is_file():
+        raise ValueError(
+            f"managed project file {directory_name}/{filename} is not a regular file"
+        )
+    return candidate
+
+
+def _load_project_ideas_list(path: Path, *, label: str) -> list[Any]:
+    """Load a managed or explicitly supplied ideas list for identity checks."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not validate {label} ideas") from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"{label} ideas must contain a JSON list")
+    return payload
+
+
+def _managed_project_ideas_hash(project_dir: str | Path) -> str | None:
+    """Return the one canonical persisted ideas identity, failing on ambiguity."""
+
+    generated = _managed_project_file(project_dir, "01_ideas", "generated_ideas.json")
+    stable = _managed_project_file(project_dir, "01_ideas", "ideas.json")
+    existing = [path for path in (generated, stable) if path.is_file()]
+    if not existing:
+        return None
+    identities = {
+        canonical_content_hash(_load_project_ideas_list(path, label="persisted"))
+        for path in existing
+    }
+    if len(identities) != 1:
+        raise ValueError(
+            "--resume refused conflicting generated_ideas.json and ideas.json"
+        )
+    return next(iter(identities))
+
+
 def create_project_structure(
     project_dir: str,
     *,
     output_root: str | Path | None = None,
 ) -> dict:
     """创建项目目录结构。"""
-    project_path = resolve_project_path(project_dir, output_root=output_root)
+    project_path = _assert_managed_project_layout(
+        resolve_project_path(project_dir, output_root=output_root)
+    )
 
     # 创建子目录
     dirs = {
@@ -295,8 +389,10 @@ def create_project_structure(
         "logs": project_path / "04_logs",
     }
 
-    for dir_path in dirs.values():
-        dir_path.mkdir(parents=True, exist_ok=True)
+    project_path.mkdir(parents=True, exist_ok=True)
+    for name in _MANAGED_PROJECT_DIRECTORY_NAMES:
+        (project_path / name).mkdir(parents=True, exist_ok=True)
+    _assert_managed_project_layout(project_path)
 
     print(f"✅ 创建项目目录结构: {project_path}")
     print(
@@ -311,7 +407,38 @@ def _prepare_project_input(args: argparse.Namespace, dirs: dict[str, Path]) -> N
     if sum(supplied) > 1:
         raise ValueError("--question, --topic, and --ideas are mutually exclusive")
 
-    topic_path = dirs["root"] / "00_config" / "topic.md"
+    project_root = _assert_managed_project_layout(dirs["root"])
+    topic_path = _managed_project_file(project_root, "00_config", "topic.md")
+    generated = _managed_project_file(project_root, "01_ideas", "generated_ideas.json")
+    stable = _managed_project_file(project_root, "01_ideas", "ideas.json")
+    existing_idea_paths = [path for path in (generated, stable) if path.is_file()]
+
+    persisted_idea_hash: str | None = None
+    if args.resume and existing_idea_paths:
+        persisted_idea_hash = _managed_project_ideas_hash(project_root)
+
+    progress_path = _managed_project_file(
+        project_root, "04_logs", _PROJECT_PROGRESS_FILENAME
+    )
+    prior_input_identity = bool(
+        existing_idea_paths or topic_path.is_file() or progress_path.is_file()
+    )
+    if args.resume and args.ideas:
+        supplied_ideas = _load_project_ideas_list(
+            Path(args.ideas).expanduser(), label="supplied"
+        )
+        if persisted_idea_hash is None:
+            if prior_input_identity:
+                raise ValueError(
+                    "--resume refused supplied ideas because the existing project "
+                    "has no persisted ideas identity"
+                )
+        elif canonical_content_hash(supplied_ideas) != persisted_idea_hash:
+            raise ValueError(
+                "--resume refused because the supplied ideas differ from the "
+                "existing project ideas"
+            )
+
     if args.question:
         question = str(args.question).strip()
         if not question:
@@ -324,15 +451,55 @@ def _prepare_project_input(args: argparse.Namespace, dirs: dict[str, Path]) -> N
                     "--resume refused because the supplied question differs from the "
                     "existing project question"
                 )
+        elif args.resume and prior_input_identity:
+            raise ValueError(
+                "--resume refused a question because the existing project has no "
+                "persisted topic identity"
+            )
         atomic_write_text(topic_path, content)
+        args.topic = str(topic_path)
+    elif args.topic:
+        try:
+            supplied_topic = Path(args.topic).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("could not read the supplied topic") from exc
+        if args.resume and topic_path.is_file():
+            if topic_path.read_text(encoding="utf-8") != supplied_topic:
+                raise ValueError(
+                    "--resume refused because the supplied topic differs from the "
+                    "existing project topic"
+                )
+        elif args.resume and prior_input_identity:
+            raise ValueError(
+                "--resume refused an explicit topic because this older project has "
+                "no persisted topic identity; omit --topic or start a new project"
+            )
+        atomic_write_text(topic_path, supplied_topic)
         args.topic = str(topic_path)
     elif args.resume and not args.topic and not args.ideas and topic_path.is_file():
         args.topic = str(topic_path)
 
-    generated = dirs["ideas"] / "generated_ideas.json"
-    stable = dirs["ideas"] / "ideas.json"
     if args.resume and (generated.is_file() or stable.is_file()):
         args.skip_ideation = True
+
+
+def _materialize_project_ideas_input(
+    project_dir: str | Path,
+    source: str | Path,
+) -> str:
+    """Copy user-supplied ideas with an atomic, project-confined replacement."""
+
+    source_path = Path(source).expanduser()
+    try:
+        content = source_path.read_text(encoding="utf-8")
+        payload = json.loads(content)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("could not read the supplied ideas JSON") from exc
+    if not isinstance(payload, list):
+        raise ValueError("supplied ideas must contain a JSON list")
+    destination = _managed_project_file(project_dir, "01_ideas", "ideas.json")
+    atomic_write_text(destination, content)
+    return str(destination)
 
 
 def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]]:
@@ -352,7 +519,10 @@ def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]
         ]
     from ai_scientist.apps.preflight import check_bfts_config
 
-    checks = check_bfts_config(args.bfts_config)
+    checks = check_bfts_config(
+        args.bfts_config,
+        workspace=getattr(args, "project_dir", None),
+    )
     rows = [
         {
             "label": item.label,
@@ -376,13 +546,50 @@ def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]
 def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
     """Create a finite, isolated BFTS config without mutating the user's source."""
 
-    if not args.autopilot:
-        return None
-    import yaml
-
     from ai_scientist.resources import resolve_bfts_config_path
 
     source = resolve_bfts_config_path(args.bfts_config)
+    explicit_executor_workspace = str(
+        os.environ.get("XSCIENTIST_WORKSPACE") or ""
+    ).strip()
+    bootstrap_config_override = False
+    try:
+        from xscientist.entrypoints import (
+            _executor_workspace_was_bootstrapped,
+            _project_bfts_config_was_explicit,
+        )
+
+        bootstrap_config_override = bool(
+            _project_bfts_config_was_explicit()
+            and _executor_workspace_was_bootstrapped()
+        )
+    except ImportError:
+        pass
+    if not explicit_executor_workspace or bootstrap_config_override:
+        from xscientist.executor_manager import resolve_executor_workspace
+
+        trusted_executor_workspace = resolve_executor_workspace(source)
+        if trusted_executor_workspace is not None:
+            resolved_workspace = str(trusted_executor_workspace.resolve())
+            if bootstrap_config_override:
+                from xscientist.entrypoints import (
+                    _rebind_bootstrapped_executor_workspace,
+                )
+
+                _rebind_bootstrapped_executor_workspace(resolved_workspace)
+            else:
+                os.environ["XSCIENTIST_WORKSPACE"] = resolved_workspace
+        elif bootstrap_config_override:
+            from xscientist.entrypoints import (
+                _rebind_bootstrapped_executor_workspace,
+            )
+
+            _rebind_bootstrapped_executor_workspace(None)
+    if not args.autopilot:
+        return None
+
+    import yaml
+
     payload = yaml.safe_load(source.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Autopilot BFTS configuration root must be a mapping")
@@ -480,7 +687,9 @@ def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
         except (TypeError, ValueError):
             stages[key] = int(ceiling)
 
-    destination = Path(args.project_dir) / "00_config" / "autopilot_bfts.yaml"
+    destination = _managed_project_file(
+        args.project_dir, "00_config", "autopilot_bfts.yaml"
+    )
     header = (
         "# XScientist finite autopilot derivative\n"
         f"# profile: {args.autopilot}\n"
@@ -506,7 +715,7 @@ def _configure_autopilot_project_budget(args: argparse.Namespace) -> dict[str, o
 
     payload = yaml.safe_load(Path(args.bfts_config).read_text(encoding="utf-8"))
     budget = dict((payload or {}).get("llm_budget") or {})
-    state_path = Path(args.project_dir) / "04_logs" / "llm_budget.json"
+    state_path = _managed_project_file(args.project_dir, "04_logs", "llm_budget.json")
     manager = configure_llm_budget(
         max_total_tokens=budget.get("max_total_tokens"),
         max_cost_usd=budget.get("max_cost_usd"),
@@ -569,17 +778,50 @@ def _write_autopilot_receipt(
         "preflight": checks,
     }
     receipt["receipt_hash"] = canonical_content_hash(receipt)
-    destination = Path(args.project_dir) / "04_logs" / "autopilot_run.json"
+    destination = _managed_project_file(
+        args.project_dir, "04_logs", "autopilot_run.json"
+    )
     atomic_write_json(destination, receipt, ensure_ascii=False)
     return str(destination)
 
 
 def _load_project_progress(project_dir: str | Path) -> dict[str, Any]:
-    payload = _safe_load_json(
-        Path(project_dir) / "04_logs" / "progress.json", default={}
+    progress_path = _managed_project_file(
+        project_dir, "04_logs", _PROJECT_PROGRESS_FILENAME
     )
-    if not isinstance(payload, dict):
+    if not progress_path.is_file():
         return {}
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "--resume refused because saved project progress is damaged; start a "
+            "new project or rerun without --resume"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "--resume refused because saved project progress must be a JSON object; "
+            "start a new project or rerun without --resume"
+        )
+    has_resume_state = bool(payload.get("results") or payload.get("selected_indices"))
+    if has_resume_state:
+        recorded_ideas_hash = payload.get("ideas_hash")
+        if not isinstance(recorded_ideas_hash, str) or not recorded_ideas_hash.strip():
+            raise ValueError(
+                "--resume refused legacy progress without an ideas hash; start a "
+                "new project or rerun without --resume"
+            )
+        current_ideas_hash = _managed_project_ideas_hash(project_dir)
+        if current_ideas_hash is None:
+            raise ValueError(
+                "--resume refused because saved progress cannot be matched to "
+                "persisted ideas; start a new project or rerun without --resume"
+            )
+        if recorded_ideas_hash != current_ideas_hash:
+            raise ValueError(
+                "--resume refused because current ideas differ from the ideas bound "
+                "to saved progress; start a new project or rerun without --resume"
+            )
     return _resolve_project_progress_paths(payload, project_dir=project_dir)
 
 
@@ -673,10 +915,24 @@ def _resolve_project_progress_paths(
 def _save_project_progress(
     project_dir: str | Path,
     *,
+    ideas_hash: str,
     results: list[dict[str, Any]],
     total: int,
     selected_indices: list[int],
 ) -> str:
+    expected_ideas_hash = str(ideas_hash or "").strip()
+    if not expected_ideas_hash:
+        raise ValueError("cannot save project progress without the run ideas hash")
+    current_ideas_hash = _managed_project_ideas_hash(project_dir)
+    if current_ideas_hash is None:
+        raise ValueError(
+            "cannot save project progress before a canonical ideas file exists"
+        )
+    if current_ideas_hash != expected_ideas_hash:
+        raise ValueError(
+            "refused to save project progress because the managed ideas changed "
+            "during this run"
+        )
     latest: dict[int, dict[str, Any]] = {}
     for fallback_idx, result in enumerate(results):
         latest[int(result.get("idea_idx", fallback_idx))] = result
@@ -684,6 +940,7 @@ def _save_project_progress(
     payload = _portable_project_progress_payload(
         {
             "schema_version": "xscientist.project-progress.v1",
+            "ideas_hash": expected_ideas_hash,
             "completed": sum(
                 1 for result in ordered if result.get("status") == "success"
             ),
@@ -694,9 +951,167 @@ def _save_project_progress(
         },
         project_dir=project_dir,
     )
-    path = Path(project_dir) / "04_logs" / "progress.json"
+    path = _managed_project_file(project_dir, "04_logs", _PROJECT_PROGRESS_FILENAME)
     atomic_write_json(path, payload, indent=2, ensure_ascii=False, default=str)
     return str(path)
+
+
+_RESUME_INCOMPLETE_RESEARCH_STATUSES = {
+    "blocked",
+    "evidence_blocked",
+    "failed",
+    "incomplete",
+    "quality_gate_failed",
+    "rejected",
+    "revision_needed",
+}
+_RESUME_COMPLETE_RESEARCH_STATUSES = {
+    "exploratory_draft",
+    "manuscript_draft",
+    "submission_ready",
+}
+_OPEN_REVIEW_COUNT_FIELDS = (
+    "active_issue_count",
+    "blocker_count",
+    "critic_active_issue_count",
+    "critic_blocking_issue_count",
+    "open_review_blocker_count",
+    "review_active_issue_count",
+    "review_blocker_count",
+)
+_OPEN_REVIEW_LIST_FIELDS = (
+    "active_review_issues",
+    "open_review_blockers",
+    "review_blockers",
+)
+
+
+def _declared_review_count_blocks(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, bool):
+        return True
+    if not isinstance(value, int):
+        return True
+    return value != 0
+
+
+def _review_contract_blocks_resume(
+    project_dir: str | Path,
+    result: dict[str, Any],
+) -> bool:
+    raw_path = str(result.get("review_state_file") or "").strip()
+    if not raw_path:
+        return False
+    project_path = Path(project_dir).expanduser()
+    lexical_root = Path(os.path.abspath(project_path))
+    root = project_path.resolve()
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = lexical_root / candidate
+    try:
+        lexical = Path(os.path.abspath(candidate))
+        try:
+            relative = lexical.relative_to(lexical_root)
+            cursor = lexical_root
+        except ValueError:
+            relative = lexical.relative_to(root)
+            cursor = root
+        for part in relative.parts:
+            cursor /= part
+            if cursor.is_symlink():
+                return True
+        resolved = lexical.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return True
+    if not resolved.is_file() or resolved.is_symlink():
+        return True
+    review_state = _safe_load_json(resolved, default=None)
+    if not isinstance(review_state, dict):
+        return True
+    for field in ("active_issue_records", "active_issues"):
+        if field not in review_state:
+            continue
+        declared_issues = review_state[field]
+        if not isinstance(declared_issues, list) or declared_issues:
+            return True
+    if "repair_metrics" in review_state:
+        repair_metrics = review_state["repair_metrics"]
+        if not isinstance(repair_metrics, dict):
+            return True
+    else:
+        repair_metrics = {}
+    for field in ("active_issue_count", "blocking_issue_count"):
+        if _declared_review_count_blocks(repair_metrics.get(field)):
+            return True
+    if "lane_summaries" in review_state:
+        lane_summaries = review_state["lane_summaries"]
+        if not isinstance(lane_summaries, dict):
+            return True
+    else:
+        lane_summaries = {}
+    for lane in lane_summaries.values():
+        if not isinstance(lane, dict):
+            return True
+        for field in ("active_issue_count", "blocking_issue_count"):
+            if _declared_review_count_blocks(lane.get(field)):
+                return True
+    return False
+
+
+def _result_is_resume_complete(
+    result: dict[str, Any],
+    *,
+    project_dir: str | Path | None = None,
+) -> bool:
+    """Keep legacy successes resumable while honoring explicit paper blockers."""
+
+    if result.get("status") != "success":
+        return False
+    for field in _OPEN_REVIEW_COUNT_FIELDS:
+        if _declared_review_count_blocks(result.get(field)):
+            return False
+    for field in _OPEN_REVIEW_LIST_FIELDS:
+        if field not in result:
+            continue
+        declared_issues = result[field]
+        if not isinstance(declared_issues, list) or declared_issues:
+            return False
+    if project_dir is not None:
+        if not _successful_paper_results(project_dir, [result]):
+            return False
+        if _review_contract_blocks_resume(project_dir, result):
+            return False
+    if "research_status" not in result:
+        return True
+    declared_research_status = result["research_status"]
+    if not isinstance(declared_research_status, str):
+        return False
+    research_status = declared_research_status.strip().lower()
+    if research_status in _RESUME_INCOMPLETE_RESEARCH_STATUSES:
+        return False
+    return research_status in _RESUME_COMPLETE_RESEARCH_STATUSES
+
+
+def _latest_project_results(project_dir: str | Path) -> list[dict[str, Any]]:
+    latest: dict[int, dict[str, Any]] = {}
+    for fallback_idx, result in enumerate(
+        _load_project_progress(project_dir).get("results") or []
+    ):
+        if isinstance(result, dict):
+            latest[int(result.get("idea_idx", fallback_idx))] = result
+    return [latest[index] for index in sorted(latest)]
+
+
+def _upsert_project_results(
+    existing: list[dict[str, Any]],
+    replacements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latest: dict[int, dict[str, Any]] = {}
+    for fallback_idx, result in enumerate([*existing, *replacements]):
+        latest[int(result.get("idea_idx", fallback_idx))] = result
+    return [latest[index] for index in sorted(latest)]
 
 
 def _resolve_resume_work(
@@ -721,7 +1136,7 @@ def _resolve_resume_work(
     completed = {
         idea_idx
         for idea_idx, result in latest.items()
-        if result.get("status") == "success"
+        if _result_is_resume_complete(result, project_dir=project_dir)
     }
     pending = [idea_idx for idea_idx in idea_indices if idea_idx not in completed]
     prior = [
@@ -749,7 +1164,8 @@ def _completed_resume_results(
     except (TypeError, ValueError):
         return None
     if not all(
-        idea_idx in latest and latest[idea_idx].get("status") == "success"
+        idea_idx in latest
+        and _result_is_resume_complete(latest[idea_idx], project_dir=project_dir)
         for idea_idx in selected_indices
     ):
         return None
@@ -879,21 +1295,125 @@ def _record_local_research_checkpoint(
         print(f"⚠️  科研版本库 checkpoint 失败，研究产物已保留: {exc}")
 
 
+def _successful_paper_results(
+    project_dir: str | Path,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    project_path = Path(project_dir).expanduser()
+    lexical_root = Path(os.path.abspath(project_path))
+    root = project_path.resolve()
+    successful: list[dict[str, Any]] = []
+    for result in results:
+        if result.get("status") != "success":
+            continue
+        raw_pdf = str(result.get("pdf_path") or "").strip()
+        if not raw_pdf:
+            continue
+        candidate = Path(raw_pdf).expanduser()
+        if not candidate.is_absolute():
+            candidate = lexical_root / candidate
+        try:
+            lexical = Path(os.path.abspath(candidate))
+            try:
+                relative = lexical.relative_to(lexical_root)
+                cursor = lexical_root
+            except ValueError:
+                relative = lexical.relative_to(root)
+                cursor = root
+            for part in relative.parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    raise ValueError("paper path contains a symlink")
+            resolved = lexical.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if (
+            resolved.is_file()
+            and not resolved.is_symlink()
+            and resolved.suffix.lower() == ".pdf"
+        ):
+            try:
+                pdf_size = resolved.stat().st_size
+                if pdf_size < 12:
+                    continue
+                with resolved.open("rb") as handle:
+                    pdf_header = handle.read(5)
+                    handle.seek(max(0, pdf_size - 1024))
+                    pdf_trailer = handle.read()
+            except OSError:
+                continue
+            if pdf_header == b"%PDF-" and pdf_trailer.rstrip().endswith(b"%%EOF"):
+                successful.append(result)
+    return successful
+
+
+def _print_project_completion(
+    project_dir: str | Path,
+    results: list[dict[str, Any]],
+) -> None:
+    successful_papers = _successful_paper_results(project_dir, results)
+    print("\n" + "=" * 80)
+    if len(successful_papers) < len(results):
+        print(
+            "⚠️ 本次流程部分完成："
+            f"{len(successful_papers)}/{len(results)} 个想法生成了可检查的 PDF 论文产物。"
+        )
+    else:
+        print(
+            "✅ 本次流程完成："
+            f"{len(successful_papers)}/{len(results)} 个想法生成了可检查的 PDF 论文产物。"
+        )
+    print(f"📁 项目目录: {project_dir}")
+    for result in successful_papers:
+        print(f"📄 PDF: {result.get('pdf_path')}")
+    print("=" * 80)
+
+
 def _publication_gate_failure(
     args: argparse.Namespace,
     results: list[dict[str, Any]],
 ) -> str | None:
+    successful_papers = _successful_paper_results(args.project_dir, results)
+    if not successful_papers:
+        return "没有成功生成可检查的 PDF 论文产物，本次流程未完成"
     constraints_active = (
         args.require_quality_gate
         or args.min_submission_priority is not None
         or args.max_submission_blockers is not None
     )
+
+    def passes_current_submission_gate(result: dict[str, Any]) -> bool:
+        if result.get("submission_acceptance_passed") is not True:
+            return False
+        if args.require_quality_gate and result.get("quality_gate_passed") is not True:
+            return False
+        if args.min_submission_priority is not None:
+            priority = result.get("submission_priority_score")
+            if (
+                isinstance(priority, bool)
+                or not isinstance(priority, (int, float))
+                or not math.isfinite(priority)
+                or priority < args.min_submission_priority
+            ):
+                return False
+        if args.max_submission_blockers is not None:
+            blockers = result.get("blocker_count")
+            if (
+                isinstance(blockers, bool)
+                or not isinstance(blockers, int)
+                or blockers < 0
+                or blockers > args.max_submission_blockers
+            ):
+                return False
+        return True
+
     if constraints_active and not any(
-        result.get("submission_acceptance_passed") is True for result in results
+        passes_current_submission_gate(result) for result in successful_papers
     ):
         return "没有任何项目论文通过当前本地投稿准备度门禁，任务视为失败"
     if (args.strict_writing_guardrails or args.high_quality_mode) and not any(
-        result_passed_writeup_guardrails(result) for result in results
+        result_passed_writeup_guardrails(result) for result in successful_papers
     ):
         return "严格写作守护开启，但没有任何论文通过写作守护检查，任务视为失败"
     return None
@@ -2184,22 +2704,20 @@ def generate_ideas(
     print("🔬 步骤 1: 生成研究想法")
     print("=" * 80)
 
-    ideas_dir = osp.join(project_dir, "01_ideas")
-
     # 读取主题描述
     with open(topic_file, "r") as f:
         workshop_description = f.read()
 
     # 输出文件路径
-    idea_json = osp.join(ideas_dir, "generated_ideas.json")
-    stable_idea_json = osp.join(ideas_dir, "ideas.json")
+    idea_json = _managed_project_file(project_dir, "01_ideas", "generated_ideas.json")
+    stable_idea_json = _managed_project_file(project_dir, "01_ideas", "ideas.json")
 
     # 创建客户端
     client, client_model = create_client(model)
 
     # 生成想法
     ideas = generate_temp_free_idea(
-        idea_fname=idea_json,
+        idea_fname=str(idea_json),
         client=client,
         model=client_model,
         workshop_description=workshop_description,
@@ -2211,11 +2729,11 @@ def generate_ideas(
     # Benchmarks (and downstream workflows) expect a stable `ideas.json` fixture.
     # Keep the historical `generated_ideas.json` name but also mirror it to `ideas.json`.
     try:
-        shutil.copy(idea_json, stable_idea_json)
+        atomic_write_json(stable_idea_json, ideas, indent=4, ensure_ascii=False)
         print(f"✅ 已同步 ideas fixture: {stable_idea_json}")
     except OSError as exc:
         print(f"⚠️  未能同步 ideas.json fixture: {exc}")
-    return idea_json
+    return str(idea_json)
 
 
 def find_latest_pdf(exp_dir: str):
@@ -3715,35 +4233,22 @@ def run_parallel_experiments(
             idea_idx = futures[future]
             try:
                 result = future.result()
-                results.append(result)
-
-                _save_project_progress(
-                    project_dir,
-                    results=list(kwargs.get("prior_results") or []) + results,
-                    total=int(kwargs.get("progress_total") or len(args_list)),
-                    selected_indices=list(
-                        kwargs.get("selected_indices") or idea_indices
-                    ),
-                )
-
             except Exception as e:
                 print(f"❌ 想法 #{idea_idx} 执行出错: {e}")
                 traceback.print_exc()
-                results.append(
-                    {
-                        "idea_idx": idea_idx,
-                        "status": "failed",
-                        "error": str(e),
-                    }
-                )
-                _save_project_progress(
-                    project_dir,
-                    results=list(kwargs.get("prior_results") or []) + results,
-                    total=int(kwargs.get("progress_total") or len(args_list)),
-                    selected_indices=list(
-                        kwargs.get("selected_indices") or idea_indices
-                    ),
-                )
+                result = {
+                    "idea_idx": idea_idx,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            results.append(result)
+            _save_project_progress(
+                project_dir,
+                ideas_hash=str(kwargs["ideas_hash"]),
+                results=list(kwargs.get("prior_results") or []) + results,
+                total=int(kwargs.get("progress_total") or len(args_list)),
+                selected_indices=list(kwargs.get("selected_indices") or idea_indices),
+            )
 
     return results
 
@@ -3754,8 +4259,10 @@ def save_project_summary(
     *,
     insight_report: dict[str, Any] | None = None,
 ) -> tuple[str, str, dict]:
-    logs_dir = Path(project_dir) / "04_logs"
+    project_root = _assert_managed_project_layout(project_dir)
+    logs_dir = project_root / "04_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    _assert_managed_project_layout(project_root)
 
     quality_scores = [
         result.get("quality_score")
@@ -3925,7 +4432,9 @@ def save_project_summary(
         summary,
         project_dir=project_dir,
     )
-    summary_file = logs_dir / "project_summary.json"
+    summary_file = _managed_project_file(
+        project_root, "04_logs", "project_summary.json"
+    )
     atomic_write_json(summary_file, persisted_summary, indent=4, default=str)
 
     persisted_results = list(persisted_summary.get("results") or [])
@@ -3960,7 +4469,9 @@ def save_project_summary(
         ),
         reverse=True,
     )
-    shortlist_file = logs_dir / "submission_shortlist.md"
+    shortlist_file = _managed_project_file(
+        project_root, "04_logs", "submission_shortlist.md"
+    )
     lines = ["# Project Submission Shortlist", ""]
     for result in ranked[:5]:
         integrity = summarize_integrity_forensics_result(result)
@@ -3987,7 +4498,7 @@ def save_project_summary(
                 "",
             ]
         )
-    shortlist_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(shortlist_file, "\n".join(lines) + "\n")
     return str(summary_file), str(shortlist_file), summary
 
 
@@ -4075,6 +4586,7 @@ def main(argv=None):
     completed_resume = (
         _completed_resume_results(args.project_dir)
         if args.resume
+        and not args.skip_experiment
         and not args.idea_indices
         and not args.seed_from_ara
         and not args.seed_node_id
@@ -4082,9 +4594,22 @@ def main(argv=None):
     )
     if completed_resume is not None:
         args._research_git_active = _initialize_local_research_git(args)
-        print("♻️ 选定的科研流程已经完整完成；复用现有证据、论文与洞见，不再调用模型。")
+        successful_papers = _successful_paper_results(
+            args.project_dir, completed_resume
+        )
+        if not successful_papers:
+            print("❌ 已有进度未包含可用 PDF，项目尚未完成。")
+            sys.exit(1)
+        gate_failure = _publication_gate_failure(args, completed_resume)
+        if gate_failure:
+            print(f"❌ {gate_failure}")
+            sys.exit(1)
+        print(
+            "♻️ 复用已有成功结果与可检查的论文产物，不再调用模型；"
+            "审查与投稿状态以保存的门禁字段为准。"
+        )
         _export_project_research_dag(args, results=completed_resume)
-        print(f"📁 项目目录: {args.project_dir}")
+        _print_project_completion(args.project_dir, completed_resume)
         return
 
     autopilot_config = _prepare_autopilot_bfts_config(args)
@@ -4159,8 +4684,10 @@ def main(argv=None):
                 args.num_reflections,
             )
         elif args.ideas:
-            idea_json = osp.join(args.project_dir, "01_ideas", "ideas.json")
-            shutil.copy(args.ideas, idea_json)
+            idea_json = _materialize_project_ideas_input(
+                args.project_dir,
+                args.ideas,
+            )
         else:
             print("❌ 错误: 需要指定 --topic 或 --ideas")
             sys.exit(1)
@@ -4175,6 +4702,7 @@ def main(argv=None):
     # 加载想法
     with open(idea_json, "r") as f:
         ideas = json.load(f)
+    run_ideas_hash = canonical_content_hash(ideas)
     project_idea_cards = _write_project_pipeline_seed_artifacts(
         project_dir=args.project_dir,
         ideas=ideas,
@@ -4265,6 +4793,30 @@ def main(argv=None):
             )
 
     selected_idea_indices = list(idea_indices)
+    retained_progress = _load_project_progress(args.project_dir) if args.resume else {}
+    retained_progress_results = (
+        _latest_project_results(args.project_dir) if args.resume else []
+    )
+    progress_selected_indices: list[int] = []
+    for value in [
+        *(retained_progress.get("selected_indices") or []),
+        *selected_idea_indices,
+    ]:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if index not in progress_selected_indices:
+            progress_selected_indices.append(index)
+    try:
+        retained_total = int(retained_progress.get("total") or 0)
+    except (TypeError, ValueError):
+        retained_total = 0
+    progress_total = max(
+        retained_total,
+        len(progress_selected_indices),
+        len(retained_progress_results),
+    )
     idea_indices, prior_results, resume_checkpoints = _resolve_resume_work(
         args.project_dir,
         selected_idea_indices,
@@ -4276,12 +4828,14 @@ def main(argv=None):
             f"selected={len(selected_idea_indices)} completed={len(prior_results)} "
             f"pending={len(idea_indices)} checkpoints={len(resume_checkpoints)}"
         )
-    _save_project_progress(
-        args.project_dir,
-        results=prior_results,
-        total=len(selected_idea_indices),
-        selected_indices=selected_idea_indices,
-    )
+    if args.skip_experiment:
+        print(
+            "\n⏭️ 已按 --skip-experiment 跳过每个想法的 "
+            "experiment → plot → writeup → review 流程。"
+        )
+        print(f"📁 项目目录: {args.project_dir}")
+        print("📄 本次运行未生成论文。")
+        return
 
     # 运行实验
     if not args.skip_experiment:
@@ -4343,13 +4897,14 @@ def main(argv=None):
                 idea_json,
                 args.num_workers,
                 idea_indices,
-                prior_results=prior_results,
+                prior_results=retained_progress_results,
                 resume_checkpoints=resume_checkpoints,
-                progress_total=len(selected_idea_indices),
-                selected_indices=selected_idea_indices,
+                progress_total=progress_total,
+                selected_indices=progress_selected_indices,
+                ideas_hash=run_ideas_hash,
                 **kwargs,
             )
-            results.extend(new_results)
+            results = _upsert_project_results(results, new_results)
             executed_results.extend(new_results)
 
             # 打印结果摘要
@@ -4414,13 +4969,18 @@ def main(argv=None):
                 )
 
                 result = process_single_idea(process_args)
-                results.append(result)
+                results = _upsert_project_results(results, [result])
+                retained_progress_results = _upsert_project_results(
+                    retained_progress_results,
+                    [result],
+                )
                 executed_results.append(result)
                 _save_project_progress(
                     args.project_dir,
-                    results=results,
-                    total=len(selected_idea_indices),
-                    selected_indices=selected_idea_indices,
+                    ideas_hash=run_ideas_hash,
+                    results=retained_progress_results,
+                    total=progress_total,
+                    selected_indices=progress_selected_indices,
                 )
 
                 status_icon = "✅" if result["status"] == "success" else "❌"
@@ -4505,11 +5065,7 @@ def main(argv=None):
             print(f"❌ {publication_failure}")
             sys.exit(1)
 
-    print("\n" + "=" * 80)
-    print("🎉 项目完成!")
-    print(f"📁 项目目录: {args.project_dir}")
-    print(f"📄 论文位置: {osp.join(args.project_dir, '03_papers')}")
-    print("=" * 80)
+    _print_project_completion(args.project_dir, results)
 
 
 if __name__ == "__main__":

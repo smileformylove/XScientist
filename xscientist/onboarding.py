@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import stat
+import subprocess
 from collections.abc import Iterable
+from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,12 @@ from .file_transactions import (
     ManagedFileState as _WorkspaceFileState,
     capture_managed_file_state as _capture_workspace_file_state,
     restore_managed_file_state,
+)
+from .executor_manager import (
+    ExecutorManagerError,
+    _executor_recipe_digest_from_text,
+    _source_checkout_revision,
+    _source_checkout_root,
 )
 from .provider_config import (
     DEFAULT_MODELS,
@@ -193,23 +201,16 @@ def _render_env(provider: str, *, provider_required: bool = True) -> str:
     )
 
 
-def _installed_vcs_source() -> tuple[str, str] | None:
-    """Return a safe PEP 610 VCS origin so executors install the exact commit."""
+def _safe_vcs_source_url(raw_url: object) -> str | None:
+    """Normalize a credential-free VCS origin that pip can fetch over HTTPS."""
 
-    try:
-        raw = importlib_metadata.distribution("xscientist").read_text("direct_url.json")
-        payload = json.loads(raw or "{}")
-    except (importlib_metadata.PackageNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    vcs = payload.get("vcs_info")
-    if not isinstance(vcs, dict) or vcs.get("vcs") != "git":
-        return None
-    commit = str(vcs.get("commit_id") or "").strip()
-    url = str(payload.get("url") or "").strip().removeprefix("git+")
-    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
-        return None
+    url = str(raw_url or "").strip().removeprefix("git+")
+    github_ssh = re.fullmatch(
+        r"git@github\.com:([A-Za-z0-9._~/%+\-]+(?:/[A-Za-z0-9._~/%+\-]+)+)",
+        url,
+    )
+    if github_ssh is not None:
+        url = f"https://github.com/{github_ssh.group(1)}"
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https"
@@ -221,7 +222,165 @@ def _installed_vcs_source() -> tuple[str, str] | None:
         or not re.fullmatch(r"[A-Za-z0-9._~:/@%+\-]+", url)
     ):
         return None
-    return url, commit.lower()
+    return url
+
+
+@dataclass(frozen=True)
+class _InstalledRuntimeSource:
+    install_source: str
+    revision: str
+    source_url: str | None
+    reproducible: bool
+    error: str
+
+
+def _installed_runtime_source() -> _InstalledRuntimeSource:
+    """Resolve PEP 610 provenance without treating unknown origins as PyPI."""
+
+    try:
+        distribution = importlib_metadata.distribution("xscientist")
+    except importlib_metadata.PackageNotFoundError:
+        return _InstalledRuntimeSource(
+            install_source="pypi-release",
+            revision="release",
+            source_url=None,
+            reproducible=True,
+            error="",
+        )
+    except (OSError, UnicodeError):
+        return _InstalledRuntimeSource(
+            install_source="unreproducible",
+            revision="unknown",
+            source_url=None,
+            reproducible=False,
+            error="installed XScientist metadata cannot be read reproducibly",
+        )
+    try:
+        raw = distribution.read_text("direct_url.json")
+    except (OSError, UnicodeError):
+        return _InstalledRuntimeSource(
+            install_source="unreproducible",
+            revision="unknown",
+            source_url=None,
+            reproducible=False,
+            error="installed XScientist direct_url.json cannot be read reproducibly",
+        )
+    if raw is None:
+        return _InstalledRuntimeSource(
+            install_source="pypi-release",
+            revision="release",
+            source_url=None,
+            reproducible=True,
+            error="",
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+    if not isinstance(payload, dict):
+        return _InstalledRuntimeSource(
+            install_source="unreproducible",
+            revision="unknown",
+            source_url=None,
+            reproducible=False,
+            error="installed XScientist direct_url.json is invalid; refusing to assume PyPI",
+        )
+    vcs = payload.get("vcs_info")
+    if not isinstance(vcs, dict) or vcs.get("vcs") != "git":
+        return _InstalledRuntimeSource(
+            install_source="unreproducible",
+            revision="unknown",
+            source_url=None,
+            reproducible=False,
+            error=(
+                "installed XScientist direct_url.json has no reproducible Git commit; "
+                "refusing to assume PyPI"
+            ),
+        )
+    commit = str(vcs.get("commit_id") or "").strip().lower()
+    source_url = _safe_vcs_source_url(payload.get("url"))
+    if not re.fullmatch(r"[0-9a-f]{7,64}", commit) or source_url is None:
+        return _InstalledRuntimeSource(
+            install_source="unreproducible",
+            revision="unknown",
+            source_url=None,
+            reproducible=False,
+            error=(
+                "installed XScientist VCS origin is not a safe immutable HTTPS pin; "
+                "refusing to assume PyPI"
+            ),
+        )
+    return _InstalledRuntimeSource(
+        install_source="vcs-commit",
+        revision=commit,
+        source_url=source_url,
+        reproducible=True,
+        error="",
+    )
+
+
+def _installed_vcs_source() -> tuple[str, str] | None:
+    """Return a safe PEP 610 VCS origin so executors install the exact commit."""
+
+    source = _installed_runtime_source()
+    if source.reproducible and source.install_source == "vcs-commit":
+        return str(source.source_url), source.revision
+    return None
+
+
+def _checkout_vcs_source() -> tuple[str, str] | None:
+    """Return a safe remote pin for the source tree without exposing its path."""
+
+    source_root = _source_checkout_root()
+    if source_root is None:
+        return None
+    try:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=source_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if dirty.returncode or dirty.stdout.strip():
+            return None
+        revision = _source_checkout_revision(source_root)
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=source_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (ExecutorManagerError, OSError):
+        return None
+    source_url = _safe_vcs_source_url(remote.stdout if not remote.returncode else "")
+    if source_url is None or not re.fullmatch(r"[0-9a-fA-F]{7,64}", revision):
+        return None
+    return source_url, revision.lower()
+
+
+def _runtime_install_source() -> _InstalledRuntimeSource:
+    source_root = _source_checkout_root()
+    if source_root is not None:
+        vcs_source = _checkout_vcs_source()
+        if vcs_source is not None:
+            source_url, revision = vcs_source
+            return _InstalledRuntimeSource(
+                install_source="vcs-commit",
+                revision=revision,
+                source_url=source_url,
+                reproducible=True,
+                error="",
+            )
+        return _InstalledRuntimeSource(
+            install_source="local-source",
+            revision=_source_checkout_revision(source_root),
+            source_url=None,
+            reproducible=True,
+            error="",
+        )
+    return _installed_runtime_source()
 
 
 def _workspace_installation_command(
@@ -237,16 +396,24 @@ def _workspace_installation_command(
         selected,
         provider=provider if provider_required else None,
     )
-    vcs_source = _installed_vcs_source()
-    if vcs_source is not None:
-        source_url, source_revision = vcs_source
-        runtime_spec = f"{package_spec} @ git+{source_url}@{source_revision}"
-    else:
+    source = _runtime_install_source()
+    if not source.reproducible:
+        raise WorkspaceInitError(source.error)
+    if source.install_source == "vcs-commit":
+        runtime_spec = f"{package_spec} @ git+{source.source_url}@{source.revision}"
+    elif source.install_source == "local-source":
+        # The running checkout is already the host runtime. With no safe remote
+        # (including dirty changes) to pin, keep the generated handoff executable
+        # and path-free by sending its controlled snapshot only to the executor.
+        return "xscientist executor prepare --workspace ."
+    elif source.install_source == "pypi-release":
         runtime_spec = capability_installation_spec(
             selected,
             provider=provider if provider_required else None,
             version=__version__,
         )
+    else:  # pragma: no cover - internal source contract
+        raise WorkspaceInitError("unsupported XScientist runtime source")
     return f'python -m pip install "{runtime_spec}"'
 
 
@@ -261,8 +428,10 @@ def _render_dockerfile(
         selected,
         provider=provider if provider_required else None,
     )
-    vcs_source = _installed_vcs_source()
-    if vcs_source is None:
+    source = _runtime_install_source()
+    if not source.reproducible:
+        raise WorkspaceInitError(source.error)
+    if source.install_source == "pypi-release":
         runtime_spec = capability_installation_spec(
             selected,
             provider=provider if provider_required else None,
@@ -270,10 +439,21 @@ def _render_dockerfile(
         )
         source_revision = "release"
         source_kind = "pypi-release"
-    else:
-        source_url, source_revision = vcs_source
-        runtime_spec = f"{package_spec} @ git+{source_url}@{source_revision}"
+        install_mode = "pypi"
+    elif source.install_source == "local-source":
+        # No safe public origin is available. The executor manager supplies the
+        # checkout itself as the Docker context, so no host path is persisted.
+        runtime_spec = package_spec
+        source_revision = source.revision
+        source_kind = "local-source"
+        install_mode = "local"
+    elif source.install_source == "vcs-commit":
+        source_revision = source.revision
+        runtime_spec = f"{package_spec} @ git+{source.source_url}@{source_revision}"
         source_kind = "vcs-commit"
+        install_mode = "pypi"
+    else:  # pragma: no cover - internal source contract
+        raise WorkspaceInitError("unsupported XScientist runtime source")
     local_extras = package_spec.removeprefix("xscientist")
     local_spec = f"/tmp/xscientist-build-context{local_extras}"
     torch_install = (
@@ -281,12 +461,15 @@ def _render_dockerfile(
         if "ml" in selected
         else ""
     )
-    return f"""FROM python:3.11-slim
+    recipe_placeholder = "__XSCIENTIST_RECIPE_DIGEST__"
+    rendered = f"""FROM python:3.11-slim
 
 ARG XSCIENTIST_VERSION={__version__}
-ARG XSCIENTIST_INSTALL_MODE=pypi
+ARG XSCIENTIST_INSTALL_MODE={install_mode}
 ARG XSCIENTIST_SOURCE_REVISION={source_revision}
 ARG XSCIENTIST_INSTALL_SOURCE={source_kind}
+ARG XSCIENTIST_RUNTIME_SPEC={runtime_spec}
+ARG XSCIENTIST_RECIPE_DIGEST={recipe_placeholder}
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \\
     PYTHONDONTWRITEBYTECODE=1 \\
     PYTHONUNBUFFERED=1
@@ -299,13 +482,14 @@ COPY . /tmp/xscientist-build-context
 RUN if [ "$XSCIENTIST_INSTALL_MODE" = "local" ]; then \\
       python -m pip install --no-cache-dir "{local_spec}"; \\
     else \\
-      python -m pip install --no-cache-dir "{runtime_spec}"; \\
+      python -m pip install --no-cache-dir "$XSCIENTIST_RUNTIME_SPEC"; \\
     fi \\
     && rm -rf /tmp/xscientist-build-context
 
 LABEL org.opencontainers.image.version="$XSCIENTIST_VERSION" \\
       org.opencontainers.image.revision="$XSCIENTIST_SOURCE_REVISION" \\
-      org.xscientist.install-source="$XSCIENTIST_INSTALL_SOURCE"
+      org.xscientist.install-source="$XSCIENTIST_INSTALL_SOURCE" \\
+      org.xscientist.executor-recipe="$XSCIENTIST_RECIPE_DIGEST"
 
 RUN useradd --create-home --uid 10001 scientist
 USER scientist
@@ -313,6 +497,8 @@ WORKDIR /workspace
 
 CMD ["python", "--version"]
 """
+    recipe_digest = _executor_recipe_digest_from_text(rendered)
+    return rendered.replace(recipe_placeholder, recipe_digest)
 
 
 def _render_topic() -> str:
@@ -355,11 +541,18 @@ def _render_readme(
         capabilities=capabilities,
         provider_required=provider_required,
     )
-    install_note = (
-        f"This installs the selected capabilities and only the `{provider}` client."
-        if provider_required
-        else "This task is provider-neutral, so no model client is installed."
-    )
+    if install == "xscientist executor prepare --workspace .":
+        install_note = (
+            "This development checkout has no credential-free HTTPS origin to pin. "
+            "The command builds its exact local state into the isolated executor "
+            "without persisting the host checkout path."
+        )
+    else:
+        install_note = (
+            f"This installs the selected capabilities and only the `{provider}` client."
+            if provider_required
+            else "This task is provider-neutral, so no model client is installed."
+        )
     provider_note = (
         f"""```bash
 xscientist provider check {provider}

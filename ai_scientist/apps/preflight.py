@@ -265,7 +265,38 @@ def check_configured_models(payload: dict) -> list[CheckResult]:
     return results
 
 
-def _check_docker_image(image: str) -> tuple[bool, str]:
+def _check_docker_image(
+    image: str,
+    *,
+    executor_workspace: Path | None = None,
+) -> tuple[bool, str]:
+    if executor_workspace is not None:
+        try:
+            from xscientist.executor_manager import (
+                ExecutorManagerError,
+                inspect_executor,
+            )
+
+            status = inspect_executor(executor_workspace)
+        except ExecutorManagerError as exc:
+            return False, (
+                "executor identity check failed: " + redact_sensitive_text(str(exc))
+            )
+        except OSError:
+            return False, "executor identity check could not start Docker"
+        if status.get("image") != image:
+            return (
+                False,
+                "configured docker image does not match the initialized "
+                "executor workspace",
+            )
+        if not status.get("ok"):
+            return False, (
+                "executor identity check failed: "
+                + redact_sensitive_text(str(status.get("error") or "unknown error"))
+            )
+        return True, f"executor image identity is verified: {image}"
+
     docker = shutil.which("docker")
     if docker is None:
         return False, "docker executable not found"
@@ -277,8 +308,10 @@ def _check_docker_image(image: str) -> tuple[bool, str]:
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"docker daemon check failed: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "docker daemon check timed out"
+    except OSError:
+        return False, "docker daemon check could not start"
     if daemon.returncode != 0:
         return False, "docker daemon is not reachable"
     try:
@@ -289,14 +322,20 @@ def _check_docker_image(image: str) -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"docker image check failed: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "docker image check timed out"
+    except OSError:
+        return False, "docker image check could not start"
     if inspected.returncode != 0:
         return False, f"docker image is not available locally: {image}"
     return True, f"docker image is available locally: {image}"
 
 
-def check_bfts_config(value: str) -> list[CheckResult]:
+def check_bfts_config(
+    value: str,
+    *,
+    workspace: str | Path | None = None,
+) -> list[CheckResult]:
     try:
         path = resolve_bfts_config_path(value)
         with path.open("r", encoding="utf-8") as handle:
@@ -372,7 +411,39 @@ def check_bfts_config(value: str) -> list[CheckResult]:
             )
         )
         return results
-    docker_ok, detail = _check_docker_image(image)
+    from xscientist.executor_manager import resolve_executor_workspace
+
+    explicit_workspace = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    if explicit_workspace:
+        executor_workspace = resolve_executor_workspace(explicit_workspace)
+        if executor_workspace is None:
+            results.append(
+                CheckResult(
+                    label="Experiment isolation",
+                    ok=False,
+                    severity=(
+                        "error"
+                        if backend == "docker" or require_isolation
+                        else "warning"
+                    ),
+                    detail=(
+                        "explicit XSCIENTIST_WORKSPACE is not an initialized "
+                        "executor workspace"
+                    ),
+                )
+            )
+            return results
+    else:
+        # The configuration's initialized workspace is authoritative.  A
+        # project/output directory is only a discovery hint and must not
+        # shadow the recipe that owns the selected configuration.
+        executor_workspace = resolve_executor_workspace(path)
+        if executor_workspace is None and workspace is not None:
+            executor_workspace = resolve_executor_workspace(workspace)
+    docker_ok, detail = _check_docker_image(
+        image,
+        executor_workspace=executor_workspace,
+    )
     results.append(
         CheckResult(
             label="Experiment isolation",

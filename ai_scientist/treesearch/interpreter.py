@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -35,8 +36,10 @@ from ai_scientist.utils.bounded_process import (
     run_process_bounded,
     workspace_limit_checker,
 )
+from ai_scientist.utils.privacy import redact_sensitive_text
 
 logger = logging.getLogger("ai-scientist")
+_DOCKER_IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 @dataclass
@@ -143,32 +146,99 @@ def docker_is_available() -> tuple[bool, str | None]:
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"docker availability check failed: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "docker availability check timed out"
+    except OSError:
+        return False, "docker availability check could not start"
     if probe.returncode != 0:
-        reason = (probe.stderr or probe.stdout or "docker daemon unavailable").strip()
-        return False, reason
+        return False, "docker daemon is unavailable"
     return True, None
 
 
-def docker_image_is_available(image: str) -> tuple[bool, str | None]:
-    """Return whether an executor image is already present locally."""
+def docker_image_is_available(
+    image: str,
+    *,
+    workspace: str | Path | None = None,
+    verified_identity: dict[str, str] | None = None,
+) -> tuple[bool, str | None]:
+    """Return whether an executor image is present and workspace-compatible."""
+
+    explicit_workspace = str(os.environ.get("XSCIENTIST_WORKSPACE") or "").strip()
+    workspace_hints = (
+        [explicit_workspace]
+        if explicit_workspace
+        else ([str(workspace)] if workspace is not None else [])
+    )
+    if workspace_hints:
+        from xscientist.executor_manager import (
+            ExecutorManagerError,
+            inspect_executor,
+            resolve_executor_workspace,
+        )
+
+        executor_workspace = next(
+            (
+                resolved
+                for hint in workspace_hints
+                if (resolved := resolve_executor_workspace(hint)) is not None
+            ),
+            None,
+        )
+        if explicit_workspace and executor_workspace is None:
+            return (
+                False,
+                "explicit XSCIENTIST_WORKSPACE is not an initialized executor "
+                "workspace",
+            )
+        if executor_workspace is not None:
+            try:
+                status = inspect_executor(executor_workspace)
+            except ExecutorManagerError as exc:
+                return False, (
+                    "executor identity check failed: " + redact_sensitive_text(str(exc))
+                )
+            except OSError:
+                return False, "executor identity check could not start Docker"
+            if status.get("image") != image:
+                return (
+                    False,
+                    "configured docker image does not match the initialized "
+                    "executor workspace",
+                )
+            if not status.get("ok"):
+                return False, (
+                    "executor identity check failed: "
+                    + redact_sensitive_text(str(status.get("error") or "unknown error"))
+                )
+            image_id = str(status.get("image_id") or "").strip().lower()
+            if not _DOCKER_IMAGE_ID_PATTERN.fullmatch(image_id):
+                return False, "executor identity check returned no immutable image ID"
+            if verified_identity is not None:
+                verified_identity["image_id"] = image_id
+            return True, None
 
     docker = shutil.which("docker")
     if docker is None:
         return False, "docker executable not found"
     try:
         probe = subprocess.run(
-            [docker, "image", "inspect", image],
+            [docker, "image", "inspect", image, "--format", "{{.Id}}"],
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"docker image check failed: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, "docker image inspection timed out"
+    except OSError:
+        return False, "docker image inspection failed"
     if probe.returncode != 0:
         return False, f"docker image is not available locally: {image}"
+    image_id = str(probe.stdout or "").strip().lower()
+    if not _DOCKER_IMAGE_ID_PATTERN.fullmatch(image_id):
+        return False, "docker image check returned no immutable image ID"
+    if verified_identity is not None:
+        verified_identity["image_id"] = image_id
     return True, None
 
 
@@ -256,6 +326,7 @@ class Interpreter:
         self.sandbox_policy = sandbox_policy or SandboxPolicy(
             backend="process", require_isolation=False
         )
+        self.verified_docker_image_id: str | None = None
         self.execution_backend, self.isolation_reason = self._resolve_backend()
 
     def _resolve_backend(self) -> tuple[str, str | None]:
@@ -269,11 +340,18 @@ class Interpreter:
 
         available, reason = docker_is_available()
         if available:
+            verified_identity: dict[str, str] = {}
             image_available, image_reason = docker_image_is_available(
-                policy.docker_image
+                policy.docker_image,
+                workspace=self.working_dir,
+                verified_identity=verified_identity,
             )
             if image_available:
-                return "docker", None
+                image_id = verified_identity.get("image_id")
+                if image_id and _DOCKER_IMAGE_ID_PATTERN.fullmatch(image_id):
+                    self.verified_docker_image_id = image_id
+                    return "docker", None
+                image_reason = "executor verification returned no immutable image ID"
             reason = image_reason
         if policy.backend == "docker" or policy.require_isolation:
             raise SandboxUnavailableError(
@@ -296,6 +374,11 @@ class Interpreter:
             "fallback_reason": self.isolation_reason,
             "docker_image": (
                 policy.docker_image if self.execution_backend == "docker" else None
+            ),
+            "docker_image_id": (
+                self.verified_docker_image_id
+                if self.execution_backend == "docker"
+                else None
             ),
             "network": policy.network if self.execution_backend == "docker" else "host",
             "memory": policy.memory if self.execution_backend == "docker" else None,
@@ -511,14 +594,12 @@ class Interpreter:
         container_env.update(self.env_vars)
         for key, value in sorted(container_env.items()):
             command.extend(["--env", f"{key}={value}"])
-        command.extend(
-            [
-                policy.docker_image,
-                "python",
-                "-u",
-                f"/workspace/{self.agent_file_name}",
-            ]
-        )
+        image_id = self.verified_docker_image_id
+        if image_id is None:
+            raise SandboxUnavailableError(
+                "verified Docker image identity is unavailable"
+            )
+        command.extend([image_id, "python", "-u", f"/workspace/{self.agent_file_name}"])
         return command
 
     def _force_remove_container(self, container_name: str) -> None:

@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,13 +15,43 @@ from unittest import mock
 import yaml
 
 from xscientist.cli import _contextual_action, main as cli_main
+from xscientist.research_git import init_repository
 from xscientist.research_journey import workspace_action_contract
+from xscientist.research_vcs import ResearchRepository
 from xscientist.workspace_history import save_workspace_checkpoint
-from xscientist.workspace_status import _MAX_POINTER_RECORDS, _cas_logical_bindings
+from xscientist.workspace_status import (
+    _MAX_POINTER_RECORDS,
+    _cas_logical_bindings,
+    _deliverables_summary,
+)
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
 class DemoStatusTests(unittest.TestCase):
+    def test_project_progress_does_not_hide_recorded_terminal_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            summary, _warnings = _deliverables_summary(
+                Path(td),
+                progress={"results": [{"status": "success"}]},
+                research={
+                    "guide": {"experiment_states": {"completed": 1, "failed": 1}}
+                },
+                review={"object_counts": {"experiment_attempt": 2}},
+                repo_status=None,
+            )
+
+        self.assertEqual(
+            summary["experiment"],
+            {
+                "runs": 2,
+                "successful": 1,
+                "failed": 1,
+                "recorded_attempts": 2,
+                "terminal_states": {"completed": 1, "failed": 1},
+                "registry_status": None,
+            },
+        )
+
     def test_repository_neutral_template_declares_workspace_cwd(self) -> None:
         action = workspace_action_contract(
             "xscientist research discovery template --output discovery.json"
@@ -70,6 +101,54 @@ class DemoStatusTests(unittest.TestCase):
             "xscientist explore /tmp/xscientist-user-study --lang zh",
         )
 
+    def test_first_status_is_ready_and_binds_record_to_the_inspected_workspace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            workspace = parent / "my-study"
+            previous = Path.cwd()
+            try:
+                os.chdir(parent)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        cli_main(
+                            [
+                                "explore",
+                                "./my-study",
+                                "--idea",
+                                "Does walking improve sleep?",
+                                "--expect",
+                                "Sleep improves.",
+                                "--disprove",
+                                "Sleep does not improve.",
+                                "--test",
+                                "Run a held-out comparison.",
+                                "--non-interactive",
+                            ]
+                        ),
+                        0,
+                    )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(
+                        cli_main(["status", "./my-study", "--lang", "en"]),
+                        0,
+                    )
+            finally:
+                os.chdir(previous)
+
+            rendered = output.getvalue()
+            self.assertIn("State: ready for the next research step", rendered)
+            self.assertNotIn("State: run complete", rendered)
+            run_line = next(
+                line for line in rendered.splitlines() if line.startswith("Run:  ")
+            )
+            argv = shlex.split(run_line.removeprefix("Run:  "))
+            self.assertEqual(argv[:2], ["xscientist", "record"])
+            self.assertEqual((parent / argv[2]).resolve(), workspace.resolve())
+            self.assertNotEqual(argv[2], ".")
+
     def test_provider_free_demo_creates_a_contested_evidence_journey(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "demo"
@@ -93,6 +172,7 @@ class DemoStatusTests(unittest.TestCase):
             self.assertFalse(payload["privacy"]["host_paths_disclosed"])
             self.assertTrue((workspace / "research.yaml").is_file())
             self.assertIn("failed_attempt", payload["objects"])
+            self.assertIn("failure_evidence", payload["objects"])
             self.assertIn("supporting_evidence", payload["objects"])
             self.assertIn("refuting_evidence", payload["objects"])
             self.assertIn("bounded_inference", payload["objects"])
@@ -105,6 +185,20 @@ class DemoStatusTests(unittest.TestCase):
                 "strengthen_research_program",
             )
             self.assertEqual(payload["guide"]["program_review"]["gap_count"], 6)
+            repository = ResearchRepository(workspace)
+            failure_evidence = repository.get(payload["objects"]["failure_evidence"])
+            self.assertEqual(failure_evidence["state"], "completed")
+            self.assertEqual(
+                failure_evidence["payload"]["failure_reason"],
+                "The first fixture contained malformed records.",
+            )
+            self.assertIn(
+                {
+                    "type": "derived_from",
+                    "target": payload["objects"]["failed_attempt"],
+                },
+                failure_evidence["relations"],
+            )
             commands = {
                 step["code"]: step["command"] for step in payload["guide"]["next_steps"]
             }
@@ -536,6 +630,218 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(payload["errors"][0]["code"], "workspace_state_corrupted")
             self.assertEqual(payload["errors"][0]["file"], "04_logs/progress.json")
 
+    def test_status_refuses_symlinked_workspace_state(self) -> None:
+        for parent_symlink in (False, True):
+            with (
+                self.subTest(parent_symlink=parent_symlink),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                base = Path(td)
+                workspace = base / "workspace"
+                workspace.mkdir()
+                external = base / "external-logs"
+                external.mkdir()
+                (external / "progress.json").write_text(
+                    json.dumps({"current_stage": "complete", "results": []}),
+                    encoding="utf-8",
+                )
+                (external / "insight_report.json").write_text(
+                    json.dumps({"epistemic_status": "verified"}),
+                    encoding="utf-8",
+                )
+                if parent_symlink:
+                    (workspace / "04_logs").symlink_to(
+                        external, target_is_directory=True
+                    )
+                else:
+                    logs = workspace / "04_logs"
+                    logs.mkdir()
+                    (logs / "progress.json").symlink_to(external / "progress.json")
+                    (logs / "insight_report.json").symlink_to(
+                        external / "insight_report.json"
+                    )
+
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = cli_main(["status", str(workspace), "--json"])
+
+                self.assertEqual(exit_code, 1)
+                payload = json.loads(output.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["operational_state"], "invalid")
+                self.assertFalse(payload["run"]["started"])
+                self.assertIsNone(payload["result"]["epistemic_status"])
+                corrupted = {
+                    item.get("file")
+                    for item in payload["errors"]
+                    if item.get("code") == "workspace_state_corrupted"
+                }
+                self.assertIn("04_logs/progress.json", corrupted)
+                self.assertIn("04_logs/insight_report.json", corrupted)
+                self.assertNotIn(str(external), output.getvalue())
+
+    def test_status_treats_malformed_state_fields_as_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            logs = workspace / "04_logs"
+            logs.mkdir(parents=True)
+            (logs / "progress.json").write_text(
+                json.dumps({"results": 1}), encoding="utf-8"
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "invalid")
+            self.assertIn("progress.results must be a JSON array", output.getvalue())
+
+    def test_status_never_crashes_on_malformed_review_contract_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "workspace"
+            experiment = workspace / "02_experiments" / "idea_0"
+            experiment.mkdir(parents=True)
+            (experiment / "pipeline_manifest.json").write_text("{}\n", encoding="utf-8")
+            (experiment / "review_state.json").write_text(
+                json.dumps({"active_issue_records": 1}), encoding="utf-8"
+            )
+            logs = workspace / "04_logs"
+            logs.mkdir()
+            (logs / "progress.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "status": "completed",
+                                "pipeline_manifest": (
+                                    "02_experiments/idea_0/pipeline_manifest.json"
+                                ),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["attention_required"])
+            self.assertEqual(payload["operational_state"], "needs_attention")
+            self.assertIn(
+                "review_state.active_issue_records must be a JSON array",
+                output.getvalue(),
+            )
+
+    def test_status_does_not_treat_plain_git_commit_as_research_checkpoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "demo"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli_main(["demo", str(workspace)]), 0)
+            tracked_path = (
+                "02_experiments/offline-autopilot-fixture/pipeline_manifest.json"
+            )
+            tracked = workspace / tracked_path
+            tracked.write_text("{}\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "--", tracked_path],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "plain git artifact commit"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "invalid")
+            self.assertIn(
+                "research_head_not_checkpointed",
+                {item["code"] for item in payload["errors"]},
+            )
+            audit = payload["deliverables"]["audit"]
+            self.assertFalse(audit["research_checkpoint_head"])
+            self.assertEqual(audit["checkpointed"], 0)
+            self.assertGreater(audit["unbound"], 0)
+
+    def test_research_init_does_not_retroactively_bind_raw_git_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            paper = workspace / "03_papers" / "paper.pdf"
+            paper.parent.mkdir(parents=True)
+            paper.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Raw Commit Test"],
+                cwd=workspace,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "raw@example.invalid"],
+                cwd=workspace,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "add", "03_papers/paper.pdf"],
+                cwd=workspace,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "raw paper artifact"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+            )
+            init_repository(
+                workspace,
+                name="audit-boundary",
+                question="# Is this artifact Research Git bound?\n",
+                git_user_name="Research Test",
+                git_user_email="research@example.invalid",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(exit_code, 0)
+            audit = payload["deliverables"]["audit"]
+            self.assertTrue(audit["research_checkpoint_head"])
+            self.assertNotIn(
+                "research_head_not_checkpointed",
+                {item["code"] for item in payload["errors"]},
+            )
+            self.assertEqual(audit["checkpointed"], 0)
+            self.assertIn("03_papers/paper.pdf", audit["unbound_paths"])
+            self.assertIn(
+                "deliverable_artifacts_unbound",
+                {item["code"] for item in payload["warnings"]},
+            )
+
     def test_status_prioritizes_the_last_readiness_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td) / "demo"
@@ -608,7 +914,7 @@ class DemoStatusTests(unittest.TestCase):
             self.assertIn("Next: xscientist status", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("Workspace: demo", rendered)
-            self.assertIn("State: run complete; more evidence needed", rendered)
+            self.assertIn("State: experiment recorded; more evidence needed", rendered)
             self.assertIn("Scientific progress: 7/8", rendered)
             self.assertIn("History: main@", rendered)
             self.assertIn("Checks: trace=pass, replay=pass, verify=pending", rendered)
@@ -659,6 +965,10 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(
                 payload["next_steps"][0]["code"], "run_resolution_experiment"
             )
+            run_step = payload["next_steps"][0]
+            self.assertEqual(run_step["command"], "xscientist record {workspace}")
+            self.assertFalse(run_step["action"]["executable_after_binding"])
+            self.assertEqual(run_step["action"]["input_binding"]["mode"], "interactive")
             self.assertFalse(payload["result"]["dag_current"])
             self.assertEqual(payload["warnings"][0]["code"], "generated_view_stale")
 
@@ -678,7 +988,7 @@ class DemoStatusTests(unittest.TestCase):
             self.assertIn("演示成功", demo_output.getvalue())
             rendered = status_output.getvalue()
             self.assertIn("工作区：demo", rendered)
-            self.assertIn("状态：运行完成，仍需补充证据", rendered)
+            self.assertIn("状态：已记录实验，仍需补充证据", rendered)
             self.assertIn("科学进度", rendered)
             self.assertIn("下一步", rendered)
             self.assertIn("检验存在争议的边界", rendered)
@@ -734,7 +1044,7 @@ class DemoStatusTests(unittest.TestCase):
                     0,
                 )
             self.assertIn(
-                "State: run complete; more evidence needed",
+                "State: experiment recorded; more evidence needed",
                 human_status.getvalue(),
             )
             self.assertNotIn("Research pipeline:", human_status.getvalue())
