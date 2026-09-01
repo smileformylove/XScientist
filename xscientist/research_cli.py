@@ -1129,7 +1129,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         action="append",
         default=[],
         metavar="LABEL=PATH",
-        help="Hash one durable result artifact (repeatable; required for a completed campaign task).",
+        help=(
+            "Ingest one durable result artifact into Research VCS CAS "
+            "(repeatable; required for a completed campaign task)."
+        ),
     )
     experiment_parser.add_argument("--seed", action="append", type=int, default=[])
     experiment_parser.add_argument("--environment-hash")
@@ -2877,10 +2880,7 @@ def main(
                 metrics=_parse_assignments(args.metric, label="metric"),
                 configuration=_parse_assignments(args.config, label="configuration"),
                 producer_id=args.producer_id,
-                result_artifact_hashes={
-                    label: _hash_local_file(path)
-                    for label, path in result_artifact_paths.items()
-                },
+                result_artifact_paths=result_artifact_paths,
                 seeds=args.seed,
                 environment_hash=args.environment_hash,
                 dependency_lock_hashes=[

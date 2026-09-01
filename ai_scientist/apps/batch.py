@@ -40,6 +40,7 @@ from ai_scientist.utils.integrity_workflow import (
 )
 from ai_scientist.utils.experiment_registry import (
     build_experiment_record,
+    record_terminal_experiment_failure,
     save_experiment_registry,
 )
 from ai_scientist.utils.experiment_report import write_experiment_report
@@ -3042,14 +3043,20 @@ def _process_single_paper(args):
             isinstance(experiment_result, dict)
             and experiment_result.get("status") != "completed"
         ):
+            terminal = record_terminal_experiment_failure(
+                paper_structure["root"],
+                research_plan=research_plan,
+                experiment_result=experiment_result,
+                producer="continuous_paper_generator.experiment_terminal_outcome",
+            )
             return {
                 "idea_idx": idea_idx,
-                "status": experiment_result.get("status", "failed"),
+                "status": terminal["runtime_status"],
+                "runtime_status": terminal["runtime_status"],
+                "registry_status": terminal["status"],
                 "stage": "experiment",
-                "error": (
-                    (experiment_result.get("failure_error") or {}).get("message")
-                    or (experiment_result.get("budget_error") or {}).get("message")
-                ),
+                "error": terminal["error"],
+                "experiment_registry_rows": terminal["registry_rows"],
                 "resumable": bool(experiment_result.get("resumable")),
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "run_status_path": experiment_result.get("run_status_path"),

@@ -19,6 +19,7 @@ from .research_git import (
     CheckpointResult,
     ResearchGitError,
     ResearchObjectResult,
+    _pointer_records_at_commit,
     show_checkpoint,
 )
 from ai_scientist.utils.trajectory_binding import terminal_negative_contract_errors
@@ -985,7 +986,12 @@ class ResearchLifecycle:
                         "confirmatory experiment lineage contains an empty transition"
                     )
                 registry_artifact_paths = changed_paths & allowed_registry_paths
-                object_paths = changed_paths - registry_artifact_paths
+                pointer_paths = {
+                    path
+                    for path in changed_paths
+                    if path.startswith("research-objects/") and path.endswith(".json")
+                }
+                object_paths = changed_paths - registry_artifact_paths - pointer_paths
                 if registry_artifact_paths and checkpoint.get("stage") != "review":
                     raise ResearchGitError(
                         "confirmatory registry artifacts must be admitted with a "
@@ -995,6 +1001,7 @@ class ResearchLifecycle:
                     raise ResearchGitError(
                         "confirmatory registry artifact transition has no binding object"
                     )
+                declared_pointer_bindings: dict[str, str] = {}
                 for path in sorted(object_paths):
                     match = _RESEARCH_OBJECT_PATH.fullmatch(path)
                     if (
@@ -1011,6 +1018,19 @@ class ResearchLifecycle:
                         )
                         prior_attempt_ids.append(object_id)
                         classification = "confirmatory_attempt"
+                        attempt = self.repository.get(object_id)
+                        attempt_payload = attempt.get("payload") or {}
+                        result_artifacts = attempt_payload.get("result_artifacts") or {}
+                        if isinstance(result_artifacts, Mapping):
+                            for item in result_artifacts.values():
+                                if not isinstance(item, Mapping):
+                                    continue
+                                pointer_path = str(item.get("pointer_path") or "")
+                                object_hash = str(item.get("content_hash") or "")
+                                if pointer_path and object_hash:
+                                    declared_pointer_bindings[pointer_path] = (
+                                        object_hash
+                                    )
                     elif match is not None and match.group("kind") == "evidence":
                         object_id = self._validate_confirmatory_negative_evidence_path(
                             path,
@@ -1037,6 +1057,42 @@ class ResearchLifecycle:
                             "classification": classification,
                         }
                     )
+                unexpected_pointer_paths = pointer_paths - set(
+                    declared_pointer_bindings
+                )
+                if unexpected_pointer_paths:
+                    raise ResearchGitError(
+                        "confirmatory attempt transition contains an unbound research "
+                        "object pointer: " + ", ".join(sorted(unexpected_pointer_paths))
+                    )
+                committed_pointers = _pointer_records_at_commit(
+                    self.repository.path,
+                    cursor,
+                    strict=True,
+                )
+                committed_pointer_hashes = {
+                    str(pointer["pointer_path"]): object_hash
+                    for object_hash, pointers in committed_pointers.items()
+                    for pointer in pointers
+                }
+                mismatched_pointer_paths = {
+                    path
+                    for path, declared_hash in declared_pointer_bindings.items()
+                    if committed_pointer_hashes.get(path) != declared_hash
+                }
+                if mismatched_pointer_paths:
+                    raise ResearchGitError(
+                        "confirmatory result pointer does not match its attempt: "
+                        + ", ".join(sorted(mismatched_pointer_paths))
+                    )
+                checked_paths.extend(
+                    {
+                        "commit": cursor,
+                        "path": path,
+                        "classification": "confirmatory_result_pointer",
+                    }
+                    for path in sorted(pointer_paths)
+                )
                 checked_paths.extend(
                     {
                         "commit": cursor,
@@ -1089,7 +1145,7 @@ class ResearchLifecycle:
             },
         }
 
-    def experiment_attempt(
+    def _prepare_experiment_attempt(
         self,
         attempt: Mapping[str, Any],
         *,
@@ -1097,9 +1153,8 @@ class ResearchLifecycle:
         plan_id: str | None = None,
         priority_id: str | None = None,
         provenance: Mapping[str, Any] | None = None,
-        commit: bool = True,
     ) -> dict[str, Any]:
-        """Record every attempt, including failure, timeout, and cancellation."""
+        """Validate and normalize an attempt without mutating the repository."""
 
         payload = dict(attempt)
         study_phase = str(payload.get("study_phase") or "").strip().lower()
@@ -1361,13 +1416,75 @@ class ResearchLifecycle:
                 "actor_id": producer_id,
                 "authority": "research_agent",
             }
+        return {
+            "payload": payload,
+            "state": state,
+            "relations": relations,
+            "actor": producer_actor,
+            "provenance": provenance,
+        }
+
+    def validate_experiment_attempt(
+        self,
+        attempt: Mapping[str, Any],
+        *,
+        preregistration_id: str | None = None,
+        plan_id: str | None = None,
+        priority_id: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the normalized attempt contract without recording any object."""
+
+        return self._prepare_experiment_attempt(
+            attempt,
+            preregistration_id=preregistration_id,
+            plan_id=plan_id,
+            priority_id=priority_id,
+            provenance=provenance,
+        )
+
+    def experiment_attempt(
+        self,
+        attempt: Mapping[str, Any],
+        *,
+        preregistration_id: str | None = None,
+        plan_id: str | None = None,
+        priority_id: str | None = None,
+        provenance: Mapping[str, Any] | None = None,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Record every attempt, including failure, timeout, and cancellation."""
+
+        prepared = self._prepare_experiment_attempt(
+            attempt,
+            preregistration_id=preregistration_id,
+            plan_id=plan_id,
+            priority_id=priority_id,
+            provenance=provenance,
+        )
+        return self.record_validated_experiment_attempt(prepared, commit=commit)
+
+    def record_validated_experiment_attempt(
+        self,
+        prepared: Mapping[str, Any],
+        *,
+        commit: bool = True,
+    ) -> dict[str, Any]:
+        """Record a contract returned by ``validate_experiment_attempt`` once."""
+
+        required = {"payload", "state", "relations", "actor", "provenance"}
+        if not required <= set(prepared):
+            raise ResearchGitError(
+                "validated experiment attempt contract is incomplete"
+            )
+        state = str(prepared["state"])
         result = self.repository.record(
             "experiment_attempt",
-            payload,
+            prepared["payload"],
             state=state,
-            relations=relations,
-            actor=producer_actor,
-            provenance=provenance,
+            relations=prepared["relations"],
+            actor=prepared["actor"],
+            provenance=prepared["provenance"],
         )
         checkpoint = (
             self.repository.commit(

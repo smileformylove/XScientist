@@ -1113,6 +1113,19 @@ def _contextual_action(command: str, workspace: str | Path | None) -> str:
         return f"xscientist explore {quoted}{suffix}"
     if command == "xscientist setup .":
         return f"xscientist setup {quoted}"
+    if command.startswith("xscientist research object add "):
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = []
+        if len(argv) >= 5 and "--repo" in argv:
+            repo_index = argv.index("--repo")
+            if repo_index + 1 < len(argv) and argv[repo_index + 1] == ".":
+                source = Path(argv[4]).expanduser()
+                if not source.is_absolute() and "://" not in argv[4]:
+                    argv[4] = str(Path(workspace).expanduser() / source)
+                argv[repo_index + 1] = str(workspace)
+                return shlex.join(argv)
     if "--workspace ." in command:
         return command.replace("--workspace .", f"--workspace {quoted}")
     if "--repo ." in command:
@@ -3033,7 +3046,7 @@ def _workspace_git_changes(
     try:
         if Path(probe.stdout.strip()).resolve() != workspace.resolve():
             return False, set(), set()
-    except OSError:
+    except (OSError, RuntimeError):
         return False, set(), set()
 
     def paths(*arguments: str) -> set[str]:
@@ -3757,6 +3770,28 @@ def _start_input_error(
     else:
         print(f"xscientist start: {message}", file=sys.stderr)
     return returncode
+
+
+def _start_research_dag_relative_path(workspace: Path) -> str | None:
+    """Return an existing DAG path relative to its workspace, never a template."""
+
+    try:
+        root = workspace.expanduser().resolve()
+    except OSError:
+        return None
+    candidates = (
+        root / "research-dag" / "research-dag.html",
+        root / "outputs" / "views" / root.name / "research-dag" / "research-dag.html",
+    )
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved.is_file():
+            return candidate.relative_to(root).as_posix()
+    return None
 
 
 def _run_start(parsed: argparse.Namespace) -> int:
@@ -4657,6 +4692,11 @@ def _run_start(parsed: argparse.Namespace) -> int:
         else:
             os.environ["XSCIENTIST_WORKSPACE"] = previous_workspace
 
+    from .research_journey import workspace_action_context, workspace_action_contract
+
+    status_action = workspace_action_contract("xscientist status .")
+    if status_action is None:  # pragma: no cover - fixed non-empty command
+        raise RuntimeError("workspace status action contract is unavailable")
     payload = {
         "schema": "xscientist.start.v1",
         "ok": returncode == 0,
@@ -4666,7 +4706,14 @@ def _run_start(parsed: argparse.Namespace) -> int:
         "target_venue": parsed.target_venue,
         "returncode": returncode,
         "model_contract": model_contract,
-        "research_dag": ("outputs/views/{workspace}/research-dag/research-dag.html"),
+        "research_dag": (
+            _start_research_dag_relative_path(workspace) if returncode == 0 else None
+        ),
+        "research_dag_path_base": "workspace",
+        "status_command": status_action["command_template"],
+        "status_action": status_action,
+        "workspace_context": workspace_action_context(),
+        "host_paths_disclosed": False,
         "phases": phases,
     }
     if parsed.as_json:
@@ -4678,7 +4725,7 @@ def _run_start(parsed: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     elif returncode == 0:
         print("Automated research completed with a local Research VCS history.")
-        print(f"Open the research DAG under: {payload['research_dag']}")
+        print("Next: xscientist status " + shlex.quote(str(parsed.directory)))
     return returncode
 
 
@@ -4817,6 +4864,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "cancelled",
                 "interrupted",
             }
+            if detached_status in {
+                "queued",
+                "running",
+                "cancelling",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
+                from .research_journey import (
+                    workspace_action_context,
+                    workspace_action_contract,
+                )
+
+                action_commands: dict[str, str]
+                if startup_failed:
+                    action_commands = {
+                        "inspect_action": (
+                            f"xscientist runs show {payload['id']} --workspace ."
+                        ),
+                        "resume_action": (
+                            f"xscientist runs resume {payload['id']} --workspace ."
+                        ),
+                    }
+                elif detached_status == "succeeded":
+                    action_commands = {"status_action": "xscientist status ."}
+                else:
+                    action_commands = {
+                        "watch_action": (
+                            f"xscientist runs watch {payload['id']} --workspace ."
+                        )
+                    }
+                actions_added = False
+                for action_name, action_command in action_commands.items():
+                    handoff_action = workspace_action_contract(action_command)
+                    if handoff_action is not None:
+                        payload[action_name] = handoff_action
+                        actions_added = True
+                if actions_added:
+                    payload["workspace_context"] = workspace_action_context()
+                    payload["host_paths_disclosed"] = False
             if startup_failed:
                 try:
                     logs = read_run_logs(
@@ -4855,12 +4943,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             elif detached_status == "succeeded":
                 print(f"Detached research run completed: {payload['id']}")
-                print(f"Workspace: {payload['workspace']}")
+                print("Next: xscientist status " + shlex.quote(str(parsed.directory)))
             else:
                 print(f"Detached research run started: {payload['id']}")
-                print(f"Workspace: {payload['workspace']}")
                 print(
-                    "Watch: xscientist runs watch "
+                    "Next: xscientist runs watch "
                     f"{payload['id']} --workspace "
                     f"{shlex.quote(str(parsed.directory))}"
                 )
@@ -5934,6 +6021,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run = payload["run"]
             result = payload["result"]
             review = payload["review"]
+            deliverables = payload["deliverables"]
             background_run = payload.get("background_run")
             state_labels = {
                 "en": {
@@ -5969,11 +6057,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                     len(pending.get(name) or [])
                     for name in ("backend_staged", "selected", "tracked", "eligible")
                 )
+                deliverable_audit = deliverables.get("audit") or {}
+                deliverable_pending = int(deliverable_audit.get("pending") or 0)
+                deliverable_unbound = int(deliverable_audit.get("unbound") or 0)
                 if language == "zh":
-                    history_state = "干净" if clean else f"待保存={pending_count}"
+                    if clean:
+                        history_state = "干净"
+                    else:
+                        history_parts = []
+                        if pending_count:
+                            history_parts.append(f"待保存={pending_count}")
+                        if deliverable_pending:
+                            history_parts.append(f"产物待保存={deliverable_pending}")
+                        if deliverable_unbound:
+                            history_parts.append(f"产物未绑定={deliverable_unbound}")
+                        history_state = "；".join(history_parts) or "需要检查"
                     print(f"科研历史：{research['branch']}@{head} / {history_state}")
                 else:
-                    history_state = "clean" if clean else f"pending={pending_count}"
+                    if clean:
+                        history_state = "clean"
+                    else:
+                        history_parts = []
+                        if pending_count:
+                            history_parts.append(f"pending={pending_count}")
+                        if deliverable_pending:
+                            history_parts.append(
+                                f"outputs pending={deliverable_pending}"
+                            )
+                        if deliverable_unbound:
+                            history_parts.append(
+                                f"outputs unbound={deliverable_unbound}"
+                            )
+                        history_state = "; ".join(history_parts) or "needs review"
                     print(f"History: {research['branch']}@{head} / {history_state}")
                 if review.get("available"):
                     check_labels = {
@@ -6027,6 +6142,74 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{label}: {progress['completed_stages']}/"
                     f"{progress['total_stages']} ({progress['percent']}%)"
                 )
+            if deliverables.get("available"):
+                experiment = deliverables["experiment"]
+                paper = deliverables["paper"]
+                experiment_count = max(
+                    int(experiment.get("runs") or 0),
+                    int(experiment.get("recorded_attempts") or 0),
+                )
+                paper_state = str(paper.get("state") or "not_started")
+                if language == "zh":
+                    paper_state = {
+                        "not_started": "尚未开始",
+                        "draft": "草稿",
+                        "evidence_blocked": "证据不足",
+                        "revision_needed": "需要修订",
+                        "submission_ready": "已达到投稿准备状态",
+                    }.get(paper_state, paper_state)
+                    output_parts = [f"实验={experiment_count}"]
+                    if experiment.get("failed"):
+                        output_parts.append(f"失败={experiment['failed']}")
+                    output_parts.append(f"论文={paper_state}")
+                    figures = paper.get("figures") or {}
+                    if figures.get("total"):
+                        output_parts.append(
+                            f"图表={figures.get('ready', 0)}/{figures['total']}"
+                        )
+                    paper_review = paper.get("review") or {}
+                    if paper_review.get("active_issues"):
+                        output_parts.append(f"待修问题={paper_review['active_issues']}")
+                    print("科研产物：" + "；".join(output_parts))
+                else:
+                    paper_state = {
+                        "not_started": "not started",
+                        "draft": "draft",
+                        "evidence_blocked": "evidence blocked",
+                        "revision_needed": "revision needed",
+                        "submission_ready": "submission ready",
+                    }.get(paper_state, paper_state)
+                    output_parts = [f"experiments={experiment_count}"]
+                    if experiment.get("failed"):
+                        output_parts.append(f"failed={experiment['failed']}")
+                    output_parts.append(f"paper={paper_state}")
+                    figures = paper.get("figures") or {}
+                    if figures.get("total"):
+                        output_parts.append(
+                            f"figures={figures.get('ready', 0)}/{figures['total']}"
+                        )
+                    paper_review = paper.get("review") or {}
+                    if paper_review.get("active_issues"):
+                        output_parts.append(
+                            f"review issues={paper_review['active_issues']}"
+                        )
+                    print("Research outputs: " + "; ".join(output_parts))
+                deliverable_audit = deliverables.get("audit") or {}
+                if deliverable_audit.get("total"):
+                    checkpointed = int(deliverable_audit.get("checkpointed") or 0)
+                    total = int(deliverable_audit.get("total") or 0)
+                    pending = int(deliverable_audit.get("pending") or 0)
+                    unbound = int(deliverable_audit.get("unbound") or 0)
+                    if language == "zh":
+                        print(
+                            f"审查历史：{checkpointed}/{total} 已进入 checkpoint；"
+                            f"待保存={pending}；未绑定={unbound}"
+                        )
+                    else:
+                        print(
+                            f"Audit trail: {checkpointed}/{total} checkpointed; "
+                            f"pending={pending}; unbound={unbound}"
+                        )
             if run["started"]:
                 run_state = run["current_stage"] or (
                     "已启动" if language == "zh" else "started"

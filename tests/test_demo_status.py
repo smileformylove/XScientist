@@ -3,15 +3,20 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import shlex
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
 from xscientist.cli import _contextual_action, main as cli_main
 from xscientist.research_journey import workspace_action_contract
+from xscientist.workspace_history import save_workspace_checkpoint
+from xscientist.workspace_status import _MAX_POINTER_RECORDS, _cas_logical_bindings
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
@@ -205,6 +210,311 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(
                 payload["workspace_id"], repository_config["repository_id"]
             )
+
+    def test_status_surfaces_experiment_paper_and_checkpoint_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "demo"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli_main(["demo", str(workspace)]), 0)
+            experiment = workspace / "02_experiments" / "20260901_reviewed"
+            experiment.mkdir(parents=True)
+            (experiment / "pipeline_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "artifacts": {
+                            "experiment_registry": {"status": "ready"},
+                            "manuscript_state": {"status": "ready"},
+                            "review_state": {"status": "ready"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (experiment / "experiment_registry.jsonl").write_text(
+                '{"status":"completed"}\n', encoding="utf-8"
+            )
+            (experiment / "paper.tex").write_text(
+                "\\documentclass{article}\n", encoding="utf-8"
+            )
+            (experiment / "manuscript_state.json").write_text(
+                json.dumps(
+                    {
+                        "guardrail_status": "ready",
+                        "latex_path": "paper.tex",
+                        "evidence_summary": {
+                            "claim_count": 2,
+                            "supported_claim_count": 2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (experiment / "figure_spec.json").write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "figure_count": 2,
+                            "ready_figure_count": 1,
+                        },
+                        "figures": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (experiment / "review_state.json").write_text(
+                json.dumps(
+                    {
+                        "active_issue_records": [{"issue_id": "RVW-1"}],
+                        "repair_metrics": {"active_issue_count": 1},
+                        "lane_summaries": {
+                            "hostile_critic": {"blocking_issue_count": 1}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (experiment / "repair_plan.json").write_text(
+                json.dumps({"summary": {"task_count": 1, "ready_task_count": 1}}),
+                encoding="utf-8",
+            )
+            paper = workspace / "03_papers" / "final.pdf"
+            paper.parent.mkdir()
+            paper.write_bytes(b"%PDF-1.4\nreviewed draft\n")
+            progress_path = workspace / "04_logs" / "progress.json"
+            progress_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "xscientist.project-progress.v1",
+                        "selected_indices": [0, 1],
+                        "results": [
+                            {
+                                "idea_idx": 0,
+                                "status": "completed",
+                                "research_status": "submission_ready",
+                                "pipeline_manifest": (
+                                    "02_experiments/20260901_reviewed/"
+                                    "pipeline_manifest.json"
+                                ),
+                                "pdf_path": "03_papers/final.pdf",
+                            },
+                            {"idea_idx": 1, "status": "failed"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            before_output = io.StringIO()
+            with contextlib.redirect_stdout(before_output):
+                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 0)
+            before = json.loads(before_output.getvalue())
+
+            self.assertEqual(before["deliverables"]["experiment"]["successful"], 1)
+            self.assertEqual(before["deliverables"]["experiment"]["failed"], 1)
+            self.assertEqual(
+                before["deliverables"]["paper"]["state"], "revision_needed"
+            )
+            self.assertEqual(
+                before["deliverables"]["paper"]["figures"],
+                {"total": 2, "ready": 1},
+            )
+            self.assertEqual(
+                before["deliverables"]["paper"]["review"]["blocking_issues"],
+                1,
+            )
+            self.assertGreater(before["deliverables"]["audit"]["pending"], 0)
+            self.assertIn(
+                "03_papers/final.pdf",
+                before["deliverables"]["audit"]["unbound_paths"],
+            )
+            self.assertEqual(before["next_steps"][0]["code"], "bind_research_output")
+            bind_action = before["next_steps"][0]["action"]
+            self.assertTrue(bind_action["executable_after_binding"])
+            self.assertEqual(bind_action["workspace_binding"]["mode"], "argument")
+            self.assertIn("{workspace}", bind_action["argv_template"])
+            self.assertEqual(bind_action["cwd_binding"]["mode"], "workspace_root")
+            self.assertEqual(bind_action["cwd_binding"]["template"], "{workspace}")
+            self.assertFalse(before["review"]["clean"])
+            self.assertNotIn(str(workspace), before_output.getvalue())
+
+            human_output = io.StringIO()
+            with (
+                contextlib.redirect_stdout(human_output),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en"]), 0
+                )
+            history_line = next(
+                line
+                for line in human_output.getvalue().splitlines()
+                if line.startswith("History: ")
+            )
+            self.assertIn("outputs pending=", history_line)
+            self.assertIn("outputs unbound=1", history_line)
+            run_line = next(
+                line
+                for line in human_output.getvalue().splitlines()
+                if line.startswith("Run:  ")
+            )
+            bind_argv = shlex.split(run_line.removeprefix("Run:  "))
+            self.assertEqual(bind_argv[:4], ["xscientist", "research", "object", "add"])
+            self.assertEqual(Path(bind_argv[4]), paper)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli_main(bind_argv[1:]), 0)
+            saved = save_workspace_checkpoint(
+                workspace,
+                message="checkpoint reviewed manuscript",
+            )
+            self.assertTrue(saved["checkpoint"]["committed"])
+
+            after_output = io.StringIO()
+            with contextlib.redirect_stdout(after_output):
+                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 0)
+            after = json.loads(after_output.getvalue())
+            audit = after["deliverables"]["audit"]
+            self.assertEqual(audit["pending"], 0)
+            self.assertEqual(audit["unbound"], 0)
+            self.assertEqual(audit["checkpointed"], audit["total"])
+            self.assertTrue(after["review"]["clean"])
+
+    def test_status_pairs_the_selected_experiment_with_its_progress_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "project"
+            older = workspace / "02_experiments" / "idea_1"
+            selected = workspace / "02_experiments" / "idea_0"
+            older.mkdir(parents=True)
+            selected.mkdir(parents=True)
+            for experiment in (older, selected):
+                (experiment / "pipeline_manifest.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+                (experiment / "manuscript_state.json").write_text(
+                    json.dumps({"guardrail_status": "ready"}), encoding="utf-8"
+                )
+            selected_pdf = workspace / "03_papers" / "idea_0.pdf"
+            older_pdf = workspace / "03_papers" / "idea_1.pdf"
+            selected_pdf.parent.mkdir()
+            selected_pdf.write_bytes(b"%PDF-1.4\nselected\n")
+            older_pdf.write_bytes(b"%PDF-1.4\nolder\n")
+            old_ns = 1_700_000_000_000_000_000
+            new_ns = old_ns + 1_000_000_000
+            for path in (older, *older.iterdir()):
+                os.utime(path, ns=(old_ns, old_ns))
+            for path in (selected, *selected.iterdir()):
+                os.utime(path, ns=(new_ns, new_ns))
+            logs = workspace / "04_logs"
+            logs.mkdir(parents=True)
+            (logs / "progress.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "idea_idx": 0,
+                                "status": "completed",
+                                "research_status": "manuscript_draft",
+                                "pipeline_manifest": (
+                                    "02_experiments/idea_0/pipeline_manifest.json"
+                                ),
+                                "pdf_path": "03_papers/idea_0.pdf",
+                            },
+                            {
+                                "idea_idx": 1,
+                                "status": "completed",
+                                "research_status": "submission_ready",
+                                "pipeline_manifest": (
+                                    "02_experiments/idea_1/pipeline_manifest.json"
+                                ),
+                                "pdf_path": "03_papers/idea_1.pdf",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cli_main(["status", str(workspace), "--json"]), 0)
+            payload = json.loads(output.getvalue())
+
+            self.assertEqual(
+                payload["deliverables"]["experiment_root"],
+                "02_experiments/idea_0",
+            )
+            self.assertEqual(payload["deliverables"]["paper"]["state"], "draft")
+            self.assertEqual(
+                payload["deliverables"]["paper"]["pdf"],
+                "03_papers/idea_0.pdf",
+            )
+            self.assertIn(
+                "03_papers/idea_0.pdf",
+                payload["deliverables"]["audit"]["unbound_paths"],
+            )
+            self.assertNotIn(
+                "03_papers/idea_1.pdf",
+                payload["deliverables"]["audit"]["unbound_paths"],
+            )
+            self.assertFalse(payload["research"]["initialized"])
+            self.assertFalse(payload["review"]["available"])
+            self.assertIsNone(payload["review"]["clean"])
+            self.assertEqual(
+                payload["next_steps"][0]["code"], "initialize_research_history"
+            )
+            self.assertEqual(
+                payload["next_steps"][0]["action"]["argv_template"],
+                ["xscientist", "research", "init", "{workspace}"],
+            )
+
+    def test_pointer_status_scan_consumes_at_most_the_record_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            pointer_root = workspace / "research-objects"
+            pointer_root.mkdir()
+
+            class FakeEntry:
+                def __init__(self, index: int) -> None:
+                    self.name = f"ignored-{index}.txt"
+                    self.path = str(pointer_root / self.name)
+
+                def is_file(self, *, follow_symlinks: bool) -> bool:
+                    self.follow_symlinks = follow_symlinks
+                    return True
+
+            class BoundedEntries:
+                def __init__(self) -> None:
+                    self.count = 0
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args) -> None:
+                    return None
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if self.count >= _MAX_POINTER_RECORDS:
+                        raise AssertionError("pointer scan exceeded its hard bound")
+                    self.count += 1
+                    return FakeEntry(self.count)
+
+            entries = BoundedEntries()
+            with mock.patch(
+                "xscientist.workspace_status.os.scandir", return_value=entries
+            ):
+                bindings = _cas_logical_bindings(
+                    workspace,
+                    repo_status={"last_checkpoint": {}},
+                    pending_paths=set(),
+                )
+
+            self.assertEqual(bindings, {})
+            self.assertEqual(entries.count, _MAX_POINTER_RECORDS)
 
     def test_status_reports_corrupted_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as td:

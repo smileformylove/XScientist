@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shlex
+import subprocess
 from copy import deepcopy
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +31,37 @@ from .research_journey import (
 
 STATUS_SCHEMA = "xscientist.workspace-status.v1"
 RUN_SCHEMA = "xscientist.local-run.v1"
+
+_DELIVERABLE_CONTRACT_FILES = (
+    "pipeline_manifest.json",
+    "claim_evidence_graph.json",
+    "experiment_registry.jsonl",
+    "figure_spec.json",
+    "manuscript_state.json",
+    "review_state.json",
+    "critic_findings.json",
+    "repair_plan.json",
+    "repair_attempts.jsonl",
+    "stage_standards.json",
+    "process_alignment.json",
+    "verification_report.json",
+)
+_MAX_DELIVERABLE_ROOTS = 512
+_MAX_POINTER_RECORDS = 4096
+_SUCCESSFUL_EXPERIMENT_STATES = {"success", "succeeded", "completed"}
+_FAILED_EXPERIMENT_STATES = {
+    "failed",
+    "error",
+    "timeout",
+    "timed_out",
+    "cancelled",
+    "canceled",
+    "interrupted",
+    "rejected",
+    "orphan",
+    "orphaned",
+    "budget_exhausted",
+}
 
 
 def _read_json(path: Path) -> tuple[dict[str, Any], str | None]:
@@ -71,6 +106,488 @@ def _workspace_identity(root: Path) -> tuple[str, str]:
 
 def _first_existing(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.is_file()), None)
+
+
+def _count(value: Any, *, default: int = 0) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _workspace_file(
+    root: Path,
+    value: Any,
+    *,
+    base: Path | None = None,
+) -> Path | None:
+    """Resolve one recorded path only when it is a regular workspace file."""
+
+    rendered = str(value or "").strip()
+    if not rendered or "://" in rendered:
+        return None
+    candidate = Path(rendered).expanduser()
+    if not candidate.is_absolute():
+        candidate = (base or root) / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() and not resolved.is_symlink() else None
+
+
+def _latest_experiment_selection(
+    root: Path,
+    progress: dict[str, Any],
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Select one experiment and the progress result that actually names it."""
+
+    experiments_root = root / "02_experiments"
+    candidates: dict[Path, dict[str, Any] | None] = {}
+    for result in progress.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        recorded = _workspace_file(root, result.get("pipeline_manifest"))
+        if recorded is not None:
+            candidates[recorded.parent] = result
+            continue
+        raw_directory = str(result.get("exp_dir") or "").strip()
+        if not raw_directory:
+            continue
+        candidate = Path(raw_directory).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(experiments_root.resolve())
+        except (OSError, ValueError):
+            continue
+        if resolved.is_dir() and not resolved.is_symlink():
+            candidates[resolved] = result
+    if experiments_root.is_dir() and not experiments_root.is_symlink():
+        try:
+            entries = sorted(experiments_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            entries = []
+        for candidate in entries[-_MAX_DELIVERABLE_ROOTS:]:
+            if candidate.is_dir() and not candidate.is_symlink():
+                candidates.setdefault(candidate.resolve(), None)
+    if not candidates:
+        return None, None
+
+    def recency_key(path: Path) -> tuple[int, int, str]:
+        """Prefer the experiment most recently touched by the researcher."""
+
+        try:
+            latest_mtime = path.stat().st_mtime_ns
+        except OSError:
+            latest_mtime = 0
+        contract_count = 0
+        for filename in _DELIVERABLE_CONTRACT_FILES:
+            contract = path / filename
+            try:
+                if contract.is_file() and not contract.is_symlink():
+                    contract_count += 1
+                    latest_mtime = max(latest_mtime, contract.stat().st_mtime_ns)
+            except OSError:
+                continue
+        return latest_mtime, contract_count, path.name
+
+    selected = max(candidates, key=recency_key)
+    return selected, candidates[selected]
+
+
+def _latest_experiment_root(root: Path, progress: dict[str, Any]) -> Path | None:
+    """Return the selected experiment root for compatibility with local callers."""
+
+    return _latest_experiment_selection(root, progress)[0]
+
+
+def _latest_project_pdf(
+    root: Path,
+    *,
+    experiment_root: Path | None,
+    selected_result: dict[str, Any] | None,
+) -> Path | None:
+    """Return only a PDF attributable to the selected experiment/result."""
+
+    if selected_result is not None:
+        return _workspace_file(root, selected_result.get("pdf_path"))
+    if experiment_root is not None:
+        return None
+    papers = root / "03_papers"
+    if not papers.is_dir() or papers.is_symlink():
+        return None
+    try:
+        candidates = sorted(
+            (
+                path
+                for path in papers.iterdir()
+                if path.is_file()
+                and not path.is_symlink()
+                and path.suffix.lower() == ".pdf"
+            ),
+            key=lambda path: path.name,
+        )
+    except OSError:
+        return None
+    return candidates[-1] if candidates else None
+
+
+def _git_tracked_paths(root: Path, paths: list[str]) -> set[str]:
+    if not paths:
+        return set()
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--cached", "-z", "--", *paths],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if completed.returncode:
+        return set()
+    return {
+        item.decode("utf-8", errors="surrogateescape")
+        for item in completed.stdout.split(b"\0")
+        if item
+    }
+
+
+def _cas_logical_bindings(
+    root: Path,
+    *,
+    repo_status: dict[str, Any] | None,
+    pending_paths: set[str],
+) -> dict[str, str]:
+    """Map logical artifact paths to checkpointed or pending CAS pointers."""
+
+    if repo_status is None:
+        return {}
+    pointer_root = root / "research-objects"
+    if not pointer_root.is_dir() or pointer_root.is_symlink():
+        return {}
+    checkpoint_refs = {
+        str(item)
+        for item in (repo_status.get("last_checkpoint") or {}).get("object_refs") or []
+        if str(item).startswith("sha256:")
+    }
+    pointers: list[Path] = []
+    try:
+        with os.scandir(pointer_root) as entries:
+            for entry in islice(entries, _MAX_POINTER_RECORDS):
+                try:
+                    if not entry.name.endswith(".json") or not entry.is_file(
+                        follow_symlinks=False
+                    ):
+                        continue
+                except OSError:
+                    continue
+                pointers.append(Path(entry.path))
+    except OSError:
+        return {}
+    bindings: dict[str, str] = {}
+    pointer_relatives: list[str] = []
+    rows: list[tuple[str, str, str]] = []
+    for pointer in pointers:
+        payload, error = _read_json(pointer)
+        object_hash = str(payload.get("object_hash") or "")
+        logical_path = str(payload.get("logical_path") or "").strip()
+        if (
+            error
+            or not logical_path
+            or Path(logical_path).is_absolute()
+            or ".." in Path(logical_path).parts
+            or not object_hash.startswith("sha256:")
+        ):
+            continue
+        relative = pointer.relative_to(root).as_posix()
+        pointer_relatives.append(relative)
+        rows.append((logical_path, object_hash, relative))
+    tracked_pointers = _git_tracked_paths(root, pointer_relatives)
+    for logical_path, object_hash, pointer_relative in rows:
+        if pointer_relative in pending_paths:
+            bindings[logical_path] = "pending"
+        elif pointer_relative in tracked_pointers and object_hash in checkpoint_refs:
+            bindings[logical_path] = "checkpointed"
+        else:
+            bindings.setdefault(logical_path, "unbound")
+    return bindings
+
+
+def _deliverable_audit(
+    root: Path,
+    *,
+    paths: list[Path],
+    repo_status: dict[str, Any] | None,
+) -> dict[str, Any]:
+    relative_paths = sorted(
+        {
+            path.relative_to(root).as_posix()
+            for path in paths
+            if path.is_file() and root in path.parents
+        }
+    )
+    if repo_status is None:
+        return {
+            "available": False,
+            "total": len(relative_paths),
+            "checkpointed": 0,
+            "pending": 0,
+            "unbound": len(relative_paths),
+            "checkpointed_paths": [],
+            "pending_paths": [],
+            "unbound_paths": relative_paths,
+        }
+    pending_set = {
+        str(path)
+        for path in (
+            list(repo_status.get("staged_paths") or [])
+            + list((repo_status.get("research_stage") or {}).get("paths") or [])
+            + list(repo_status.get("tracked_changes") or [])
+            + list(repo_status.get("eligible_changes") or [])
+        )
+    }
+    tracked = _git_tracked_paths(root, relative_paths)
+    cas_bindings = _cas_logical_bindings(
+        root,
+        repo_status=repo_status,
+        pending_paths=pending_set,
+    )
+    checkpointed: list[str] = []
+    pending: list[str] = []
+    unbound: list[str] = []
+    for relative in relative_paths:
+        if relative in pending_set or cas_bindings.get(relative) == "pending":
+            pending.append(relative)
+        elif relative in tracked or cas_bindings.get(relative) == "checkpointed":
+            checkpointed.append(relative)
+        else:
+            unbound.append(relative)
+    return {
+        "available": True,
+        "total": len(relative_paths),
+        "checkpointed": len(checkpointed),
+        "pending": len(pending),
+        "unbound": len(unbound),
+        "checkpointed_paths": checkpointed,
+        "pending_paths": pending,
+        "unbound_paths": unbound,
+    }
+
+
+def _deliverables_summary(
+    root: Path,
+    *,
+    progress: dict[str, Any],
+    review: dict[str, Any],
+    repo_status: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Summarize experiments and paper readiness from existing local contracts."""
+
+    experiment_root, selected_result = _latest_experiment_selection(root, progress)
+    contract_root = experiment_root or root
+    contract_paths = [
+        contract_root / filename
+        for filename in _DELIVERABLE_CONTRACT_FILES
+        if (contract_root / filename).is_file()
+        and not (contract_root / filename).is_symlink()
+    ]
+    manifest, manifest_error = _read_json(contract_root / "pipeline_manifest.json")
+    manuscript, manuscript_error = _read_json(contract_root / "manuscript_state.json")
+    figure_spec, figure_error = _read_json(contract_root / "figure_spec.json")
+    review_state, review_error = _read_json(contract_root / "review_state.json")
+    repair_plan, repair_error = _read_json(contract_root / "repair_plan.json")
+    warnings: list[dict[str, str]] = []
+    for path, error in (
+        (contract_root / "pipeline_manifest.json", manifest_error),
+        (contract_root / "manuscript_state.json", manuscript_error),
+        (contract_root / "figure_spec.json", figure_error),
+        (contract_root / "review_state.json", review_error),
+        (contract_root / "repair_plan.json", repair_error),
+    ):
+        if error:
+            warnings.append(
+                {
+                    "code": "deliverable_contract_unreadable",
+                    "detail": f"{portable_path(path, base=root)}: {error}",
+                    "remediation": "restore the contract from Research Git or rerun its producing stage",
+                }
+            )
+
+    progress_results = [
+        item for item in progress.get("results") or [] if isinstance(item, dict)
+    ]
+    run_states = [
+        str(item.get("status") or "").strip().lower() for item in progress_results
+    ]
+    successful_runs = sum(
+        state in _SUCCESSFUL_EXPERIMENT_STATES for state in run_states
+    )
+    failed_runs = sum(state in _FAILED_EXPERIMENT_STATES for state in run_states)
+    counts = review.get("object_counts") or {}
+    recorded_attempts = _count(counts.get("experiment_attempt"))
+    manuscript_revisions = _count(counts.get("manuscript"))
+
+    figure_summary = (
+        figure_spec.get("summary")
+        if isinstance(figure_spec.get("summary"), dict)
+        else {}
+    )
+    figures = [
+        item for item in figure_spec.get("figures") or [] if isinstance(item, dict)
+    ]
+    figure_count = _count(figure_summary.get("figure_count"), default=len(figures))
+    ready_figure_count = _count(
+        figure_summary.get("ready_figure_count")
+        or sum(item.get("status") == "ready" for item in figures),
+    )
+
+    manuscript_evidence = (
+        manuscript.get("evidence_summary")
+        if isinstance(manuscript.get("evidence_summary"), dict)
+        else {}
+    )
+    review_metrics = (
+        review_state.get("repair_metrics")
+        if isinstance(review_state.get("repair_metrics"), dict)
+        else {}
+    )
+    active_issue_count = _count(
+        review_metrics.get("active_issue_count")
+        or len(review_state.get("active_issue_records") or [])
+    )
+    lane_summaries = (
+        review_state.get("lane_summaries")
+        if isinstance(review_state.get("lane_summaries"), dict)
+        else {}
+    )
+    blocking_issue_count = sum(
+        _count(item.get("blocking_issue_count"))
+        for item in lane_summaries.values()
+        if isinstance(item, dict)
+    )
+    repair_summary = (
+        repair_plan.get("summary")
+        if isinstance(repair_plan.get("summary"), dict)
+        else {}
+    )
+    repair_task_count = _count(repair_summary.get("task_count"))
+    repair_ready_count = _count(repair_summary.get("ready_task_count"))
+
+    explicit_research_status = (
+        str((selected_result or {}).get("research_status") or "").strip().lower()
+    )
+    guardrail_status = str(manuscript.get("guardrail_status") or "") or None
+    if blocking_issue_count or active_issue_count or repair_task_count:
+        paper_state = "revision_needed"
+    elif guardrail_status == "blocked":
+        paper_state = "evidence_blocked"
+    elif explicit_research_status == "submission_ready":
+        paper_state = "submission_ready"
+    elif manuscript or manuscript_revisions:
+        paper_state = "draft"
+    else:
+        paper_state = "not_started"
+
+    source_path = _workspace_file(
+        root,
+        manuscript.get("latex_path"),
+        base=contract_root,
+    )
+    pdf_path = _latest_project_pdf(
+        root,
+        experiment_root=experiment_root,
+        selected_result=selected_result,
+    )
+    material_paths = list(contract_paths)
+    if source_path is not None:
+        material_paths.append(source_path)
+    if pdf_path is not None:
+        material_paths.append(pdf_path)
+    audit = _deliverable_audit(
+        root,
+        paths=material_paths,
+        repo_status=repo_status,
+    )
+    if audit["unbound"]:
+        warnings.append(
+            {
+                "code": "deliverable_artifacts_unbound",
+                "detail": (
+                    f"{audit['unbound']} experiment or paper artifact(s) are not "
+                    "bound to the current Research Git history"
+                ),
+                "remediation": (
+                    "initialize Research Git before binding existing outputs"
+                    if repo_status is None
+                    else "bind large outputs through `xscientist research object add`, then save one checkpoint"
+                ),
+            }
+        )
+    artifact_entries = (
+        manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    )
+    return (
+        {
+            "available": bool(
+                progress_results
+                or recorded_attempts
+                or manuscript_revisions
+                or contract_paths
+                or pdf_path
+            ),
+            "experiment_root": (
+                portable_path(experiment_root, base=root)
+                if experiment_root is not None
+                else None
+            ),
+            "experiment": {
+                "runs": len(progress_results),
+                "successful": successful_runs,
+                "failed": failed_runs,
+                "recorded_attempts": recorded_attempts,
+                "registry_status": (
+                    (artifact_entries.get("experiment_registry") or {}).get("status")
+                    if isinstance(artifact_entries.get("experiment_registry"), dict)
+                    else None
+                ),
+            },
+            "paper": {
+                "state": paper_state,
+                "manuscript_revisions": manuscript_revisions,
+                "guardrail_status": guardrail_status,
+                "claim_count": _count(manuscript_evidence.get("claim_count")),
+                "supported_claim_count": _count(
+                    manuscript_evidence.get("supported_claim_count")
+                ),
+                "figures": {
+                    "total": figure_count,
+                    "ready": ready_figure_count,
+                },
+                "review": {
+                    "active_issues": active_issue_count,
+                    "blocking_issues": blocking_issue_count,
+                },
+                "repair": {
+                    "tasks": repair_task_count,
+                    "ready": repair_ready_count,
+                },
+                "source": (
+                    portable_path(source_path, base=root)
+                    if source_path is not None
+                    else None
+                ),
+                "pdf": (
+                    portable_path(pdf_path, base=root) if pdf_path is not None else None
+                ),
+            },
+            "audit": audit,
+        },
+        warnings,
+    )
 
 
 def _empty_closure_levels(status: str = "unavailable") -> dict[str, dict[str, Any]]:
@@ -393,6 +910,18 @@ def build_workspace_status(
                 "remediation": "run `xscientist audit . --level trace` for details",
             }
         )
+    deliverables, deliverable_warnings = _deliverables_summary(
+        root,
+        progress=progress,
+        review=review,
+        repo_status=repo_status,
+    )
+    warnings.extend(deliverable_warnings)
+    deliverable_audit = deliverables["audit"]
+    if repo_status is not None and (
+        deliverable_audit.get("pending") or deliverable_audit.get("unbound")
+    ):
+        review["clean"] = False
     dag_view = _dag_view_status(root, dag_path, head=research.get("head"))
     if dag_view.get("warning"):
         warnings.append(
@@ -404,6 +933,33 @@ def build_workspace_status(
         )
     background_run = _selected_background_run(root)
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
+    deliverable_step: dict[str, str] | None = None
+    if not research_enabled and deliverables.get("available"):
+        deliverable_step = {
+            "code": "initialize_research_history",
+            "title": "Initialize Research Git before binding existing outputs",
+            "command": "xscientist research init .",
+        }
+    elif repo_status is not None and deliverable_audit.get("unbound_paths"):
+        unbound_path = str(deliverable_audit["unbound_paths"][0])
+        deliverable_step = {
+            "code": "bind_research_output",
+            "title": "Bind the latest experiment or manuscript output to Research Git",
+            "command": (
+                "xscientist research object add "
+                f"{shlex.quote(unbound_path)} --repo . "
+                f"--logical-path {shlex.quote(unbound_path)}"
+            ),
+        }
+    elif repo_status is not None and deliverable_audit.get("pending"):
+        deliverable_step = {
+            "code": "checkpoint_research_outputs",
+            "title": "Save the latest experiment and paper state as one checkpoint",
+            "command": (
+                "xscientist history save . "
+                '-m "checkpoint experiment and manuscript state"'
+            ),
+        }
     readiness_blockers = [
         item
         for item in readiness.get("remediations") or []
@@ -445,6 +1001,8 @@ def build_workspace_status(
                 ),
             },
         )
+    if deliverable_step is not None:
+        next_steps.insert(0, deliverable_step)
     if readiness_blockers:
         blocker = readiness_blockers[0]
         next_steps.insert(
@@ -498,7 +1056,9 @@ def build_workspace_status(
     workspace_name, workspace_id = _workspace_identity(root)
     background_status = str((background_run or {}).get("status") or "")
     guide_progress = (research.get("guide") or {}).get("progress") or {}
-    scientific_work_exists = int(guide_progress.get("completed_stages") or 0) > 0
+    scientific_work_exists = _count(guide_progress.get("completed_stages")) > 0 or bool(
+        deliverables.get("available")
+    )
     attention_required = bool(
         errors
         or readiness_blockers
@@ -568,6 +1128,7 @@ def build_workspace_status(
                 else None
             ),
         },
+        "deliverables": deliverables,
         "review": review,
         "budget": {
             "available": bool(budget),

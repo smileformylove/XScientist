@@ -21,7 +21,6 @@ from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
 )
 
-
 _ARTIFACT_NAME = "manuscript_candidate_pool"
 _POOL_DIR_NAME = "pareto_pool"
 _CANDIDATES_SUBDIR = "candidates"
@@ -167,7 +166,11 @@ def _dominates(a_scores: dict[str, float], b_scores: dict[str, float]) -> bool:
 
 def compute_pareto_front(candidates: list[dict[str, Any]]) -> list[str]:
     keys: list[str] = []
-    valid = [c for c in candidates if isinstance(c, dict) and isinstance(c.get("scores"), dict)]
+    valid = [
+        c
+        for c in candidates
+        if isinstance(c, dict) and isinstance(c.get("scores"), dict)
+    ]
     for candidate in valid:
         scores = candidate["scores"]
         dominated = False
@@ -192,7 +195,10 @@ def add_candidate(
 ) -> dict[str, Any]:
     if latex_path is None:
         return {"status": "skipped_no_latex"}
+    project_root_path = Path(project_root).expanduser().resolve()
     latex_path_obj = Path(latex_path).expanduser()
+    if not latex_path_obj.is_absolute():
+        latex_path_obj = project_root_path / latex_path_obj
     if not latex_path_obj.exists():
         return {"status": "skipped_no_latex", "latex_path": str(latex_path_obj)}
     try:
@@ -225,18 +231,20 @@ def add_candidate(
 
     existing = next((c for c in candidates if c.get("key") == key), None)
     if existing is None:
-        candidates.append({
-            "key": key,
-            "latex_relpath": relpath,
-            "scores": full_scores,
-            "imputed_dims": imputed_dims,
-            "round_index": int(round_index),
-            "source": str(source or "review_round"),
-            "created_at": _now_iso(),
-            "last_seen_round": int(round_index),
-            "is_on_front": False,
-            "times_seeded": 0,
-        })
+        candidates.append(
+            {
+                "key": key,
+                "latex_relpath": relpath,
+                "scores": full_scores,
+                "imputed_dims": imputed_dims,
+                "round_index": int(round_index),
+                "source": str(source or "review_round"),
+                "created_at": _now_iso(),
+                "last_seen_round": int(round_index),
+                "is_on_front": False,
+                "times_seeded": 0,
+            }
+        )
         admit_status = "added"
     else:
         existing.setdefault("round_index", int(round_index))
@@ -290,7 +298,9 @@ def evict_dominated(
 
     front_members = [c for c in candidates if c.get("key") in front_keys]
     dominated_members = [c for c in candidates if c.get("key") not in front_keys]
-    dominated_members.sort(key=lambda c: (int(c.get("round_index") or 0), str(c.get("created_at") or "")))
+    dominated_members.sort(
+        key=lambda c: (int(c.get("round_index") or 0), str(c.get("created_at") or ""))
+    )
 
     while len(front_members) + len(dominated_members) > cap and dominated_members:
         victim = dominated_members.pop(0)
@@ -299,7 +309,11 @@ def evict_dominated(
     if len(front_members) > cap:
         front_members.sort(
             key=lambda c: (
-                statistics.mean(c.get("scores", {}).values()) if c.get("scores") else 0.0,
+                (
+                    statistics.mean(c.get("scores", {}).values())
+                    if c.get("scores")
+                    else 0.0
+                ),
                 -int(c.get("round_index") or 0),
             ),
             reverse=True,
@@ -423,7 +437,11 @@ def select_merge_pair(
     pool = load_pareto_pool(project_root)
     candidates: list[dict[str, Any]] = pool.get("candidates") or []
     front_keys = set(pool.get("front_keys") or [])
-    front = [c for c in candidates if c.get("key") in front_keys and isinstance(c.get("scores"), dict)]
+    front = [
+        c
+        for c in candidates
+        if c.get("key") in front_keys and isinstance(c.get("scores"), dict)
+    ]
     if len(front) < 2:
         return None
     best: tuple[float, dict[str, Any], dict[str, Any]] | None = None

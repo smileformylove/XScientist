@@ -411,6 +411,24 @@ choice as a warning.
 Large/binary files are denied by the Git whitelist. Register them in the local
 CAS instead:
 
+When the file is the output of a terminal experiment, the shortest path is to
+record both in one operation:
+
+```bash
+xscientist research experiment "held-out evaluation" \
+  --status success --metric accuracy=0.91 \
+  --result-artifact metrics=./results/heldout.json \
+  --repo .
+```
+
+Each repeatable `LABEL=PATH` input is copied into CAS and represented in the
+typed attempt by its logical name, logical path, content hash, and portable
+pointer path. The pointer, attempt, and object reference enter the same
+checkpoint, so deleting the original result file does not remove the audited
+snapshot. A missing or damaged CAS object makes reproduction fail closed.
+
+For a standalone artifact, use the lower-level pair:
+
 ```bash
 xscientist research object add ./raw/results.parquet \
   --logical-path data/results.parquet

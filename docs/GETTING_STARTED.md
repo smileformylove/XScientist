@@ -86,8 +86,25 @@ xscientist history rollback ./my-study --commit HEAD
 ```
 
 `status` is the default review page: it shows the current checkpoint, pending
-research changes, and the trace/replay/verify check ladder. `show` inspects one
-checkpoint and `diff` explains the scientific change between two checkpoints.
+research changes, latest experiment failures, paper/review readiness, artifact
+checkpoint coverage, and the trace/replay/verify check ladder. It keeps one
+highest-priority action under `Next`; `show` inspects one checkpoint and `diff`
+explains the scientific change between two checkpoints.
+
+Text contracts for experiments, manuscripts, reviews, and repairs are eligible
+for normal checkpoints. Keep generated PDFs, result tables, and other large
+outputs in the local content-addressed store:
+
+```bash
+xscientist research experiment "held-out evaluation" \
+  --status success --metric accuracy=0.91 \
+  --result-artifact metrics=./results/heldout.json \
+  --repo ./my-study
+```
+
+This records the experiment, immutable result snapshot, portable pointer, and
+content hash together. If a paper or result is still unbound, `status` prints
+the exact `research object add` command before asking for a checkpoint.
 
 The rollback command above is a read-only preview. It reports the exact target,
 scientific impact, blockers, and an apply command. `--apply` appends a reversal

@@ -8,11 +8,16 @@ import os
 import re
 import statistics
 import uuid
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ai_scientist.utils.pipeline_contracts import load_contract_artifact, save_contract_artifact
+from ai_scientist.utils.pipeline_contracts import (
+    load_contract_artifact,
+    save_contract_artifact,
+)
+from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 
 
 def _pareto_pool_enabled() -> bool:
@@ -24,8 +29,12 @@ def _pareto_pool_enabled() -> bool:
     }
 
 
-def _aggregate_scores_from_role_summaries(review_state: dict[str, Any]) -> dict[str, float]:
-    role_summaries = review_state.get("role_summaries") if isinstance(review_state, dict) else None
+def _aggregate_scores_from_role_summaries(
+    review_state: dict[str, Any],
+) -> dict[str, float]:
+    role_summaries = (
+        review_state.get("role_summaries") if isinstance(review_state, dict) else None
+    )
     if not isinstance(role_summaries, dict):
         return {}
     from ai_scientist.utils.pareto_pool import SCORE_KEYS
@@ -65,7 +74,9 @@ def _maybe_record_pareto_candidate(
     if not _pareto_pool_enabled():
         return
     try:
-        manuscript_state = load_contract_artifact(project_root, "manuscript_state", default=None)
+        manuscript_state = load_contract_artifact(
+            project_root, "manuscript_state", default=None
+        )
     except Exception:
         manuscript_state = None
     latex_path = None
@@ -143,6 +154,31 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _portable_review_job(
+    project_root: str | Path,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist review locations without retaining host filesystem identity."""
+
+    root = Path(project_root).expanduser().resolve()
+    payload = deepcopy(job)
+    for field in ("job_dir", "pdf_path"):
+        raw_value = str(payload.get(field) or "").strip()
+        if not raw_value:
+            continue
+        candidate = Path(raw_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        rendered = portable_path(candidate, base=root)
+        payload[field] = None if rendered == REDACTED_PATH else rendered
+        payload[f"{field}_scope"] = (
+            "workspace_relative"
+            if rendered != REDACTED_PATH
+            else "external_not_recorded"
+        )
+    return payload
+
+
 def _normalize_issue_text(text: Any) -> str:
     normalized = str(text or "").strip().lower()
     normalized = _ISSUE_SPACE_RE.sub(" ", normalized)
@@ -183,9 +219,7 @@ def _tokenize_text(text: Any) -> set[str]:
     if not normalized:
         return set()
     return {
-        token
-        for token in _ISSUE_TOKEN_RE.split(normalized)
-        if token and len(token) > 1
+        token for token in _ISSUE_TOKEN_RE.split(normalized) if token and len(token) > 1
     }
 
 
@@ -219,13 +253,13 @@ def _build_target_entry(
 
 
 def _build_issue_binding_catalog(project_root: str | Path) -> dict[str, Any]:
-    claim_graph = load_contract_artifact(
-        project_root, "claim_evidence_graph", default={}
-    ) or {}
+    claim_graph = (
+        load_contract_artifact(project_root, "claim_evidence_graph", default={}) or {}
+    )
     figure_spec = load_contract_artifact(project_root, "figure_spec", default={}) or {}
-    manuscript_state = load_contract_artifact(
-        project_root, "manuscript_state", default={}
-    ) or {}
+    manuscript_state = (
+        load_contract_artifact(project_root, "manuscript_state", default={}) or {}
+    )
 
     claim_nodes = [
         node
@@ -298,7 +332,9 @@ def _build_issue_binding_catalog(project_root: str | Path) -> dict[str, Any]:
         else {}
     )
     figure_to_claim = {
-        str(item.get("figure_id") or "").strip(): str(item.get("claim_id") or "").strip()
+        str(item.get("figure_id") or "")
+        .strip(): str(item.get("claim_id") or "")
+        .strip()
         for item in figures_raw
         if str(item.get("figure_id") or "").strip()
     }
@@ -431,9 +467,7 @@ def _default_repair_actions(
     role = str(issue_record.get("role") or "clarity").strip()
     section_ids = _coerce_str_list(issue_record.get("section_ids"))
     section_text = (
-        section_ids[0].replace("_", " ")
-        if section_ids
-        else primary_target_label
+        section_ids[0].replace("_", " ") if section_ids else primary_target_label
     )
     if primary_target_type == "figure" and primary_target_id:
         return [
@@ -448,9 +482,7 @@ def _default_repair_actions(
             return [
                 f"Revise the {section_text} section with stronger experimental evidence to resolve: {issue_text}"
             ]
-        return [
-            f"Revise the {section_text} section narrative to resolve: {issue_text}"
-        ]
+        return [f"Revise the {section_text} section narrative to resolve: {issue_text}"]
     return [f"Create a focused repair plan for reviewer issue: {issue_text}"]
 
 
@@ -526,10 +558,7 @@ def _build_repair_queue(
         elif section_ids:
             primary_target_type = "section"
             primary_target_id = section_ids[0]
-        label_target_id = (
-            primary_target_id
-            or (section_ids[0] if section_ids else "")
-        )
+        label_target_id = primary_target_id or (section_ids[0] if section_ids else "")
         primary_target_label = _format_target_label(label_target_id, catalog=catalog)
         target_ids = claim_ids + figure_ids + section_ids
         matched_actions = _match_supporting_texts(
@@ -585,7 +614,8 @@ def _build_repair_queue(
                 "severity": str(issue_record.get("severity") or "").strip() or None,
                 "kind": str(issue_record.get("kind") or "").strip() or None,
                 "blocker_class": str(
-                    issue_record.get("blocker_class") or _infer_blocker_class(issue_record)
+                    issue_record.get("blocker_class")
+                    or _infer_blocker_class(issue_record)
                 ),
                 "appearance_count": int(issue_record.get("appearance_count") or 1),
                 "is_persistent": bool(issue_record.get("is_persistent")),
@@ -638,18 +668,24 @@ def _bind_issue_targets(
             binding_reasons.append("figure_from_claim_binding")
     if figure_ids and not claim_ids:
         for figure_id in figure_ids:
-            claim_id = str(catalog.get("figure_to_claim", {}).get(figure_id) or "").strip()
+            claim_id = str(
+                catalog.get("figure_to_claim", {}).get(figure_id) or ""
+            ).strip()
             if claim_id:
                 claim_ids.append(claim_id)
         claim_ids = _dedupe_texts(claim_ids)
         if claim_ids:
             binding_reasons.append("claim_from_figure_binding")
     if claim_ids:
-        for section_name, bound_claims in (catalog.get("section_claim_bindings") or {}).items():
+        for section_name, bound_claims in (
+            catalog.get("section_claim_bindings") or {}
+        ).items():
             if any(claim_id in bound_claims for claim_id in claim_ids):
                 section_ids.append(section_name)
     if figure_ids:
-        for section_name, bound_figures in (catalog.get("section_figure_bindings") or {}).items():
+        for section_name, bound_figures in (
+            catalog.get("section_figure_bindings") or {}
+        ).items():
             if any(figure_id in bound_figures for figure_id in figure_ids):
                 section_ids.append(section_name)
     section_ids = _dedupe_texts(section_ids)
@@ -678,7 +714,9 @@ def _bind_issue_targets(
     }
 
 
-def _extract_issue_records(review_payload: dict[str, Any], *, role: str) -> list[dict[str, Any]]:
+def _extract_issue_records(
+    review_payload: dict[str, Any], *, role: str
+) -> list[dict[str, Any]]:
     issue_specs = [
         ("Weaknesses", "weakness", "major"),
         ("Questions", "question", "minor"),
@@ -803,7 +841,9 @@ def _coerce_issue_records_from_state(
     return []
 
 
-def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[str, Any]:
+def compute_review_repair_metrics(
+    review_state: dict[str, Any] | None,
+) -> dict[str, Any]:
     state = review_state if isinstance(review_state, dict) else {}
     active_records = _coerce_issue_records_from_state(state, "active_issue_records")
     resolved_records = _coerce_issue_records_from_state(state, "resolved_issue_records")
@@ -821,7 +861,10 @@ def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[s
             roles.add(role_text)
     total_issue_ids = {
         str(item.get("issue_id") or "")
-        for item in active_records + resolved_records + persistent_records + issue_ledger
+        for item in active_records
+        + resolved_records
+        + persistent_records
+        + issue_ledger
         if str(item.get("issue_id") or "").strip()
     }
     total_issue_count = len(total_issue_ids)
@@ -846,7 +889,9 @@ def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[s
             if str(item.get("issue_id") or "").strip()
         }
     )
-    repair_action_count = len(_dedupe_texts(_coerce_text_list(state.get("repair_actions"))))
+    repair_action_count = len(
+        _dedupe_texts(_coerce_text_list(state.get("repair_actions")))
+    )
     verification_count = len(
         _dedupe_texts(_coerce_text_list(state.get("verification_checks")))
     )
@@ -870,7 +915,12 @@ def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[s
             is_strongly_bound = (
                 bool(item.get("is_strongly_bound"))
                 if "is_strongly_bound" in item
-                else (not binding_reasons or any(reason != "role_default_section" for reason in binding_reasons))
+                else (
+                    not binding_reasons
+                    or any(
+                        reason != "role_default_section" for reason in binding_reasons
+                    )
+                )
             )
             if is_strongly_bound:
                 strong_bound_issue_ids.add(issue_id)
@@ -888,7 +938,12 @@ def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[s
             is_strongly_bound = (
                 bool(item.get("is_strongly_bound"))
                 if "is_strongly_bound" in item
-                else (not binding_reasons or any(reason != "role_default_section" for reason in binding_reasons))
+                else (
+                    not binding_reasons
+                    or any(
+                        reason != "role_default_section" for reason in binding_reasons
+                    )
+                )
             )
             if is_strongly_bound:
                 strong_bound_active_issue_ids.add(issue_id)
@@ -915,7 +970,10 @@ def compute_review_repair_metrics(review_state: dict[str, Any] | None) -> dict[s
     )
     verification_coverage = (
         round(
-            min(1.0, verification_count / max(active_issue_count + resolved_issue_count, 1)),
+            min(
+                1.0,
+                verification_count / max(active_issue_count + resolved_issue_count, 1),
+            ),
             3,
         )
         if (active_issue_count + resolved_issue_count) > 0
@@ -1007,21 +1065,43 @@ def review_jobs_root(project_root: str | Path) -> Path:
 
 def _infer_blocker_class(issue_record: dict[str, Any]) -> str:
     role = str(issue_record.get("role") or "").strip().lower()
-    text = _normalize_issue_text(issue_record.get("text") or issue_record.get("issue_text") or "")
+    text = _normalize_issue_text(
+        issue_record.get("text") or issue_record.get("issue_text") or ""
+    )
     if role in {"skeptical_pc_member", "claim_cross_examiner"}:
-        if any(token in text for token in ("overclaim", "oversell", "generaliz", "claim", "support")):
+        if any(
+            token in text
+            for token in ("overclaim", "oversell", "generaliz", "claim", "support")
+        ):
             return "oversell"
     if role == "desk_reject_editor" and any(
-        token in text for token in ("scope", "framing", "fit", "position", "motivation", "importance")
+        token in text
+        for token in ("scope", "framing", "fit", "position", "motivation", "importance")
     ):
         return "positioning_gap"
     if role in {"rigor", "skeptical_pc_member"} or any(
         token in text
-        for token in ("baseline", "ablation", "significance", "control", "benchmark", "experiment")
+        for token in (
+            "baseline",
+            "ablation",
+            "significance",
+            "control",
+            "benchmark",
+            "experiment",
+        )
     ):
         return "evidence_hole"
     if role == "stats_sniper" or any(
-        token in text for token in ("variance", "confidence interval", "p-value", "significance test", "error bar", "sample size", "statistic")
+        token in text
+        for token in (
+            "variance",
+            "confidence interval",
+            "p-value",
+            "significance test",
+            "error bar",
+            "sample size",
+            "statistic",
+        )
     ):
         return "statistical_gap"
     if role in {"reproducibility", "reproducibility_assassin"} or any(
@@ -1030,7 +1110,14 @@ def _infer_blocker_class(issue_record: dict[str, Any]) -> str:
     ):
         return "reproducibility_gap"
     if role in {"related_work_skeptic"} or any(
-        token in text for token in ("citation", "prior work", "related work", "literature", "missing reference")
+        token in text
+        for token in (
+            "citation",
+            "prior work",
+            "related work",
+            "literature",
+            "missing reference",
+        )
     ):
         return "citation_gap"
     if role in {"novelty", "novelty_executioner", "meta_reviewer"}:
@@ -1045,21 +1132,45 @@ def _infer_blocker_class(issue_record: dict[str, Any]) -> str:
 def _infer_repair_owner(queue_item: dict[str, Any], lane: str) -> tuple[str, str]:
     blocker_class = str(queue_item.get("blocker_class") or "").strip().lower()
     role = str(queue_item.get("role") or "").strip().lower()
-    primary_target_type = str(queue_item.get("primary_target_type") or "").strip().lower()
+    primary_target_type = (
+        str(queue_item.get("primary_target_type") or "").strip().lower()
+    )
     if lane in {"evidence_followup", "method_repair"} or blocker_class in {
         "evidence_hole",
         "reproducibility_gap",
         "statistical_gap",
     }:
-        return ("experiment_agent", "Needs stronger evidence, controls, or reproducibility detail.")
-    if lane == "figure_repair" or primary_target_type == "figure" or blocker_class == "figure_gap":
-        return ("figure_agent", "Issue is primarily about figure packaging or visual evidence.")
+        return (
+            "experiment_agent",
+            "Needs stronger evidence, controls, or reproducibility detail.",
+        )
+    if (
+        lane == "figure_repair"
+        or primary_target_type == "figure"
+        or blocker_class == "figure_gap"
+    ):
+        return (
+            "figure_agent",
+            "Issue is primarily about figure packaging or visual evidence.",
+        )
     if blocker_class in {"oversell", "novelty_risk", "citation_gap", "positioning_gap"}:
-        return ("storyline_editor", "Issue is about claim scope, novelty framing, or overstatement.")
-    if role in {"clarity", "style_snob", "desk_reject_editor"} or lane == "section_rewrite":
-        return ("writing_agent", "Issue is primarily narrative, structure, or exposition.")
+        return (
+            "storyline_editor",
+            "Issue is about claim scope, novelty framing, or overstatement.",
+        )
+    if (
+        role in {"clarity", "style_snob", "desk_reject_editor"}
+        or lane == "section_rewrite"
+    ):
+        return (
+            "writing_agent",
+            "Issue is primarily narrative, structure, or exposition.",
+        )
     if lane == "triage":
-        return ("planner_agent", "Issue still needs planning/ownership clarification before execution.")
+        return (
+            "planner_agent",
+            "Issue still needs planning/ownership clarification before execution.",
+        )
     return ("repair_agent", "Generic repair ownership fallback.")
 
 
@@ -1109,7 +1220,11 @@ def begin_review_job(
         "status": "running",
     }
     (job_dir / "job.json").write_text(
-        json.dumps(job, indent=2, ensure_ascii=False),
+        json.dumps(
+            _portable_review_job(project_root, job),
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     return job
@@ -1132,7 +1247,11 @@ def finalize_review_job(
     job["usage_summary"] = usage_summary or {}
     job["evidence_refs"] = list(evidence_refs or [])
     (job_dir / "job.json").write_text(
-        json.dumps(job, indent=2, ensure_ascii=False),
+        json.dumps(
+            _portable_review_job(project_root, job),
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     if review_text is not None:
@@ -1152,7 +1271,7 @@ def finalize_review_job(
         f"- Lane: {job.get('lane_name') or 'review'}",
         f"- Strictness: {job.get('strictness_profile') or 'standard'}",
         f"- Status: {job['status']}",
-        f"- PDF: {job.get('pdf_path')}",
+        f"- PDF: {_portable_review_job(project_root, job).get('pdf_path')}",
         f"- Evidence refs: {', '.join(job.get('evidence_refs') or []) or 'none'}",
     ]
     (job_dir / "review_summary.md").write_text(
@@ -1213,12 +1332,16 @@ def update_review_state(
     review_state["rounds"].append(round_item)
     previous_active = {
         str(item.get("issue_id") or ""): item
-        for item in _coerce_issue_records_from_state(review_state, "active_issue_records")
+        for item in _coerce_issue_records_from_state(
+            review_state, "active_issue_records"
+        )
         if str(item.get("issue_id") or "").strip()
     }
     resolved_records = {
         str(item.get("issue_id") or ""): item
-        for item in _coerce_issue_records_from_state(review_state, "resolved_issue_records")
+        for item in _coerce_issue_records_from_state(
+            review_state, "resolved_issue_records"
+        )
         if str(item.get("issue_id") or "").strip()
     }
     issue_ledger = {
@@ -1235,9 +1358,13 @@ def update_review_state(
             if isinstance(review_text.get("review"), dict)
             else {}
         )
-        issue_records = _extract_issue_records(review_payload, role=str(job.get("role") or "clarity"))
+        issue_records = _extract_issue_records(
+            review_payload, role=str(job.get("role") or "clarity")
+        )
         current_issue_ids = {
-            str(item.get("issue_id") or "") for item in issue_records if str(item.get("issue_id") or "").strip()
+            str(item.get("issue_id") or "")
+            for item in issue_records
+            if str(item.get("issue_id") or "").strip()
         }
         previous_issue_ids = set(previous_active.keys())
         persistent_issue_ids = current_issue_ids & previous_issue_ids
@@ -1262,8 +1389,10 @@ def update_review_state(
                 "review_suite": job.get("suite_name"),
                 "strictness_profile": job.get("strictness_profile") or "standard",
                 "evidence_refs": list(evidence_refs or []),
-                "first_seen_job_id": previous.get("first_seen_job_id") or job.get("job_id"),
-                "first_seen_at": previous.get("first_seen_at") or job.get("finished_at"),
+                "first_seen_job_id": previous.get("first_seen_job_id")
+                or job.get("job_id"),
+                "first_seen_at": previous.get("first_seen_at")
+                or job.get("finished_at"),
                 "last_seen_job_id": job.get("job_id"),
                 "last_seen_at": job.get("finished_at"),
                 "appearance_count": appearance_count,
@@ -1286,16 +1415,23 @@ def update_review_state(
             previous["status"] = "resolved"
             previous["resolved_in_job_id"] = job.get("job_id")
             previous["resolved_at"] = job.get("finished_at")
-            previous["review_lane"] = previous.get("review_lane") or job.get("lane_name") or "review"
-            previous.setdefault("is_bound", bool(
-                _coerce_str_list(previous.get("claim_ids"))
-                or _coerce_str_list(previous.get("figure_ids"))
-                or _coerce_str_list(previous.get("section_ids"))
-            ))
+            previous["review_lane"] = (
+                previous.get("review_lane") or job.get("lane_name") or "review"
+            )
+            previous.setdefault(
+                "is_bound",
+                bool(
+                    _coerce_str_list(previous.get("claim_ids"))
+                    or _coerce_str_list(previous.get("figure_ids"))
+                    or _coerce_str_list(previous.get("section_ids"))
+                ),
+            )
             resolved_records[issue_id] = previous
             issue_ledger[issue_id] = previous
         review_state["active_issue_records"] = active_issue_records
-        review_state["active_issues"] = [item.get("text") for item in active_issue_records]
+        review_state["active_issues"] = [
+            item.get("text") for item in active_issue_records
+        ]
         review_state["persistent_issue_records"] = persistent_issue_records
         review_state["persistent_issues"] = [
             item.get("text") for item in persistent_issue_records
@@ -1368,9 +1504,9 @@ def update_review_state(
         blocker_class_counts: dict[str, int] = {}
         for item in active_issue_records:
             blocker_class = str(item.get("blocker_class") or "general_blocker")
-            blocker_class_counts[blocker_class] = blocker_class_counts.get(
-                blocker_class, 0
-            ) + 1
+            blocker_class_counts[blocker_class] = (
+                blocker_class_counts.get(blocker_class, 0) + 1
+            )
         review_state.setdefault("role_summaries", {})[job["role"]] = {
             "scores": review_payload.get("scores") or {},
             "weaknesses": weaknesses,
@@ -1409,7 +1545,9 @@ def update_review_state(
                 issue_id = str(issue_record.get("issue_id") or "").strip()
                 queue_item = queue_by_issue.get(issue_id) or {}
                 target_type = str(queue_item.get("primary_target_type") or "unbound")
-                target_id = str(queue_item.get("primary_target_id") or "").strip() or None
+                target_id = (
+                    str(queue_item.get("primary_target_id") or "").strip() or None
+                )
                 critic_findings.append(
                     {
                         "issue_id": issue_id,

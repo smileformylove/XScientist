@@ -161,6 +161,25 @@ xscientist status ./first-study --lang zh
 日常只看 `status` 即可。需要分支、流水线、Token 或后台任务细节时再加
 `--verbose`；自动化程序使用 `--json`。
 
+默认视图保持极简，但会直接回答推进科研最需要的几件事：实验完成与失败数量、论文
+处于草稿/证据不足/待修订/投稿准备中的哪一态、图表与审稿问题还剩多少，以及这些
+产物有多少已经进入 checkpoint。实验、论文、审稿和修订的文本契约默认可由 Git
+审查；PDF、结果表等二进制产物不塞进 Git。若存在未绑定产物，`status` 会把准确的
+CAS 绑定命令放在“下一步”的首位。
+
+记录实验时可以同时保存真实结果文件，而不只留下一个脱离内容的哈希：
+
+```bash
+xscientist research experiment "留出集评估" \
+  --status success --metric accuracy=0.91 \
+  --result-artifact metrics=./results/heldout.json \
+  --repo ./my-study
+```
+
+该命令会把不可变快照写入本地内容寻址存储，将可移植指针和内容哈希绑定到有类型的
+实验记录，并在同一个 checkpoint 中保存。失败、超时和取消的运行同样会成为可追溯
+的实验结果，而不是历史中的空白。
+
 可移植 JSON 不会嵌入被检查工作区的宿主机路径。每个 `primary_action` 或
 `next_steps[]` 行都包含 `action` 契约：已有对象使用精确的 `rso-...` ID，并明确
 给出 `argv_template`、`workspace_binding`、`cwd_binding` 与 `input_binding`。

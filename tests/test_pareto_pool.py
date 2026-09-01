@@ -76,12 +76,33 @@ class ParetoFrontTests(unittest.TestCase):
 
 
 class AddEvictTests(unittest.TestCase):
+    def test_add_resolves_portable_manuscript_path_from_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td) / "projects" / "demo"
+            project_root.mkdir(parents=True, exist_ok=True)
+            initialize_pipeline_contracts(project_root, workflow_mode="review_board")
+            _write_latex(
+                project_root / "latex" / "template.tex",
+                "\\section{Intro}\nPortable.\n",
+            )
+
+            outcome = add_candidate(
+                project_root,
+                latex_path="latex/template.tex",
+                scores={"Originality": 7.0, "Clarity": 5.0, "Quality": 6.0},
+                round_index=0,
+            )
+
+            self.assertEqual(outcome["status"], "added")
+
     def test_add_imputes_missing_dims_and_admits(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
-            latex = _write_latex(project_root / "latex" / "template.tex", "\\section{Intro}\nA.\n")
+            latex = _write_latex(
+                project_root / "latex" / "template.tex", "\\section{Intro}\nA.\n"
+            )
 
             outcome = add_candidate(
                 project_root,
@@ -103,7 +124,9 @@ class AddEvictTests(unittest.TestCase):
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
-            latex = _write_latex(project_root / "latex" / "template.tex", "\\section{Intro}\nA.\n")
+            latex = _write_latex(
+                project_root / "latex" / "template.tex", "\\section{Intro}\nA.\n"
+            )
 
             outcome = add_candidate(
                 project_root,
@@ -124,8 +147,18 @@ class AddEvictTests(unittest.TestCase):
             # Two trade-off front members + 5 strictly dominated ones.
             front_a = _write_latex(project_root / "scratch" / "a.tex", "\\section{}\nA")
             front_b = _write_latex(project_root / "scratch" / "b.tex", "\\section{}\nB")
-            add_candidate(project_root, latex_path=front_a, scores=_full_scores(Originality=9, Clarity=4), round_index=0)
-            add_candidate(project_root, latex_path=front_b, scores=_full_scores(Originality=4, Clarity=9), round_index=0)
+            add_candidate(
+                project_root,
+                latex_path=front_a,
+                scores=_full_scores(Originality=9, Clarity=4),
+                round_index=0,
+            )
+            add_candidate(
+                project_root,
+                latex_path=front_b,
+                scores=_full_scores(Originality=4, Clarity=9),
+                round_index=0,
+            )
             for idx in range(5):
                 latex = _write_latex(
                     project_root / "scratch" / f"dom_{idx}.tex",
@@ -149,7 +182,9 @@ class AddEvictTests(unittest.TestCase):
             self.assertLessEqual(len(pool_after["candidates"]), 3)
             front_keys_after = set(pool_after["front_keys"])
             # Front members must survive.
-            self.assertTrue(front_keys_before.issubset({c["key"] for c in pool_after["candidates"]}))
+            self.assertTrue(
+                front_keys_before.issubset({c["key"] for c in pool_after["candidates"]})
+            )
             self.assertTrue(front_keys_before.issubset(front_keys_after))
 
             archived = list((project_root / "pareto_pool" / "archived").glob("*.tex"))
@@ -162,22 +197,40 @@ class SeedSelectionTests(unittest.TestCase):
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
-            strong = _write_latex(project_root / "scratch" / "strong.tex", "\\section{}\nstrong")
-            mixed = _write_latex(project_root / "scratch" / "mixed.tex", "\\section{}\nmixed")
+            strong = _write_latex(
+                project_root / "scratch" / "strong.tex", "\\section{}\nstrong"
+            )
+            mixed = _write_latex(
+                project_root / "scratch" / "mixed.tex", "\\section{}\nmixed"
+            )
             # Build a genuine trade-off: strong wins Clarity, mixed wins Originality.
             # strong has no weak dims (<7); mixed has one (Clarity=6).
             add_candidate(
                 project_root,
                 latex_path=strong,
-                scores=_full_scores(Originality=9, Clarity=9, Quality=8, Significance=8,
-                                    Soundness=8, Presentation=8, Contribution=8),
+                scores=_full_scores(
+                    Originality=9,
+                    Clarity=9,
+                    Quality=8,
+                    Significance=8,
+                    Soundness=8,
+                    Presentation=8,
+                    Contribution=8,
+                ),
                 round_index=0,
             )
             add_candidate(
                 project_root,
                 latex_path=mixed,
-                scores=_full_scores(Originality=10, Clarity=6, Quality=8, Significance=8,
-                                    Soundness=8, Presentation=8, Contribution=8),
+                scores=_full_scores(
+                    Originality=10,
+                    Clarity=6,
+                    Quality=8,
+                    Significance=8,
+                    Soundness=8,
+                    Presentation=8,
+                    Contribution=8,
+                ),
                 round_index=0,
             )
 
@@ -200,7 +253,9 @@ class MaybeSelectSeedPathTests(unittest.TestCase):
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
             latex = _write_latex(project_root / "scratch" / "a.tex", "\\section{}\nA")
-            add_candidate(project_root, latex_path=latex, scores=_full_scores(), round_index=0)
+            add_candidate(
+                project_root, latex_path=latex, scores=_full_scores(), round_index=0
+            )
             os.environ.pop("AI_SCIENTIST_PARETO_POOL", None)
             self.assertFalse(pareto_pool_enabled())
             self.assertIsNone(maybe_select_seed_path(project_root))
@@ -211,7 +266,9 @@ class MaybeSelectSeedPathTests(unittest.TestCase):
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
             latex = _write_latex(project_root / "scratch" / "a.tex", "\\section{}\nA")
-            add_candidate(project_root, latex_path=latex, scores=_full_scores(), round_index=0)
+            add_candidate(
+                project_root, latex_path=latex, scores=_full_scores(), round_index=0
+            )
             with patch.dict(os.environ, {"AI_SCIENTIST_PARETO_POOL": "1"}):
                 self.assertTrue(pareto_pool_enabled())
                 path = maybe_select_seed_path(project_root)
@@ -238,21 +295,27 @@ class MergePairTests(unittest.TestCase):
         add_candidate(
             project_root,
             latex_path=latex_a,
-            scores=_full_scores(Clarity=9.0, Presentation=8.5, Soundness=6.0, Quality=6.0),
+            scores=_full_scores(
+                Clarity=9.0, Presentation=8.5, Soundness=6.0, Quality=6.0
+            ),
             round_index=0,
         )
         # B strong on Soundness/Quality (complementary to A)
         add_candidate(
             project_root,
             latex_path=latex_b,
-            scores=_full_scores(Clarity=6.0, Presentation=6.0, Soundness=9.0, Quality=8.5),
+            scores=_full_scores(
+                Clarity=6.0, Presentation=6.0, Soundness=9.0, Quality=8.5
+            ),
             round_index=1,
         )
         # C dominated — same as A but weaker everywhere
         add_candidate(
             project_root,
             latex_path=latex_c,
-            scores=_full_scores(Clarity=5.0, Presentation=5.0, Soundness=5.0, Quality=5.0),
+            scores=_full_scores(
+                Clarity=5.0, Presentation=5.0, Soundness=5.0, Quality=5.0
+            ),
             round_index=2,
         )
 
@@ -278,7 +341,9 @@ class MergePairTests(unittest.TestCase):
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
             latex = _write_latex(project_root / "scratch" / "a.tex", "\\section{}\nA")
-            add_candidate(project_root, latex_path=latex, scores=_full_scores(), round_index=0)
+            add_candidate(
+                project_root, latex_path=latex, scores=_full_scores(), round_index=0
+            )
             self.assertIsNone(select_merge_pair(project_root))
 
     def test_select_merge_pair_threshold_skip(self) -> None:
@@ -287,8 +352,12 @@ class MergePairTests(unittest.TestCase):
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
             # Two front members with nearly-identical scores — complementarity too low.
-            latex_a = _write_latex(project_root / "scratch" / "a.tex", "\\section{a}\nA")
-            latex_b = _write_latex(project_root / "scratch" / "b.tex", "\\section{b}\nB")
+            latex_a = _write_latex(
+                project_root / "scratch" / "a.tex", "\\section{a}\nA"
+            )
+            latex_b = _write_latex(
+                project_root / "scratch" / "b.tex", "\\section{b}\nB"
+            )
             add_candidate(
                 project_root,
                 latex_path=latex_a,
@@ -304,7 +373,9 @@ class MergePairTests(unittest.TestCase):
             # Threshold above the actual gap (=2.0).
             self.assertIsNone(select_merge_pair(project_root, min_complementarity=5.0))
 
-    def test_describe_merge_pair_has_sorted_complementary_dims_and_strengths(self) -> None:
+    def test_describe_merge_pair_has_sorted_complementary_dims_and_strengths(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)

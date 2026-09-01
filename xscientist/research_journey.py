@@ -194,6 +194,12 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
 
     binding_mode = "none"
     cwd_mode = "caller"
+    workspace_relative_object_source = bool(
+        len(argv) >= 5
+        and argv[:4] == ["xscientist", "research", "object", "add"]
+        and not Path(argv[4]).is_absolute()
+        and "://" not in argv[4]
+    )
 
     for flag in ("--repo", "--workspace"):
         if flag in argv:
@@ -255,6 +261,11 @@ def workspace_action_contract(command: str | None) -> dict[str, Any] | None:
         binding_mode = "argument"
     if binding_mode == "none" and argv[:2] == ["xscientist", "preflight"]:
         binding_mode = "cwd"
+        cwd_mode = "workspace_root"
+    if workspace_relative_object_source:
+        # The object source is intentionally stored as a workspace-relative
+        # logical path. Binding --repo alone is insufficient because the CLI
+        # resolves this positional source from the process cwd.
         cwd_mode = "workspace_root"
 
     quoted_placeholder = shlex.quote(WORKSPACE_PLACEHOLDER)

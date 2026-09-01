@@ -148,6 +148,20 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 evidence_refs=["experiment_registry.jsonl"],
             )
 
+            persisted_job = json.loads(
+                (Path(job["job_dir"]) / "job.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(persisted_job["job_dir"].startswith("reviews/"))
+            self.assertEqual(persisted_job["job_dir_scope"], "workspace_relative")
+            self.assertEqual(persisted_job["pdf_path"], "paper.pdf")
+            self.assertEqual(persisted_job["pdf_path_scope"], "workspace_relative")
+            self.assertNotIn(str(project_root), json.dumps(persisted_job))
+            self.assertNotIn(
+                str(project_root),
+                (Path(job["job_dir"]) / "review_summary.md").read_text(
+                    encoding="utf-8"
+                ),
+            )
             review_state = json.loads(
                 (project_root / "review_state.json").read_text(encoding="utf-8")
             )

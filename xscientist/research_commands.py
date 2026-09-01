@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -40,10 +41,14 @@ from .research_git import (
     CheckpointResult,
     ResearchGitError,
     ResearchObjectResult,
+    _add_research_objects_atomically,
+    _repository_lock,
+    _rollback_new_research_object_pointers_locked,
     capture_environment_receipt,
     create_checkpoint,
     research_object_introduction_order,
     repository_status,
+    validate_research_logical_component,
 )
 from .research_lifecycle import ResearchLifecycle
 from .research_semantics import (
@@ -448,11 +453,13 @@ def _finish(
     commit: bool,
     related: Sequence[ResearchObjectResult] = (),
     reproduce_command: str | None = None,
+    include_paths: Sequence[str] = (),
+    object_refs: Sequence[str] = (),
 ) -> dict[str, Any]:
     checkpoint: CheckpointResult | None = None
     if commit:
         created_results = [item for item in (result, *related) if item.created]
-        if not created_results:
+        if not created_results and not include_paths:
             return {
                 "object": result,
                 "related": list(related),
@@ -466,12 +473,14 @@ def _finish(
             item.path.relative_to(repository.path).as_posix()
             for item in created_results
         ]
+        includes.extend(str(path) for path in include_paths)
         checkpoint = create_checkpoint(
             repository.path,
             stage=stage,
             subject=subject,
             status=status,
-            only_paths=includes,
+            only_paths=sorted(set(includes)),
+            object_refs=object_refs,
             reproduce_command=reproduce_command,
         )
     return {"object": result, "related": list(related), "checkpoint": checkpoint}
@@ -1057,6 +1066,7 @@ def save_experiment(
     configuration: Mapping[str, Any] | None = None,
     producer_id: str | None = None,
     result_artifact_hashes: Mapping[str, str] | None = None,
+    result_artifact_paths: Mapping[str, str | Path] | None = None,
     seeds: Sequence[int] = (),
     environment_hash: str | None = None,
     dependency_lock_hashes: Sequence[str] = (),
@@ -1089,13 +1099,43 @@ def save_experiment(
         payload["producer_id"] = _required_text(
             producer_id, label="experiment producer id"
         )
-    if result_artifact_hashes:
-        payload["result_artifact_hashes"] = {
+    artifact_hashes = (
+        {
             _required_text(str(name), label="result artifact label"): _hashes(
                 [str(digest)], label="result artifact hash"
             )[0]
             for name, digest in sorted(result_artifact_hashes.items())
         }
+        if result_artifact_hashes
+        else {}
+    )
+    artifact_pointers: dict[str, Any] = {}
+    pointer_paths: set[str] = set()
+    pointer_refs: set[str] = set()
+    artifact_sources: dict[str, Path] = {}
+    if result_artifact_paths:
+        for raw_name, raw_path in sorted(result_artifact_paths.items()):
+            name = _required_text(str(raw_name), label="result artifact label")
+            source = Path(raw_path).expanduser()
+            if not source.is_file():
+                raise ResearchGitError(f"result artifact is not a regular file: {name}")
+            digest = hashlib.sha256()
+            try:
+                with source.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError as exc:
+                raise ResearchGitError(
+                    f"result artifact could not be read: {name}"
+                ) from exc
+            source_hash = "sha256:" + digest.hexdigest()
+            declared_hash = artifact_hashes.get(name)
+            if declared_hash is not None and declared_hash != source_hash:
+                raise ResearchGitError(f"result artifact hash mismatch: {name}")
+            artifact_hashes[name] = source_hash
+            artifact_sources[name] = source
+    if artifact_hashes:
+        payload["result_artifact_hashes"] = artifact_hashes
     if seeds:
         payload["seeds"] = list(dict.fromkeys(seeds))
     if failure_class.strip():
@@ -1148,26 +1188,84 @@ def save_experiment(
     provenance = {
         key: value for key, value in provenance.items() if value not in (None, "", [])
     }
-    lifecycle = ResearchLifecycle(repository)
-    recorded = lifecycle.experiment_attempt(
-        payload,
-        preregistration_id=preregistration_id,
-        plan_id=plan_id,
-        priority_id=priority_id,
-        provenance=provenance,
-        commit=False,
-    )
-    result = recorded["attempt"]
-    stage = "experiment" if result.state == "completed" else "failed"
-    return _finish(
-        repository,
-        result,
-        stage=stage,
-        subject=message or f"record {result.state} experiment attempt",
-        status=result.state,
-        commit=commit,
-        reproduce_command=reproduce_command,
-    )
+    artifact_requests: list[tuple[Path, str, str | None, str | None]] = []
+    artifact_logical_paths: dict[str, str] = {}
+    for name, source in sorted(artifact_sources.items()):
+        label_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
+        label_slug = (label_slug or "artifact")[:48]
+        label_digest = canonical_content_hash(name).split(":", 1)[1][:12]
+        filename = validate_research_logical_component(source.name)
+        logical_path = f"result-artifacts/{label_slug}-{label_digest}/{filename}"
+        artifact_logical_paths[name] = logical_path
+        artifact_requests.append(
+            (source, logical_path, None, artifact_hashes.get(name))
+        )
+
+    with _repository_lock(repository.path):
+        _ensure_direct_save_is_safe(repository, commit=commit)
+        transaction_head = str(repository.status().get("head") or "")
+        if not code_commit and str(study_phase).strip().lower() != "confirmatory":
+            provenance["code_commit"] = transaction_head
+        lifecycle = ResearchLifecycle(repository)
+        prepared = lifecycle.validate_experiment_attempt(
+            payload,
+            preregistration_id=preregistration_id,
+            plan_id=plan_id,
+            priority_id=priority_id,
+            provenance=provenance,
+        )
+        pointer_results = []
+        recorded_result: ResearchObjectResult | None = None
+        try:
+            pointer_results = _add_research_objects_atomically(
+                repository.path,
+                artifact_requests,
+            )
+            pointers_by_label = dict(
+                zip(sorted(artifact_sources), pointer_results, strict=True)
+            )
+            for name, pointer in sorted(pointers_by_label.items()):
+                logical_path = artifact_logical_paths[name]
+                pointer_path = pointer.pointer_path.relative_to(
+                    repository.path
+                ).as_posix()
+                artifact_pointers[name] = {
+                    "logical_name": name,
+                    "content_hash": pointer.object_hash,
+                    "logical_path": logical_path,
+                    "pointer_path": pointer_path,
+                }
+                pointer_paths.add(pointer_path)
+                pointer_refs.add(pointer.object_hash)
+            if artifact_pointers:
+                prepared_payload = dict(prepared["payload"])
+                prepared_payload["result_artifacts"] = artifact_pointers
+                prepared = {**prepared, "payload": prepared_payload}
+            recorded = lifecycle.record_validated_experiment_attempt(
+                prepared,
+                commit=False,
+            )
+            result = recorded["attempt"]
+            recorded_result = result
+            stage = "experiment" if result.state == "completed" else "failed"
+            return _finish(
+                repository,
+                result,
+                stage=stage,
+                subject=message or f"record {result.state} experiment attempt",
+                status=result.state,
+                commit=commit,
+                reproduce_command=reproduce_command,
+                include_paths=sorted(pointer_paths),
+                object_refs=sorted(pointer_refs),
+            )
+        except BaseException:
+            current_head = str(repository.status().get("head") or "")
+            if current_head == transaction_head:
+                _rollback_new_research_object_pointers_locked(pointer_results)
+                if recorded_result is not None and recorded_result.created:
+                    recorded_result.path.unlink(missing_ok=True)
+            raise
 
 
 def _confirmatory_queue_contract(

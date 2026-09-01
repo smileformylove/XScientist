@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from ai_scientist.utils.figure_spec import build_figure_spec_from_summaries
-from ai_scientist.utils.manuscript_state import build_manuscript_state
+from ai_scientist.utils.manuscript_state import (
+    build_manuscript_state,
+    save_manuscript_state,
+)
 from ai_scientist.utils.research_planning import (
     build_claim_evidence_graph,
     build_idea_cards,
@@ -20,6 +24,51 @@ from ai_scientist.utils.truth_contracts import (
 
 
 class ResearchPipelineArtifactsTests(unittest.TestCase):
+    def test_saved_manuscript_path_is_workspace_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "paper"
+            latex = root / "latex" / "template.tex"
+            latex.parent.mkdir(parents=True)
+            latex.write_text("\\documentclass{article}\n", encoding="utf-8")
+            state = {
+                "schema_version": 1,
+                "latex_path": str(latex),
+                "guardrail_status": "ready",
+            }
+
+            save_manuscript_state(str(root), state)
+
+            saved = json.loads(
+                (root / "manuscript_state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["latex_path"], "latex/template.tex")
+            self.assertEqual(saved["latex_path_scope"], "workspace_relative")
+            self.assertEqual(state["latex_path"], str(latex))
+            self.assertNotIn(str(root), json.dumps(saved))
+
+    def test_external_manuscript_path_is_not_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "paper"
+            root.mkdir()
+            external = Path(td) / "external.tex"
+            external.write_text("external\n", encoding="utf-8")
+
+            save_manuscript_state(
+                str(root),
+                {
+                    "schema_version": 1,
+                    "latex_path": str(external),
+                    "guardrail_status": "ready",
+                },
+            )
+
+            saved = json.loads(
+                (root / "manuscript_state.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(saved["latex_path"])
+            self.assertEqual(saved["latex_path_scope"], "external_not_recorded")
+            self.assertNotIn(str(external), json.dumps(saved))
+
     def test_planning_and_figure_spec_should_produce_ready_manuscript_state(
         self,
     ) -> None:

@@ -372,6 +372,9 @@ class GatePreconditionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "locked")
+        self.assertEqual(result["runtime_status"], "locked")
+        self.assertEqual(result["registry_status"], "failed")
+        self.assertTrue(result["terminal_receipt_hash"].startswith("sha256:"))
         self.assertEqual(result["stage"], "experiment")
         self.assertEqual(result["lock_owner"]["pid"], 123)
         write_report_mock.assert_not_called()
@@ -624,6 +627,8 @@ class GatePreconditionTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "locked")
+        self.assertEqual(result["runtime_status"], "locked")
+        self.assertEqual(result["registry_status"], "failed")
         self.assertEqual(result["stage"], "experiment")
         self.assertEqual(result["lock_owner"]["pid"], 456)
         write_report_mock.assert_not_called()

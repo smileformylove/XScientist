@@ -192,6 +192,14 @@ scientific outcome, not a software failure.
 Use `xscientist status ./first-study --verbose` only when you need branch,
 pipeline, token, or background-run details. Use `--json` for automation.
 
+The default view stays compact while answering the questions needed to keep a
+study moving: how many experiments ran or failed, whether the paper is a draft,
+blocked, under revision, or ready for submission review, how many figures and
+review issues remain, and how much of that material is bound to a checkpoint.
+Small experiment, manuscript, review, and repair contracts are Git-reviewable
+by default. PDFs, result tables, and other binary outputs stay out of Git; when
+one is unbound, `status` puts the exact CAS binding command first in `Next`.
+
 Portable JSON never embeds the inspected host path. Each suggested
 `primary_action` or `next_steps[]` row includes an `action` contract with an
 `argv_template`, exact `rso-...` object IDs when those objects already exist,
@@ -576,6 +584,21 @@ xscientist audit ./first-study --level trace
 xscientist audit ./first-study --level replay
 xscientist audit ./first-study --level verify
 ```
+
+Record the result file together with the terminal experiment instead of keeping
+only a detached hash:
+
+```bash
+xscientist research experiment "held-out evaluation" \
+  --status success --metric accuracy=0.91 \
+  --result-artifact metrics=./results/heldout.json \
+  --repo ./first-study
+```
+
+The command copies an immutable snapshot into the local CAS, writes its
+portable pointer, links the content hash to the typed experiment attempt, and
+includes both in the same checkpoint. Failed, timed-out, and cancelled runs are
+also durable experiment outcomes rather than missing history.
 
 Audit answers three different questions and never conflates them:
 

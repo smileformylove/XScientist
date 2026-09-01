@@ -17,12 +17,14 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -57,6 +59,7 @@ from ai_scientist.utils.privacy import (
     format_privacy_findings,
     redact_sensitive_payload,
     redact_sensitive_text,
+    scan_file,
     scan_paths,
 )
 
@@ -80,6 +83,7 @@ _MAX_TRAJECTORY_OBJECT_BYTES = 512 * 1024
 _MAX_RESEARCH_STAGE_BYTES = 1 * 1024 * 1024
 _MAX_RESEARCH_STAGE_ENTRIES = 4096
 _MAX_BUNDLE_POINTER_BYTES = 1 * 1024 * 1024
+_MAX_PRIVACY_SCANNABLE_OBJECT_BYTES = 4_000_000
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -120,10 +124,43 @@ DEFAULT_TRACK_PATTERNS = (
     "02_experiments/**/idea.md",
     "02_experiments/**/metrics.json",
     "02_experiments/**/env.json",
+    "02_experiments/**/pipeline_manifest.json",
     "02_experiments/**/pipeline/*.json",
     "02_experiments/**/claim_evidence_graph.json",
     "02_experiments/**/experiment_registry.jsonl",
     "02_experiments/**/research_plan.json",
+    "02_experiments/**/figure_spec.json",
+    "02_experiments/**/plot_execution_receipt.json",
+    "02_experiments/**/manuscript_state.json",
+    "02_experiments/**/manuscript_candidate_pool.json",
+    "02_experiments/**/review_state.json",
+    "02_experiments/**/critic_findings.json",
+    "02_experiments/**/repair_plan.json",
+    "02_experiments/**/repair_attempts.jsonl",
+    "02_experiments/**/stage_standards.json",
+    "02_experiments/**/process_alignment.json",
+    "02_experiments/**/arft_coverage.json",
+    "02_experiments/**/truth_contract.json",
+    "02_experiments/**/hallucination_checks.json",
+    "02_experiments/**/hallucination_review.json",
+    "02_experiments/**/sample_gate.json",
+    "02_experiments/**/decision_log.jsonl",
+    "02_experiments/**/verification_report.json",
+    "02_experiments/**/evaluation_charter.json",
+    "02_experiments/**/evaluation_benchmarks.jsonl",
+    "02_experiments/**/evaluation_report.json",
+    "02_experiments/**/final_review*.json",
+    "02_experiments/**/self_review*.json",
+    "02_experiments/**/reviews*/*.json",
+    "02_experiments/**/reviews*/*.jsonl",
+    "02_experiments/**/reviews*/*.md",
+    "02_experiments/**/reviews*/*.tex",
+    "02_experiments/**/reviews*/*.bib",
+    "02_experiments/**/hostile_critic/*.json",
+    "02_experiments/**/hostile_critic/*.jsonl",
+    "02_experiments/**/hostile_critic/*.md",
+    "02_experiments/**/hostile_critic/*.tex",
+    "02_experiments/**/hostile_critic/*.bib",
     "02_experiments/**/*.tex",
     "02_experiments/**/*.bib",
     "03_papers/*.tex",
@@ -139,6 +176,38 @@ DEFAULT_TRACK_PATTERNS = (
     "04_logs/insight_report.md",
     "04_logs/autopilot_fixture_receipt.json",
     "pipeline_manifest.json",
+    "figure_spec.json",
+    "plot_execution_receipt.json",
+    "manuscript_state.json",
+    "manuscript_candidate_pool.json",
+    "review_state.json",
+    "critic_findings.json",
+    "repair_plan.json",
+    "repair_attempts.jsonl",
+    "stage_standards.json",
+    "process_alignment.json",
+    "arft_coverage.json",
+    "truth_contract.json",
+    "hallucination_checks.json",
+    "hallucination_review.json",
+    "sample_gate.json",
+    "decision_log.jsonl",
+    "verification_report.json",
+    "evaluation_charter.json",
+    "evaluation_benchmarks.jsonl",
+    "evaluation_report.json",
+    "final_review*.json",
+    "self_review*.json",
+    "reviews*/*.json",
+    "reviews*/*.jsonl",
+    "reviews*/*.md",
+    "reviews*/*.tex",
+    "reviews*/*.bib",
+    "hostile_critic/*.json",
+    "hostile_critic/*.jsonl",
+    "hostile_critic/*.md",
+    "hostile_critic/*.tex",
+    "hostile_critic/*.bib",
     "science_constitution.json",
     "epistemic_graph.json",
     "research_plan.json",
@@ -297,6 +366,24 @@ class ResearchGitError(RuntimeError):
     """A safe local-repository operation could not be completed."""
 
 
+_PROCESS_REPOSITORY_LOCKS: dict[str, threading.RLock] = {}
+_PROCESS_REPOSITORY_LOCKS_GUARD = threading.Lock()
+_REPOSITORY_LOCK_STATE = threading.local()
+
+
+def _reset_repository_locks_after_fork() -> None:
+    global _PROCESS_REPOSITORY_LOCKS
+    global _PROCESS_REPOSITORY_LOCKS_GUARD
+    global _REPOSITORY_LOCK_STATE
+    _PROCESS_REPOSITORY_LOCKS = {}
+    _PROCESS_REPOSITORY_LOCKS_GUARD = threading.Lock()
+    _REPOSITORY_LOCK_STATE = threading.local()
+
+
+if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX capability
+    os.register_at_fork(after_in_child=_reset_repository_locks_after_fork)
+
+
 @contextmanager
 def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
     """Serialize scientific state transitions without leaving stale locks."""
@@ -308,34 +395,76 @@ def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
     if not lock_path.is_absolute():
         lock_path = repo / lock_path
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as stream:
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                elif msvcrt is not None:
-                    stream.seek(0)
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                break
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    raise ResearchGitError(
-                        f"timed out waiting for research repository lock: {lock_path}"
-                    )
-                time.sleep(0.05)
-        try:
+    lock_key = str(lock_path.resolve())
+    deadline = time.monotonic() + timeout_seconds
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _PROCESS_REPOSITORY_LOCKS_GUARD.acquire(timeout=remaining):
+        raise ResearchGitError(
+            f"timed out waiting for research repository lock: {lock_path}"
+        )
+    try:
+        process_lock = _PROCESS_REPOSITORY_LOCKS.setdefault(lock_key, threading.RLock())
+    finally:
+        _PROCESS_REPOSITORY_LOCKS_GUARD.release()
+    remaining = max(0.0, deadline - time.monotonic())
+    if not process_lock.acquire(timeout=remaining):
+        raise ResearchGitError(
+            f"timed out waiting for research repository lock: {lock_path}"
+        )
+    try:
+        held = getattr(_REPOSITORY_LOCK_STATE, "held", set())
+        if lock_key in held:
             yield
+            return
+        _REPOSITORY_LOCK_STATE.held = {*held, lock_key}
+        try:
+            with lock_path.open("a+b") as stream:
+                _acquire_repository_file_lock(
+                    stream,
+                    lock_path=lock_path,
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                )
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
         finally:
+            _REPOSITORY_LOCK_STATE.held = held
+    finally:
+        process_lock.release()
+
+
+def _acquire_repository_file_lock(
+    stream: Any,
+    *,
+    lock_path: Path,
+    timeout_seconds: float,
+) -> None:
+    """Acquire the cross-process half of a repository lock."""
+
+    stream.seek(0, os.SEEK_END)
+    if stream.tell() == 0:
+        stream.write(b"\0")
+        stream.flush()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
             if fcntl is not None:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif msvcrt is not None:
                 stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                raise ResearchGitError(
+                    f"timed out waiting for research repository lock: {lock_path}"
+                )
+            time.sleep(0.05)
 
 
 @dataclass(frozen=True)
@@ -700,6 +829,45 @@ def _normalise_relative(path: str | Path) -> str:
     return candidate.as_posix()
 
 
+def validate_research_logical_component(value: str | Path) -> str:
+    """Validate one portable filename component used for CAS hydration."""
+
+    rendered = str(value)
+    if (
+        not rendered
+        or rendered in {".", ".."}
+        or rendered[-1:] in {" ", "."}
+        or any(ord(character) < 32 for character in rendered)
+        or any(character in '<>:"/\\|?*' for character in rendered)
+    ):
+        raise ResearchGitError(
+            f"unsafe cross-platform research object filename: {rendered!r}"
+        )
+    device_stem = rendered.split(".", 1)[0].casefold()
+    if device_stem in {"con", "prn", "aux", "nul"} or re.fullmatch(
+        r"(?:com|lpt)[1-9]", device_stem
+    ):
+        raise ResearchGitError(
+            f"unsafe cross-platform research object filename: {rendered!r}"
+        )
+    return rendered
+
+
+def _validate_research_logical_path(value: str | Path) -> str:
+    logical = _normalise_relative(value)
+    for component in PurePosixPath(logical).parts:
+        validate_research_logical_component(component)
+    return logical
+
+
+def _research_logical_alias_key(value: str | Path) -> tuple[str, ...]:
+    logical = _validate_research_logical_path(value)
+    return tuple(
+        unicodedata.normalize("NFC", component).casefold()
+        for component in PurePosixPath(logical).parts
+    )
+
+
 def _matches(path: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
@@ -850,7 +1018,12 @@ def _compare_dependency_locks(worktree: Path, receipt: Any) -> list[dict[str, An
     return mismatches
 
 
-def _copy_into_store(source: Path, store_root: Path) -> tuple[str, int, Path]:
+def _copy_into_store(
+    source_fd: int,
+    store_root: Path,
+    *,
+    privacy_root: Path,
+) -> tuple[str, int, Path]:
     """Copy one immutable snapshot into CAS and return hash, size, and path.
 
     A hard link is deliberately not used: mutating the caller's source after
@@ -864,13 +1037,34 @@ def _copy_into_store(source: Path, store_root: Path) -> tuple[str, int, Path]:
     digest = hashlib.sha256()
     size = 0
     try:
-        with source.open("rb") as source_stream, os.fdopen(handle, "wb") as target:
+        with (
+            os.fdopen(source_fd, "rb") as source_stream,
+            os.fdopen(handle, "wb") as target,
+        ):
             for chunk in iter(lambda: source_stream.read(1024 * 1024), b""):
                 target.write(chunk)
                 digest.update(chunk)
                 size += len(chunk)
             target.flush()
             os.fsync(target.fileno())
+        if size <= _MAX_PRIVACY_SCANNABLE_OBJECT_BYTES:
+            try:
+                snapshot = temp.read_bytes()
+            except OSError as exc:
+                raise ResearchGitError(
+                    "privacy gate could not scan the research object snapshot"
+                ) from exc
+            if len(snapshot) != size:
+                raise ResearchGitError(
+                    "privacy gate could not verify the research object snapshot"
+                )
+            if b"\0" not in snapshot[:8192]:
+                findings = scan_file(temp, root=privacy_root, scope="research_object")
+                if findings:
+                    raise ResearchGitError(
+                        "privacy gate refused the research object:\n"
+                        + format_privacy_findings(findings)
+                    )
         object_hash = f"sha256:{digest.hexdigest()}"
         store_path = store_root / "objects" / "sha256" / digest.hexdigest()
         store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2423,7 +2617,9 @@ def _validate_pointer_payload(
         raise ResearchGitError(
             f"research object pointer hash verification failed: {pointer_path}"
         )
-    _normalise_relative(str(payload.get("logical_path") or ""))
+    logical_path = _validate_research_logical_path(
+        str(payload.get("logical_path") or "")
+    )
     store_relpath = _normalise_relative(str(payload.get("store_relpath") or ""))
     digest = str(payload["object_hash"]).split(":", 1)[1]
     if PurePosixPath(store_relpath).parts[-3:] != ("objects", "sha256", digest):
@@ -2431,42 +2627,85 @@ def _validate_pointer_payload(
             f"research object pointer has inconsistent CAS path: {pointer_path}"
         )
     pointer_name = PurePosixPath(pointer_path).name
-    if pointer_name.startswith("sha256-") and pointer_name != f"sha256-{digest}.json":
+    logical_digest = hashlib.sha256(logical_path.encode("utf-8")).hexdigest()[:16]
+    valid_names = {
+        f"sha256-{digest}.json",  # Legacy one-pointer-per-object layout.
+        f"sha256-{digest}-{logical_digest}.json",
+    }
+    if pointer_name.startswith("sha256-") and pointer_name not in valid_names:
         raise ResearchGitError(
-            f"research object pointer filename does not match its hash: {pointer_path}"
+            "research object pointer filename does not match its hash and logical "
+            f"path: {pointer_path}"
         )
     return payload
+
+
+def _record_pointer(
+    records: dict[str, list[dict[str, Any]]],
+    logical_bindings: dict[tuple[str, ...], tuple[str, str]],
+    *,
+    object_hash: str,
+    record: dict[str, Any],
+) -> None:
+    logical_path = str(record.get("logical_path") or "")
+    alias_key = _research_logical_alias_key(logical_path)
+    previous = logical_bindings.get(alias_key)
+    if previous is not None and previous != (logical_path, object_hash):
+        raise ResearchGitError(
+            "research object logical paths collide on a portable filesystem: "
+            f"{previous[0]} and {logical_path}"
+        )
+    logical_bindings[alias_key] = (logical_path, object_hash)
+    records.setdefault(object_hash, []).append(record)
 
 
 def _pointer_records(
     repo: Path,
     *,
     strict: bool = False,
-) -> dict[str, dict[str, Any]]:
-    records: dict[str, dict[str, Any]] = {}
+) -> dict[str, list[dict[str, Any]]]:
+    records: dict[str, list[dict[str, Any]]] = {}
+    logical_bindings: dict[tuple[str, ...], tuple[str, str]] = {}
     pointer_root = repo / "research-objects"
     if not pointer_root.exists():
         return records
     for path in sorted(pointer_root.glob("*.json")):
+        relative_path = path.relative_to(repo).as_posix()
+        if _has_symlink_component(repo, relative_path):
+            if strict:
+                raise ResearchGitError(
+                    "research object pointer path contains a symbolic link: "
+                    f"{relative_path}"
+                )
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload = _validate_pointer_payload(
                 payload,
-                pointer_path=path.relative_to(repo).as_posix(),
+                pointer_path=relative_path,
             )
         except (OSError, json.JSONDecodeError, ResearchGitError) as exc:
             if strict:
                 raise ResearchGitError(
                     f"cannot validate research object pointer: "
-                    f"{path.relative_to(repo).as_posix()}: {exc}"
+                    f"{relative_path}: {exc}"
                 ) from exc
             continue
         object_hash = str(payload.get("object_hash") or "")
         if object_hash.startswith("sha256:"):
-            records[object_hash] = {
-                **payload,
-                "pointer_path": path.relative_to(repo).as_posix(),
-            }
+            try:
+                _record_pointer(
+                    records,
+                    logical_bindings,
+                    object_hash=object_hash,
+                    record={
+                        **payload,
+                        "pointer_path": relative_path,
+                    },
+                )
+            except ResearchGitError:
+                if strict:
+                    raise
     return records
 
 
@@ -2475,9 +2714,10 @@ def _pointer_records_at_commit(
     commit: str,
     *,
     strict: bool = True,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     tree = _run_git(repo, ["ls-tree", "-r", "--name-only", commit]).stdout.splitlines()
-    records: dict[str, dict[str, Any]] = {}
+    records: dict[str, list[dict[str, Any]]] = {}
+    logical_bindings: dict[tuple[str, ...], tuple[str, str]] = {}
     for pointer_path in sorted(
         path
         for path in tree
@@ -2496,7 +2736,16 @@ def _pointer_records_at_commit(
             continue
         object_hash = str(payload.get("object_hash") or "")
         if object_hash.startswith("sha256:"):
-            records[object_hash] = {**payload, "pointer_path": pointer_path}
+            try:
+                _record_pointer(
+                    records,
+                    logical_bindings,
+                    object_hash=object_hash,
+                    record={**payload, "pointer_path": pointer_path},
+                )
+            except ResearchGitError:
+                if strict:
+                    raise
     return records
 
 
@@ -3059,18 +3308,27 @@ def _create_checkpoint_locked(
         committed_pointers = (
             _pointer_records_at_commit(root, head, strict=True) if head else {}
         )
-        pointers = {
-            object_hash: item
-            for object_hash, item in committed_pointers.items()
-            if item.get("pointer_path") not in selected_pointer_paths
-        }
-        pointers.update(
-            {
-                object_hash: item
-                for object_hash, item in _pointer_records(root, strict=True).items()
-                if item.get("pointer_path") in selected_pointer_paths
-            }
-        )
+        merged_pointers: dict[str, list[dict[str, Any]]] = {}
+        logical_bindings: dict[tuple[str, ...], tuple[str, str]] = {}
+        for object_hash, items in committed_pointers.items():
+            for item in items:
+                if item.get("pointer_path") not in selected_pointer_paths:
+                    _record_pointer(
+                        merged_pointers,
+                        logical_bindings,
+                        object_hash=object_hash,
+                        record=item,
+                    )
+        for object_hash, items in _pointer_records(root, strict=True).items():
+            for item in items:
+                if item.get("pointer_path") in selected_pointer_paths:
+                    _record_pointer(
+                        merged_pointers,
+                        logical_bindings,
+                        object_hash=object_hash,
+                        record=item,
+                    )
+        pointers = merged_pointers
     resolved_object_refs = sorted(
         {
             *(str(item) for item in object_refs if str(item).startswith("sha256:")),
@@ -4092,6 +4350,97 @@ def list_research_tags(repo: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _resolve_research_object_source(source: str | Path) -> Path:
+    """Resolve a regular source while rejecting user-spelled symlink components."""
+
+    candidate = Path(source).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate = Path(os.path.abspath(candidate))
+    if sys.platform == "darwin" and candidate.parts[:2] in {
+        ("/", "etc"),
+        ("/", "tmp"),
+        ("/", "var"),
+    }:
+        candidate = Path("/private") / candidate.relative_to("/")
+    cursor = Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        cursor /= part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise ResearchGitError(
+                f"research object is not a regular file: {candidate}"
+            ) from exc
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise ResearchGitError(
+                f"research object source contains a symbolic link: {candidate}"
+            )
+    if not stat.S_ISREG(candidate.lstat().st_mode):
+        raise ResearchGitError(f"research object is not a regular file: {candidate}")
+    return candidate
+
+
+def _open_research_object_source(source: str | Path) -> tuple[Path, int]:
+    """Open a source once without following symlinks or reparse points."""
+
+    candidate = _resolve_research_object_source(source)
+    read_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
+        directory_flags = (
+            getattr(os, "O_PATH", os.O_RDONLY)
+            | getattr(os, "O_DIRECTORY", 0)
+            | os.O_NOFOLLOW
+        )
+        directory_fd = os.open(candidate.anchor, directory_flags)
+        try:
+            for component in candidate.parts[1:-1]:
+                next_fd = os.open(
+                    component,
+                    directory_flags,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = next_fd
+            source_fd = os.open(
+                candidate.name,
+                read_flags | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise ResearchGitError(
+                f"research object source changed or contains a symbolic link: {candidate}"
+            ) from exc
+        finally:
+            os.close(directory_fd)
+    else:
+        try:
+            source_fd = os.open(candidate, read_flags)
+        except OSError as exc:
+            raise ResearchGitError(
+                f"research object source could not be opened safely: {candidate}"
+            ) from exc
+        try:
+            # Windows has no portable openat/O_NOFOLLOW.  Fail closed if any
+            # component is or becomes a reparse point, and require the opened
+            # handle to still identify the same regular leaf.
+            checked = _resolve_research_object_source(candidate)
+            if not os.path.samestat(os.fstat(source_fd), checked.lstat()):
+                raise ResearchGitError(
+                    f"research object source changed while opening: {candidate}"
+                )
+        except BaseException:
+            os.close(source_fd)
+            raise
+    if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+        os.close(source_fd)
+        raise ResearchGitError(f"research object is not a regular file: {candidate}")
+    return candidate, source_fd
+
+
 def _add_research_object_locked(
     root: Path,
     source: str | Path,
@@ -4100,29 +4449,41 @@ def _add_research_object_locked(
     media_type: str | None = None,
 ) -> ObjectPointerResult:
     config = load_repository_config(root)
-    source_path = Path(source).expanduser().resolve()
-    if not source_path.is_file():
-        raise ResearchGitError(f"research object is not a regular file: {source_path}")
+    source_path = _resolve_research_object_source(source)
     if logical_path:
-        logical = _normalise_relative(logical_path)
+        logical = _validate_research_logical_path(logical_path)
     else:
         try:
             logical = source_path.relative_to(root).as_posix()
         except ValueError:
-            logical = f"external/{source_path.name}"
+            logical = _validate_research_logical_path(f"external/{source_path.name}")
+    logical = _validate_research_logical_path(logical)
     if _matches(logical, SECRET_DENY_PATTERNS):
         raise ResearchGitError(
             f"refusing to register a denied secret/binary logical path: {logical}"
         )
     store_root = _configured_store_root(root)
-    object_hash, object_size, store_path = _copy_into_store(source_path, store_root)
+    source_path, source_fd = _open_research_object_source(source_path)
+    try:
+        object_hash, object_size, store_path = _copy_into_store(
+            source_fd,
+            store_root,
+            privacy_root=root,
+        )
+    except BaseException:
+        try:
+            os.close(source_fd)
+        except OSError:
+            pass
+        raise
     digest = object_hash.split(":", 1)[1]
     pointer_dir = _resolve_configured_path(
         root,
         (config.get("storage") or {}).get("pointer_directory") or "research-objects",
         label="pointer directory",
     )
-    pointer_path = pointer_dir / f"sha256-{digest}.json"
+    logical_digest = hashlib.sha256(logical.encode("utf-8")).hexdigest()[:16]
+    pointer_path = pointer_dir / f"sha256-{digest}-{logical_digest}.json"
     pointer_payload = {
         "schema_version": OBJECT_POINTER_SCHEMA,
         "protocol_kind": "research_object_pointer",
@@ -4135,20 +4496,65 @@ def _add_research_object_locked(
         "store_relpath": store_path.relative_to(root).as_posix(),
         "created_at": _now_iso(),
     }
-    pointer_payload["pointer_hash"] = content_hash(pointer_payload)
+    logical_alias_key = _research_logical_alias_key(logical)
+    for existing_hash, existing_pointers in _pointer_records(root, strict=True).items():
+        for existing_pointer in existing_pointers:
+            existing_logical = str(existing_pointer["logical_path"])
+            if _research_logical_alias_key(existing_logical) == logical_alias_key and (
+                existing_logical,
+                existing_hash,
+            ) != (logical, object_hash):
+                raise ResearchGitError(
+                    "research object logical paths collide on a portable filesystem: "
+                    f"{existing_logical} and {logical}"
+                )
+    linked = False
+    if pointer_path.is_symlink():
+        raise ResearchGitError(
+            f"research object pointer path contains a symbolic link: {pointer_path}"
+        )
+    if pointer_path.is_file():
+        try:
+            existing = _validate_pointer_payload(
+                json.loads(pointer_path.read_text(encoding="utf-8")),
+                pointer_path=pointer_path.relative_to(root).as_posix(),
+            )
+        except (OSError, json.JSONDecodeError, ResearchGitError) as exc:
+            raise ResearchGitError(
+                f"existing research object pointer is damaged: {pointer_path}"
+            ) from exc
+        stable_fields = (
+            "object_hash",
+            "size",
+            "media_type",
+            "logical_path",
+            "store_relpath",
+        )
+        if any(
+            existing.get(field) != pointer_payload.get(field) for field in stable_fields
+        ):
+            raise ResearchGitError(
+                f"research object pointer identity collision: {pointer_path}"
+            )
+        pointer_payload = existing
+        linked = True
+    pointer_payload["pointer_hash"] = content_hash(
+        {key: value for key, value in pointer_payload.items() if key != "pointer_hash"}
+    )
     try:
         validate_json(pointer_payload, load_schema("research_object_pointer"))
     except ValidationError as exc:
         raise ResearchGitError(
             f"generated object pointer is invalid: {exc.message}"
         ) from exc
-    _atomic_write_json(pointer_path, pointer_payload)
+    if not linked:
+        _atomic_write_json(pointer_path, pointer_payload)
     return ObjectPointerResult(
         pointer_path=pointer_path,
         store_path=store_path,
         object_hash=object_hash,
         size=object_size,
-        linked=False,
+        linked=linked,
     )
 
 
@@ -4167,6 +4573,45 @@ def add_research_object(
             logical_path=logical_path,
             media_type=media_type,
         )
+
+
+def _add_research_objects_atomically(
+    repo: str | Path,
+    requests: Sequence[tuple[str | Path, str, str | None, str | None]],
+) -> list[ObjectPointerResult]:
+    """Publish several pointers as one operation, rolling back new pointers."""
+
+    root = _repository_root(repo)
+    results: list[ObjectPointerResult] = []
+    with _repository_lock(root):
+        try:
+            for source, logical_path, media_type, expected_hash in requests:
+                result = _add_research_object_locked(
+                    root,
+                    source,
+                    logical_path=logical_path,
+                    media_type=media_type,
+                )
+                results.append(result)
+                if expected_hash is not None and result.object_hash != expected_hash:
+                    raise ResearchGitError(
+                        "research object changed after preflight hashing: "
+                        + logical_path
+                    )
+        except BaseException:
+            _rollback_new_research_object_pointers_locked(results)
+            raise
+    return results
+
+
+def _rollback_new_research_object_pointers_locked(
+    results: Sequence[ObjectPointerResult],
+) -> None:
+    for result in reversed(results):
+        if result.linked:
+            continue
+        result.pointer_path.unlink(missing_ok=True)
+        _fsync_directory(result.pointer_path.parent)
 
 
 def _checkpoint_at_commit(
@@ -4405,7 +4850,8 @@ def verify_research_repository(
     errors: list[str] = []
     warnings: list[str] = []
     checkpoints: list[tuple[str, dict[str, Any]]] = []
-    pointer_records: dict[str, dict[str, Any]] = {}
+    pointer_records: dict[str, list[dict[str, Any]]] = {}
+    pointer_logical_bindings: dict[tuple[str, ...], tuple[str, str]] = {}
     checked = {
         "checkpoints": 0,
         "pointers": 0,
@@ -4558,9 +5004,12 @@ def verify_research_repository(
             )
             payload = _validate_pointer_payload(payload, pointer_path=pointer_path)
             object_hash = str(payload["object_hash"])
-            if object_hash in pointer_records:
-                errors.append(f"duplicate pointer for object {object_hash}")
-            pointer_records[object_hash] = {**payload, "pointer_path": pointer_path}
+            _record_pointer(
+                pointer_records,
+                pointer_logical_bindings,
+                object_hash=object_hash,
+                record={**payload, "pointer_path": pointer_path},
+            )
         except (json.JSONDecodeError, ResearchGitError) as exc:
             errors.append(str(exc))
 
@@ -4583,20 +5032,21 @@ def verify_research_repository(
                     + str(conflict.get("candidate") or "unknown")
                 )
         for object_hash in latest.get("object_refs") or []:
-            pointer = pointer_records.get(str(object_hash))
-            if pointer is None:
+            object_pointers = pointer_records.get(str(object_hash))
+            if not object_pointers:
                 errors.append(f"checkpoint references missing pointer: {object_hash}")
                 continue
             if verify_objects:
                 checked["objects"] += 1
-                _store_path, object_error = _verify_pointer_object(
-                    root,
-                    str(object_hash),
-                    pointer,
-                    store_root=store_root,
-                )
-                if object_error:
-                    errors.append(object_error)
+                for pointer in object_pointers:
+                    _store_path, object_error = _verify_pointer_object(
+                        root,
+                        str(object_hash),
+                        pointer,
+                        store_root=store_root,
+                    )
+                    if object_error:
+                        errors.append(object_error)
         for manifest_ref in latest.get("ara_manifests") or []:
             checked["ara_manifests"] += 1
             manifest_path = str(manifest_ref.get("path") or "")
@@ -7295,8 +7745,15 @@ def restore_research_bundle(
 def _safe_hydration_target(worktree: Path, logical_path: str) -> Path:
     if str(logical_path).strip() in {"", "."}:
         return worktree.resolve()
-    relative = PurePosixPath(_normalise_relative(logical_path))
-    target = (worktree / relative).resolve()
+    relative = PurePosixPath(_validate_research_logical_path(logical_path))
+    cursor = worktree
+    for component in relative.parts:
+        cursor /= component
+        if cursor.is_symlink():
+            raise ResearchGitError(
+                "reproduction object path contains a symlink: " + relative.as_posix()
+            )
+    target = cursor.resolve()
     try:
         target.relative_to(worktree.resolve())
     except ValueError as exc:
@@ -7428,26 +7885,33 @@ def reproduce_checkpoint(
     object_errors: dict[str, str] = {}
     verified_sources: dict[str, Path] = {}
     for object_hash in required:
-        pointer = pointers.get(object_hash)
-        if pointer is None:
+        object_pointers = pointers.get(object_hash)
+        if not object_pointers:
             missing.append(object_hash)
             object_errors[object_hash] = "missing object pointer at selected commit"
             continue
-        store_path, object_error = _verify_pointer_object(
-            root,
-            object_hash,
-            pointer,
-            store_root=store_root,
-        )
-        if object_error:
-            if store_path is None or not store_path.is_file():
-                missing.append(object_hash)
-            else:
-                damaged.append(object_hash)
-            object_errors[object_hash] = object_error
-            continue
-        if store_path is not None:
-            verified_sources[object_hash] = store_path
+        pointer_errors: list[str] = []
+        object_missing = False
+        verified_path: Path | None = None
+        for pointer in object_pointers:
+            store_path, object_error = _verify_pointer_object(
+                root,
+                object_hash,
+                pointer,
+                store_root=store_root,
+            )
+            if object_error:
+                pointer_errors.append(object_error)
+                object_missing = object_missing or (
+                    store_path is None or not store_path.is_file()
+                )
+            elif store_path is not None:
+                verified_path = store_path
+        if pointer_errors:
+            (missing if object_missing else damaged).append(object_hash)
+            object_errors[object_hash] = "; ".join(dict.fromkeys(pointer_errors))
+        elif verified_path is not None:
+            verified_sources[object_hash] = verified_path
     command = str((checkpoint.get("reproduce") or {}).get("command") or "").strip()
     environment_receipt = (checkpoint.get("reproduce") or {}).get("environment")
     environment = _compare_runtime_environment(environment_receipt)
@@ -7651,22 +8115,27 @@ def reproduce_checkpoint(
         worktree_attempted = True
         _run_git(root, ["worktree", "add", "--detach", str(worktree), resolved])
         for object_hash in required:
-            pointer = pointers[object_hash]
             source = verified_sources[object_hash]
-            target = _safe_hydration_target(worktree, str(pointer["logical_path"]))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                if target.is_file() and _hash_file(target) == object_hash:
+            hydrated_logical_paths: set[str] = set()
+            for pointer in pointers[object_hash]:
+                logical_path = str(pointer["logical_path"])
+                if logical_path in hydrated_logical_paths:
                     continue
-                raise ResearchGitError(
-                    f"refusing to overwrite reproduction target: {target}"
-                )
-            shutil.copy2(source, target)
-            if _hash_file(target) != object_hash:
-                target.unlink(missing_ok=True)
-                raise ResearchGitError(
-                    f"reproduction object changed during hydration: {object_hash}"
-                )
+                hydrated_logical_paths.add(logical_path)
+                target = _safe_hydration_target(worktree, logical_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    if target.is_file() and _hash_file(target) == object_hash:
+                        continue
+                    raise ResearchGitError(
+                        f"refusing to overwrite reproduction target: {target}"
+                    )
+                shutil.copy2(source, target)
+                if _hash_file(target) != object_hash:
+                    target.unlink(missing_ok=True)
+                    raise ResearchGitError(
+                        f"reproduction object changed during hydration: {object_hash}"
+                    )
         dependency_mismatches = _compare_dependency_locks(worktree, environment_receipt)
         environment["mismatches"].extend(dependency_mismatches)
         environment["matches"] = (

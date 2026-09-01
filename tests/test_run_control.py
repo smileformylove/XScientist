@@ -464,6 +464,142 @@ class LocalRunControlTests(unittest.TestCase):
         self.assertIn("stopped during startup", stderr.getvalue())
         self.assertNotIn("run started", stderr.getvalue())
 
+    def test_detached_cli_success_handoff_uses_the_actual_workspace(self) -> None:
+        payload = {
+            "schema": RUN_SCHEMA,
+            "id": "done-1",
+            "status": "succeeded",
+            "workspace": "private-study",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "xscientist.run_control.launch_detached_run",
+                return_value=payload,
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(
+                [
+                    "start",
+                    "study",
+                    "--question",
+                    "q",
+                    "--allow-synthetic-data",
+                    "--detach",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            output.getvalue().splitlines()[-1],
+            "Next: xscientist status study",
+        )
+        self.assertNotIn("Workspace: .", output.getvalue())
+
+    def test_detached_json_running_exposes_a_bound_watch_action(self) -> None:
+        payload = {
+            "schema": RUN_SCHEMA,
+            "id": "run-1",
+            "status": "running",
+            "workspace": "private-study",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch(
+                "xscientist.run_control.launch_detached_run",
+                return_value=payload,
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli_main(
+                [
+                    "start",
+                    "study",
+                    "--question",
+                    "q",
+                    "--allow-synthetic-data",
+                    "--detach",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        public = json.loads(output.getvalue())
+        self.assertEqual(public["workspace"], ".")
+        self.assertEqual(
+            public["watch_action"]["argv_template"],
+            [
+                "xscientist",
+                "runs",
+                "watch",
+                "run-1",
+                "--workspace",
+                "{workspace}",
+            ],
+        )
+        self.assertEqual(
+            public["watch_action"]["workspace_binding"]["source"],
+            "invocation_workspace",
+        )
+        self.assertFalse(public["workspace_context"]["host_path_disclosed"])
+        self.assertNotIn("private-study", output.getvalue())
+
+    def test_detached_json_terminal_states_expose_inspect_and_resume_actions(
+        self,
+    ) -> None:
+        for status in ("failed", "cancelled", "interrupted"):
+            with self.subTest(status=status):
+                payload = {
+                    "schema": RUN_SCHEMA,
+                    "id": f"{status}-1",
+                    "status": status,
+                    "workspace": "private-study",
+                }
+                output = io.StringIO()
+                with (
+                    mock.patch(
+                        "xscientist.run_control.launch_detached_run",
+                        return_value=payload,
+                    ),
+                    mock.patch(
+                        "xscientist.run_control.read_run_logs",
+                        return_value={"stdout": [], "stderr": ["terminal failure"]},
+                    ),
+                    contextlib.redirect_stdout(output),
+                ):
+                    exit_code = cli_main(
+                        [
+                            "start",
+                            "study",
+                            "--question",
+                            "q",
+                            "--allow-synthetic-data",
+                            "--detach",
+                            "--json",
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 1)
+                public = json.loads(output.getvalue())
+                expected_prefixes = {
+                    "inspect_action": ["xscientist", "runs", "show"],
+                    "resume_action": ["xscientist", "runs", "resume"],
+                }
+                for action_name, prefix in expected_prefixes.items():
+                    action = public[action_name]
+                    self.assertEqual(action["argv_template"][:3], prefix)
+                    self.assertEqual(
+                        action["argv_template"][-2:],
+                        ["--workspace", "{workspace}"],
+                    )
+                    self.assertEqual(
+                        action["workspace_binding"]["source"],
+                        "invocation_workspace",
+                    )
+                self.assertFalse(public["workspace_context"]["host_path_disclosed"])
+                self.assertNotIn("private-study", output.getvalue())
+
     def test_detached_launch_error_is_one_json_document(self) -> None:
         output = io.StringIO()
         with (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,14 +16,203 @@ from ai_scientist.utils.experiment_registry import (
     check_experiment_registry_integrity,
     load_experiment_records,
     load_verified_experiment_records,
+    normalize_terminal_experiment_status,
+    record_terminal_experiment_failure,
     save_experiment_registry,
     summarize_experiment_registry,
 )
 from ai_scientist.utils.research_integrity import ResearchIntegrityError
 from ai_scientist.utils.pipeline_contracts import load_pipeline_manifest
+from ai_scientist.utils.decision_log import load_decision_log
 
 
 class ExperimentRegistryTests(unittest.TestCase):
+    def test_terminal_receipts_are_distinct_per_run_and_replay_idempotently(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = {
+                "tasks": [
+                    {
+                        "task_id": "task_0",
+                        "dataset": "demo",
+                        "metric": "accuracy",
+                        "baseline": "base",
+                    }
+                ]
+            }
+            first_receipt = {
+                "status": "failed",
+                "failure_error": {
+                    "type": "RuntimeError",
+                    "error_code": "experiment_failed",
+                    "failure_ref": "receipt-one",
+                    "message": "first failure",
+                },
+            }
+            second_receipt = {
+                "status": "failed",
+                "failure_error": {
+                    "type": "RuntimeError",
+                    "error_code": "experiment_failed",
+                    "failure_ref": "receipt-two",
+                    "message": "second failure",
+                },
+            }
+
+            first = record_terminal_experiment_failure(
+                root,
+                research_plan=plan,
+                experiment_result=first_receipt,
+                producer="test.terminal_outcome",
+            )
+            durable_paths = [
+                root / "experiment_registry.jsonl",
+                root / "experiment_registry.integrity.json",
+                root / "experiment_registry.history.jsonl",
+                root / "decision_log.jsonl",
+                root / "pipeline_manifest.json",
+                root / "stage_standards.json",
+            ]
+            before_replay = {path: path.read_bytes() for path in durable_paths}
+            replay = record_terminal_experiment_failure(
+                root,
+                research_plan=plan,
+                experiment_result=first_receipt,
+                producer="test.terminal_outcome",
+            )
+            self.assertEqual(
+                before_replay,
+                {path: path.read_bytes() for path in durable_paths},
+            )
+            second = record_terminal_experiment_failure(
+                root,
+                research_plan=plan,
+                experiment_result=second_receipt,
+                producer="test.terminal_outcome",
+            )
+
+            rows = load_verified_experiment_records(root)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({row["record_id"] for row in rows}), 2)
+            self.assertNotEqual(
+                first["terminal_receipt_hash"], second["terminal_receipt_hash"]
+            )
+            self.assertFalse(first["replayed"])
+            self.assertTrue(replay["replayed"])
+            self.assertFalse(second["replayed"])
+            self.assertEqual(len(load_decision_log(root)), 2)
+
+    def test_concurrent_terminal_receipt_replay_records_one_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = {
+                "tasks": [
+                    {
+                        "task_id": "task_0",
+                        "dataset": "demo",
+                        "metric": "accuracy",
+                        "baseline": "base",
+                    }
+                ]
+            }
+            receipt = {
+                "status": "failed",
+                "failure_error": {
+                    "failure_ref": "shared-receipt",
+                    "message": "same terminal run",
+                },
+            }
+            barrier = threading.Barrier(2)
+            real_load = experiment_registry.load_experiment_records
+
+            def synchronize_legacy_precheck(project_root):
+                rows = real_load(project_root)
+                barrier.wait(timeout=5)
+                return rows
+
+            with mock.patch.object(
+                experiment_registry,
+                "load_experiment_records",
+                side_effect=synchronize_legacy_precheck,
+            ):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(
+                        executor.map(
+                            lambda _: record_terminal_experiment_failure(
+                                root,
+                                research_plan=plan,
+                                experiment_result=receipt,
+                                producer="test.concurrent_terminal_outcome",
+                            ),
+                            range(2),
+                        )
+                    )
+
+            self.assertEqual(
+                sorted(result["replayed"] for result in results),
+                [False, True],
+            )
+            self.assertEqual(len(load_verified_experiment_records(root)), 1)
+            self.assertEqual(len(load_decision_log(root)), 1)
+
+    def test_terminal_failure_is_persisted_before_writeup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "project" / "02_experiments" / "run-1"
+            checkpoint = root / "logs" / "checkpoint.json"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("{}\n", encoding="utf-8")
+            result = record_terminal_experiment_failure(
+                root,
+                research_plan={
+                    "workflow_mode": "program_driven",
+                    "execution_policy": {"policy_name": "program_driven"},
+                    "tasks": [
+                        {
+                            "task_id": "task_0",
+                            "dataset": "demo",
+                            "metric": "accuracy",
+                            "baseline": "base",
+                            "acceptance_checks": ["produce a metric"],
+                        }
+                    ],
+                },
+                experiment_result={
+                    "status": "budget_exhausted",
+                    "budget_error": {
+                        "message": f"budget exhausted near {root}/private.log"
+                    },
+                    "resumable": True,
+                    "checkpoint_path": str(checkpoint),
+                },
+                producer="test.terminal_outcome",
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["runtime_status"], "budget_exhausted")
+            rows = load_verified_experiment_records(root)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertEqual(rows[0]["budget_status"], "budget_exhausted")
+            self.assertEqual(
+                rows[0]["artifacts"]["checkpoint_path"],
+                "logs/checkpoint.json",
+            )
+            self.assertFalse(rows[0]["entered_storyline"])
+            decisions = load_decision_log(root)
+            self.assertEqual(decisions[-1]["category"], "experiment_terminal_outcome")
+            self.assertEqual(decisions[-1]["selected"], "failed")
+            persisted = (root / "experiment_registry.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn(str(root), persisted)
+
+    def test_terminal_status_normalization_is_typed(self) -> None:
+        self.assertEqual(normalize_terminal_experiment_status("timed_out"), "timed_out")
+        self.assertEqual(
+            normalize_terminal_experiment_status("interrupted"), "cancelled"
+        )
+        self.assertEqual(normalize_terminal_experiment_status("locked"), "failed")
+
     @staticmethod
     def _legacy_v1_history_row(integrity: dict) -> dict:
         core = {

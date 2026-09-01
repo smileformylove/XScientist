@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
 from ai_scientist.utils.atomic_io import atomic_write_bytes
+from ai_scientist.utils.decision_log import record_decision
 from ai_scientist.utils.evidence_snapshot import (
     REGISTRY_HISTORY_FILENAME,
     REGISTRY_INTEGRITY_FILENAME,
@@ -31,6 +32,11 @@ from ai_scientist.utils.pipeline_contracts import (
     artifact_path,
     load_jsonl_artifact,
     update_pipeline_artifact,
+)
+from ai_scientist.utils.privacy import (
+    REDACTED_PATH,
+    portable_path,
+    redact_sensitive_text,
 )
 
 _REGISTRY_LOCKS: dict[str, threading.RLock] = {}
@@ -572,10 +578,13 @@ def summarize_experiment_registry(project_root: str | Path) -> dict[str, Any]:
     return summary
 
 
-def save_experiment_registry(
+def _save_experiment_registry_rows(
     project_root: str | Path, rows: list[dict[str, Any]]
-) -> str:
+) -> tuple[str, bool]:
+    """Merge rows transactionally and report whether durable state changed."""
+
     output_path, integrity_path, history_path = _registry_paths(project_root)
+    changed = False
     with _registry_transaction_lock(project_root):
         paths = (output_path, integrity_path, history_path)
         observed = {path: _read_optional_bytes(path) for path in paths}
@@ -637,17 +646,224 @@ def save_experiment_registry(
                 require_existing_valid=require_existing_valid,
                 expected_originals=observed,
             )
-    update_pipeline_artifact(
-        project_root,
-        "experiment_registry",
-        status="ready",
-        producer="experiment_registry",
-        depends_on=["research_plan"],
-    )
-    from ai_scientist.utils.stage_standards import save_stage_standards
+            changed = True
+    if changed:
+        update_pipeline_artifact(
+            project_root,
+            "experiment_registry",
+            status="ready",
+            producer="experiment_registry",
+            depends_on=["research_plan"],
+        )
+        from ai_scientist.utils.stage_standards import save_stage_standards
 
-    save_stage_standards(project_root)
-    return str(output_path)
+        save_stage_standards(project_root)
+    return str(output_path), changed
+
+
+def save_experiment_registry(
+    project_root: str | Path, rows: list[dict[str, Any]]
+) -> str:
+    output_path, _ = _save_experiment_registry_rows(project_root, rows)
+    return output_path
+
+
+def normalize_terminal_experiment_status(raw_status: Any) -> str:
+    normalized = str(raw_status or "failed").strip().lower()
+    if normalized in {"timeout", "timed_out"}:
+        return "timed_out"
+    if normalized in {"cancelled", "canceled", "interrupted"}:
+        return "cancelled"
+    return "failed"
+
+
+def _terminal_failure_receipt_hash(
+    root: Path, experiment_result: dict[str, Any]
+) -> str:
+    """Identify one runtime receipt without persisting host paths or wall-clock time."""
+
+    error = experiment_result.get("failure_error") or experiment_result.get(
+        "budget_error"
+    )
+    error = error if isinstance(error, dict) else {}
+    explicit_identity = {
+        key: str(value).strip()
+        for key, value in {
+            "receipt_hash": experiment_result.get("receipt_hash"),
+            "run_id": experiment_result.get("run_id"),
+            "attempt_id": experiment_result.get("attempt_id"),
+            "failure_ref": error.get("failure_ref"),
+        }.items()
+        if str(value or "").strip()
+    }
+    artifact_hashes: dict[str, str] = {}
+    for field in (
+        "run_status_path",
+        "initialization_status_path",
+        "checkpoint_path",
+        "manager_state_path",
+    ):
+        raw_path = str(experiment_result.get(field) or "").strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            encoded = read_bounded_regular_file(
+                resolved,
+                maximum=16 * 1024 * 1024,
+                label="terminal_experiment_receipt",
+            )
+        except (BoundedFileError, OSError, ValueError):
+            continue
+        artifact_hashes[field] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    identity: dict[str, Any] = {
+        "status": str(experiment_result.get("status") or "failed").strip().lower(),
+        "explicit_identity": explicit_identity,
+        "artifact_hashes": artifact_hashes,
+    }
+    if not explicit_identity and not artifact_hashes:
+        identity["fallback"] = {
+            "error_type": str(error.get("type") or "").strip(),
+            "error_code": str(error.get("error_code") or "").strip(),
+            "error_message": redact_sensitive_text(str(error.get("message") or "")),
+            "initialization_phase": experiment_result.get("initialization_phase"),
+            "resumable": bool(experiment_result.get("resumable")),
+            "lock_owner": experiment_result.get("lock_owner") or {},
+        }
+    return canonical_hash(identity)
+
+
+def record_terminal_experiment_failure(
+    project_root: str | Path,
+    *,
+    research_plan: dict[str, Any],
+    experiment_result: dict[str, Any],
+    producer: str,
+) -> dict[str, Any]:
+    """Persist a terminal runtime failure before manuscript work is skipped."""
+
+    root = Path(project_root).expanduser().resolve()
+    raw_status = str(experiment_result.get("status") or "failed").strip().lower()
+    status = normalize_terminal_experiment_status(raw_status)
+    receipt_hash = _terminal_failure_receipt_hash(root, experiment_result)
+    receipt_id = receipt_hash.removeprefix("sha256:")[:20]
+    raw_error = (
+        (experiment_result.get("failure_error") or {}).get("message")
+        or (experiment_result.get("budget_error") or {}).get("message")
+        or experiment_result.get("error")
+        or f"experiment runtime ended with status {raw_status}"
+    )
+    error_message = redact_sensitive_text(str(raw_error))
+    artifact_fields: dict[str, str] = {}
+    for field in (
+        "checkpoint_path",
+        "run_status_path",
+        "manager_state_path",
+        "initialization_status_path",
+        "lock_path",
+    ):
+        raw_path = str(experiment_result.get(field) or "").strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        rendered = portable_path(candidate, base=root)
+        if rendered != REDACTED_PATH:
+            artifact_fields[field] = rendered
+    tasks = [
+        task for task in research_plan.get("tasks") or [] if isinstance(task, dict)
+    ] or [{"task_id": "experiment"}]
+    rows = [
+        build_experiment_record(
+            record_id=(
+                f"{str(task.get('task_id') or f'task_{index}')}:runtime:"
+                f"{raw_status}:{receipt_id}"
+            ),
+            task_id=str(task.get("task_id") or f"task_{index}"),
+            dataset=str(task.get("dataset") or "dataset_to_be_selected"),
+            metric=str(task.get("metric") or "primary_task_metric"),
+            baseline_ref=str(task.get("baseline") or "strong_existing_baseline"),
+            config={
+                "goal": task.get("goal"),
+                "priority": task.get("priority"),
+            },
+            status=status,
+            result_summary={
+                "runtime_status": raw_status,
+                "terminal_receipt_hash": receipt_hash,
+                "resumable": bool(experiment_result.get("resumable")),
+                "initialization_phase": experiment_result.get("initialization_phase"),
+            },
+            artifacts=artifact_fields,
+            error_type=raw_status,
+            error_message=error_message,
+            entered_storyline=False,
+            budget=task.get("budget"),
+            budget_status=(
+                "budget_exhausted" if raw_status == "budget_exhausted" else None
+            ),
+            workflow_mode=research_plan.get("workflow_mode"),
+            policy_name=(research_plan.get("execution_policy") or {}).get(
+                "policy_name"
+            ),
+            acceptance_checks=task.get("acceptance_checks"),
+            acceptance_results=[
+                {
+                    "check": str(check),
+                    "passed": False,
+                    "source": "terminal_runtime_failure",
+                }
+                for check in task.get("acceptance_checks") or []
+            ],
+            budget_audit={
+                "audited": True,
+                "within_budget": raw_status != "budget_exhausted",
+                "source": "terminal_runtime_failure",
+            },
+            evidence_role=task.get("evidence_role"),
+            paired_control_task_id=task.get("paired_control_task_id"),
+            intervention_variant=task.get("intervention_variant"),
+            stress_condition=task.get("stress_condition"),
+        )
+        for index, task in enumerate(tasks)
+    ]
+    _, changed = _save_experiment_registry_rows(root, rows)
+    replayed = not changed
+    if not replayed:
+        record_decision(
+            root,
+            category="experiment_terminal_outcome",
+            selected=status,
+            options_considered=[
+                {"option": status, "selected": True},
+                {
+                    "option": "continue_to_writeup",
+                    "rejected_because": (
+                        "the experiment did not produce a completed terminal outcome"
+                    ),
+                },
+            ],
+            producer=producer,
+            metadata={
+                "runtime_status": raw_status,
+                "terminal_receipt_hash": receipt_hash,
+                "resumable": bool(experiment_result.get("resumable")),
+                "registry_rows": len(rows),
+            },
+        )
+    return {
+        "status": status,
+        "runtime_status": raw_status,
+        "terminal_receipt_hash": receipt_hash,
+        "replayed": replayed,
+        "error": error_message,
+        "registry_rows": len(rows),
+    }
 
 
 def _load_registry_rows_and_bytes(

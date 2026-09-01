@@ -344,10 +344,94 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(payload["phase"], "research")
             self.assertEqual(payload["workspace"], ".")
             self.assertEqual(payload["project"], ".")
-            self.assertIn("{workspace}", payload["research_dag"])
+            self.assertIsNone(payload["research_dag"])
+            self.assertEqual(payload["research_dag_path_base"], "workspace")
+            self.assertEqual(payload["status_command"], "xscientist status {workspace}")
+            self.assertEqual(
+                payload["status_action"]["argv_template"],
+                ["xscientist", "status", "{workspace}"],
+            )
+            self.assertEqual(
+                payload["status_action"]["workspace_binding"]["source"],
+                "invocation_workspace",
+            )
+            self.assertFalse(payload["host_paths_disclosed"])
             self.assertNotIn(sentinel, output.getvalue())
             self.assertNotIn(str(Path(td).resolve()), output.getvalue())
             self.assertIn("[REDACTED_PATH]", payload["error"][0])
+
+    def test_start_json_returns_a_real_workspace_relative_dag_and_status_action(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            ready = {
+                "schema": "xscientist.doctor.v1",
+                "ok": True,
+                "configuration_ready": True,
+                "runtime_ready": True,
+                "checks": {},
+                "next_actions": [],
+            }
+
+            def successful_project(_args):
+                dag = (
+                    workspace
+                    / "outputs"
+                    / "views"
+                    / workspace.name
+                    / "research-dag"
+                    / "research-dag.html"
+                )
+                dag.parent.mkdir(parents=True)
+                dag.write_text("<html></html>\n", encoding="utf-8")
+                return 0
+
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "ai_scientist.utils.auth_session.validate_session",
+                    return_value=(True, "ok", {"username": "test-researcher"}),
+                ),
+                mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
+                mock.patch(
+                    "xscientist.cli.project_main", side_effect=successful_project
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                exit_code = cli_main(
+                    [
+                        "start",
+                        str(workspace),
+                        "--question",
+                        "Does X change Y?",
+                        "--provider",
+                        "zhipu",
+                        "--allow-synthetic-data",
+                        "--skip-credentials",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            payload = json.loads(rendered)
+            expected_dag = "outputs/views/study/research-dag/research-dag.html"
+            self.assertEqual(payload["phase"], "complete")
+            self.assertEqual(payload["workspace"], ".")
+            self.assertEqual(payload["research_dag"], expected_dag)
+            self.assertEqual(payload["research_dag_path_base"], "workspace")
+            self.assertTrue((workspace / expected_dag).is_file())
+            self.assertEqual(
+                payload["status_action"]["argv_template"],
+                ["xscientist", "status", "{workspace}"],
+            )
+            self.assertTrue(payload["status_action"]["workspace_binding"]["required"])
+            self.assertFalse(
+                payload["status_action"]["workspace_binding"]["host_path_disclosed"]
+            )
+            self.assertFalse(payload["workspace_context"]["host_path_disclosed"])
+            self.assertNotIn(str(Path(td).resolve()), rendered)
 
     def test_root_help_is_progressive_and_advanced_help_is_available(self) -> None:
         concise = io.StringIO()
@@ -437,6 +521,7 @@ class OnboardingTests(unittest.TestCase):
                 "next_actions": [],
                 "host_paths_disclosed": False,
             }
+            output = io.StringIO()
             with (
                 mock.patch(
                     "ai_scientist.utils.auth_session.validate_session",
@@ -448,7 +533,7 @@ class OnboardingTests(unittest.TestCase):
                 ),
                 mock.patch("xscientist.diagnostics.diagnose", return_value=ready),
                 mock.patch("xscientist.cli.project_main", return_value=0) as project,
-                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stdout(output),
             ):
                 exit_code = cli_main(
                     [
@@ -477,6 +562,13 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--target-venue") + 1], "icml")
             self.assertIn("--allow-synthetic-data", argv)
             self.assertIn("--research-vcs-strict", argv)
+            rendered = output.getvalue()
+            self.assertNotIn("{workspace}", rendered)
+            self.assertNotIn("Open the research DAG", rendered)
+            self.assertEqual(
+                rendered.strip().splitlines()[-1],
+                f"Next: xscientist status {workspace}",
+            )
             for flag in (
                 "--model-ideation",
                 "--model-agg-plots",
@@ -648,6 +740,8 @@ class OnboardingTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
+            self.assertIsNone(payload["research_dag"])
+            self.assertEqual(payload["status_command"], "xscientist status {workspace}")
             contract = payload["model_contract"]
             self.assertEqual(contract["execution_model"], "openai_compat/glm-5.3")
             self.assertEqual(contract["judgment_model"], "ollama/qwen2.5:7b")

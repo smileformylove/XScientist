@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ai_scientist.utils.pipeline_helpers import save_review_artifacts
+from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ai_scientist.utils.review_execution import execute_review_pass
 from ai_scientist.utils.review_jobs import REVIEW_ROLES
 from ai_scientist.utils.workflow_modes import (
@@ -224,9 +225,7 @@ def build_workflow_runtime_plan(
         improvement_review_roles=tuple(_dedupe_preserve(list(improvement_roles))),
         final_review_roles=tuple(_dedupe_preserve(list(final_roles))),
         critic_review_roles=tuple(_dedupe_preserve(list(critic_roles))),
-        requires_independent_critic=bool(
-            runtime_config["requires_independent_critic"]
-        ),
+        requires_independent_critic=bool(runtime_config["requires_independent_critic"]),
         critic_strictness_profile=str(runtime_config["critic_strictness_profile"]),
     )
 
@@ -273,7 +272,9 @@ def merge_text_reviews(
         if values
     }
     decision_values = _dedupe_preserve(decisions)
-    effective_primary_role = str(primary_role or (ordered_roles[0] if ordered_roles else "general"))
+    effective_primary_role = str(
+        primary_role or (ordered_roles[0] if ordered_roles else "general")
+    )
     merged_review = {
         "Summary": (
             "\n".join(summaries[:6])
@@ -330,7 +331,9 @@ def merge_image_reviews(
         "figure_reviews": figure_reviews,
         "role_reviews": role_reviews,
         "workflow_review_roles": ordered_roles,
-        "primary_role": str(primary_role or (ordered_roles[0] if ordered_roles else "general")),
+        "primary_role": str(
+            primary_role or (ordered_roles[0] if ordered_roles else "general")
+        ),
     }
 
 
@@ -359,7 +362,9 @@ def execute_review_suite(
 ) -> dict[str, Any]:
     normalized_roles = [
         role
-        for role in _dedupe_preserve([str(role or "").strip().lower() for role in review_roles])
+        for role in _dedupe_preserve(
+            [str(role or "").strip().lower() for role in review_roles]
+        )
         if role == "general" or role in REVIEW_ROLES
     ]
     if not normalized_roles:
@@ -373,7 +378,11 @@ def execute_review_suite(
     pdf_path: str | None = None
 
     for role in normalized_roles:
-        role_save_dir = suite_dir / role if per_role_artifacts and suite_dir is not None else suite_dir
+        role_save_dir = (
+            suite_dir / role
+            if per_role_artifacts and suite_dir is not None
+            else suite_dir
+        )
         review_pass = execute_review_pass(
             paper_dir=paper_dir,
             model_review=model_review,
@@ -429,13 +438,28 @@ def execute_review_suite(
             image_filename=image_filename,
             text_mode=text_mode,
         )
+        portable_pdf_path = None
+        portable_pdf_scope = None
+        if pdf_path:
+            portable_base = Path(project_root or paper_dir).expanduser().resolve()
+            pdf_candidate = Path(pdf_path).expanduser()
+            if not pdf_candidate.is_absolute():
+                pdf_candidate = portable_base / pdf_candidate
+            rendered_pdf = portable_path(pdf_candidate, base=portable_base)
+            portable_pdf_path = None if rendered_pdf == REDACTED_PATH else rendered_pdf
+            portable_pdf_scope = (
+                "workspace_relative"
+                if rendered_pdf != REDACTED_PATH
+                else "external_not_recorded"
+            )
         suite_summary = {
             "suite_name": str(suite_name or "review_suite"),
             "lane_name": str(lane_name or "review"),
             "strictness_profile": str(strictness_profile or "standard"),
             "review_roles": normalized_roles,
             "primary_role": primary_role,
-            "pdf_path": pdf_path,
+            "pdf_path": portable_pdf_path,
+            "pdf_path_scope": portable_pdf_scope,
             "job_ids": {
                 role: ((payload.get("job") or {}).get("job_id"))
                 for role, payload in passes_by_role.items()

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 """Structured manuscript state derived from claims, figures, and writeup policy."""
 
+from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from ai_scientist.utils.pipeline_contracts import save_contract_artifact
-
+from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 
 DEFAULT_OUTLINE = {
     "normal": [
@@ -66,7 +68,9 @@ def _build_section_bindings(
         if lowered in RESULT_SECTIONS or lowered in {"abstract", "introduction"}:
             section_claim_bindings[section_name] = list(claim_bindings)
         elif lowered in METHOD_SECTIONS:
-            section_claim_bindings[section_name] = list(claim_bindings[:1] or claim_bindings)
+            section_claim_bindings[section_name] = list(
+                claim_bindings[:1] or claim_bindings
+            )
         else:
             section_claim_bindings[section_name] = []
         if lowered in RESULT_SECTIONS:
@@ -92,7 +96,9 @@ def build_manuscript_state(
     spec = figure_spec or {}
     outline = list(DEFAULT_OUTLINE.get(writeup_type, DEFAULT_OUTLINE["normal"]))
     claim_nodes = [
-        node for node in graph.get("nodes", []) if isinstance(node, dict) and node.get("type") == "claim"
+        node
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict) and node.get("type") == "claim"
     ]
     ready_figures = [
         figure
@@ -100,7 +106,8 @@ def build_manuscript_state(
         if isinstance(figure, dict) and figure.get("status") == "ready"
     ]
     explicit_main_exists = any(
-        str(figure.get("paper_slot") or "").strip() == "main" for figure in ready_figures
+        str(figure.get("paper_slot") or "").strip() == "main"
+        for figure in ready_figures
     )
     claim_figure_bindings: dict[str, list[str]] = {}
     main_claim_figure_bindings: dict[str, list[str]] = {}
@@ -156,7 +163,9 @@ def build_manuscript_state(
         "evidence_summary": {
             "claim_count": len(claim_bindings),
             "supported_claim_count": len(claim_figure_bindings),
-            "unsupported_claim_count": max(len(claim_bindings) - len(claim_figure_bindings), 0),
+            "unsupported_claim_count": max(
+                len(claim_bindings) - len(claim_figure_bindings), 0
+            ),
             "ready_figure_count": sum(
                 len(figure_ids) for figure_ids in claim_figure_bindings.values()
             ),
@@ -169,10 +178,24 @@ def build_manuscript_state(
 
 
 def save_manuscript_state(project_root: str, state: dict[str, Any]) -> str:
+    root = Path(project_root).expanduser().resolve()
+    portable_state = deepcopy(state)
+    raw_latex_path = str(portable_state.get("latex_path") or "").strip()
+    if raw_latex_path:
+        candidate = Path(raw_latex_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        rendered = portable_path(candidate, base=root)
+        portable_state["latex_path"] = None if rendered == REDACTED_PATH else rendered
+        portable_state["latex_path_scope"] = (
+            "workspace_relative"
+            if rendered != REDACTED_PATH
+            else "external_not_recorded"
+        )
     output_path = save_contract_artifact(
         project_root,
         "manuscript_state",
-        state,
+        portable_state,
         producer="manuscript_state",
         depends_on=["claim_evidence_graph", "figure_spec"],
     )

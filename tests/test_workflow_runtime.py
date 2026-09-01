@@ -20,7 +20,9 @@ from ai_scientist.utils.workflow_runtime import (
 
 
 class WorkflowRuntimeTests(unittest.TestCase):
-    def test_build_workflow_runtime_plan_should_expand_high_quality_final_roles(self) -> None:
+    def test_build_workflow_runtime_plan_should_expand_high_quality_final_roles(
+        self,
+    ) -> None:
         plan = build_workflow_runtime_plan(
             "classic_pipeline",
             high_quality_mode=True,
@@ -60,7 +62,10 @@ class WorkflowRuntimeTests(unittest.TestCase):
             image_payloads = {
                 "novelty": {
                     "figure_reviews": [
-                        {"figure_id": "fig_1", "description": "Clarify the novelty panel."}
+                        {
+                            "figure_id": "fig_1",
+                            "description": "Clarify the novelty panel.",
+                        }
                     ]
                 },
                 "rigor": {
@@ -110,7 +115,9 @@ class WorkflowRuntimeTests(unittest.TestCase):
             self.assertTrue(result["found"])
             self.assertEqual(result["review_roles_used"], ["novelty", "rigor"])
             merged_review = result["review_text"]["review"]
-            self.assertIn("Novelty delta is underspecified.", merged_review["Weaknesses"])
+            self.assertIn(
+                "Novelty delta is underspecified.", merged_review["Weaknesses"]
+            )
             self.assertIn("Baseline coverage is thin.", merged_review["Weaknesses"])
             self.assertEqual(merged_review["scores"]["Overall"], 3.5)
             self.assertEqual(merged_review["scores"]["Novelty"], 2.5)
@@ -127,8 +134,13 @@ class WorkflowRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(suite_payload["job_ids"]["novelty"], "novelty_job")
             self.assertEqual(suite_payload["job_ids"]["rigor"], "rigor_job")
+            self.assertEqual(suite_payload["pdf_path"], "paper.pdf")
+            self.assertEqual(suite_payload["pdf_path_scope"], "workspace_relative")
+            self.assertNotIn(str(root), json.dumps(suite_payload))
 
-    def test_multi_agent_board_should_include_expanded_hostile_critic_roles(self) -> None:
+    def test_multi_agent_board_should_include_expanded_hostile_critic_roles(
+        self,
+    ) -> None:
         plan = build_workflow_runtime_plan(
             "multi_agent_board",
             high_quality_mode=True,
@@ -174,7 +186,9 @@ class WorkflowRuntimeTests(unittest.TestCase):
         self.assertEqual(decisions[-1]["selected"], "skip_independent_confirmation")
         self.assertTrue(decisions[-1]["metadata"]["ablation_enabled"])
 
-    def test_independent_critic_pass_should_run_confirmation_when_primary_clear(self) -> None:
+    def test_independent_critic_pass_should_run_confirmation_when_primary_clear(
+        self,
+    ) -> None:
         plan = build_workflow_runtime_plan(
             "multi_agent_board",
             high_quality_mode=True,
@@ -188,11 +202,14 @@ class WorkflowRuntimeTests(unittest.TestCase):
             def _fake_execute_review_suite(**kwargs):
                 calls.append(kwargs)
                 lane_name = kwargs["lane_name"]
-                review_state = load_contract_artifact(
-                    project_root,
-                    "review_state",
-                    default={},
-                ) or {}
+                review_state = (
+                    load_contract_artifact(
+                        project_root,
+                        "review_state",
+                        default={},
+                    )
+                    or {}
+                )
                 lane_summaries = dict(review_state.get("lane_summaries") or {})
                 lane_summaries[lane_name] = {
                     "active_issue_count": 0,
@@ -210,9 +227,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     "review_roles_used": list(kwargs["review_roles"]),
                     "primary_role": "novelty",
                     "passes_by_role": {
-                        "novelty": {
-                            "review_text": {"review": {"Weaknesses": []}}
-                        }
+                        "novelty": {"review_text": {"review": {"Weaknesses": []}}}
                     },
                     "review_text": {"review": {"Weaknesses": []}},
                     "review_img": {},
@@ -243,10 +258,13 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 )
             decisions = load_decision_log(project_root)
 
-        self.assertEqual([call["lane_name"] for call in calls], [
-            "hostile_critic",
-            "hostile_critic_confirmation",
-        ])
+        self.assertEqual(
+            [call["lane_name"] for call in calls],
+            [
+                "hostile_critic",
+                "hostile_critic_confirmation",
+            ],
+        )
         self.assertTrue(result["critic_confirmed"])
         self.assertEqual(result["blocking_issue_count"], 0)
         confirmation_instruction = calls[1]["review_plan"]["review_instruction"]
@@ -267,11 +285,14 @@ class WorkflowRuntimeTests(unittest.TestCase):
             def _fake_execute_review_suite(**kwargs):
                 lane_name = kwargs["lane_name"]
                 blocking = 1 if lane_name == "hostile_critic_confirmation" else 0
-                review_state = load_contract_artifact(
-                    project_root,
-                    "review_state",
-                    default={},
-                ) or {}
+                review_state = (
+                    load_contract_artifact(
+                        project_root,
+                        "review_state",
+                        default={},
+                    )
+                    or {}
+                )
                 lane_summaries = dict(review_state.get("lane_summaries") or {})
                 lane_summaries[lane_name] = {
                     "active_issue_count": blocking,
@@ -359,11 +380,14 @@ class WorkflowRuntimeTests(unittest.TestCase):
             def _fake_execute_review_suite(**kwargs):
                 calls.append(kwargs)
                 lane_name = kwargs["lane_name"]
-                review_state = load_contract_artifact(
-                    project_root,
-                    "review_state",
-                    default={},
-                ) or {}
+                review_state = (
+                    load_contract_artifact(
+                        project_root,
+                        "review_state",
+                        default={},
+                    )
+                    or {}
+                )
                 lane_summaries = dict(review_state.get("lane_summaries") or {})
                 lane_summaries[lane_name] = {
                     "active_issue_count": 2,
@@ -562,10 +586,13 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     project_root=project_root,
                 )
 
-        self.assertEqual([call["lane_name"] for call in calls], [
-            "hostile_critic",
-            "hostile_critic_confirmation",
-        ])
+        self.assertEqual(
+            [call["lane_name"] for call in calls],
+            [
+                "hostile_critic",
+                "hostile_critic_confirmation",
+            ],
+        )
         self.assertFalse(result["critic_confirmation"]["found"])
         self.assertFalse(result["critic_confirmation"]["confirmed"])
         self.assertEqual(
@@ -574,9 +601,13 @@ class WorkflowRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result["critic_confirmation"]["blocking_issue_count"], 1)
         self.assertEqual(result["blocking_source"], "ep_independent_eval")
-        self.assertGreaterEqual(result["active_issue_count"], result["blocking_issue_count"])
+        self.assertGreaterEqual(
+            result["active_issue_count"], result["blocking_issue_count"]
+        )
 
-    def test_stale_confirmation_lane_summary_must_not_confirm_current_pass(self) -> None:
+    def test_stale_confirmation_lane_summary_must_not_confirm_current_pass(
+        self,
+    ) -> None:
         plan = build_workflow_runtime_plan(
             "multi_agent_board",
             high_quality_mode=True,

@@ -57,6 +57,7 @@ from ai_scientist.utils.workflow_selection import (
 from ai_scientist.utils.experiment_report import write_experiment_report
 from ai_scientist.utils.experiment_registry import (
     build_experiment_record,
+    record_terminal_experiment_failure,
     save_experiment_registry,
 )
 from ai_scientist.utils.ara_pipeline import (
@@ -878,6 +879,60 @@ def _record_local_research_checkpoint(
         print(f"⚠️  科研版本库 checkpoint 失败，研究产物已保留: {exc}")
 
 
+def _publication_gate_failure(
+    args: argparse.Namespace,
+    results: list[dict[str, Any]],
+) -> str | None:
+    constraints_active = (
+        args.require_quality_gate
+        or args.min_submission_priority is not None
+        or args.max_submission_blockers is not None
+    )
+    if constraints_active and not any(
+        result.get("submission_acceptance_passed") is True for result in results
+    ):
+        return "没有任何项目论文通过当前本地投稿准备度门禁，任务视为失败"
+    if (args.strict_writing_guardrails or args.high_quality_mode) and not any(
+        result_passed_writeup_guardrails(result) for result in results
+    ):
+        return "严格写作守护开启，但没有任何论文通过写作守护检查，任务视为失败"
+    return None
+
+
+def _experiment_checkpoint_status(executed_results: list[dict[str, Any]]) -> str:
+    """Describe this execution transition without borrowing prior successes."""
+
+    return (
+        "completed"
+        if any(result.get("status") == "success" for result in executed_results)
+        else "failed"
+    )
+
+
+def _finalize_local_research_handoff(
+    args: argparse.Namespace,
+    *,
+    results: list[dict[str, Any]],
+    ara_paths: list[str],
+) -> str | None:
+    """Checkpoint the terminal paper state before a strict gate can fail the run."""
+
+    failure = _publication_gate_failure(args, results)
+    _record_local_research_checkpoint(
+        args,
+        stage="paper",
+        subject="freeze project summary and shortlist",
+        summary=(
+            "Record the project-level paper summary, shortlist, quality gates, "
+            "and final handoff state."
+        ),
+        status="failed" if failure else "completed",
+        ara_paths=ara_paths,
+    )
+    _export_project_research_dag(args, results=results)
+    return failure
+
+
 def _research_vcs_failure(
     args: argparse.Namespace, action: str, exc: Exception
 ) -> None:
@@ -1091,7 +1146,13 @@ def _compact_research_result(result: dict) -> dict:
     scalar_keys = (
         "idea_idx",
         "status",
+        "runtime_status",
+        "registry_status",
+        "terminal_receipt_hash",
+        "stage",
         "failure_stage",
+        "error",
+        "resumable",
         "quality_score",
         "rigor_score",
         "claim_support_score",
@@ -1207,7 +1268,9 @@ def _record_local_research_attempt_objects(
         for fallback_index, result in enumerate(results):
             idea_index = int(result.get("idea_idx", fallback_index))
             payload = _compact_research_result(result)
-            payload["status"] = str(result.get("status") or "failed")
+            payload["status"] = str(
+                result.get("registry_status") or result.get("status") or "failed"
+            )
             recorded = lifecycle.experiment_attempt(
                 payload,
                 preregistration_id=(preregistration_id if idea_index == 0 else None),
@@ -1228,6 +1291,138 @@ def _record_local_research_attempt_objects(
         print(f"🧬 Research VCS 已记录 {len(results)} 个实验尝试（含失败结果）")
     except (ResearchGitError, OSError, ValueError) as exc:
         _research_vcs_failure(args, "experiment record", exc)
+
+
+def _manuscript_artifact_bindings(
+    project_root: Path,
+    *,
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Snapshot exact paper/review artifacts into CAS for a manuscript revision."""
+
+    from xscientist.research_git import add_research_object
+
+    project_root = project_root.expanduser().resolve()
+    candidates: list[tuple[str, Path]] = []
+
+    def add_candidate(role: str, raw_path: Any, *, base: Path = project_root) -> None:
+        rendered = str(raw_path or "").strip()
+        if not rendered or "://" in rendered:
+            return
+        candidate = Path(rendered).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        try:
+            lexical = Path(os.path.abspath(candidate))
+            if sys.platform == "darwin" and lexical.parts[:2] in {
+                ("/", "etc"),
+                ("/", "tmp"),
+                ("/", "var"),
+            }:
+                lexical = Path("/private") / lexical.relative_to("/")
+            relative = lexical.relative_to(project_root)
+            cursor = project_root
+            for part in relative.parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    return
+            resolved = lexical.resolve()
+            resolved.relative_to(project_root)
+        except (OSError, ValueError):
+            return
+        if resolved.is_file():
+            candidates.append((role, resolved))
+
+    for role, field in (
+        ("manuscript_pdf", "pdf_path"),
+        ("pipeline_manifest", "pipeline_manifest"),
+        ("claim_evidence_graph", "claim_evidence_graph_file"),
+        ("experiment_registry", "experiment_registry_file"),
+        ("figure_spec", "figure_spec_file"),
+        ("plot_execution_receipt", "plot_execution_receipt_file"),
+        ("manuscript_state", "manuscript_state_file"),
+        ("review_state", "review_state_file"),
+        ("repair_plan", "repair_plan_file"),
+        ("critic_findings", "critic_findings_file"),
+        ("stage_standards", "stage_standards_file"),
+    ):
+        add_candidate(role, result.get(field))
+
+    manuscript_state_path = next(
+        (path for role, path in candidates if role == "manuscript_state"),
+        None,
+    )
+    if manuscript_state_path is not None:
+        manuscript_state = _safe_load_json(manuscript_state_path, default={}) or {}
+        add_candidate(
+            "manuscript_source",
+            manuscript_state.get("latex_path"),
+            base=manuscript_state_path.parent,
+        )
+
+    bindings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for role, path in candidates:
+        relative = path.relative_to(project_root).as_posix()
+        identity = (role, relative)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        pointer = add_research_object(
+            project_root,
+            path,
+            logical_path=relative,
+        )
+        bindings.append(
+            {
+                "role": role,
+                "logical_path": relative,
+                "content_hash": pointer.object_hash,
+                "pointer_path": pointer.pointer_path.relative_to(
+                    project_root
+                ).as_posix(),
+                "size": pointer.size,
+            }
+        )
+    return sorted(bindings, key=lambda item: (item["role"], item["logical_path"]))
+
+
+def _paper_result_artifact_fields(
+    exp_dir: str | Path,
+    *,
+    pdf_path: str | Path | None = None,
+    critic_findings_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return the common durable paper paths for success and terminal failure."""
+
+    root = Path(exp_dir).expanduser()
+    resolved_pdf = str(pdf_path or "").strip() or str(find_latest_pdf(str(root)) or "")
+    if resolved_pdf:
+        candidate = Path(resolved_pdf).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        resolved_pdf = str(candidate)
+    fields: dict[str, Any] = {
+        "exp_dir": str(root),
+        "pdf_path": (
+            resolved_pdf if resolved_pdf and Path(resolved_pdf).is_file() else None
+        ),
+        "pipeline_manifest": str(root / "pipeline_manifest.json"),
+        "claim_evidence_graph_file": str(root / "claim_evidence_graph.json"),
+        "experiment_registry_file": str(root / "experiment_registry.jsonl"),
+        "figure_spec_file": str(root / "figure_spec.json"),
+        "plot_execution_receipt_file": str(root / "plot_execution_receipt.json"),
+        "manuscript_state_file": str(root / "manuscript_state.json"),
+        "review_state_file": str(root / "review_state.json"),
+        "repair_plan_file": str(root / "repair_plan.json"),
+        "stage_standards_file": str(root / "stage_standards.json"),
+    }
+    critic_path = str(critic_findings_file or "").strip()
+    if not critic_path:
+        candidate = root / "hostile_critic" / "findings.json"
+        critic_path = str(candidate) if candidate.is_file() else ""
+    fields["critic_findings_file"] = critic_path or None
+    return fields
 
 
 def _record_local_research_handoff_objects(
@@ -1454,6 +1649,20 @@ def _record_local_research_handoff_objects(
                     "authority": "deterministic_gate",
                 },
             )
+            artifact_bindings = _manuscript_artifact_bindings(
+                lifecycle.repository.path,
+                result=result,
+            )
+            revision_hash = (
+                content_hash(
+                    {
+                        "idea_idx": idea_index,
+                        "artifact_bindings": artifact_bindings,
+                    }
+                )
+                if artifact_bindings
+                else None
+            )
             manuscript = lifecycle.manuscript(
                 {
                     "idea_idx": idea_index,
@@ -1462,6 +1671,11 @@ def _record_local_research_handoff_objects(
                     "rigor_score": result.get("rigor_score"),
                     "final": False,
                     "blocker": "independent_verification_missing",
+                    "revision_hash": revision_hash,
+                    "artifact_bindings": artifact_bindings,
+                    "artifact_hashes": sorted(
+                        {str(item["content_hash"]) for item in artifact_bindings}
+                    ),
                 },
                 claim_ids=claim_ids,
                 gate_id=gate.object_id,
@@ -2323,15 +2537,22 @@ def process_single_idea(args):
             isinstance(experiment_result, dict)
             and experiment_result.get("status") != "completed"
         ):
+            terminal = record_terminal_experiment_failure(
+                exp_dir,
+                research_plan=research_plan,
+                experiment_result=experiment_result,
+                producer="run_project.experiment_terminal_outcome",
+            )
             return {
                 "idea_idx": idea_idx,
                 "exp_dir": exp_dir,
-                "status": experiment_result.get("status", "failed"),
+                "status": terminal["runtime_status"],
+                "runtime_status": terminal["runtime_status"],
+                "registry_status": terminal["status"],
+                "terminal_receipt_hash": terminal["terminal_receipt_hash"],
                 "stage": "experiment",
-                "error": (
-                    (experiment_result.get("failure_error") or {}).get("message")
-                    or (experiment_result.get("budget_error") or {}).get("message")
-                ),
+                "error": terminal["error"],
+                "experiment_registry_rows": terminal["registry_rows"],
                 "resumable": bool(experiment_result.get("resumable")),
                 "checkpoint_path": experiment_result.get("checkpoint_path"),
                 "run_status_path": experiment_result.get("run_status_path"),
@@ -2500,10 +2721,10 @@ def process_single_idea(args):
             guardrail_findings, guardrail_reasons = load_guardrail_artifacts(exp_dir)
             guardrail_blocking = bool(guardrail_reasons)
             return {
+                **_paper_result_artifact_fields(exp_dir),
                 "idea_idx": idea_idx,
                 "status": "failed",
                 "stage": "writeup",
-                "exp_dir": exp_dir,
                 "writing_profile": writing_profile,
                 "writing_audit_rounds": writing_audit_rounds,
                 "strict_writing_guardrails": strict_writing_guardrails,
@@ -2559,6 +2780,7 @@ def process_single_idea(args):
             )
             if strict_fallbacks and quality_fallback_event:
                 return {
+                    **_paper_result_artifact_fields(exp_dir),
                     "idea_idx": idea_idx,
                     "status": "failed",
                     "stage": "quality_fallback_blocked",
@@ -2861,6 +3083,7 @@ def process_single_idea(args):
             )
             if strict_fallbacks and quality_fallback_event:
                 return {
+                    **_paper_result_artifact_fields(exp_dir),
                     "idea_idx": idea_idx,
                     "status": "failed",
                     "stage": "quality_fallback_blocked",
@@ -2942,6 +3165,11 @@ def process_single_idea(args):
             )
         if critic_pass.get("blocking_issue_count", 0) > 0:
             return {
+                **_paper_result_artifact_fields(
+                    exp_dir,
+                    pdf_path=pdf_path,
+                    critic_findings_file=critic_pass.get("critic_findings_file"),
+                ),
                 "idea_idx": idea_idx,
                 "status": "failed",
                 "stage": "hostile_critic",
@@ -2956,7 +3184,6 @@ def process_single_idea(args):
                 "critic_roles_used": list(workflow_runtime_plan.critic_review_roles),
                 "critic_active_issue_count": critic_pass.get("active_issue_count"),
                 "critic_blocking_issue_count": critic_pass.get("blocking_issue_count"),
-                "critic_findings_file": critic_pass.get("critic_findings_file"),
                 "reason": "Independent hostile critic reported blocking issues.",
             }
         final_self_review_progress = None
@@ -3130,6 +3357,7 @@ def process_single_idea(args):
             )
             if not final_submission_gate.get("accepted"):
                 return {
+                    **_paper_result_artifact_fields(exp_dir, pdf_path=pdf_path),
                     "idea_idx": idea_idx,
                     "status": "failed",
                     "research_status": "manuscript_draft",
@@ -3368,6 +3596,7 @@ def process_single_idea(args):
             target_venue=target_venue,
         )
         return {
+            **(_paper_result_artifact_fields(exp_dir) if "exp_dir" in locals() else {}),
             "idea_idx": idea_idx,
             "status": "failed",
             "stage": current_stage,
@@ -4203,9 +4432,6 @@ def main(argv=None):
             for result in results
             if result.get("ara_manifest")
         ]
-        successful_experiments = sum(
-            1 for result in results if result.get("status") == "success"
-        )
         _record_local_research_attempt_objects(args, results=executed_results)
         _record_local_research_checkpoint(
             args,
@@ -4216,7 +4442,7 @@ def main(argv=None):
                 f"retaining {len(prior_results)} completed resume results, including "
                 "their ARA manifests and compact evidence state."
             ),
-            status="completed" if successful_experiments else "failed",
+            status=_experiment_checkpoint_status(executed_results),
             ara_paths=experiment_ara_paths,
         )
 
@@ -4270,40 +4496,14 @@ def main(argv=None):
             ):
                 print(f"   - {reason}: {count}")
 
-        constraints_active = (
-            args.require_quality_gate
-            or args.min_submission_priority is not None
-            or args.max_submission_blockers is not None
-        )
-        if constraints_active:
-            passed = any(
-                result.get("submission_acceptance_passed") is True for result in results
-            )
-            if not passed:
-                print("❌ 没有任何项目论文通过当前本地投稿准备度门禁，任务视为失败")
-                sys.exit(1)
-        if args.strict_writing_guardrails or args.high_quality_mode:
-            any_guardrail_pass = any(
-                result_passed_writeup_guardrails(result) for result in results
-            )
-            if not any_guardrail_pass:
-                print(
-                    "❌ 严格写作守护开启，但没有任何论文通过写作守护检查，任务视为失败"
-                )
-                sys.exit(1)
-
-        _record_local_research_checkpoint(
+        publication_failure = _finalize_local_research_handoff(
             args,
-            stage="paper",
-            subject="freeze project summary and shortlist",
-            summary=(
-                "Record the project-level paper summary, shortlist, quality gates, "
-                "and final handoff state."
-            ),
-            status="completed",
+            results=results,
             ara_paths=experiment_ara_paths,
         )
-        _export_project_research_dag(args, results=results)
+        if publication_failure:
+            print(f"❌ {publication_failure}")
+            sys.exit(1)
 
     print("\n" + "=" * 80)
     print("🎉 项目完成!")

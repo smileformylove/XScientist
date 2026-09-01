@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -105,6 +106,87 @@ class LocalResearchGitTests(unittest.TestCase):
             checkpoint = show_checkpoint(root)["checkpoint"]
             self.assertEqual(checkpoint["stage"], "init")
             validate(checkpoint, load_schema("research_checkpoint"))
+
+    def test_paper_review_text_artifacts_are_eligible_and_checkpointed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            tracked_text_paths = {
+                "figure_spec.json",
+                "manuscript_state.json",
+                "review_state.json",
+                "critic_findings.json",
+                "repair_plan.json",
+                "repair_attempts.jsonl",
+                "stage_standards.json",
+                "process_alignment.json",
+                "02_experiments/idea-0/figure_spec.json",
+                "02_experiments/idea-0/pipeline_manifest.json",
+                "02_experiments/idea-0/manuscript_state.json",
+                "02_experiments/idea-0/review_state.json",
+                "02_experiments/idea-0/critic_findings.json",
+                "02_experiments/idea-0/repair_plan.json",
+                "02_experiments/idea-0/repair_attempts.jsonl",
+                "02_experiments/idea-0/stage_standards.json",
+                "02_experiments/idea-0/process_alignment.json",
+                "02_experiments/idea-0/final_review.json",
+                "02_experiments/idea-0/final_review_img.json",
+                "02_experiments/idea-0/self_review_final_progress.json",
+                "02_experiments/idea-0/reviews_round_1/final_review.json",
+                "02_experiments/idea-0/reviews_round_1/repair_trace.jsonl",
+                "02_experiments/idea-0/reviews_round_1/response.md",
+                "02_experiments/idea-0/reviews_round_1/response.tex",
+                "02_experiments/idea-0/reviews_round_1/references.bib",
+                "02_experiments/idea-0/hostile_critic/findings.json",
+                "02_experiments/idea-0/hostile_critic/trace.jsonl",
+                "02_experiments/idea-0/hostile_critic/response.md",
+                "02_experiments/idea-0/hostile_critic/response.tex",
+                "02_experiments/idea-0/hostile_critic/references.bib",
+            }
+            for relative in tracked_text_paths:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+            excluded_binary_paths = {
+                "03_papers/final.pdf",
+                "02_experiments/idea-0/figures/result.png",
+                "02_experiments/idea-0/hostile_critic/annotated.pdf",
+            }
+            for relative in excluded_binary_paths:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"binary-artifact")
+
+            before = repository_status(root)
+            excluded_before = {
+                item.split(" (", 1)[0] for item in before["excluded_changes"]
+            }
+            self.assertTrue(
+                tracked_text_paths.issubset(set(before["eligible_changes"]))
+            )
+            self.assertTrue(tracked_text_paths.isdisjoint(excluded_before))
+            self.assertTrue(
+                excluded_binary_paths.isdisjoint(set(before["eligible_changes"]))
+            )
+            self.assertFalse(before["worktree_clean"])
+
+            checkpoint = auto_checkpoint(
+                root,
+                stage="paper",
+                subject="record paper review contracts",
+            )
+
+            self.assertTrue(checkpoint.committed)
+            self.assertTrue(tracked_text_paths.issubset(set(checkpoint.staged_paths)))
+            self.assertTrue(excluded_binary_paths.isdisjoint(checkpoint.staged_paths))
+            committed = set(
+                self._git(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+            )
+            self.assertTrue(tracked_text_paths.issubset(committed))
+            self.assertTrue(excluded_binary_paths.isdisjoint(committed))
+            after = repository_status(root)
+            self.assertEqual(after["eligible_changes"], [])
+            self.assertTrue(after["worktree_clean"])
 
     def test_init_preserves_existing_project_files_and_commits_only_managed_paths(
         self,
@@ -742,6 +824,190 @@ class LocalResearchGitTests(unittest.TestCase):
                 {key: value for key, value in bundle.items() if key != "destination"},
                 load_schema("research_bundle"),
             )
+
+    def test_research_object_rejects_symlink_sources_and_private_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            secret = base / "secret.json"
+            secret.write_text('{"api_key":"sk-' + "A" * 32 + '"}\n', encoding="utf-8")
+            alias = base / "alias.json"
+            linked_dir = base / "linked"
+            try:
+                alias.symlink_to(secret)
+                linked_dir.symlink_to(base, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+
+            with self.assertRaisesRegex(ResearchGitError, "symbolic link"):
+                add_research_object(root, alias, logical_path="data/alias.json")
+            with self.assertRaisesRegex(ResearchGitError, "symbolic link"):
+                add_research_object(
+                    root,
+                    linked_dir / secret.name,
+                    logical_path="data/parent-alias.json",
+                )
+            with self.assertRaisesRegex(ResearchGitError, "privacy gate refused"):
+                add_research_object(root, secret, logical_path="data/secret.json")
+
+            self.assertFalse(list((root / "research-objects").glob("*.json")))
+            self.assertFalse(list((root / ".ara-store" / "objects").glob("sha256/*")))
+
+            binary = base / "opaque.bin"
+            binary.write_bytes(b"\0sk-" + b"B" * 32)
+            pointer = add_research_object(root, binary, logical_path="data/opaque.bin")
+            self.assertTrue(pointer.store_path.is_file())
+
+    def test_same_object_preserves_all_logical_paths_and_legacy_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "shared.bin"
+            source.write_bytes(b"shared immutable evidence")
+
+            first = add_research_object(root, source, logical_path="results/first.bin")
+            second = add_research_object(
+                root, source, logical_path="results/second.bin"
+            )
+            self.assertEqual(first.object_hash, second.object_hash)
+            self.assertNotEqual(first.pointer_path, second.pointer_path)
+
+            checkpoint = create_checkpoint(
+                root, stage="evidence", subject="bind shared evidence twice"
+            )
+            verification = verify_research_repository(root)
+            destination = base / "reproduction"
+            reproduction = reproduce_checkpoint(
+                root,
+                commit=checkpoint.commit or "HEAD",
+                destination=destination,
+            )
+
+            self.assertTrue(verification["ok"], verification["errors"])
+            self.assertTrue(reproduction["objects_complete"])
+            self.assertEqual(
+                (destination / "results" / "first.bin").read_bytes(),
+                source.read_bytes(),
+            )
+            self.assertEqual(
+                (destination / "results" / "second.bin").read_bytes(),
+                source.read_bytes(),
+            )
+
+            legacy_root = base / "legacy"
+            self._init(legacy_root)
+            legacy_pointer = add_research_object(
+                legacy_root, source, logical_path="results/legacy.bin"
+            )
+            digest = legacy_pointer.object_hash.split(":", 1)[1]
+            canonical_legacy = (
+                legacy_pointer.pointer_path.parent / f"sha256-{digest}.json"
+            )
+            legacy_pointer.pointer_path.rename(canonical_legacy)
+            legacy_checkpoint = create_checkpoint(
+                legacy_root, stage="evidence", subject="bind legacy pointer"
+            )
+            legacy_destination = base / "legacy-reproduction"
+            legacy_result = reproduce_checkpoint(
+                legacy_root,
+                commit=legacy_checkpoint.commit or "HEAD",
+                destination=legacy_destination,
+            )
+            self.assertTrue(legacy_result["objects_complete"])
+            self.assertEqual(
+                (legacy_destination / "results" / "legacy.bin").read_bytes(),
+                source.read_bytes(),
+            )
+
+    def test_portable_logical_aliases_and_reserved_components_are_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "shared.bin"
+            source.write_bytes(b"shared")
+            add_research_object(root, source, logical_path="results/Case.bin")
+
+            with self.assertRaisesRegex(ResearchGitError, "portable filesystem"):
+                add_research_object(root, source, logical_path="results/case.bin")
+            with self.assertRaisesRegex(ResearchGitError, "cross-platform"):
+                add_research_object(root, source, logical_path="results/NUL.txt")
+
+            composed = "results/r\N{LATIN SMALL LETTER E WITH ACUTE}sultat.bin"
+            decomposed = "results/re\N{COMBINING ACUTE ACCENT}sultat.bin"
+            add_research_object(root, source, logical_path=composed)
+            with self.assertRaisesRegex(ResearchGitError, "portable filesystem"):
+                add_research_object(root, source, logical_path=decomposed)
+
+    def test_checkpoint_rejects_symlinked_pointer_before_constructing_refs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "evidence.bin"
+            source.write_bytes(b"evidence")
+            pointer = add_research_object(
+                root, source, logical_path="results/evidence.bin"
+            )
+            outside = base / "pointer.json"
+            pointer.pointer_path.replace(outside)
+            try:
+                pointer.pointer_path.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+            (root / "claims" / "c1.json").write_text(
+                '{"claim":"C1"}\n', encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(
+                ResearchGitError, "pointer path.*symbolic link"
+            ):
+                create_checkpoint(root, stage="evidence", subject="unsafe pointer")
+
+            self.assertNotIn(
+                pointer.object_hash,
+                show_checkpoint(root)["checkpoint"].get("object_refs") or [],
+            )
+
+    def test_source_descriptor_is_stable_after_leaf_path_swap(self) -> None:
+        if os.name != "posix":
+            self.skipTest("descriptor no-follow regression is POSIX-specific")
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "source.bin"
+            replacement = base / "replacement.bin"
+            displaced = base / "source-original.bin"
+            source.write_bytes(b"original snapshot")
+            replacement.write_bytes(b"replacement payload")
+            real_copy = research_git_module._copy_into_store
+
+            def swap_after_open(source_fd, store_root, *, privacy_root):
+                source.replace(displaced)
+                source.symlink_to(replacement)
+                return real_copy(
+                    source_fd,
+                    store_root,
+                    privacy_root=privacy_root,
+                )
+
+            with mock.patch.object(
+                research_git_module,
+                "_copy_into_store",
+                side_effect=swap_after_open,
+            ):
+                pointer = add_research_object(
+                    root, source, logical_path="results/source.bin"
+                )
+
+            self.assertEqual(pointer.store_path.read_bytes(), b"original snapshot")
 
     def test_bundle_restore_round_trip_is_clean_and_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -8,6 +8,20 @@ for its Python package; the ARA protocol has its own version in
 
 ### Added
 
+- Added a compact `xscientist status` research-output view that pairs the
+  latest experiment with its own result contract, surfaces paper/review/repair
+  readiness, distinguishes checkpointed, pending, and unbound artifacts, and
+  emits workspace-bound next actions that remain safe to copy from any working
+  directory.
+- Made experiment completion receipts replay-safe and auditable: distinct
+  terminal executions retain distinct registry records, confirmatory limits
+  are checked before CAS mutation, and result artifacts can be bound directly
+  into Research Git alongside typed experiment attempts.
+- Extended end-to-end paper provenance so manuscript, PDF, review, critic, and
+  repair artifacts survive every publication-gate outcome as workspace-relative
+  records and enter the same local content-addressed handoff. Research Git now
+  preserves multiple logical paths for identical content and privacy-scans
+  eligible text before permanent CAS admission.
 - Added an EvoTrainer-inspired offline evolution harness audit and
   `xscientist evolution harness-audit`: bounded content-addressed version
   evidence is diagnosed across score, reward signal, behavior, and version
