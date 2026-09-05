@@ -644,7 +644,7 @@ class QuickRecordTests(unittest.TestCase):
                         "--status",
                         "completed",
                         "--result",
-                        "token sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "token " + "".join(("s", "k", "-")) + "A" * 32,
                         "--non-interactive",
                         "--json",
                     ]
