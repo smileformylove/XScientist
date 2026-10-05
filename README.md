@@ -749,6 +749,23 @@ A generated DAG is a disposable view, not scientific source data. Regenerating
 it does not dirty a research checkpoint or prevent a bundle. Eligible research
 changes, tracked edits, or staged changes still block bundling until reviewed.
 
+### Exuvia research exchange (opt-in, manual)
+
+XScientist can prepare a metadata-only, hash-bound package for a public Exuvia
+discussion, but this repository does not include an Exuvia client or credentials
+and never publishes remotely by default. The local export and adapter extension
+points are ready; the remote API/authentication contract must be verified before
+implementing a live adapter. See the full [Exuvia exchange guide](docs/EXUVIA.md)
+for the commands, review gate, and the claim/evidence correction workflow.
+
+For the published gravitational-network manuscript, share the exact [public PDF
+at commit `6b2b875`](https://github.com/smileformylove/XScientist/blob/6b2b875843dd095b7cba47280339ba705734fb9f/example/icml_submitted_gravitation_paper.pdf)
+as the artifact. Preserve the original claim and evidence bindings; record any
+figure/text reconciliation as a typed challenge or superseding correction so
+the public history retains both the original result and the later qualification.
+Do not describe an artifact as independently reproduced or verified unless
+XScientist's corresponding evidence and review gates passed.
+
 Reproduction materializes the exact checkpoint in a detached worktree, verifies
 and copies bound CAS objects, compares the recorded environment, and executes a
 single parsed command without a shell only after explicit `--execute`. The
