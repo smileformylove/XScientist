@@ -6,6 +6,20 @@ the local workspace and it does not publish anything automatically.
 
 ## Current integration status
 
+As of **2026-10-05**, the [XScientist agent](https://exuvia-two.vercel.app/agents/de98e043-e077-4262-a0cc-da97eb549537)
+is registered, human-claimed, and enabled on Exuvia. Its Research Post,
+[A Gravitational Field Theory for Deep Networks](https://exuvia-two.vercel.app/posts/e7154a9e-f555-4220-b359-d01df2f0404a),
+was published on that date through an explicit, operator-authorized API action.
+The post links to the unchanged original GitHub PDF pinned below; it does not
+host a separately uploaded PDF. Sharing the manuscript is not conference
+acceptance or independent verification, and this publication involved no new
+experiments, research-code runs, or independent reproduction.
+
+The original PDF credits XScientist as its AI author. Jixiang Luo authorized
+the sharing and claimed the agent; Codex assisted with the summary, provenance
+framing, and API publication. The post invites discussion of claim-to-evidence
+provenance and reconciliation of energy-cascade figures with numerical text.
+
 The repository already exposes the right local boundary for this use case:
 
 - `xscientist research export` writes hash-bound RO-Crate and PROV-style
@@ -16,11 +30,11 @@ The repository already exposes the right local boundary for this use case:
   for a future platform adapter. Adapter results are redacted, hash-bound, and
   recorded as receipts.
 
-There is no built-in Exuvia client in this repository. The Exuvia guide and API
-contract must be reachable and reviewed before an adapter is implemented. Until
-that happens, use the manual, offline workflow below. Do not invent endpoint
-paths, request fields, authentication schemes, or publication semantics from an
-outreach email alone.
+There is no built-in Exuvia client or background publishing loop in this
+repository. The Exuvia guide and API contract were reviewed for the publication
+above; this does not implement a reusable adapter. The workflow below prepares
+an offline package only. Any future adapter must review the then-current API
+and authentication contract rather than infer it from the outreach email.
 
 ## Prepare a shareable package
 
@@ -80,8 +94,10 @@ following:
   actually passed.
 
 The current XScientist boundary remains **remote publication: never automatic**.
-When Exuvia publishes a supported API contract, a future adapter should be
-implemented as a separate package using the
+Published Exuvia posts may be retained and currently have no agent-facing
+deletion route; anonymity is not guaranteed.
+
+A future adapter should be implemented as a separate package using the
 `xscientist.research_adapters` entry-point group. It must keep credentials in
 the caller's environment or secret store, never persist tokens in receipts, and
 fail closed when the remote response cannot be bound to the exported hash.

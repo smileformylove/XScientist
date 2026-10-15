@@ -650,6 +650,26 @@ reachable pointer closure。因此 `reproduce`/`audit` profile 会包含只在�
 闭包，再核对 pointer bytes 与 CAS hash/size。这是本地完整性重算，不是外部签名、
 托管链或可信证明。
 
+### Exuvia 研究交流（自愿参与、人工授权）
+
+截至 **2026-10-05**，[XScientist 在 Exuvia 上的账号](https://exuvia-two.vercel.app/agents/de98e043-e077-4262-a0cc-da97eb549537)
+已注册、由人工操作者认领并启用。论文
+[A Gravitational Field Theory for Deep Networks](https://exuvia-two.vercel.app/posts/e7154a9e-f555-4220-b359-d01df2f0404a)
+已以该身份公开发布为 Exuvia Research Post。
+
+帖子引用的是 [commit `6b2b875` 中的原始 PDF](https://github.com/smileformylove/XScientist/blob/6b2b875843dd095b7cba47280339ba705734fb9f/example/icml_submitted_gravitation_paper.pdf)：
+文件保持不变、仍托管在 GitHub，没有另行上传 PDF 文件到 Exuvia。这是公开分享与讨论
+记录，不代表会议录用或独立科学验证；此次发布没有新增实验、运行研究代码或独立复现。
+原 PDF 将 XScientist 标为 AI 作者；Jixiang Luo 授权分享并认领账号，Codex 协助整理
+摘要、来源说明和通过 API 发布。
+
+讨论重点是主张与证据的关联，以及能量级联图和数值正文的一致性。任何后续修正都应
+保留原始结果、修正内容及各方贡献的归属，而不是覆盖原始记录。
+
+这次发布是一次明确授权的 API 操作，不代表仓库已内置 Exuvia 客户端、凭据或后台
+自动发布功能。后续分享仍需人工审查与授权；本地导出命令、发布门禁和修正流程见
+[Exuvia 交流指南](EXUVIA.md)。
+
 ### 研究策略 Rollout 审计（受 Faraday 启发）
 
 [Faraday 论文](https://arxiv.org/abs/2608.13331)训练一个外层研究策略，
@@ -710,6 +730,28 @@ xscientist research belief-audit belief.json --json
 
 这些命令审计的是上下文完整性，不是科学真实性，也不会继承 BCG 自报的 benchmark
 数字。完整边界见[信念上下文文档](BELIEF_CONTEXT.zh.md)。
+
+### 快慢证据路由
+
+受 [JevGPT: Thinking Fast and Slow in Autonomous Research](https://arxiv.org/abs/2610.18272)
+所描述的快慢分工启发，研究上下文现在把低成本的证据发现和有界的证据定位分成两步。
+第一步在完整、不可变的科研闭包上，用确定性的角色、图距离、词法相关性、时序和权威
+信号排序；第二步只检查发现前列和必需对象，从证据形状字段中提取小型、带 hash 绑定的
+证据切片，供较慢的决策模型使用。被省略的候选仍保留在 receipt 中，不会被静默删除。
+
+这套路由是本地、确定性的实现，不声称复现 JevGPT 的 benchmark 数字，也不要求再部署
+一个模型。需要时，规划器可以通过 Python API 明确当前证据目标：
+
+```python
+context = repository.context(
+    target_ids=["@latest:hypothesis"],
+    evidence_objectives=["held-out transfer accuracy", "negative results"],
+    budget_tokens=4000,
+)
+```
+
+生成的 receipt 会记录两个阶段、目标 hash、定位命中和完整候选集，因此减少上下文 token
+不会削弱来源追踪或科研评审门禁。
 
 ### 过程 benchmark 对照（离线、可复现）
 

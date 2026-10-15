@@ -751,16 +751,29 @@ changes, tracked edits, or staged changes still block bundling until reviewed.
 
 ### Exuvia research exchange (opt-in, manual)
 
+As of **2026-10-05**, the [XScientist agent on Exuvia](https://exuvia-two.vercel.app/agents/de98e043-e077-4262-a0cc-da97eb549537)
+has been registered, claimed by its human operator, and enabled. The manuscript
+[A Gravitational Field Theory for Deep Networks](https://exuvia-two.vercel.app/posts/e7154a9e-f555-4220-b359-d01df2f0404a)
+is publicly available as an Exuvia Research Post under that identity.
+
+The post links to the unchanged [original PDF at commit `6b2b875`](https://github.com/smileformylove/XScientist/blob/6b2b875843dd095b7cba47280339ba705734fb9f/example/icml_submitted_gravitation_paper.pdf),
+which remains hosted on GitHub; the PDF was not uploaded to Exuvia as a separate
+file. This is a public manuscript-sharing and discussion record, not conference
+acceptance or independent verification. No new experiments, research-code runs,
+or independent reproduction were performed for this publication. The original
+PDF credits XScientist as its AI author; Jixiang Luo authorized the sharing and
+claimed the agent, and Codex assisted with the summary, provenance framing, and
+API publication.
+
 XScientist can prepare a metadata-only, hash-bound package for a public Exuvia
 discussion, but this repository does not include an Exuvia client or credentials
-and never publishes remotely by default. The local export and adapter extension
-points are ready; the remote API/authentication contract must be verified before
-implementing a live adapter. See the full [Exuvia exchange guide](docs/EXUVIA.md)
+and never publishes remotely by default. This post was published through an
+explicit, operator-authorized API action, not a built-in adapter or background
+publishing loop. See the full [Exuvia exchange guide](docs/EXUVIA.md)
 for the commands, review gate, and the claim/evidence correction workflow.
 
-For the published gravitational-network manuscript, share the exact [public PDF
-at commit `6b2b875`](https://github.com/smileformylove/XScientist/blob/6b2b875843dd095b7cba47280339ba705734fb9f/example/icml_submitted_gravitation_paper.pdf)
-as the artifact. Preserve the original claim and evidence bindings; record any
+The post invites discussion of claim-to-evidence provenance and the energy-cascade
+figures versus the numerical text. Preserve the original claim and evidence bindings; record any
 figure/text reconciliation as a typed challenge or superseding correction so
 the public history retains both the original result and the later qualification.
 Do not describe an artifact as independently reproduced or verified unless
@@ -885,6 +898,33 @@ xscientist research belief-audit belief.json --json
 These commands audit context integrity, not scientific truth, and never inherit
 BCG's self-reported benchmark numbers. See the full
 [belief-context boundary](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md).
+
+### Fast/slow evidence routing
+
+Inspired by the fast/slow split described in [JevGPT: Thinking Fast and Slow in
+Autonomous Research](https://arxiv.org/abs/2610.18272), research context now
+separates cheap evidence discovery from bounded evidence localization. The
+discovery pass ranks the complete immutable closure using deterministic role,
+graph, lexical, recency, and authority signals. A second pass inspects only the
+discovery frontier and required objects, extracting evidence-shaped fields into
+small, hash-bound slices for the slower decision model. Omitted candidates remain
+in the receipt and are never silently deleted.
+
+The routing is local and deterministic; it does not claim JevGPT's benchmark
+numbers or require a second model. A planner can make its current evidence
+objectives explicit through the Python API:
+
+```python
+context = repository.context(
+    target_ids=["@latest:hypothesis"],
+    evidence_objectives=["held-out transfer accuracy", "negative results"],
+    budget_tokens=4000,
+)
+```
+
+The resulting receipt records both stages, objective hashes, localization
+matches, and the complete candidate set, so lower token use does not weaken
+provenance or scientific review gates.
 
 ### Process benchmark comparison (offline and reproducible)
 

@@ -75,6 +75,28 @@ _ROLE_BASE_SCORES = {
     "lineage": 45,
     "archived_history": 12,
 }
+_FAST_SLOW_ROUTING_POLICY = "xscientist.fast-slow-evidence.v1"
+_LOCALIZATION_POOL_SIZE = 12
+_LOCALIZABLE_PAYLOAD_KEYS = {
+    "abstract",
+    "authors",
+    "conclusion",
+    "context",
+    "date",
+    "finding",
+    "locator",
+    "measurement",
+    "metric",
+    "metrics",
+    "observation",
+    "passage",
+    "quote",
+    "result",
+    "statement",
+    "summary",
+    "text",
+    "title",
+}
 
 
 def _is_sha256(value: Any) -> bool:
@@ -97,6 +119,95 @@ def _summary(item: Mapping[str, Any]) -> str:
             text = " ".join(str(value).split())
             return text[:237] + ("..." if len(text) > 237 else "")
     return f"{item.get('kind')} {item.get('object_id')}"
+
+
+def _normalize_evidence_objectives(
+    values: Sequence[str], *, fallback: str
+) -> list[str]:
+    """Normalize the slow planner's evidence objectives into bounded text."""
+
+    raw_values = [str(value or "").strip() for value in values]
+    if not any(raw_values):
+        raw_values = [fallback]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        text = truncate_text_to_tokens(" ".join(value.split()), 64)
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+        if len(normalized) >= 8:
+            break
+    if not normalized:
+        raise ResearchGitError("evidence objectives cannot be empty")
+    return normalized
+
+
+def _localizable_payload_leaves(
+    value: Any, *, path: str = ""
+) -> list[tuple[str, str]]:
+    """Collect only evidence-shaped fields for the fast localization pass."""
+
+    leaves: list[tuple[str, str]] = []
+
+    def walk(current: Any, current_path: str) -> None:
+        if len(leaves) >= 128:
+            return
+        if isinstance(current, Mapping):
+            for key in sorted(current):
+                key_text = str(key)
+                child_path = f"{current_path}.{key_text}" if current_path else key_text
+                if key_text.casefold() in _LOCALIZABLE_PAYLOAD_KEYS:
+                    if isinstance(current[key], (str, int, float)):
+                        text = " ".join(str(current[key]).split())
+                        if text:
+                            leaves.append((child_path, text))
+                    elif isinstance(current[key], (Mapping, list, tuple)):
+                        walk(current[key], child_path)
+                elif isinstance(current[key], (Mapping, list, tuple)):
+                    walk(current[key], child_path)
+            return
+        if isinstance(current, (list, tuple)):
+            for index, item in enumerate(current[:32]):
+                walk(item, f"{current_path}[{index}]")
+
+    walk(value, path)
+    return leaves
+
+
+def _localize_evidence(
+    item: Mapping[str, Any], *, objectives: Sequence[str]
+) -> dict[str, Any]:
+    """Return a bounded, auditable evidence slice for one candidate."""
+
+    objective_query = " ".join(objectives)
+    leaves = _localizable_payload_leaves(item.get("payload") or {})
+    ranked = [
+        (
+            semantic_overlap(objective_query, {"path": path, "value": value}),
+            path,
+            value,
+        )
+        for path, value in leaves
+    ]
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    matches = [row for row in ranked if row[0] > 0][:3]
+    best_score = round(matches[0][0], 6) if matches else 0.0
+    result: dict[str, Any] = {
+        "status": "localized",
+        "objective_hash": content_hash(list(objectives)),
+        "score": best_score,
+        "matched_fields": [
+            {"path": path, "score": round(score, 6)}
+            for score, path, _ in matches
+        ],
+    }
+    if matches:
+        result["evidence_slice"] = truncate_text_to_tokens(matches[0][2], 48)
+        result["evidence_locator"] = matches[0][1]
+    return result
 
 
 def _targets(item: Mapping[str, Any]) -> set[str]:
@@ -194,6 +305,7 @@ def _fit_source_views(
     candidates: list[dict[str, Any]],
     required_ids: Sequence[str],
     budget_tokens: int,
+    include_localized_slices: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Project ranked audit candidates into a bounded semantic working set."""
 
@@ -220,6 +332,14 @@ def _fit_source_views(
             "role": str(candidate.get("role") or "lineage"),
             "summary": truncate_text_to_tokens(_summary(item), summary_budget),
         }
+        localization = candidate.get("localization") or {}
+        if include_localized_slices and localization.get("status") == "localized":
+            if localization.get("evidence_slice"):
+                view["evidence_slice"] = truncate_text_to_tokens(
+                    localization["evidence_slice"], 36
+                )
+            if localization.get("evidence_locator"):
+                view["evidence_locator"] = str(localization["evidence_locator"])
         cost = estimate_text_tokens(view)
         if object_id not in required_set and used + cost > available:
             continue
@@ -286,6 +406,11 @@ def _research_prompt_visible_payload(
             ),
         },
         **belief_guard,
+        **(
+            {"evidence_objectives": payload.get("evidence_objectives") or []}
+            if payload.get("evidence_objectives_explicit") is True
+            else {}
+        ),
         "audit": {
             "source_closure_hash": payload.get("source_closure_hash"),
             "memory_snapshot_hash": payload.get("memory_snapshot_hash"),
@@ -453,6 +578,7 @@ def build_research_context_snapshot(
     options_considered: Sequence[Mapping[str, Any] | str] = (),
     rationale: Sequence[str] = (),
     constraints: Sequence[str] = (),
+    evidence_objectives: Sequence[str] = (),
     memory_refs: Sequence[str] = (),
     ref: str | None = None,
     budget_tokens: int = 4000,
@@ -657,6 +783,10 @@ def build_research_context_snapshot(
         rationale=rationale,
         constraints=constraints,
     )
+    normalized_objectives = _normalize_evidence_objectives(
+        evidence_objectives,
+        fallback=query,
+    )
     recency_rank = {
         object_id: object_sequence[object_id] for object_id in source_object_ids
     }
@@ -735,6 +865,7 @@ def build_research_context_snapshot(
                 "score": round(sum(components.values()), 3),
                 "score_components": components,
                 "score_semantics": "role + graph distance + lexical relevance + recency + authority",
+                "discovery_score": round(sum(components.values()), 3),
                 "selected": False,
                 "selection_reason": "ranked audit candidate",
             }
@@ -743,7 +874,7 @@ def build_research_context_snapshot(
         key=lambda row: (-float(row["score"]), str(row["object_id"]))
     )
     for rank, candidate in enumerate(retrieval_candidates, start=1):
-        candidate["rank"] = rank
+        candidate["discovery_rank"] = rank
 
     required_view_ids = list(resolved_targets)
     for role in ("active_contradiction", "verified_evidence", "active_evidence"):
@@ -766,11 +897,63 @@ def build_research_context_snapshot(
         if matching_decisions:
             required_view_ids.append(str(matching_decisions[0]["object_id"]))
 
+    # Fast pass: only localize the discovery frontier and semantically required
+    # objects. The complete candidate set and its hashes remain available for
+    # audit, while the slow planner receives compact evidence slices.
+    localization_ids = {
+        str(candidate["object_id"])
+        for candidate in retrieval_candidates[:_LOCALIZATION_POOL_SIZE]
+    }
+    localization_ids.update(required_view_ids)
+    for candidate in retrieval_candidates:
+        object_id = str(candidate["object_id"])
+        if object_id in localization_ids:
+            localization = _localize_evidence(
+                objects[object_id], objectives=normalized_objectives
+            )
+            candidate["localization"] = localization
+            localized_score = float(localization.get("score") or 0.0)
+            candidate["score_components"]["evidence_localization"] = round(
+                localized_score * 20, 3
+            )
+            candidate["score"] = round(
+                float(candidate["discovery_score"])
+                + float(candidate["score_components"]["evidence_localization"]),
+                3,
+            )
+            candidate["score_semantics"] = (
+                "role + graph distance + lexical discovery + recency + authority "
+                "+ bounded evidence localization"
+            )
+        else:
+            candidate["localization"] = {
+                "status": "skipped",
+                "reason": "outside discovery frontier",
+            }
+
+    retrieval_candidates.sort(
+        key=lambda row: (-float(row["score"]), str(row["object_id"]))
+    )
+    for rank, candidate in enumerate(retrieval_candidates, start=1):
+        candidate["rank"] = rank
+
+    localized_matches = [
+        row
+        for row in retrieval_candidates
+        if (row.get("localization") or {}).get("status") == "localized"
+        and float((row.get("localization") or {}).get("score") or 0.0) > 0
+        and str(row.get("object_id")) not in required_view_ids
+    ]
+    if localized_matches:
+        required_view_ids.append(str(localized_matches[0]["object_id"]))
+        required_view_ids = list(dict.fromkeys(required_view_ids))
+
     source_views, working_set = _fit_source_views(
         objects=objects,
         candidates=retrieval_candidates,
         required_ids=required_view_ids,
         budget_tokens=int(budget_tokens),
+        include_localized_slices=bool(evidence_objectives),
     )
     selected_view_ids = {str(item["object_id"]) for item in source_views}
     for candidate in retrieval_candidates:
@@ -792,11 +975,19 @@ def build_research_context_snapshot(
         "target_ids": resolved_targets,
         "as_of": as_of,
         "budget_tokens": int(budget_tokens),
+        "evidence_objectives": normalized_objectives,
+        "evidence_objectives_hash": content_hash(normalized_objectives),
     }
     retrieval_algorithm = {
         "name": "frontier_aware_semantic_relation_closure",
         "version": RESEARCH_CONTEXT_POLICY_VERSION,
-        "ranking": "active frontier role + graph distance + lexical relevance + recency + authority",
+        "routing_policy": _FAST_SLOW_ROUTING_POLICY,
+        "ranking": "active frontier role + graph distance + lexical discovery + recency + authority + bounded evidence localization",
+        "stages": {
+            "discovery": "all candidates, deterministic lexical overlap",
+            "localization": "top discovery frontier and required objects, evidence-shaped fields only",
+        },
+        "localization_pool_size": _LOCALIZATION_POOL_SIZE,
         "model": None,
         "index": "research_object_relations_at_ref+deterministic_lexical_features",
     }
@@ -830,6 +1021,8 @@ def build_research_context_snapshot(
         "rules": [
             "close over explicit Research Object relations",
             "rank the effective frontier before superseded history",
+            "discover broadly with a low-cost deterministic pass before localization",
+            "localize evidence-shaped fields only on the discovery frontier",
             "retain one current contradiction or decisive evidence in working memory",
             "budget semantic working views only; never trim audit IDs or hashes",
             "link only the latest prior context using a hash chain",
@@ -900,6 +1093,8 @@ def build_research_context_snapshot(
         "selected": str(selected or ""),
         "rationale": [str(value) for value in rationale if str(value).strip()],
         "constraints": [str(value) for value in constraints if str(value).strip()],
+        "evidence_objectives": normalized_objectives,
+        "evidence_objectives_explicit": bool(evidence_objectives),
         "selection_policy": policy,
         "selection_policy_hash": content_hash(policy),
         "as_of": as_of,
@@ -1006,6 +1201,15 @@ def research_context_issues(
         payload.get("selection_policy") or {}
     ):
         issues.append("context selection policy hash mismatch")
+    evidence_objectives = payload.get("evidence_objectives")
+    if evidence_objectives is not None:
+        if (
+            not isinstance(evidence_objectives, list)
+            or not evidence_objectives
+            or any(not isinstance(value, str) or not value.strip() for value in evidence_objectives)
+            or len(evidence_objectives) > 8
+        ):
+            issues.append("context evidence objectives are invalid")
     retrieval_receipt = payload.get("retrieval_receipt")
     if retrieval_receipt is not None:
         if not isinstance(retrieval_receipt, Mapping):
@@ -1072,6 +1276,15 @@ def research_context_issues(
                 issues.append("context retrieval request targets do not match context")
             if request.get("as_of") != payload.get("as_of"):
                 issues.append("context retrieval request ref does not match context")
+            if evidence_objectives is not None:
+                if request.get("evidence_objectives") != evidence_objectives:
+                    issues.append(
+                        "context retrieval objectives do not match context"
+                    )
+                if request.get("evidence_objectives_hash") != content_hash(
+                    evidence_objectives
+                ):
+                    issues.append("context retrieval objective hash mismatch")
             if (retrieval_receipt.get("algorithm") or {}).get(
                 "version"
             ) != policy_version:
@@ -1191,6 +1404,7 @@ def record_research_context_snapshot(
     options_considered: Sequence[Mapping[str, Any] | str] = (),
     rationale: Sequence[str] = (),
     constraints: Sequence[str] = (),
+    evidence_objectives: Sequence[str] = (),
     memory_refs: Sequence[str] = (),
     budget_tokens: int = 4000,
     belief_as_of: str | None = None,
@@ -1208,6 +1422,7 @@ def record_research_context_snapshot(
         options_considered=options_considered,
         rationale=rationale,
         constraints=constraints,
+        evidence_objectives=evidence_objectives,
         memory_refs=memory_refs,
         ref="WORKTREE",
         budget_tokens=budget_tokens,
