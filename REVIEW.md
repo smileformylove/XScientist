@@ -60,11 +60,41 @@ rechecks additionally require hostile-review coverage. Missing/unknown issues
 and legacy absence-only logs do not pass: rerun the responsible reviews to
 record scoped closure. This is intentionally stricter than the old verifier.
 
-These are structural checks, not an independent scientific reproduction. Review
-closure is not yet bound to a manuscript digest or code commit. A non-empty PDF
-path is not proof that the PDF exists or was reviewed. Figure bindings and claim
-graph support do not by themselves establish figure correctness or scientific
-truth. Do not promote these signals into independent verification credentials.
+## Version-Bound Review Inputs
+
+`begin_review_job(..., pdf_path=...)` captures a portable `review_subject` before
+the runtime reads the document. It binds the non-empty PDF bytes and any LaTeX
+source declared in `manuscript_state`. Finalization checks those inputs again;
+missing inputs and changes during review cannot produce a passing runtime result.
+Findings from an unbound attempt are retained, but cannot close existing issues.
+Passing a PDF only at finalization cannot retroactively bind an earlier review.
+
+For a project that is itself a Git repository, the subject also records `HEAD`
+and a content fingerprint of tracked working-tree files, including staged new
+files, unstaged edits, deletion, and executable flags. Generated pipeline
+contracts, `reviews/`, and `.ara/` are excluded to avoid self-invalidation.
+Untracked source is not covered: add it to Git before requesting code review.
+A non-Git run directory does not inherit an ancestor application's commit and
+has manuscript-only binding. External paths, unsupported files, unavailable Git,
+or hashing limits (256 MiB, 10,000 source files) fail closed.
+
+Every closure check must reference the same subject version. The verifier hashes
+the current inputs again, so an old pass cannot clear a changed document or code
+revision. The next valid review reopens stale closures, restores all responsible
+review scopes, and preserves the original jobs for audit. Partial passes from
+different versions cannot be combined. Legacy closures without subject bindings
+need fresh reviews, not synthesized hashes for historical jobs.
+
+Persisted multi-role suites and primary/independent critic confirmation also
+require one shared, current subject. The runtime rechecks the selected PDF path
+so keeping the old file alongside a newly selected output cannot preserve a pass.
+
+The target is the recorded PDF path, not whichever unrelated PDF happens to be
+newest. A caller validating a different selected output must pass its `pdf_path`
+in the repair task; a mismatched target fails. These local records are structural
+checks, not signed credentials or proof of independent scientific reproduction,
+PDF validity, or that experimental code actually produced its claimed results.
+Figure bindings and claim-graph support alone do not establish scientific truth.
 
 ## Convergence And Next Work
 
@@ -74,8 +104,8 @@ After three unsuccessful rounds, reassess the approach and evidence rather than
 silently extending the loop. These are review instructions, not a new runtime cap;
 existing workflow round and retry budgets still govern execution.
 
-Next implementation priorities are revision/digest-bound review receipts,
-automated risk-based routing, and incremental re-review with explicit coverage
+Next implementation priorities are automated risk-based routing and incremental
+re-review with explicit coverage
 (an unexamined issue must never be treated as cleared). Require a migration path
 and regression cases before changing closure semantics again.
 

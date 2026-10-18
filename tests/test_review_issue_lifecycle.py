@@ -23,6 +23,7 @@ class ReviewIssueLifecycleTests(unittest.TestCase):
         self.root = Path(temp.name) / "project"
         self.root.mkdir()
         initialize_pipeline_contracts(self.root)
+        (self.root / "paper.pdf").write_bytes(b"%PDF-1.4\nreview fixture\n")
 
     def _state(self) -> dict:
         return load_contract_artifact(self.root, "review_state", default={})
@@ -53,6 +54,7 @@ class ReviewIssueLifecycleTests(unittest.TestCase):
             review_plan={},
             lane_name=lane,
             suite_name=suite,
+            pdf_path=self.root / "paper.pdf",
         )
         finalize_review_job(
             self.root,
@@ -254,6 +256,110 @@ class ReviewIssueLifecycleTests(unittest.TestCase):
                     self.root, "review_state", modified, producer="test"
                 )
                 self.assertFalse(verify_reviewer_board_recheck(issue, self.root)[0])
+
+    def test_pdf_change_invalidates_closure_and_reopens_the_responsible_role(
+        self,
+    ) -> None:
+        issue = self._review("rigor", "Missing baseline.")["active_issue_records"][0]
+        self._review("rigor")
+        (self.root / "paper.pdf").write_bytes(b"%PDF-1.4\nnew version\n")
+        passed, evidence = verify_reviewer_board_recheck(issue, self.root)
+        self.assertFalse(passed)
+        self.assertEqual(evidence["reason"], "stale_review_subject")
+        state = self._review("clarity")
+        self.assertEqual(state["active_issue_records"][0]["role"], "rigor")
+        self.assertEqual(state["resolved_issue_records"], [])
+        self.assertEqual(len(state["repair_queue"]), 1)
+        self._review("rigor")
+        self.assertTrue(verify_reviewer_board_recheck(issue, self.root)[0])
+
+    def test_partial_closures_from_different_versions_cannot_be_combined(self) -> None:
+        issue = self._review("rigor", "Shared issue.")["active_issue_records"][0]
+        self._review("clarity", "Shared issue.")
+        self._review("rigor")
+        (self.root / "paper.pdf").write_bytes(b"%PDF-1.4\nnew version\n")
+        state = self._review("clarity")
+        self.assertEqual(state["active_issue_records"][0]["role"], "rigor")
+        self.assertFalse(verify_reviewer_board_recheck(issue, self.root)[0])
+        self._review("rigor")
+        self.assertTrue(verify_reviewer_board_recheck(issue, self.root)[0])
+
+    def test_pdf_replaced_during_review_cannot_clear_issues(self) -> None:
+        self._review("rigor", "Missing baseline.")
+        job = begin_review_job(
+            self.root,
+            role="rigor",
+            model_review="test",
+            review_plan={},
+            pdf_path="paper.pdf",
+        )
+        (self.root / "paper.pdf").write_bytes(b"%PDF-1.4\nreplacement\n")
+        finalize_review_job(
+            self.root,
+            job=job,
+            review_text={"Weaknesses": []},
+            review_img=None,
+            pdf_path="paper.pdf",
+        )
+        self.assertEqual(job["status"], "unbound_subject")
+        self.assertEqual(job["subject_check"], "stale_review_subject")
+        self.assertEqual(self._state()["active_issues"], ["Missing baseline."])
+
+    def test_unbound_legacy_caller_preserves_blockers_and_cannot_retroactively_bind(
+        self,
+    ) -> None:
+        self._review("rigor", "Missing baseline.")
+        job = begin_review_job(
+            self.root, role="rigor", model_review="test", review_plan={}
+        )
+        finalize_review_job(
+            self.root,
+            job=job,
+            review_text={"Weaknesses": ["New issue."]},
+            review_img=None,
+            pdf_path=str(self.root / "paper.pdf"),
+        )
+        self.assertEqual(job["status"], "unbound_subject")
+        self.assertEqual(
+            set(self._state()["active_issues"]), {"Missing baseline.", "New issue."}
+        )
+
+    def test_missing_pdf_file_is_not_a_completed_review(self) -> None:
+        self._review("rigor", "Missing baseline.")
+        job = begin_review_job(
+            self.root,
+            role="rigor",
+            model_review="test",
+            review_plan={},
+            pdf_path="paper.pdf",
+        )
+        (self.root / "paper.pdf").unlink()
+        finalize_review_job(
+            self.root,
+            job=job,
+            review_text={"Weaknesses": []},
+            review_img=None,
+            pdf_path=str(self.root / "paper.pdf"),
+        )
+        self.assertEqual(job["status"], "missing_pdf")
+        self.assertEqual(self._state()["active_issues"], ["Missing baseline."])
+
+    def test_reopening_hostile_debt_refreshes_other_lane_summaries_and_findings(
+        self,
+    ) -> None:
+        self._review(
+            "claim_cross_examiner", "Unsupported claim.", lane="hostile_critic"
+        )
+        self._review("claim_cross_examiner", lane="hostile_critic")
+        (self.root / "paper.pdf").write_bytes(b"%PDF-1.4\nnew version\n")
+        state = self._review("clarity")
+        self.assertEqual(
+            state["lane_summaries"]["hostile_critic"]["blocking_issue_count"], 1
+        )
+        critic = load_contract_artifact(self.root, "critic_findings", default={})
+        self.assertEqual(critic["active_issue_count"], 1)
+        self.assertEqual(critic["findings"][0]["role"], "claim_cross_examiner")
+        self.assertNotEqual(critic["job_id"], critic["updated_by_job_id"])
 
 
 if __name__ == "__main__":

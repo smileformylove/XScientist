@@ -100,6 +100,7 @@ def execute_review_pass(
             lane_name=lane_name,
             suite_name=suite_name,
             strictness_profile=strictness_profile,
+            pdf_path=pdf_path,
         )
         if save_dir is None:
             save_dir = Path(job["job_dir"])
@@ -147,6 +148,11 @@ def execute_review_pass(
         )
 
     if job is not None:
+        selected_pdf = pdf_path_resolver(paper_dir)
+        job["selection_unchanged"] = bool(selected_pdf) and (
+            Path(selected_pdf).expanduser().resolve()
+            == Path(pdf_path).expanduser().resolve()
+        )
         finalize_review_job(
             project_root,
             job=job,
@@ -158,7 +164,10 @@ def execute_review_pass(
         )
 
     return {
-        "found": True,
+        "found": job is None
+        or (
+            job.get("status") == "completed" and job.get("review_payload_valid") is True
+        ),
         "pdf_path": pdf_path,
         "review_text": review_text,
         "review_img": review_img,

@@ -11,6 +11,7 @@ from ai_scientist.utils.pipeline_helpers import save_review_artifacts
 from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
 from ai_scientist.utils.review_execution import execute_review_pass
 from ai_scientist.utils.review_jobs import REVIEW_ROLES
+from ai_scientist.utils.review_subject import check_review_subject
 from ai_scientist.utils.workflow_modes import (
     WorkflowModeSpec,
     resolve_workflow_mode,
@@ -421,6 +422,22 @@ def execute_review_suite(
         review_img_by_role[role] = review_pass.get("review_img")
 
     primary_role = normalized_roles[0]
+    review_subject = (passes_by_role[primary_role].get("job") or {}).get(
+        "review_subject"
+    )
+    subject_check = "not_persisted"
+    subject_ok = True
+    if persist_job and project_root is not None:
+        subject_hashes = {
+            ((payload.get("job") or {}).get("review_subject") or {}).get("subject_hash")
+            for payload in passes_by_role.values()
+        }
+        if len(subject_hashes) != 1 or None in subject_hashes:
+            subject_ok, subject_check = False, "mismatched_review_subjects"
+        else:
+            subject_ok, subject_check = check_review_subject(
+                project_root, review_subject, pdf_path=pdf_path_resolver(paper_dir)
+            )
     merged_review_text = merge_text_reviews(
         review_text_by_role,
         primary_role=primary_role,
@@ -464,14 +481,29 @@ def execute_review_suite(
                 role: ((payload.get("job") or {}).get("job_id"))
                 for role, payload in passes_by_role.items()
             },
+            "review_subject": review_subject,
+            "subject_check": subject_check,
+            "found": subject_ok,
         }
         (suite_dir / "review_suite.json").write_text(
             json.dumps(suite_summary, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
+    if subject_ok and persist_job and project_root is not None:
+        subject_ok, subject_check = check_review_subject(
+            project_root, review_subject, pdf_path=pdf_path_resolver(paper_dir)
+        )
+        if suite_dir is not None and suite_summary["subject_check"] != subject_check:
+            suite_summary.update(found=subject_ok, subject_check=subject_check)
+            (suite_dir / "review_suite.json").write_text(
+                json.dumps(suite_summary, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
     return {
-        "found": True,
+        "found": subject_ok,
+        "review_subject": review_subject,
+        "subject_check": subject_check,
         "pdf_path": pdf_path,
         "review_text": merged_review_text,
         "review_img": merged_review_img,

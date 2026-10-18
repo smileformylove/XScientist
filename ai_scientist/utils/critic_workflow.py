@@ -6,11 +6,17 @@ from typing import Any, Callable
 
 from ai_scientist.utils.decision_log import record_decision
 from ai_scientist.utils.pipeline_contracts import load_contract_artifact
-from ai_scientist.utils.workflow_runtime import WorkflowRuntimePlan, execute_review_suite
+from ai_scientist.utils.review_subject import check_review_subject
+from ai_scientist.utils.workflow_runtime import (
+    WorkflowRuntimePlan,
+    execute_review_suite,
+)
 
 
 def _hostile_critic_ablation_enabled() -> bool:
-    return str(os.environ.get("AI_SCIENTIST_ABLATE_HOSTILE_CRITIC") or "").strip().lower() in {
+    return str(
+        os.environ.get("AI_SCIENTIST_ABLATE_HOSTILE_CRITIC") or ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -19,7 +25,9 @@ def _hostile_critic_ablation_enabled() -> bool:
 
 
 def _lane_summary(project_root: str | Path, lane_name: str) -> dict[str, Any]:
-    review_state = load_contract_artifact(project_root, "review_state", default={}) or {}
+    review_state = (
+        load_contract_artifact(project_root, "review_state", default={}) or {}
+    )
     lane_summaries = (
         review_state.get("lane_summaries")
         if isinstance(review_state.get("lane_summaries"), dict)
@@ -64,10 +72,12 @@ def _review_issue_counts(review_pass: dict[str, Any]) -> dict[str, Any]:
                 continue
             role_payloads.append((str(role or "general"), payload.get("review_text")))
     elif review_pass.get("review_text") is not None:
-        role_payloads.append((
-            str(review_pass.get("primary_role") or "general"),
-            review_pass.get("review_text"),
-        ))
+        role_payloads.append(
+            (
+                str(review_pass.get("primary_role") or "general"),
+                review_pass.get("review_text"),
+            )
+        )
 
     active_count = 0
     blocking_count = 0
@@ -115,7 +125,9 @@ def _effective_issue_counts(
     computed = _review_issue_counts(review_pass)
     lane_summary = _lane_summary(project_root, lane_name) if use_lane_summary else {}
     role_payload_materialized = bool(computed.get("expected_role_count"))
-    lane_materialized = role_payload_materialized or (use_lane_summary and bool(lane_summary))
+    lane_materialized = role_payload_materialized or (
+        use_lane_summary and bool(lane_summary)
+    )
     if not computed["parse_complete"]:
         summary_blocking = _summary_count(lane_summary, "blocking_issue_count")
         summary_active = _summary_count(lane_summary, "active_issue_count")
@@ -243,6 +255,17 @@ def run_independent_critic_pass(
     )
     primary_active_count = int(primary_counts["active_issue_count"])
     primary_blocking_count = int(primary_counts["blocking_issue_count"])
+    primary_subject = review_pass.get("review_subject")
+    if primary_blocking_count == 0:
+        primary_subject_ok, primary_subject_check = check_review_subject(
+            project_root, primary_subject, pdf_path=pdf_path_resolver(paper_dir)
+        )
+        primary_counts["subject_check"] = primary_subject_check
+        if not primary_subject_ok:
+            primary_blocking_count = 1
+            primary_active_count = max(primary_active_count, 1)
+            primary_counts["blocking_issue_count"] = primary_blocking_count
+            primary_counts["active_issue_count"] = primary_active_count
     confirmation = {
         "ran": False,
         "found": False,
@@ -300,13 +323,30 @@ def run_independent_critic_pass(
         )
         confirmation_active_count = int(confirmation_counts["active_issue_count"])
         confirmation_blocking_count = int(confirmation_counts["blocking_issue_count"])
+        confirmation_subject = confirmation_pass.get("review_subject")
+        confirmation_subject_ok, confirmation_subject_check = check_review_subject(
+            project_root, confirmation_subject, pdf_path=pdf_path_resolver(paper_dir)
+        )
+        if confirmation_subject_ok and (
+            (confirmation_subject or {}).get("subject_hash")
+            != (primary_subject or {}).get("subject_hash")
+        ):
+            confirmation_subject_ok, confirmation_subject_check = (
+                False,
+                "mismatched_review_subjects",
+            )
+        if not confirmation_subject_ok:
+            confirmation_blocking_count = max(confirmation_blocking_count, 1)
+            confirmation_active_count = max(confirmation_active_count, 1)
         confirmation_found = bool(confirmation_pass.get("found")) and bool(
             confirmation_counts.get("lane_materialized")
         )
         confirmation = {
             "ran": True,
             "found": confirmation_found,
-            "confirmed": confirmation_found and confirmation_blocking_count == 0,
+            "confirmed": confirmation_found
+            and confirmation_blocking_count == 0
+            and confirmation_subject_ok,
             "active_issue_count": confirmation_active_count,
             "blocking_issue_count": confirmation_blocking_count,
             "parse_complete": bool(confirmation_counts.get("parse_complete")),
@@ -314,12 +354,17 @@ def run_independent_critic_pass(
             "role_counts": confirmation_counts.get("role_counts") or {},
             "malformed_roles": confirmation_counts.get("malformed_roles") or [],
             "source": "ep_independent_eval",
+            "subject_check": confirmation_subject_check,
             "review_roles_used": list(confirmation_pass.get("review_roles_used") or []),
             "reason": (
                 "confirmed"
                 if confirmation_found and confirmation_blocking_count == 0
                 else (
-                    "confirmation_blockers"
+                    (
+                        "confirmation_subject_changed"
+                        if not confirmation_subject_ok
+                        else "confirmation_blockers"
+                    )
                     if confirmation_found
                     else "confirmation_missing_artifact"
                 )
@@ -353,10 +398,14 @@ def run_independent_critic_pass(
         else int(confirmation.get("blocking_issue_count") or 0)
     )
     aggregate_blocking_count = primary_blocking_count + confirmation_blocker_penalty
-    aggregate_active_count = primary_active_count + int(
-        confirmation.get("active_issue_count") or 0
-    ) + (1 if confirmation.get("ran") and not confirmation.get("found") else 0)
-    critic_findings_path = Path(project_root).expanduser().resolve() / "critic_findings.json"
+    aggregate_active_count = (
+        primary_active_count
+        + int(confirmation.get("active_issue_count") or 0)
+        + (1 if confirmation.get("ran") and not confirmation.get("found") else 0)
+    )
+    critic_findings_path = (
+        Path(project_root).expanduser().resolve() / "critic_findings.json"
+    )
     return {
         **review_pass,
         "ran": True,
@@ -374,11 +423,7 @@ def run_independent_critic_pass(
         "blocking_source": (
             "ep_independent_eval"
             if confirmation_blocker_penalty
-            else (
-                "hostile_critic"
-                if primary_blocking_count
-                else None
-            )
+            else ("hostile_critic" if primary_blocking_count else None)
         ),
         "critic_findings_file": (
             str(critic_findings_path) if critic_findings_path.exists() else None

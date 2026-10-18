@@ -126,11 +126,13 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_review_job",
             )
 
+            (project_root / "paper.pdf").write_bytes(b"%PDF-1.4\nreview fixture\n")
             job = begin_review_job(
                 project_root,
                 role="rigor",
                 model_review="demo-model",
                 review_plan={"strategy": "depth"},
+                pdf_path=project_root / "paper.pdf",
             )
             finalize_review_job(
                 project_root,
@@ -205,11 +207,13 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_review_job",
             )
 
+            (project_root / "paper.pdf").write_bytes(b"%PDF-1.4\nreview fixture\n")
             first_job = begin_review_job(
                 project_root,
                 role="rigor",
                 model_review="demo-model",
                 review_plan={"strategy": "depth"},
+                pdf_path=project_root / "paper.pdf",
             )
             finalize_review_job(
                 project_root,
@@ -232,6 +236,7 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 role="rigor",
                 model_review="demo-model",
                 review_plan={"strategy": "depth"},
+                pdf_path=project_root / "paper.pdf",
             )
             finalize_review_job(
                 project_root,
@@ -281,6 +286,7 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_review_job",
             )
 
+            (project_root / "paper.pdf").write_bytes(b"%PDF-1.4\nreview fixture\n")
             job = begin_review_job(
                 project_root,
                 role="claim_cross_examiner",
@@ -289,6 +295,7 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 lane_name="hostile_critic",
                 suite_name="hostile_critic",
                 strictness_profile="adversarial",
+                pdf_path=project_root / "paper.pdf",
             )
             finalize_review_job(
                 project_root,
@@ -396,11 +403,13 @@ class ReviewJobsAndManagerBoardTests(unittest.TestCase):
                 producer="test_review_job",
             )
 
+            (project_root / "paper.pdf").write_bytes(b"%PDF-1.4\nreview fixture\n")
             job = begin_review_job(
                 project_root,
                 role="rigor",
                 model_review="demo-model",
                 review_plan={"strategy": "depth"},
+                pdf_path=project_root / "paper.pdf",
             )
             finalize_review_job(
                 project_root,

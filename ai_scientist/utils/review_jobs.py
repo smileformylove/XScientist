@@ -18,6 +18,10 @@ from ai_scientist.utils.pipeline_contracts import (
     save_contract_artifact,
 )
 from ai_scientist.utils.privacy import REDACTED_PATH, portable_path
+from ai_scientist.utils.review_subject import (
+    capture_review_subject,
+    check_review_subject,
+)
 
 
 def _pareto_pool_enabled() -> bool:
@@ -798,6 +802,60 @@ def _merge_issue_scopes(
     return merged
 
 
+def _reopen_stale_closure(
+    record: dict[str, Any], subject_hash: str
+) -> dict[str, Any] | None:
+    checks = record.get("resolution_checks") or []
+    stale = [
+        check for check in checks if check.get("review_subject_hash") != subject_hash
+    ]
+    if not stale and record.get("status") != "resolved":
+        return None
+    if not stale and record.get("resolved_subject_hash") == subject_hash:
+        return None
+    scopes = _issue_review_scopes(record) if record.get("status") != "resolved" else []
+    for check in stale:
+        observations = check.get("review_scopes")
+        if isinstance(observations, list) and observations:
+            scopes.extend(observations)
+        else:
+            # Legacy closures still identify the responsible scope, not its input version.
+            scopes.append(
+                {
+                    **{
+                        key: record[key]
+                        for key in _REVIEW_OBSERVATION_FIELDS
+                        if key in record
+                    },
+                    **{
+                        key: check.get(key)
+                        for key in ("role", "review_lane", "review_suite")
+                    },
+                }
+            )
+    reopened = _merge_issue_scopes(record, scopes or _issue_review_scopes(record))
+    reopened["status"] = "active"
+    reopened["resolution_checks"] = [check for check in checks if check not in stale]
+    for key in ("resolved_in_job_id", "resolved_at", "resolved_subject_hash"):
+        reopened.pop(key, None)
+    return reopened
+
+
+def _lane_issue_records(
+    records: list[dict[str, Any]], lane_name: str
+) -> list[dict[str, Any]]:
+    result = []
+    for record in records:
+        scopes = [
+            item
+            for item in _issue_review_scopes(record)
+            if _review_scope(item)[1] == lane_name
+        ]
+        if scopes:
+            result.append(_merge_issue_scopes(record, scopes))
+    return result
+
+
 def _extract_issue_records(
     review_payload: dict[str, Any], *, role: str
 ) -> list[dict[str, Any]]:
@@ -1286,6 +1344,7 @@ def begin_review_job(
     lane_name: str = "review",
     suite_name: str | None = None,
     strictness_profile: str = "standard",
+    pdf_path: str | Path | None = None,
 ) -> dict[str, Any]:
     job_id = f"{role}_{uuid.uuid4().hex[:10]}"
     job_dir = review_jobs_root(project_root) / job_id
@@ -1302,6 +1361,7 @@ def begin_review_job(
         "started_at": _now_iso(),
         "finished_at": None,
         "status": "running",
+        "review_subject": capture_review_subject(project_root, pdf_path),
     }
     (job_dir / "job.json").write_text(
         json.dumps(
@@ -1326,7 +1386,19 @@ def finalize_review_job(
 ) -> dict[str, Any]:
     job_dir = Path(job["job_dir"])
     job["finished_at"] = _now_iso()
-    job["status"] = "completed" if pdf_path else "missing_pdf"
+    subject_ok, subject_reason = check_review_subject(
+        project_root, job.get("review_subject"), pdf_path=pdf_path
+    )
+    if job.get("selection_unchanged") is False:
+        subject_ok, subject_reason = False, "selected_pdf_changed"
+    job["subject_check"] = subject_reason
+    pdf_candidate = Path(pdf_path).expanduser() if pdf_path else None
+    if pdf_candidate is not None and not pdf_candidate.is_absolute():
+        pdf_candidate = Path(project_root).expanduser().resolve() / pdf_candidate
+    if pdf_candidate is None or not pdf_candidate.is_file():
+        job["status"] = "missing_pdf"
+    else:
+        job["status"] = "completed" if subject_ok else "unbound_subject"
     job["review_payload_valid"] = _valid_review_payload(review_text) is not None
     job["pdf_path"] = pdf_path
     job["usage_summary"] = usage_summary or {}
@@ -1357,6 +1429,8 @@ def finalize_review_job(
         f"- Strictness: {job.get('strictness_profile') or 'standard'}",
         f"- Status: {job['status']}",
         f"- PDF: {_portable_review_job(project_root, job).get('pdf_path')}",
+        f"- Review subject: {(job.get('review_subject') or {}).get('subject_hash') or 'unbound'}",
+        f"- Subject check: {subject_reason}",
         f"- Evidence refs: {', '.join(job.get('evidence_refs') or []) or 'none'}",
     ]
     (job_dir / "review_summary.md").write_text(
@@ -1415,6 +1489,8 @@ def update_review_state(
         "status": job.get("status"),
         "finished_at": job.get("finished_at"),
         "review_payload_valid": review_payload is not None,
+        "review_subject": deepcopy(job.get("review_subject")),
+        "subject_check": job.get("subject_check"),
     }
     review_state["rounds"].append(round_item)
     previous_active = {
@@ -1439,7 +1515,17 @@ def update_review_state(
     binding_catalog = _build_issue_binding_catalog(project_root)
     active_issue_records: list[dict[str, Any]] = []
     persistent_issue_records: list[dict[str, Any]] = []
-    if review_payload is not None and job.get("status") == "completed":
+    if review_payload is not None:
+        can_resolve = job.get("status") == "completed"
+        subject_hash = (job.get("review_subject") or {}).get("subject_hash")
+        if can_resolve and subject_hash:
+            for issue_id, previous in {**resolved_records, **previous_active}.items():
+                reopened = _reopen_stale_closure(previous, subject_hash)
+                if reopened is not None:
+                    previous_active[issue_id] = reopened
+                    resolved_records.pop(issue_id, None)
+                    issue_ledger[issue_id] = reopened
+            review_state["current_review_subject"] = deepcopy(job["review_subject"])
         issue_records = _extract_issue_records(
             review_payload, role=str(job.get("role") or "clarity")
         )
@@ -1453,6 +1539,8 @@ def update_review_state(
         scope = _review_scope(job)
         active_by_id = dict(previous_active)
         for issue_id, previous in previous_active.items():
+            if not can_resolve:
+                continue
             scopes = _issue_review_scopes(previous)
             remaining = [
                 item
@@ -1468,6 +1556,8 @@ def update_review_state(
                     "review_lane": job.get("lane_name") or "review",
                     "review_suite": job.get("suite_name"),
                     "job_id": job.get("job_id"),
+                    "review_subject_hash": subject_hash,
+                    "review_scopes": [item for item in scopes if item not in remaining],
                 }
             ]
             if remaining:
@@ -1481,6 +1571,7 @@ def update_review_state(
                     "status": "resolved",
                     "resolved_in_job_id": job.get("job_id"),
                     "resolved_at": job.get("finished_at"),
+                    "resolved_subject_hash": subject_hash,
                     "resolution_checks": checks,
                 }
                 resolved_records[issue_id] = record
@@ -1519,7 +1610,7 @@ def update_review_state(
                 [
                     observation
                     for observation in _issue_review_scopes(previous_active[issue_id])
-                    if _review_scope(observation) != scope
+                    if not can_resolve or _review_scope(observation) != scope
                 ]
                 if issue_id in previous_active
                 else []
@@ -1615,53 +1706,76 @@ def update_review_state(
         questions = _coerce_text_list(review_payload.get("Questions"))
         limitations = _coerce_text_list(review_payload.get("Limitations"))
         lane_name = str(job.get("lane_name") or "review")
-        lane_records = [
-            _merge_issue_scopes(item, scopes)
-            for item in active_issue_records
-            if (
-                scopes := [
-                    observation
-                    for observation in _issue_review_scopes(item)
-                    if _review_scope(observation)[1] == lane_name
-                ]
-            )
-        ]
-        lane_persistent = [item for item in lane_records if item.get("is_persistent")]
-        blocker_class_counts: dict[str, int] = {}
-        for item in lane_records:
-            blocker_class = str(item.get("blocker_class") or "general_blocker")
-            blocker_class_counts[blocker_class] = (
-                blocker_class_counts.get(blocker_class, 0) + 1
-            )
         review_state.setdefault("role_summaries", {})[job["role"]] = {
             "scores": review_payload.get("scores") or {},
             "weaknesses": weaknesses,
             "questions": questions,
             "limitations": limitations,
         }
-        review_state.setdefault("lane_summaries", {})[lane_name] = {
-            "lane_name": lane_name,
-            "suite_name": job.get("suite_name"),
-            "strictness_profile": job.get("strictness_profile") or "standard",
-            "roles": sorted(
-                {
-                    str(observation.get("role") or "").strip()
-                    for item in lane_records
-                    for observation in _issue_review_scopes(item)
-                    if str(observation.get("role") or "").strip()
-                }
-                | {str(job.get("role") or "").strip()}
-            ),
-            "active_issue_count": len(lane_records),
-            "persistent_issue_count": len(lane_persistent),
-            "blocking_issue_count": sum(
-                str(item.get("severity") or "").strip() in {"major", "critical"}
+        lane_summaries = review_state.setdefault("lane_summaries", {})
+        lane_names = (
+            set(lane_summaries)
+            | {lane_name}
+            | {
+                _review_scope(observation)[1]
+                for item in active_issue_records
+                for observation in _issue_review_scopes(item)
+            }
+        )
+        for summary_lane in sorted(lane_names):
+            lane_records = _lane_issue_records(active_issue_records, summary_lane)
+            previous_summary = lane_summaries.get(summary_lane) or {}
+            current_lane = summary_lane == lane_name
+            blocker_class_counts: dict[str, int] = {}
+            for item in lane_records:
+                blocker_class = str(item.get("blocker_class") or "general_blocker")
+                blocker_class_counts[blocker_class] = (
+                    blocker_class_counts.get(blocker_class, 0) + 1
+                )
+            roles = {
+                str(observation.get("role") or "").strip()
                 for item in lane_records
-            ),
-            "blocker_class_counts": blocker_class_counts,
-            "updated_at": job.get("finished_at"),
-        }
-        if lane_name == "hostile_critic":
+                for observation in _issue_review_scopes(item)
+                if str(observation.get("role") or "").strip()
+            }
+            roles.update(previous_summary.get("roles") or [])
+            if current_lane:
+                roles.add(str(job.get("role") or "").strip())
+            lane_summaries[summary_lane] = {
+                "lane_name": summary_lane,
+                "suite_name": (
+                    job.get("suite_name")
+                    if current_lane
+                    else previous_summary.get("suite_name")
+                ),
+                "strictness_profile": (
+                    job.get("strictness_profile")
+                    if current_lane
+                    else previous_summary.get("strictness_profile")
+                )
+                or "standard",
+                "roles": sorted(roles),
+                "active_issue_count": len(lane_records),
+                "persistent_issue_count": sum(
+                    bool(item.get("is_persistent")) for item in lane_records
+                ),
+                "blocking_issue_count": sum(
+                    str(item.get("severity") or "").strip() in {"major", "critical"}
+                    for item in lane_records
+                ),
+                "blocker_class_counts": blocker_class_counts,
+                "updated_at": job.get("finished_at"),
+            }
+        if "hostile_critic" in lane_summaries:
+            lane_records = _lane_issue_records(active_issue_records, "hostile_critic")
+            latest_critic_job = next(
+                (
+                    item
+                    for item in reversed(review_state["rounds"])
+                    if item.get("lane_name") == "hostile_critic"
+                ),
+                {},
+            )
             queue_by_issue = {
                 str(item.get("issue_id") or "").strip(): item
                 for item in repair_queue
@@ -1700,9 +1814,12 @@ def update_review_state(
                 {
                     "schema_version": 1,
                     "generated_at": _now_iso(),
-                    "job_id": job.get("job_id"),
-                    "lane_name": lane_name,
-                    "strictness_profile": job.get("strictness_profile") or "standard",
+                    "job_id": latest_critic_job.get("job_id"),
+                    "updated_by_job_id": job.get("job_id"),
+                    "lane_name": "hostile_critic",
+                    "strictness_profile": lane_summaries["hostile_critic"][
+                        "strictness_profile"
+                    ],
                     "active_issue_count": len(lane_records),
                     "blocking_issue_count": sum(
                         str(item.get("severity") or "").strip() in {"major", "critical"}

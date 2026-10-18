@@ -13,10 +13,18 @@ from ai_scientist.utils.pipeline_contracts import (
     load_contract_artifact,
     save_contract_artifact,
 )
+from ai_scientist.utils.review_subject import capture_review_subject
 from ai_scientist.utils.workflow_runtime import (
     build_workflow_runtime_plan,
     execute_review_suite,
 )
+
+
+def _review_subject(root: Path) -> dict:
+    pdf = root / "paper.pdf"
+    if not pdf.exists():
+        pdf.write_bytes(b"%PDF-1.4\nreview fixture\n")
+    return capture_review_subject(root, pdf)
 
 
 class WorkflowRuntimeTests(unittest.TestCase):
@@ -225,6 +233,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 return {
                     "found": True,
                     "review_roles_used": list(kwargs["review_roles"]),
+                    "review_subject": _review_subject(project_root),
                     "primary_role": "novelty",
                     "passes_by_role": {
                         "novelty": {"review_text": {"review": {"Weaknesses": []}}}
@@ -308,6 +317,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 return {
                     "found": True,
                     "review_roles_used": list(kwargs["review_roles"]),
+                    "review_subject": _review_subject(project_root),
                     "primary_role": "novelty",
                     "passes_by_role": {
                         "novelty": {
@@ -403,6 +413,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 return {
                     "found": True,
                     "review_roles_used": list(kwargs["review_roles"]),
+                    "review_subject": _review_subject(project_root),
                     "review_text": {"review": {}},
                     "review_img": {},
                 }
@@ -546,6 +557,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     return {
                         "found": True,
                         "review_roles_used": list(kwargs["review_roles"]),
+                        "review_subject": _review_subject(project_root),
                         "primary_role": "novelty",
                         "passes_by_role": {
                             "novelty": {"review_text": {"review": {"Weaknesses": []}}}
@@ -556,6 +568,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 return {
                     "found": True,
                     "review_roles_used": list(kwargs["review_roles"]),
+                    "review_subject": _review_subject(project_root),
                     "primary_role": "novelty",
                     "passes_by_role": {},
                     "review_text": None,
@@ -636,6 +649,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                     return {
                         "found": True,
                         "review_roles_used": list(kwargs["review_roles"]),
+                        "review_subject": _review_subject(project_root),
                         "primary_role": "novelty",
                         "passes_by_role": {
                             "novelty": {"review_text": {"review": {"Weaknesses": []}}}
@@ -646,6 +660,7 @@ class WorkflowRuntimeTests(unittest.TestCase):
                 return {
                     "found": True,
                     "review_roles_used": list(kwargs["review_roles"]),
+                    "review_subject": _review_subject(project_root),
                     "primary_role": "novelty",
                     "passes_by_role": {},
                     "review_text": None,

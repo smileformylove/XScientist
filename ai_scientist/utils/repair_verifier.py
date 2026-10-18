@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ai_scientist.utils.pipeline_contracts import load_contract_artifact
+from ai_scientist.utils.review_subject import check_review_subject
 
 VERIFY_ENV_FLAG = "AI_SCIENTIST_REPAIR_VERIFY"
 
@@ -125,6 +126,11 @@ def _review_recheck(
         return fail("missing_resolution_review")
     hostile_checked = False
     checked_jobs: list[str] = []
+    subject_hash = resolution.get("resolved_subject_hash")
+    if not subject_hash or subject_hash != (
+        state.get("current_review_subject") or {}
+    ).get("subject_hash"):
+        return fail("missing_or_stale_resolution_subject")
     for check in checks:
         if not isinstance(check, dict):
             return fail("invalid_resolution_review")
@@ -136,6 +142,12 @@ def _review_recheck(
             or _review_scope(job) != _review_scope(check)
         ):
             return fail("unconfirmed_resolution_review")
+        subject = job.get("review_subject") or {}
+        if (
+            check.get("review_subject_hash") != subject_hash
+            or subject.get("subject_hash") != subject_hash
+        ):
+            return fail("mismatched_resolution_subject")
         role, lane, _ = _review_scope(job)
         hostile_checked |= "hostile" in role.lower() or lane == "hostile_critic"
         checked_jobs.append(str(job["job_id"]))
@@ -143,10 +155,18 @@ def _review_recheck(
         return fail("unconfirmed_resolution_review")
     if hostile and not hostile_checked:
         return fail("missing_hostile_recheck")
+    subject_ok, subject_reason = check_review_subject(
+        project_root,
+        jobs[resolution["resolved_in_job_id"]].get("review_subject"),
+        pdf_path=task.get("pdf_path"),
+    )
+    if not subject_ok:
+        return fail(subject_reason)
     return True, {
         **evidence,
         "reason": "confirmed_review_resolution",
         "resolution_job_ids": checked_jobs,
+        "review_subject_hash": subject_hash,
     }
 
 
