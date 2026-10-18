@@ -23,7 +23,6 @@ from typing import Any, Callable
 
 from ai_scientist.utils.pipeline_contracts import load_contract_artifact
 
-
 VERIFY_ENV_FLAG = "AI_SCIENTIST_REPAIR_VERIFY"
 
 VERIFIER_VOCAB: tuple[str, ...] = (
@@ -52,69 +51,117 @@ def _coerce_list(value: Any) -> list[str]:
     return [str(value).strip()] if str(value).strip() else []
 
 
-def _load_latest_review_issues(project_root: str | Path) -> list[dict[str, Any]]:
-    state = load_contract_artifact(project_root, "review_state", default={}) or {}
-    if not isinstance(state, dict):
-        return []
-    issues = state.get("issues_log") or state.get("issues") or []
-    if not isinstance(issues, list):
-        return []
-    latest_round = 0
-    for row in issues:
-        if not isinstance(row, dict):
-            continue
-        try:
-            latest_round = max(latest_round, int(row.get("round_index") or 0))
-        except (TypeError, ValueError):
-            continue
-    return [
-        row for row in issues
-        if isinstance(row, dict) and int(row.get("round_index") or 0) == latest_round
-    ]
+def _review_scope(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(item.get("role") or ""),
+        str(item.get("review_lane") or item.get("lane_name") or "review"),
+        str(item.get("review_suite") or item.get("suite_name") or ""),
+    )
 
 
-def _issue_still_present(task: dict[str, Any], project_root: str | Path) -> bool:
+def _review_recheck(
+    task: dict[str, Any], project_root: str | Path, *, hostile: bool = False
+) -> tuple[bool, dict[str, Any]]:
     issue_id = str(task.get("issue_id") or "").strip()
+    evidence: dict[str, Any] = {
+        "issue_id": issue_id,
+        "still_present_in_latest_round": False,
+        "hostile_role_resurfaced": False,
+        "matched_role": None,
+    }
+
+    def fail(reason: str) -> tuple[bool, dict[str, Any]]:
+        return False, {**evidence, "reason": reason}
+
     if not issue_id:
-        return False
-    for row in _load_latest_review_issues(project_root):
-        if str(row.get("issue_id") or "").strip() == issue_id:
-            return True
-    return False
+        return fail("missing_issue_id")
+    state = load_contract_artifact(project_root, "review_state", default=None)
+    if not isinstance(state, dict):
+        return fail("missing_review_state")
+    active = state.get("active_issue_records")
+    resolved = state.get("resolved_issue_records")
+    if not isinstance(active, list) or not isinstance(resolved, list):
+        # Legacy absence never proved that the responsible reviewer checked a repair.
+        legacy = state.get("issues_log") or state.get("issues") or []
+        active = legacy if isinstance(legacy, list) else []
+        resolved = []
+    for row in active:
+        if not isinstance(row, dict) or str(row.get("issue_id") or "") != issue_id:
+            continue
+        evidence["still_present_in_latest_round"] = True
+        scopes = row.get("review_scopes") or [row]
+        for observation in scopes:
+            if not isinstance(observation, dict):
+                continue
+            role, lane, _ = _review_scope(observation)
+            if "hostile" in role.lower() or lane == "hostile_critic":
+                evidence["hostile_role_resurfaced"] = True
+                evidence["matched_role"] = role or lane
+        return fail("issue_still_active")
+    resolution = next(
+        (
+            row
+            for row in resolved
+            if isinstance(row, dict)
+            and str(row.get("issue_id") or "") == issue_id
+            and row.get("status") == "resolved"
+        ),
+        None,
+    )
+    if resolution is None:
+        return fail("issue_not_explicitly_resolved")
+    rounds = state.get("rounds")
+    jobs = (
+        {
+            row.get("job_id"): row
+            for row in rounds
+            if isinstance(row, dict) and row.get("job_id")
+        }
+        if isinstance(rounds, list)
+        else {}
+    )
+    checks = resolution.get("resolution_checks")
+    if not isinstance(checks, list) or not checks:
+        return fail("missing_resolution_review")
+    hostile_checked = False
+    checked_jobs: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            return fail("invalid_resolution_review")
+        job = jobs.get(check.get("job_id"))
+        if (
+            not job
+            or job.get("status") != "completed"
+            or job.get("review_payload_valid") is not True
+            or _review_scope(job) != _review_scope(check)
+        ):
+            return fail("unconfirmed_resolution_review")
+        role, lane, _ = _review_scope(job)
+        hostile_checked |= "hostile" in role.lower() or lane == "hostile_critic"
+        checked_jobs.append(str(job["job_id"]))
+    if resolution.get("resolved_in_job_id") not in checked_jobs:
+        return fail("unconfirmed_resolution_review")
+    if hostile and not hostile_checked:
+        return fail("missing_hostile_recheck")
+    return True, {
+        **evidence,
+        "reason": "confirmed_review_resolution",
+        "resolution_job_ids": checked_jobs,
+    }
 
 
 def verify_reviewer_board_recheck(
     task: dict[str, Any], project_root: str | Path
 ) -> tuple[bool, dict[str, Any]]:
-    """Pass when the issue_id no longer appears in the latest review round."""
-    still_present = _issue_still_present(task, project_root)
-    return (not still_present), {
-        "issue_id": task.get("issue_id"),
-        "still_present_in_latest_round": still_present,
-    }
+    """Require explicit closure by completed, valid reviews of the reporting scopes."""
+    return _review_recheck(task, project_root)
 
 
 def verify_hostile_critic_recheck(
     task: dict[str, Any], project_root: str | Path
 ) -> tuple[bool, dict[str, Any]]:
-    """Pass when no hostile-critic role re-surfaces this issue in the latest round."""
-    issue_id = str(task.get("issue_id") or "").strip()
-    hostile_hit = False
-    role_hit: str | None = None
-    for row in _load_latest_review_issues(project_root):
-        if str(row.get("issue_id") or "").strip() != issue_id:
-            continue
-        role = str(row.get("role") or "").strip().lower()
-        lane = str(row.get("review_lane") or "").strip().lower()
-        if "hostile" in role or lane == "hostile_critic":
-            hostile_hit = True
-            role_hit = role or lane
-            break
-    return (not hostile_hit), {
-        "issue_id": issue_id,
-        "hostile_role_resurfaced": hostile_hit,
-        "matched_role": role_hit,
-    }
+    """Require explicit closure, including a completed hostile-critic recheck."""
+    return _review_recheck(task, project_root, hostile=True)
 
 
 def verify_figure_alignment_check(
@@ -152,7 +199,9 @@ def verify_experiment_validation(
         claim_ids.append(primary_id)
     if not claim_ids:
         return True, {"claim_ids": [], "reason": "no_claim_bindings"}
-    graph = load_contract_artifact(project_root, "claim_evidence_graph", default={}) or {}
+    graph = (
+        load_contract_artifact(project_root, "claim_evidence_graph", default={}) or {}
+    )
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
     edges = [e for e in (graph.get("edges") or []) if isinstance(e, dict)]
     claim_status = {
@@ -165,7 +214,8 @@ def verify_experiment_validation(
     edge_targets = {
         str(e.get("target") or "").strip()
         for e in edges
-        if str(e.get("relation") or e.get("label") or "").strip().lower() in supports_edge
+        if str(e.get("relation") or e.get("label") or "").strip().lower()
+        in supports_edge
     }
     unsupported: list[str] = []
     for cid in claim_ids:
@@ -206,9 +256,7 @@ _DISPATCH: dict[str, Callable[[dict[str, Any], Any], tuple[bool, dict[str, Any]]
 }
 
 
-def run_task_verifier(
-    task: dict[str, Any], project_root: str | Path
-) -> dict[str, Any]:
+def run_task_verifier(task: dict[str, Any], project_root: str | Path) -> dict[str, Any]:
     """Dispatch one task to its declared verifier; safe on unknown labels."""
     verifier = str(task.get("verifier") or "").strip()
     if verifier not in _DISPATCH:

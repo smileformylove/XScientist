@@ -32,7 +32,21 @@ def _save_review_state(project_root: Path, issues: list[dict]) -> None:
 
 
 class VerifierBoardRecheckTests(unittest.TestCase):
-    def test_pass_when_issue_absent_from_latest_round(self) -> None:
+    def test_malformed_legacy_round_never_passes_or_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_root = Path(td)
+            initialize_pipeline_contracts(project_root)
+            _save_review_state(
+                project_root, [{"issue_id": "RVW-1", "round_index": "bad"}]
+            )
+            outcome = run_task_verifier(
+                {"issue_id": "RVW-1", "verifier": "reviewer_board_recheck"},
+                project_root,
+            )
+            self.assertFalse(outcome["passed"])
+            self.assertFalse(outcome["skipped"])
+
+    def test_legacy_absence_does_not_prove_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
@@ -47,8 +61,8 @@ class VerifierBoardRecheckTests(unittest.TestCase):
             passed, evidence = verify_reviewer_board_recheck(
                 {"issue_id": "RVW-1"}, project_root
             )
-            self.assertTrue(passed)
-            self.assertFalse(evidence["still_present_in_latest_round"])
+            self.assertFalse(passed)
+            self.assertEqual(evidence["reason"], "issue_still_active")
 
     def test_fail_when_issue_resurfaces(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -69,7 +83,7 @@ class VerifierBoardRecheckTests(unittest.TestCase):
 
 
 class HostileCriticRecheckTests(unittest.TestCase):
-    def test_pass_when_no_hostile_role_surfaces_issue(self) -> None:
+    def test_missing_hostile_review_is_not_a_pass(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
@@ -78,8 +92,10 @@ class HostileCriticRecheckTests(unittest.TestCase):
                 project_root,
                 [{"issue_id": "RVW-1", "round_index": 1, "role": "reviewer_a"}],
             )
-            passed, _ = verify_hostile_critic_recheck({"issue_id": "RVW-1"}, project_root)
-            self.assertTrue(passed)
+            passed, _ = verify_hostile_critic_recheck(
+                {"issue_id": "RVW-1"}, project_root
+            )
+            self.assertFalse(passed)
 
     def test_fail_when_hostile_role_re_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -109,7 +125,9 @@ class FigureAlignmentTests(unittest.TestCase):
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
-            save_contract_artifact(project_root, "figure_spec", {"figures": []}, producer="t")
+            save_contract_artifact(
+                project_root, "figure_spec", {"figures": []}, producer="t"
+            )
             passed, _ = verify_figure_alignment_check({"figure_ids": []}, project_root)
             self.assertTrue(passed)
 
@@ -146,7 +164,9 @@ class ExperimentValidationTests(unittest.TestCase):
                 },
                 producer="t",
             )
-            passed, _ = verify_experiment_validation({"claim_ids": ["C1"]}, project_root)
+            passed, _ = verify_experiment_validation(
+                {"claim_ids": ["C1"]}, project_root
+            )
             self.assertTrue(passed)
 
     def test_fail_when_claim_unsupported(self) -> None:
@@ -179,13 +199,13 @@ class ExperimentValidationTests(unittest.TestCase):
                 "claim_evidence_graph",
                 {
                     "nodes": [{"id": "C1", "type": "claim", "status": "pending"}],
-                    "edges": [
-                        {"source": "E1", "target": "C1", "relation": "supports"}
-                    ],
+                    "edges": [{"source": "E1", "target": "C1", "relation": "supports"}],
                 },
                 producer="t",
             )
-            passed, _ = verify_experiment_validation({"claim_ids": ["C1"]}, project_root)
+            passed, _ = verify_experiment_validation(
+                {"claim_ids": ["C1"]}, project_root
+            )
             self.assertTrue(passed)
 
 
@@ -243,13 +263,18 @@ class DispatchTests(unittest.TestCase):
             project_root = Path(td) / "projects" / "demo"
             project_root.mkdir(parents=True, exist_ok=True)
             initialize_pipeline_contracts(project_root, workflow_mode="review_board")
-            _save_review_state(project_root, [{"issue_id": "RVW-OTHER", "round_index": 1}])
+            _save_review_state(
+                project_root, [{"issue_id": "RVW-OTHER", "round_index": 1}]
+            )
             outcome = run_task_verifier(
                 {"issue_id": "RVW-1", "verifier": "reviewer_board_recheck"},
                 project_root,
             )
             self.assertFalse(outcome["skipped"])
-            self.assertTrue(outcome["passed"])
+            self.assertFalse(outcome["passed"])
+            self.assertEqual(
+                outcome["evidence"]["reason"], "issue_not_explicitly_resolved"
+            )
 
 
 class MaybeRunRepairPlanVerifiersTests(unittest.TestCase):
@@ -300,9 +325,9 @@ class MaybeRunRepairPlanVerifiersTests(unittest.TestCase):
             self.assertIsNotNone(report)
             assert report is not None
             self.assertEqual(report["task_count"], 3)
-            self.assertEqual(report["passed"], 1)
+            self.assertEqual(report["passed"], 0)
             self.assertEqual(report["skipped"], 1)
-            self.assertEqual(report["failed"], 1)
+            self.assertEqual(report["failed"], 2)
 
 
 if __name__ == "__main__":
