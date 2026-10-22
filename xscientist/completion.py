@@ -30,7 +30,7 @@ RESEARCH_SUBCOMMANDS = {
     "verifier-authority": "prepare finalize verify",
     "experiment-admission": "prepare ingest",
     "literature": "plan receipt source update passage",
-    "video": "add list observe context index-text search",
+    "video": "add list observe context index-text search plan inspect feedback run",
     "adapter": "list doctor sync",
     "object": "add",
     "bundle": "create verify restore",

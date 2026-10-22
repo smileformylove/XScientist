@@ -17,6 +17,11 @@ VIDEO_PROTOCOLS = {
         "video_text_index",
         "source_hash",
     ),
+    "xscientist.video-inspection.v1": (
+        "context_snapshot",
+        "video_inspection",
+        "context_hash",
+    ),
 }
 
 
@@ -51,6 +56,56 @@ def video_payload_issues(kind: str, payload: Mapping[str, Any]) -> list[str]:
             payload["source_content_hash"],
         }:
             issues.append("video text index artifact binding mismatch")
+        return issues
+    if schema == "video_inspection":
+        for item in payload["items"]:
+            times = [frame["timestamp_seconds"] for frame in item["frames"]]
+            if times != sorted(set(times)):
+                issues.append(
+                    "video inspection frame times must be strictly increasing"
+                )
+        keys = {
+            (
+                item["source_content_hash"],
+                item["stream_index"],
+                frame["timestamp_seconds"],
+                frame["artifact_hash"],
+            )
+            for item in payload["items"]
+            for frame in item["frames"]
+        }
+        artifacts = {
+            digest
+            for item in payload["items"]
+            for digest in [
+                item["source_content_hash"],
+                *(frame["artifact_hash"] for frame in item["frames"]),
+            ]
+        }
+        if payload["frame_count"] != len(keys):
+            issues.append("video inspection frame count mismatch")
+        if set(payload["artifact_hashes"]) != artifacts:
+            issues.append("video inspection artifact binding mismatch")
+        if (payload["trace_status"] == "captured") != bool(
+            payload["provider_receipt_refs"]
+        ):
+            issues.append("video inspection trace status mismatch")
+        if len({item["evidence_id"] for item in payload["items"]}) != len(
+            payload["items"]
+        ):
+            issues.append("video inspection evidence references must be unique")
+        preparation = payload.get("preparation")
+        if preparation is not None and (
+            preparation["decode_operations"] > preparation["decoded_frames"]
+            or (preparation["decode_operations"] == 0)
+            != (preparation["decoded_frames"] == 0)
+            or sum(
+                preparation[key]
+                for key in ("decoded_frames", "cached_frames", "existing_frame_refs")
+            )
+            < payload["frame_count"]
+        ):
+            issues.append("video inspection preparation accounting mismatch")
         return issues
     start, end = (
         payload["selector"]["start_seconds"],

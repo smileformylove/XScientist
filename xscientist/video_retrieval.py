@@ -151,6 +151,7 @@ def search_video_evidence(
     start_seconds: float | None = None,
     end_seconds: float | None = None,
     limit: int = 8,
+    _artifacts: _VideoArtifacts | None = None,
 ) -> dict[str, Any]:
     """Retrieve timed source text and observations, retaining support and refutation."""
     if not isinstance(query, str) or not query.strip() or len(query) > 512:
@@ -174,7 +175,7 @@ def search_video_evidence(
     repository = ResearchRepository(repo)
     selected = {_asset(repository, value)["object_id"] for value in asset_ids}
     target = repository.resolve(target_id) if target_id is not None else None
-    artifacts = _VideoArtifacts(repository)
+    artifacts = _artifacts or _VideoArtifacts(repository)
     matches: list[dict[str, Any]] = []
     scanned_segments = 0
     scanned_indexes = 0

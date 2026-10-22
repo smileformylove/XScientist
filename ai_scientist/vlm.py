@@ -300,6 +300,8 @@ def get_response_from_vlm(
     max_images: int = 25,
     video_repo: str | None = None,
     video_evidence_ids: list[str] | None = None,
+    video_frame_refs: list[dict[str, Any]] | None = None,
+    video_budget_tokens: int = 2000,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Get response from vision-language model."""
     if msg_history is None:
@@ -308,6 +310,8 @@ def get_response_from_vlm(
 
     if bool(video_repo) != bool(video_evidence_ids):
         raise ValueError("video_repo and video_evidence_ids must be supplied together")
+    if video_frame_refs is not None and not video_evidence_ids:
+        raise ValueError("video_frame_refs require video evidence inputs")
 
     if _is_supported_vlm_model(model):
         if video_evidence_ids:
@@ -322,6 +326,8 @@ def get_response_from_vlm(
                 video_evidence_ids,
                 message=msg,
                 max_frames=min(max_images, 16),
+                frame_refs=video_frame_refs,
+                budget_tokens=video_budget_tokens,
             )
         else:
             content = prepare_vlm_prompt(msg, image_paths, max_images)

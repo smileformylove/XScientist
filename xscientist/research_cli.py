@@ -2040,11 +2040,14 @@ def main(
             if "object" in result:
                 if args.as_json:
                     payload = _saved_object_json(result)
-                    if "operation" in result:
-                        payload["operation"] = result["operation"]
+                    for key in ("operation", "response", "inspection"):
+                        if key in result:
+                            payload[key] = result[key]
                     _print_json(payload)
                 else:
                     _print_saved_object("video asset/evidence", result, as_json=False)
+                    if "response" in result:
+                        print(_display_text(result["response"]))
             elif args.as_json:
                 _print_json(result)
             elif "assets" in result:
@@ -2062,6 +2065,19 @@ def main(
                     f"Matches: {result['match_count']}; "
                     f"omitted: {result['omitted_count']}"
                 )
+            elif "actions" in result:
+                for item in result["actions"]:
+                    print(
+                        f"{item['tool']}  [{item['start_seconds']}, "
+                        f"{item['end_seconds']})s  frames={item['max_frames']}"
+                    )
+                print(f"Plan: {result['plan_hash']}")
+            elif "events" in result:
+                print(
+                    f"Recorded responses: {result['recorded_responses']}; "
+                    f"frames sent: {result['frames_sent']}"
+                )
+                print(f"Feedback: {result['feedback_hash']}")
             else:
                 print(
                     f"Evidence items: {len(result['items'])}; frames: {result['frame_count']}"

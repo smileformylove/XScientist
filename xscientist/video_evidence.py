@@ -565,10 +565,15 @@ def build_video_evidence_pack(
     *,
     max_frames: int = 8,
     budget_tokens: int = 2000,
+    frame_refs: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compile bounded visual context without model calls or graph mutations."""
     return _build_video_evidence_pack(
-        repo, evidence_ids, max_frames=max_frames, budget_tokens=budget_tokens
+        repo,
+        evidence_ids,
+        max_frames=max_frames,
+        budget_tokens=budget_tokens,
+        frame_refs=frame_refs,
     )
 
 
@@ -604,6 +609,7 @@ def _build_video_evidence_pack(
     max_frames: int,
     budget_tokens: int,
     artifacts: _VideoArtifacts | None = None,
+    frame_refs: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     count = _frame_limit(max_frames)
     if type(budget_tokens) is not int or not 512 <= budget_tokens <= 16000:
@@ -614,6 +620,32 @@ def _build_video_evidence_pack(
         raise ResearchGitError("provide between 1 and 32 video evidence IDs")
     repository = ResearchRepository(repo)
     artifacts = artifacts or _VideoArtifacts(repository)
+    requested_refs = None
+    if frame_refs is not None:
+        if not isinstance(frame_refs, (list, tuple)) or not 1 <= len(frame_refs) <= 512:
+            raise ResearchGitError(
+                "provide between 1 and 512 exact video frame references"
+            )
+        requested_refs = set()
+        for ref in frame_refs:
+            if not isinstance(ref, Mapping) or set(ref) != {
+                "evidence_id",
+                "timestamp_seconds",
+                "artifact_hash",
+            }:
+                raise ResearchGitError("invalid exact video frame reference")
+            if not isinstance(ref["artifact_hash"], str) or not _HASH.fullmatch(
+                ref["artifact_hash"]
+            ):
+                raise ResearchGitError("invalid exact video frame hash")
+            requested_refs.add(
+                (
+                    repository.resolve(ref["evidence_id"], kind="evidence"),
+                    _number(ref["timestamp_seconds"], "frame timestamp"),
+                    ref["artifact_hash"],
+                )
+            )
+    matched_refs = set()
     items, seen = [], set()
     core = {
         "protocol_kind": "xscientist.video-evidence-pack.v1",
@@ -660,7 +692,23 @@ def _build_video_evidence_pack(
             items.pop()
             continue
         artifacts.path(payload["source_content_hash"])
-        queues.append(_temporal_priority(payload["frames"]))
+        candidates = []
+        for frame in payload["frames"]:
+            ref = (
+                item["object_id"],
+                frame["timestamp_seconds"],
+                frame["artifact_hash"],
+            )
+            if requested_refs is None or ref in requested_refs:
+                candidates.append(frame)
+            if requested_refs is not None and ref in requested_refs:
+                matched_refs.add(ref)
+        queues.append(_temporal_priority(candidates) if candidates else [])
+
+    if requested_refs is not None and requested_refs != matched_refs:
+        raise ResearchGitError(
+            "exact frame references are absent from the supplied video evidence or context budget"
+        )
 
     included: set[tuple[Any, ...]] = set()
     # Allocate one frame per evidence per round, spreading each interval over time.
@@ -697,6 +745,7 @@ def prepare_video_evidence_prompt(
     message: str,
     max_frames: int = 8,
     budget_tokens: int = 2000,
+    frame_refs: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build timestamp/image pairs accepted by the existing VLM provider boundary."""
     repository = ResearchRepository(repo)
@@ -707,6 +756,7 @@ def prepare_video_evidence_prompt(
         max_frames=max_frames,
         budget_tokens=budget_tokens,
         artifacts=artifacts,
+        frame_refs=frame_refs,
     )
     if not pack["frame_count"]:
         raise ResearchGitError(

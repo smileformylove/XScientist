@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/video_inspection.schema.json",
+  "title": "XScientist Video Provider Input Receipt",
+  "type": "object",
+  "required": ["protocol_kind", "context_hash", "inspection_id", "query_hash", "system_message_hash", "request_hash", "response_hash", "model", "pack_hash", "items", "frame_count", "latency_ms", "provider_receipt_refs", "trace_status", "coverage_kind", "scientific_status", "audio_inspected", "artifact_hashes"],
+  "properties": {
+    "protocol_kind": {"const": "xscientist.video-inspection.v1"},
+    "context_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inspection_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "query_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "system_message_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "request_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "response_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "model": {"type": "string", "minLength": 1, "maxLength": 256},
+    "pack_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "items": {
+      "type": "array", "minItems": 1, "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": ["evidence_id", "evidence_hash", "source_id", "source_content_hash", "stream_index", "frames"],
+        "properties": {
+          "evidence_id": {"type": "string", "pattern": "^rso-[0-9a-f]+$"},
+          "evidence_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "source_id": {"type": "string", "pattern": "^rso-[0-9a-f]+$"},
+          "source_content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "stream_index": {"type": "integer", "minimum": 0},
+          "frames": {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "items": {
+              "type": "object", "required": ["artifact_hash", "timestamp_seconds"],
+              "properties": {
+                "artifact_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "timestamp_seconds": {"type": "number", "minimum": 0}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "frame_count": {"type": "integer", "minimum": 1, "maximum": 16},
+    "latency_ms": {"type": "integer", "minimum": 0},
+    "provider_receipt_refs": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}},
+    "trace_status": {"enum": ["captured", "unavailable"]},
+    "coverage_kind": {"const": "sparse_frames"},
+    "scientific_status": {"const": "unverified_model_response"},
+    "audio_inspected": {"const": false},
+    "preparation": {
+      "type": "object", "required": ["plan_hash", "decode_operations", "decoded_frames", "cached_frames", "existing_frame_refs"],
+      "properties": {
+        "plan_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "decode_operations": {"type": "integer", "minimum": 0, "maximum": 8},
+        "decoded_frames": {"type": "integer", "minimum": 0, "maximum": 16},
+        "cached_frames": {"type": "integer", "minimum": 0, "maximum": 16},
+        "existing_frame_refs": {"type": "integer", "minimum": 0, "maximum": 16}
+      },
+      "additionalProperties": false
+    },
+    "artifact_hashes": {"type": "array", "minItems": 2, "maxItems": 48, "uniqueItems": true, "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+  },
+  "additionalProperties": false
+}

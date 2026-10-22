@@ -14,6 +14,8 @@ research campaign or certify an observation as a scientific result.
 - [x] Native checkpoint retention, integrity checks and regression tests.
 - [x] Verified frame reuse, temporal frame allocation and duplicate image removal.
 - [x] Content-bound timed text indexes and offline interval retrieval.
+- [x] Read-only inspection plans, exact frame selection and bounded execution.
+- [x] Provider-input receipts and observed execution feedback.
 
 Git stores source/evidence JSON and CAS pointers. Original videos and extracted
 PNGs remain in the configured CAS and are excluded from source-code commits.
@@ -150,6 +152,73 @@ refutation when present; its minimum limit is two. Text matches are retrieval
 cues, not proof that a model inspected video or that a scientific claim holds.
 Search runs without FFmpeg or a model provider and makes no graph changes.
 
+## Planning, Inspection and Feedback
+
+```bash
+xscientist research video plan "object reaches the marker" --repo ./study \
+  --asset rso-SOURCE_ID --max-frames 8 --max-decodes 2 --json
+xscientist research video run "object reaches the marker" --repo ./study \
+  --asset rso-SOURCE_ID --model YOUR_CONFIGURED_VLM \
+  --max-frames 8 --max-decodes 2 --json
+xscientist research video inspect --repo ./study --evidence rso-EVIDENCE_ID \
+  --message "Describe only directly visible changes" --model YOUR_CONFIGURED_VLM \
+  --max-frames 4 --json
+xscientist research video feedback --repo ./study --asset rso-SOURCE_ID --json
+```
+
+`plan` is read-only and works without FFmpeg or provider dependencies. It
+retrieves relevant windows, merges overlaps and checks the density of available
+decoded points. Existing inputs are preferred when they meet that density;
+missing or sparse intervals receive sampling actions. Frame and decode budgets
+are explicit, temporal pairs are preferred, and omitted windows are counted.
+Available points and points submitted during a prior successful provider call
+are separate fields. Neither implies continuous coverage or model comprehension.
+
+`run` executes the bounded plan, records sampled inputs without asserting a
+scientific conclusion, and issues one logical VLM request through the existing
+provider routing, budget and retry policy. `inspect` directly uses existing
+evidence. These two commands call the configured model and may incur provider
+costs; the other video commands do not. Default checkpoints remain exact-path,
+and both commands accept `--no-commit`. Successfully prepared inputs remain
+reusable if a later provider operation fails.
+
+Existing-input plan actions carry exact `frame_refs` containing an evidence ID,
+actual timestamp and frame hash. Pass those to `inspect_video_evidence()` or
+`build_video_evidence_pack()` to preserve the focus window. CLI `context` and
+`inspect` accept the same JSON list through `--frames-file`. Missing or altered
+references fail before a provider call. Context budgets can still omit frames;
+the actual input manifest and receipt report what was sent.
+
+```python
+from xscientist.video_planning import run_video_inspection
+
+result = run_video_inspection(
+    "./study", "rso-SOURCE_ID", "What changes near the marker?",
+    client=client, model=model, max_frames=8, max_decodes=2,
+)
+response = result["response"]
+receipt = result["inspection"]
+```
+
+An inspection receipt is a native `context_snapshot`, linked to the exact
+evidence objects and retaining all referenced original/frame CAS objects.
+It checks actual request image bytes against the input manifest and records
+frame times/hashes, query/system/request/response digests, model route, observed
+inspection latency and available ARA provider receipt references. Native Git
+records contain no raw prompt, response or base64 image. The response is returned
+to the caller; it is not automatically admitted as scientific evidence. Without
+ARA tracing, `trace_status` explicitly remains `unavailable`. Failed provider
+validation never creates a successful inspection receipt.
+
+`feedback` validates receipt-to-evidence bindings and reports observed image
+submissions, distinct source points, repeated points for identical query/system/
+model combinations, latency and preparation counters from `run`. Asset filters
+select receipts involving those assets, including joint multi-asset calls.
+Missing preparation accounting and provider cost remain explicitly unknown.
+Repeated submissions can be intentional. These host-recorded events provide
+inputs for controlled Harness comparisons, not automatic skill adoption or
+evidence that a policy improves research quality.
+
 ## Harness Improvement Roadmap
 
 The [Harness2](https://github.com/google-research/harness2) reference is its
@@ -157,20 +226,22 @@ Propose-Probe-Compose loop over tool use, context, memory and procedures.
 This implementation supplies actual assets and evidence inputs to that loop.
 It does not claim to reproduce Harness2 or automate its improvement stages.
 
-Next system changes, in order:
+Remaining system changes, in order:
 
-1. Asset reuse: cache timestamp indexes and frame derivatives; add proxy and
+1. Asset reuse: exact frame derivations are reusable. Cache full timestamp
+   indexes, add proxy and
    clip derivation receipts; recover missing objects through existing storage
    adapters without changing source identity.
-2. Evidence retrieval: combine shot, transcript, OCR and visual indexes;
-   retrieve relevant intervals and retain contradictory observations.
-3. Adaptive inspection: use coarse-to-fine sampling and request more frames
-   near uncertainty, always recording actual inspected coverage and cost.
-4. Research orchestration: select these tools from task/context requirements,
-   preserving a distinction between indexed, retrieved and model-inspected
-   evidence instead of equating metadata access with visual inspection.
-5. Harness learning: instrument real asset resolution and inspection events,
-   probe bounded procedural changes with the existing refinement runtime,
+2. Evidence retrieval: normalized shot/transcript/OCR/caption text and opposing
+   observations are searchable. Add automatic extractor adapters and visual
+   embedding retrieval with independently measured localization quality.
+3. Adaptive inspection: density-based plans and bounded execution are available.
+   Add model-requested follow-up windows, ROI inspection and provider cost
+   resolution without overstating sparse point coverage.
+4. Research orchestration: integrate video tool selection into the broader
+   autonomous research loop and retain indexed/retrieved/submitted states.
+5. Harness learning: use the recorded real preparation and provider-input events
+   to probe bounded procedural changes with the existing refinement runtime,
    and admit scoped experience only after independent backtests.
 
 Evaluate changes on tool selection, evidence localization, redundant decoding,

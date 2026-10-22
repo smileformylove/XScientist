@@ -56,10 +56,62 @@ def add_video_commands(subparsers: Any) -> None:
     search.add_argument("--start", type=float)
     search.add_argument("--end", type=float)
     search.add_argument("--limit", type=int, default=8)
-    for command in (add, listing, observe, context, text, search):
+    plan = commands.add_parser(
+        "plan", help="Plan bounded video inspection without executing it."
+    )
+    plan.add_argument("query")
+    plan.add_argument("--asset", required=True)
+    plan.add_argument("--start", type=float, default=0)
+    plan.add_argument("--end", type=float)
+    plan.add_argument("--target")
+    plan.add_argument("--max-frames", type=int, default=8)
+    plan.add_argument("--max-decodes", type=int, default=4)
+    inspect = commands.add_parser(
+        "inspect",
+        help="Call a configured VLM on evidence and record its actual frame inputs.",
+    )
+    inspect.add_argument("--evidence", action="append", required=True)
+    inspect.add_argument("--message", required=True)
+    inspect.add_argument("--model", required=True)
+    inspect.add_argument("--max-frames", type=int, default=8)
+    inspect.add_argument("--budget-tokens", type=int, default=4000)
+    for command in (context, inspect):
+        command.add_argument(
+            "--frames-file",
+            help="JSON list of exact evidence/timestamp/hash references.",
+        )
+    feedback = commands.add_parser(
+        "feedback", help="Summarize host-recorded video inspection events."
+    )
+    feedback.add_argument("--asset", action="append", default=[])
+    feedback.add_argument("--limit", type=int, default=128)
+    run = commands.add_parser(
+        "run",
+        help="Retrieve, prepare bounded visual inputs, call a VLM and record execution feedback.",
+    )
+    run.add_argument("query")
+    run.add_argument("--asset", required=True)
+    run.add_argument("--model", required=True)
+    run.add_argument("--start", type=float, default=0)
+    run.add_argument("--end", type=float)
+    run.add_argument("--target")
+    run.add_argument("--max-frames", type=int, default=8)
+    run.add_argument("--max-decodes", type=int, default=4)
+    for command in (
+        add,
+        listing,
+        observe,
+        context,
+        text,
+        search,
+        plan,
+        inspect,
+        feedback,
+        run,
+    ):
         command.add_argument("--repo", default=".")
         command.add_argument("--json", action="store_true", dest="as_json")
-    for command in (add, observe, text):
+    for command in (add, observe, text, inspect, run):
         command.add_argument("--no-commit", action="store_true")
 
 
@@ -94,6 +146,7 @@ def run_video_command(args: argparse.Namespace) -> dict[str, Any]:
             args.evidence,
             max_frames=args.max_frames,
             budget_tokens=args.budget_tokens,
+            frame_refs=_read_frame_refs(args.frames_file),
         )
     if args.video_command == "index-text":
         from .video_retrieval import register_video_text_index
@@ -119,4 +172,94 @@ def run_video_command(args: argparse.Namespace) -> dict[str, Any]:
             end_seconds=args.end,
             limit=args.limit,
         )
+    if args.video_command == "plan":
+        from .video_planning import plan_video_inspection
+
+        return plan_video_inspection(
+            args.repo,
+            args.asset,
+            args.query,
+            start_seconds=args.start,
+            end_seconds=args.end,
+            max_frames=args.max_frames,
+            max_decodes=args.max_decodes,
+            target_id=args.target,
+        )
+    if args.video_command in {"inspect", "run"}:
+        import contextlib
+        import sys
+
+        from .research_git import ResearchGitError
+        from .video_inspection import inspect_video_evidence
+
+        try:
+            from ai_scientist.vlm import create_client
+        except ImportError as exc:
+            raise ResearchGitError(
+                "video inspection requires the configured VLM provider dependencies"
+            ) from exc
+        frame_refs = (
+            _read_frame_refs(args.frames_file)
+            if args.video_command == "inspect"
+            else None
+        )
+        with contextlib.redirect_stdout(sys.stderr):
+            client, model = create_client(args.model)
+        if args.video_command == "run":
+            from .video_planning import run_video_inspection
+
+            return run_video_inspection(
+                args.repo,
+                args.asset,
+                args.query,
+                client=client,
+                model=model,
+                start_seconds=args.start,
+                end_seconds=args.end,
+                max_frames=args.max_frames,
+                max_decodes=args.max_decodes,
+                target_id=args.target,
+                commit=not args.no_commit,
+            )
+        return inspect_video_evidence(
+            args.repo,
+            args.evidence,
+            message=args.message,
+            client=client,
+            model=model,
+            max_frames=args.max_frames,
+            frame_refs=frame_refs,
+            budget_tokens=args.budget_tokens,
+            commit=not args.no_commit,
+        )
+    if args.video_command == "feedback":
+        from .video_inspection import video_execution_feedback
+
+        return video_execution_feedback(
+            args.repo, asset_ids=args.asset, limit=args.limit
+        )
     return {"assets": list_video_assets(args.repo)}
+
+
+def _read_frame_refs(path: str | None) -> list[dict[str, Any]] | None:
+    if path is None:
+        return None
+    import json
+
+    from ai_scientist.utils.safe_files import (
+        BoundedFileError,
+        read_bounded_regular_file,
+    )
+    from .research_git import ResearchGitError
+
+    try:
+        value = json.loads(
+            read_bounded_regular_file(path, maximum=65536, label="frame_refs")
+        )
+    except (BoundedFileError, ValueError, UnicodeDecodeError) as exc:
+        raise ResearchGitError(
+            "frame references must be a bounded regular JSON file"
+        ) from exc
+    if not isinstance(value, list):
+        raise ResearchGitError("frame references must be a JSON list")
+    return value
