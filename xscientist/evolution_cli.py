@@ -37,6 +37,7 @@ from ai_scientist.utils.evolution_runtime import (
     run_canary_suite,
     run_shadow_benchmark,
 )
+from ai_scientist.utils.harness_refinement import run_harness_refinement
 from ai_scientist.utils.pipeline_contracts import (
     append_jsonl_artifact,
     artifact_path,
@@ -388,6 +389,17 @@ def _build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--out")
     benchmark.add_argument("--force", action="store_true")
 
+    refine = subparsers.add_parser(
+        "refine", help="Probe and compose shadow harness proposals; defaults to a plan."
+    )
+    refine.add_argument("--spec", required=True)
+    refine.add_argument("--constitution", required=True)
+    refine.add_argument("--store", required=True)
+    refine.add_argument("--execute", action="store_true")
+    refine.add_argument("--timeout", type=int, default=600)
+    refine.add_argument("--out")
+    refine.add_argument("--force", action="store_true")
+
     canary = subparsers.add_parser(
         "canary", help="Run bounded projects against a candidate and prove rollback."
     )
@@ -506,6 +518,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write_json(args.out, result, force=args.force)
             return 0 if result["status"] == "completed" else 3
+        if args.command == "refine":
+            if args.out and Path(args.out).expanduser().exists() and not args.force:
+                raise EvolutionRuntimeError(
+                    "output path exists; pass --force to replace it"
+                )
+            result = run_harness_refinement(
+                _object(_load_json(args.spec), label="refinement spec"),
+                constitution=_object(
+                    _load_json(args.constitution), label="science constitution"
+                ),
+                artifact_store=args.store,
+                allow_execution=args.execute,
+                timeout_seconds=args.timeout,
+            )
+            _write_json(args.out, result, force=args.force)
+            return 3 if result["status"] == "halted" else 0
         if args.command == "canary":
             result = run_canary_suite(
                 _object(_load_json(args.suite), label="canary suite"),

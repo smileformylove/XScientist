@@ -83,6 +83,38 @@ def _finite_metrics(payload: Any) -> dict[str, float]:
     return metrics
 
 
+def _behavior_evidence(value: Any) -> list[dict[str, str]]:
+    """Retain bounded evaluator observations inside the hashed run receipt."""
+    if not isinstance(value, list) or len(value) > 128:
+        raise EvolutionRuntimeError(
+            "behavior_evidence must be an array of at most 128 events"
+        )
+    events: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for event in value:
+        if not isinstance(event, dict) or set(event) != {
+            "event_id",
+            "change_id",
+            "kind",
+            "detail",
+        }:
+            raise EvolutionRuntimeError(
+                "behavior evidence requires event_id, change_id, kind, detail"
+            )
+        if any(
+            not isinstance(text, str) or not text.strip() or len(text) > 1024
+            for text in event.values()
+        ) or event["kind"] not in {"activated", "effect", "counterexample"}:
+            raise EvolutionRuntimeError("behavior evidence contains an invalid event")
+        if event["event_id"] in seen:
+            raise EvolutionRuntimeError(
+                "behavior evidence event_id must be unique within a run"
+            )
+        seen.add(event["event_id"])
+        events.append(dict(event))
+    return events
+
+
 def _validate_command(value: Any) -> list[str]:
     if (
         not isinstance(value, list)
@@ -231,6 +263,7 @@ def _execute_variant(
         try:
             output = _evaluator_payload(stdout, output_path)
             metrics = _finite_metrics(output.get("metrics"))
+            behavior = _behavior_evidence(output.get("behavior_evidence", []))
         except EvolutionRuntimeError as exc:
             receipt["status"] = "invalid_output"
             receipt["error_category"] = type(exc).__name__
@@ -255,6 +288,8 @@ def _execute_variant(
                 **gates,
             }
         )
+        if behavior:
+            receipt["behavior_evidence"] = behavior
         receipt["run_hash"] = canonical_content_hash(receipt)
         return output, receipt
 

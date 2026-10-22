@@ -5,6 +5,11 @@ runtime produces that evidence from real files and shell-free processes, then
 allows a production directory to change only after semantic validation and
 signed authorization both pass.
 
+For opt-in public development probes, observed behavior evidence, composition,
+and a final held-out test, see [Harness refinement](HARNESS_REFINEMENT.md).
+`xscientist evolution refine` defaults to a read-only plan and returns only
+shadow candidates; it does not replace this runtime's production gate.
+
 ## Safety model
 
 - Candidate sources are captured as immutable SHA-256 CAS objects. Symbolic
