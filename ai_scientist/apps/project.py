@@ -13,15 +13,20 @@ import json
 import math
 import os
 import os.path as osp
+import re
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Mapping
 import traceback
+from contextlib import contextmanager
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+
+_MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_COMMITS = 4096
+_MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_BYTES = 1024 * 1024
 
 from ai_scientist.utils.deferred_imports import load_module_attr
 from ai_scientist.utils.high_quality_pipeline import run_high_quality_pass
@@ -543,7 +548,11 @@ def _run_autopilot_preflight(args: argparse.Namespace) -> list[dict[str, object]
     return rows
 
 
-def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
+def _prepare_autopilot_bfts_config(
+    args: argparse.Namespace,
+    *,
+    reuse_existing: bool = False,
+) -> str | None:
     """Create a finite, isolated BFTS config without mutating the user's source."""
 
     from ai_scientist.resources import resolve_bfts_config_path
@@ -587,6 +596,9 @@ def _prepare_autopilot_bfts_config(args: argparse.Namespace) -> str | None:
             _rebind_bootstrapped_executor_workspace(None)
     if not args.autopilot:
         return None
+    if reuse_existing:
+        args.bfts_config = str(source)
+        return str(source)
 
     import yaml
 
@@ -1119,10 +1131,15 @@ def _resolve_resume_work(
     idea_indices: list[int],
     *,
     enabled: bool,
+    authoritative_results: list[dict[str, Any]] | None = None,
 ) -> tuple[list[int], list[dict[str, Any]], dict[int, str]]:
     if not enabled:
         return list(idea_indices), [], {}
-    progress = _load_project_progress(project_dir)
+    progress = (
+        {"results": authoritative_results}
+        if authoritative_results is not None
+        else _load_project_progress(project_dir)
+    )
     latest: dict[int, dict[str, Any]] = {}
     checkpoints: dict[int, str] = {}
     for fallback_idx, result in enumerate(progress.get("results") or []):
@@ -1424,7 +1441,11 @@ def _experiment_checkpoint_status(executed_results: list[dict[str, Any]]) -> str
 
     return (
         "completed"
-        if any(result.get("status") == "success" for result in executed_results)
+        if any(
+            (result.get("registry_status") or result.get("status"))
+            in {"success", "completed"}
+            for result in executed_results
+        )
         else "failed"
     )
 
@@ -1468,7 +1489,10 @@ def _record_local_research_planning_objects(
 ) -> None:
     if not getattr(args, "_research_git_active", False) or not idea_cards:
         return
-    from xscientist.research_git import ResearchGitError
+    from xscientist.research_git import (
+        ResearchGitError,
+        load_repository_config_at_ref,
+    )
     from xscientist.research_lifecycle import ResearchLifecycle
 
     project_root = Path(args.project_dir).expanduser().resolve()
@@ -1688,12 +1712,922 @@ def _compact_research_result(result: dict) -> dict:
         "template_profile",
         "template_capability",
         "execution_policy",
+        "admission_post_execution_status",
+        "research_status",
     )
     return {
         key: result.get(key)
         for key in scalar_keys
         if isinstance(result.get(key), (str, int, float, bool))
         or result.get(key) is None
+    }
+
+
+def _required_experiment_admission_enabled(project_dir: str | Path) -> bool:
+    """Return whether an existing Research VCS requires experiment admission."""
+
+    try:
+        from xscientist.research_git import ResearchGitError
+        from xscientist.research_vcs import ResearchRepository
+
+        return ResearchRepository(project_dir).experiment_admission_mode() == "required"
+    except (ResearchGitError, OSError, ValueError):
+        return False
+
+
+def _activate_existing_required_research_vcs(args: argparse.Namespace) -> bool:
+    """Activate an existing required repository or fail closed on downgrade."""
+
+    project_root = Path(args.project_dir).expanduser().resolve()
+    config_path = project_root / "research.yaml"
+    metadata_path = project_root / ".xscientist"
+    git_control_path = project_root / ".git"
+    if not any(
+        path.exists() or path.is_symlink()
+        for path in (config_path, metadata_path, git_control_path)
+    ):
+        return False
+    try:
+        from xscientist.research_git import (
+            ResearchGitError,
+            load_repository_config_at_ref,
+            repository_experiment_admission_mode,
+        )
+        from xscientist.research_vcs import ResearchRepository
+
+        if config_path.exists() or config_path.is_symlink():
+            required = ResearchRepository(project_root).experiment_admission_mode() == (
+                "required"
+            )
+        else:
+            try:
+                load_repository_config_at_ref(project_root, "HEAD")
+            except (ResearchGitError, OSError, ValueError):
+                if not (metadata_path.exists() or metadata_path.is_symlink()):
+                    return False
+                raise
+            required = repository_experiment_admission_mode(project_root) == "required"
+    except (ResearchGitError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            "existing Research VCS configuration is unreadable; refusing to "
+            "continue without admission enforcement"
+        ) from exc
+    if not required:
+        return False
+    if getattr(args, "research_git", "off") != "local":
+        raise RuntimeError(
+            "existing Research VCS requires experiment admission and cannot be "
+            "resumed with --research-vcs off"
+        )
+    args._research_git_active = True
+    return True
+
+
+_PROJECT_BUDGET_CLI_OPTIONS = {
+    "--max-project-tokens": "max_project_tokens",
+    "--max-project-hours": "max_project_hours",
+    "--max-cost-usd": "max_cost_usd",
+}
+
+
+def _project_cli_option_was_explicit(arguments: list[str], option: str) -> bool:
+    return any(item == option or item.startswith(f"{option}=") for item in arguments)
+
+
+def _autopilot_derivative_profile(config_text: str) -> str | None:
+    prefix = "# profile:"
+    for line in config_text.splitlines()[:8]:
+        if line.startswith(prefix):
+            profile = line[len(prefix) :].strip()
+            return profile or None
+    return None
+
+
+def _validate_required_resume_autopilot_overrides(
+    args: argparse.Namespace,
+    *,
+    config_text: str,
+) -> None:
+    """Reject explicit ceilings that would mutate an admitted derivative."""
+
+    explicit = set(getattr(args, "_project_budget_cli_overrides", ()) or ())
+    if not explicit:
+        return
+    import yaml
+
+    try:
+        payload = yaml.safe_load(config_text)
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            "required experiment admission resume configuration is unreadable"
+        ) from exc
+    budget = (payload or {}).get("llm_budget") if isinstance(payload, Mapping) else None
+    if not isinstance(budget, Mapping):
+        raise RuntimeError(
+            "required experiment admission resume configuration has no budget"
+        )
+
+    comparisons: list[tuple[str, str, float]] = []
+    if "max_project_tokens" in explicit:
+        requested_tokens = int(args.max_project_tokens)
+        if requested_tokens <= 0:
+            raise ValueError("--max-project-tokens must be greater than zero")
+        comparisons.append(
+            ("max_project_tokens", "max_total_tokens", float(requested_tokens))
+        )
+    if "max_project_hours" in explicit:
+        requested_hours = float(args.max_project_hours)
+        if requested_hours <= 0:
+            raise ValueError("--max-project-hours must be greater than zero")
+        comparisons.append(
+            (
+                "max_project_hours",
+                "max_wall_time_seconds",
+                float(int(requested_hours * 3600)),
+            )
+        )
+    if "max_cost_usd" in explicit:
+        requested_cost = float(args.max_cost_usd)
+        if requested_cost <= 0:
+            raise ValueError("--max-cost-usd must be greater than zero")
+        comparisons.append(("max_cost_usd", "max_cost_usd", requested_cost))
+
+    for _attribute, config_field, requested_ceiling in comparisons:
+        configured = budget.get(config_field)
+        try:
+            configured_ceiling = float(configured)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "required experiment admission resume budget controls would change "
+                "the immutable configuration"
+            ) from exc
+        if requested_ceiling < configured_ceiling:
+            raise RuntimeError(
+                "required experiment admission resume budget controls would change "
+                "the immutable configuration"
+            )
+
+
+def _required_admission_resume_configuration_path(
+    args: argparse.Namespace,
+    *,
+    expected_configuration_hash: Any,
+) -> Path:
+    """Resolve exact admitted config bytes without rewriting a persisted derivative."""
+
+    from ai_scientist.resources import resolve_bfts_config_path
+
+    if (
+        not isinstance(expected_configuration_hash, str)
+        or not expected_configuration_hash
+    ):
+        raise RuntimeError(
+            "unfinished required experiment admission batch has no configuration hash"
+        )
+    explicit_config = bool(getattr(args, "_project_bfts_config_cli_override", False))
+    candidates: list[Path] = []
+    if bool(getattr(args, "autopilot", None)) and not explicit_config:
+        persisted = _managed_project_file(
+            args.project_dir,
+            "00_config",
+            "autopilot_bfts.yaml",
+        )
+        if persisted.is_file():
+            candidates.append(persisted)
+    try:
+        requested = resolve_bfts_config_path(args.bfts_config)
+    except (OSError, ValueError) as exc:
+        if explicit_config:
+            raise RuntimeError(
+                "required experiment admission resume configuration is unavailable"
+            ) from exc
+    else:
+        if requested not in candidates:
+            candidates.append(requested)
+
+    for candidate in candidates:
+        try:
+            config_text = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if canonical_content_hash(config_text) != expected_configuration_hash:
+            continue
+        if bool(getattr(args, "autopilot", None)):
+            if _autopilot_derivative_profile(config_text) != str(args.autopilot):
+                continue
+            _validate_required_resume_autopilot_overrides(
+                args,
+                config_text=config_text,
+            )
+        return candidate
+    raise RuntimeError(
+        "required experiment admission resume configuration does not match the "
+        "immutable receipt"
+    )
+
+
+def _validate_required_admission_resume_execution_inputs(
+    args: argparse.Namespace,
+    scope: Mapping[str, Any],
+) -> None:
+    """Recheck the exact config and project budget before provider/model work."""
+
+    from ai_scientist.resources import resolve_bfts_config_path
+
+    try:
+        configuration_text = resolve_bfts_config_path(args.bfts_config).read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError(
+            "required experiment admission resume configuration is unavailable"
+        ) from exc
+    if canonical_content_hash(configuration_text) != scope.get("configuration_hash"):
+        raise RuntimeError(
+            "required experiment admission resume configuration changed after "
+            "reconciliation"
+        )
+    project_budget = getattr(args, "_project_budget", None)
+    actual_budget_hash = (
+        canonical_content_hash(project_budget)
+        if isinstance(project_budget, Mapping)
+        else None
+    )
+    if actual_budget_hash != scope.get("budget_hash"):
+        raise RuntimeError(
+            "required experiment admission resume budget does not match the immutable "
+            "receipt"
+        )
+
+
+def _required_admission_resume_inputs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Derive the immutable scope needed for recovery without mutable caches."""
+
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    requested_indices = (
+        [int(value.strip()) for value in str(args.idea_indices).split(",")]
+        if getattr(args, "idea_indices", None)
+        else None
+    )
+    ideas_hash = _managed_project_ideas_hash(args.project_dir)
+    selected_indices = requested_indices or [0]
+
+    lifecycle = ResearchLifecycle(args.project_dir)
+    batches = _experiment_admission_start_batches_at_head(lifecycle)
+    if not batches:
+        from ai_scientist.resources import resolve_bfts_config_path
+
+        configuration_hash = canonical_content_hash(
+            resolve_bfts_config_path(args.bfts_config).read_text(encoding="utf-8")
+        )
+        budget_hash = (
+            canonical_content_hash({"enabled": False}) if not args.autopilot else None
+        )
+        return {
+            "selected_indices": selected_indices,
+            "ideas_hash": ideas_hash,
+            "configuration_hash": configuration_hash,
+            "budget_hash": budget_hash,
+        }
+
+    receipts = batches[-1]["receipts"]
+    selected_indices = sorted(int(index) for index in receipts)
+    if not all(
+        isinstance(receipt.get("execution_scope"), Mapping)
+        for receipt in receipts.values()
+    ):
+        raise RuntimeError("required experiment admission batch has an invalid scope")
+    shared_scope: dict[str, Any] = {}
+    for field in ("ideas_hash", "configuration_hash", "budget_hash"):
+        values = {
+            (receipt.get("execution_scope") or {}).get(field)
+            for receipt in receipts.values()
+            if isinstance(receipt.get("execution_scope"), Mapping)
+        }
+        if len(values) != 1:
+            raise RuntimeError(
+                f"required experiment admission batch has inconsistent {field}"
+            )
+        shared_scope[field] = next(iter(values))
+    if (
+        ideas_hash is not None
+        and shared_scope["ideas_hash"] is not None
+        and ideas_hash != shared_scope["ideas_hash"]
+    ):
+        raise RuntimeError(
+            "persisted ideas do not match the required experiment admission batch"
+        )
+    return {"selected_indices": selected_indices, **shared_scope}
+
+
+def _install_experiment_admission_batch_state(
+    args: argparse.Namespace,
+    receipts: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """Install reconstructed immutable batch identities on the project runner."""
+
+    object_ids = dict(getattr(args, "_research_vcs_ids", {}) or {})
+    object_ids["plans"] = {
+        int(index): str(receipt["plan_id"]) for index, receipt in receipts.items()
+    }
+    object_ids["admission_gates"] = {
+        int(index): str(receipt["admission_gate_id"])
+        for index, receipt in receipts.items()
+    }
+    object_ids["admission_starts"] = {
+        int(index): str(receipt["start_object_id"])
+        for index, receipt in receipts.items()
+    }
+    preregistrations = {
+        str(receipt.get("preregistration_id") or "")
+        for receipt in receipts.values()
+        if receipt.get("preregistration_id")
+    }
+    if len(preregistrations) > 1:
+        raise ValueError(
+            "reconstructed experiment admission batch has ambiguous preregistrations"
+        )
+    if preregistrations:
+        object_ids["preregistration"] = next(iter(preregistrations))
+    else:
+        object_ids.pop("preregistration", None)
+    args._research_vcs_ids = object_ids
+    args._experiment_admission_preflights = {
+        int(index): dict(receipt) for index, receipt in receipts.items()
+    }
+
+
+def _experiment_admission_start_batches_at_head(lifecycle) -> list[dict[str, Any]]:
+    """Return exact committed start batches visible on the first-parent history."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        _run_git,
+        list_research_objects_at_ref,
+    )
+
+    repository_path = lifecycle.repository.path
+    head = str(lifecycle.repository.status().get("head") or "").strip()
+    if not head:
+        return []
+    visible = list_research_objects_at_ref(repository_path, head)
+    starts = [
+        item
+        for item in visible
+        if item.get("kind") == "context_snapshot"
+        and isinstance(item.get("payload"), Mapping)
+        and (item.get("payload") or {}).get("protocol_kind")
+        == "xscientist.experiment-admission-start.v1"
+    ]
+    grouped: dict[str, set[str]] = {}
+    for start in starts:
+        start_object_id = str(start.get("object_id") or "")
+        path = f".xscientist/objects/context_snapshot/{start_object_id}.json"
+        history = _run_git(
+            repository_path,
+            ["rev-list", "--first-parent", "--reverse", head, "--", path],
+        ).stdout.splitlines()
+        if len(history) != 1 or re.fullmatch(r"[0-9a-f]{40,64}", history[0]) is None:
+            raise ResearchGitError(
+                "experiment admission start has no unique first-parent checkpoint"
+            )
+        grouped.setdefault(history[0], set()).add(start_object_id)
+    history_order = {
+        commit: index
+        for index, commit in enumerate(
+            _run_git(
+                repository_path,
+                ["rev-list", "--first-parent", "--reverse", head],
+            ).stdout.splitlines()
+        )
+    }
+    batches: list[dict[str, Any]] = []
+    for start_checkpoint, visible_start_ids in grouped.items():
+        receipts = lifecycle.reconstruct_experiment_admission_batch(start_checkpoint)
+        reconstructed_ids = {
+            str(receipt.get("start_object_id") or "") for receipt in receipts.values()
+        }
+        if reconstructed_ids != visible_start_ids:
+            raise ResearchGitError(
+                "experiment admission start checkpoint visibility is incomplete"
+            )
+        batches.append(
+            {
+                "start_checkpoint": start_checkpoint,
+                "receipts": receipts,
+                "history_order": history_order.get(start_checkpoint, -1),
+            }
+        )
+    return sorted(batches, key=lambda item: int(item["history_order"]))
+
+
+def _experiment_attempt_start_ids(attempt: Mapping[str, Any]) -> set[str]:
+    return {
+        str(relation.get("target") or "")
+        for relation in attempt.get("relations") or []
+        if isinstance(relation, Mapping)
+        and relation.get("type") == "consumes"
+        and relation.get("role") == "experiment_admission_start"
+    }
+
+
+def _validated_committed_experiment_admission_batch(
+    lifecycle,
+    receipts: Mapping[int, Mapping[str, Any]],
+    *,
+    terminal_commit: str,
+) -> dict[int, dict[str, Any]]:
+    """Prove and return every attempt in one terminal-only checkpoint."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        list_research_objects_at_ref,
+        show_checkpoint,
+    )
+
+    committed = list_research_objects_at_ref(lifecycle.repository.path, terminal_commit)
+    expected_starts = {
+        str(receipt.get("start_object_id") or ""): int(index)
+        for index, receipt in receipts.items()
+    }
+    attempts: dict[int, dict[str, Any]] = {}
+    for attempt in committed:
+        if attempt.get("kind") != "experiment_attempt":
+            continue
+        consumed = _experiment_attempt_start_ids(attempt)
+        matched = consumed & set(expected_starts)
+        if not matched:
+            continue
+        if len(consumed) != 1 or len(matched) != 1:
+            raise ResearchGitError(
+                "experiment admission terminal attempt has ambiguous start bindings"
+            )
+        start_object_id = next(iter(matched))
+        idea_index = expected_starts[start_object_id]
+        if idea_index in attempts:
+            raise ResearchGitError(
+                "experiment admission start has multiple committed terminal attempts"
+            )
+        embedded = (attempt.get("payload") or {}).get("admission_preflight_receipt")
+        if not isinstance(embedded, Mapping) or dict(embedded) != dict(
+            receipts[idea_index]
+        ):
+            raise ResearchGitError(
+                "experiment admission terminal attempt receipt does not match its start"
+            )
+        attempts[idea_index] = dict(attempt)
+    if set(attempts) != set(receipts):
+        raise ResearchGitError(
+            "experiment admission terminal checkpoint does not consume its full batch"
+        )
+    expected_paths = {
+        f".xscientist/objects/experiment_attempt/{attempt['object_id']}.json"
+        for attempt in attempts.values()
+    }
+    shown = show_checkpoint(lifecycle.repository.path, terminal_commit)
+    checkpoint = shown.get("checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    changed_paths = checkpoint.get("changed_paths")
+    states = [str(attempt.get("state") or "") for attempt in attempts.values()]
+    expected_status = (
+        states[0]
+        if len(states) == 1
+        else ("completed" if "completed" in states else "failed")
+    )
+    if (
+        shown.get("checkpoint_hash_valid") is not True
+        or shown.get("commit") != terminal_commit
+        or checkpoint.get("stage") != "experiment_admission_terminal"
+        or checkpoint.get("status") != expected_status
+        or not isinstance(changed_paths, list)
+        or len(changed_paths) != len(expected_paths)
+        or len(set(changed_paths)) != len(changed_paths)
+        or set(changed_paths) != expected_paths
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal checkpoint does not exactly match its batch"
+        )
+    return {index: attempts[index] for index in sorted(attempts)}
+
+
+def _discover_committed_experiment_admission_batch(
+    lifecycle,
+    receipts: Mapping[int, Mapping[str, Any]],
+) -> tuple[str, dict[int, dict[str, Any]]] | None:
+    """Find one exact terminal batch and repair its immutable retention refs."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        _load_experiment_admission_terminal_completion_ref,
+        _parse_git_worktree_head_commits_porcelain_z,
+        _publish_experiment_admission_terminal_completion_refs,
+        _run_git,
+        _run_git_bounded,
+        show_checkpoint,
+    )
+
+    repository_path = lifecycle.repository.path
+    ordered_receipts = [receipts[index] for index in sorted(receipts)]
+    start_object_ids = [
+        str(receipt.get("start_object_id") or "") for receipt in ordered_receipts
+    ]
+    if not start_object_ids or "" in start_object_ids:
+        raise ResearchGitError(
+            "experiment admission batch has an invalid start identity"
+        )
+    completion_refs = [
+        _load_experiment_admission_terminal_completion_ref(
+            repository_path,
+            start_object_id=start_object_id,
+        )
+        for start_object_id in start_object_ids
+    ]
+    published = {commit for commit in completion_refs if commit is not None}
+    if len(published) > 1:
+        raise ResearchGitError("experiment admission batch completion refs disagree")
+
+    terminal_commit = next(iter(published), None)
+    if terminal_commit is None:
+        worktrees = _run_git_bounded(
+            repository_path,
+            ["worktree", "list", "--porcelain", "-z"],
+            max_output_bytes=_MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_BYTES,
+        )
+        worktree_heads = _parse_git_worktree_head_commits_porcelain_z(worktrees.stdout)
+        histories: list[set[str]] = []
+        for start_object_id in start_object_ids:
+            history = _run_git_bounded(
+                repository_path,
+                [
+                    "log",
+                    "--full-history",
+                    "--format=%H",
+                    "--no-show-signature",
+                    f"--max-count={_MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_COMMITS + 1}",
+                    f"-S{start_object_id}",
+                    "--all",
+                    *worktree_heads,
+                    "--",
+                    ".xscientist/objects/experiment_attempt",
+                ],
+                max_output_bytes=_MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_BYTES,
+            ).stdout.splitlines()
+            if len(history) > _MAX_EXPERIMENT_ADMISSION_TERMINAL_SCAN_COMMITS:
+                raise ResearchGitError(
+                    "experiment admission terminal history exceeds the bounded "
+                    "recovery limit"
+                )
+            if any(
+                re.fullmatch(r"[0-9a-f]{40,64}", commit) is None for commit in history
+            ):
+                raise ResearchGitError(
+                    "experiment admission terminal history is invalid"
+                )
+            histories.append(set(history))
+        candidates = set.intersection(*histories) if histories else set()
+        exact_candidates: list[str] = []
+        for candidate in sorted(candidates):
+            shown = show_checkpoint(repository_path, candidate)
+            checkpoint = shown.get("checkpoint")
+            checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+            if checkpoint.get("stage") != "experiment_admission_terminal":
+                continue
+            _validated_committed_experiment_admission_batch(
+                lifecycle,
+                receipts,
+                terminal_commit=candidate,
+            )
+            exact_candidates.append(candidate)
+        if len(exact_candidates) > 1:
+            raise ResearchGitError(
+                "experiment admission batch has multiple terminal checkpoints"
+            )
+        if not exact_candidates:
+            return None
+        terminal_commit = exact_candidates[0]
+
+    start_checkpoints = {
+        str(receipt.get("start_checkpoint") or "").strip()
+        for receipt in ordered_receipts
+    }
+    if len(start_checkpoints) != 1 or "" in start_checkpoints:
+        raise ResearchGitError(
+            "experiment admission batch has an ambiguous start checkpoint"
+        )
+    ancestry = _run_git(
+        repository_path,
+        [
+            "merge-base",
+            "--is-ancestor",
+            next(iter(start_checkpoints)),
+            terminal_commit,
+        ],
+        check=False,
+    )
+    if ancestry.returncode != 0:
+        raise ResearchGitError(
+            "experiment admission terminal checkpoint is not a descendant of its start"
+        )
+    attempts = _validated_committed_experiment_admission_batch(
+        lifecycle,
+        receipts,
+        terminal_commit=terminal_commit,
+    )
+    _publish_experiment_admission_terminal_completion_refs(
+        repository_path,
+        start_object_ids=start_object_ids,
+        commit=terminal_commit,
+    )
+    return terminal_commit, attempts
+
+
+def _project_result_from_committed_admission_attempt(
+    repository_path: str | Path,
+    attempt: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    terminal_commit: str,
+    runtime_record: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Rebuild progress from final Research VCS truth plus a verified outbox."""
+
+    from xscientist.research_git import ResearchGitError
+
+    payload = attempt.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    result: dict[str, Any] = {}
+    if (
+        runtime_record is not None
+        and (runtime_record.get("claim") or {}).get("schema")
+        == "xscientist.experiment-admission-execution-claim.v2"
+    ):
+        from xscientist.experiment_admission_runtime import (
+            _RESULT_PATH_FIELDS,
+            _validate_relative_path,
+        )
+
+        claim = runtime_record["claim"]
+        idea_index = int((receipt.get("execution_scope") or {}).get("idea_index"))
+        if (
+            claim.get("start_object_id") != receipt.get("start_object_id")
+            or claim.get("receipt_hash") != receipt.get("receipt_hash")
+            or claim.get("idea_index") != idea_index
+        ):
+            raise ResearchGitError(
+                "committed experiment attempt conflicts with its runtime claim"
+            )
+        bfts = runtime_record.get("bfts_terminal")
+        worker = runtime_record.get("worker_terminal")
+        bindings = {
+            "admission_runtime_claim_hash": claim.get("claim_hash"),
+        }
+        if isinstance(bfts, Mapping):
+            bindings["admission_bfts_terminal_hash"] = bfts.get("terminal_hash")
+        if isinstance(worker, Mapping):
+            bindings["admission_worker_terminal_hash"] = worker.get("terminal_hash")
+        for field, expected in bindings.items():
+            if payload.get(field) != expected:
+                raise ResearchGitError(
+                    "committed experiment attempt conflicts with its runtime outbox"
+                )
+        if isinstance(worker, Mapping):
+            result.update(dict(worker.get("result") or {}))
+            root = Path(repository_path).expanduser().resolve()
+            for field in _RESULT_PATH_FIELDS & set(result):
+                relative = _validate_relative_path(result[field], label=field)
+                result[field] = str(root / relative)
+    authoritative_pipeline_status = str(payload.get("pipeline_status") or "failed")
+    authoritative_registry_status = str(
+        payload.get("status") or attempt.get("state") or "failed"
+    )
+    idea_index = int((receipt.get("execution_scope") or {}).get("idea_index"))
+    if result and (
+        result.get("idea_idx") != idea_index
+        or result.get("status") != authoritative_pipeline_status
+        or result.get("registry_status") != authoritative_registry_status
+    ):
+        raise ResearchGitError(
+            "committed experiment attempt outcome conflicts with its runtime outbox"
+        )
+    for field, value in _compact_research_result(dict(payload)).items():
+        if field not in {"idea_idx", "status", "registry_status"}:
+            result[field] = value
+    result.update(
+        {
+            "idea_idx": idea_index,
+            "status": authoritative_pipeline_status,
+            "registry_status": authoritative_registry_status,
+            "admission_terminal_commit": terminal_commit,
+        }
+    )
+    return result
+
+
+def _reconcile_required_experiment_admission_runtime(
+    args: argparse.Namespace,
+    *,
+    selected_indices: list[int],
+    ideas_hash: str | None,
+    configuration_hash: str | None,
+    budget_hash: str | None,
+) -> dict[str, Any]:
+    """Recover required-admission batches before issuing any new start."""
+
+    empty = {
+        "active": False,
+        "committed_results": [],
+        "recovered_results": [],
+        "execute_indices": list(selected_indices),
+        "batch_indices": list(selected_indices),
+        "pending_batch": False,
+    }
+    if not getattr(args, "_research_git_active", False):
+        return empty
+    from xscientist.experiment_admission_runtime import (
+        admission_runtime_records,
+        result_from_runtime_record,
+    )
+    from xscientist.research_git import (
+        ResearchGitError,
+        _load_experiment_admission_terminal_completion_ref,
+    )
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    lifecycle = ResearchLifecycle(args.project_dir)
+    if lifecycle.repository.experiment_admission_mode() != "required":
+        return empty
+    batches = _experiment_admission_start_batches_at_head(lifecycle)
+    runtime_records = admission_runtime_records(lifecycle.repository.path)
+    records_by_start = {
+        str(record.get("start_object_id") or ""): record for record in runtime_records
+    }
+    expected_scope = {
+        "ideas_hash": ideas_hash,
+        "configuration_hash": configuration_hash,
+        "budget_hash": budget_hash,
+    }
+    committed_results: dict[int, dict[str, Any]] = {}
+    pending_batches: list[dict[str, Any]] = []
+    for batch in batches:
+        receipts = batch["receipts"]
+        discovered = _discover_committed_experiment_admission_batch(
+            lifecycle,
+            receipts,
+        )
+        if discovered is not None:
+            terminal_commit, attempts = discovered
+            for idea_index, receipt in receipts.items():
+                scope = receipt.get("execution_scope")
+                if not isinstance(scope, Mapping) or any(
+                    scope.get(field) != expected
+                    for field, expected in expected_scope.items()
+                ):
+                    continue
+                committed_results[int(idea_index)] = (
+                    _project_result_from_committed_admission_attempt(
+                        lifecycle.repository.path,
+                        attempts[int(idea_index)],
+                        receipt,
+                        terminal_commit=terminal_commit,
+                        runtime_record=records_by_start.get(
+                            str(receipt["start_object_id"])
+                        ),
+                    )
+                )
+            continue
+        pending_batches.append(batch)
+    if len(pending_batches) > 1:
+        raise ResearchGitError(
+            "multiple unresolved experiment admission start batches require manual recovery"
+        )
+    if not pending_batches:
+        remaining = [
+            int(index)
+            for index in selected_indices
+            if int(index) not in committed_results
+        ]
+        return {
+            **empty,
+            "active": True,
+            "committed_results": [
+                committed_results[index] for index in sorted(committed_results)
+            ],
+            "execute_indices": remaining,
+            "batch_indices": sorted(
+                {int(index) for index in selected_indices} | set(committed_results)
+            ),
+        }
+
+    pending = pending_batches[0]
+    receipts = pending["receipts"]
+    for receipt in receipts.values():
+        scope = receipt.get("execution_scope")
+        if not isinstance(scope, Mapping) or any(
+            scope.get(field) != expected for field, expected in expected_scope.items()
+        ):
+            raise ResearchGitError(
+                "unresolved experiment admission batch does not match this run"
+            )
+    recovered_results: dict[int, dict[str, Any]] = {}
+    execute_indices: list[int] = []
+    for idea_index, receipt in receipts.items():
+        start_object_id = str(receipt["start_object_id"])
+        record = records_by_start.get(start_object_id)
+        if record is None:
+            execute_indices.append(int(idea_index))
+            continue
+        claim = record.get("claim")
+        if not isinstance(claim, Mapping) or claim.get("schema") != (
+            "xscientist.experiment-admission-execution-claim.v2"
+        ):
+            raise ResearchGitError(
+                "legacy experiment admission claim is in doubt; manual recovery is required"
+            )
+        if (
+            claim.get("receipt_hash") != receipt.get("receipt_hash")
+            or claim.get("start_checkpoint_commit") != pending["start_checkpoint"]
+            or claim.get("idea_index") != idea_index
+        ):
+            raise ResearchGitError(
+                "experiment admission runtime claim does not match its committed batch"
+            )
+        if record.get("owner_state") in {"alive", "unknown"}:
+            raise ResearchGitError(
+                "experiment admission runtime owner is still alive or unknown; "
+                "the whole batch remains blocked"
+            )
+        recovered = result_from_runtime_record(lifecycle.repository.path, record)
+        if recovered is None:
+            raise ResearchGitError(
+                "experiment admission claimed start has no recoverable terminal state"
+            )
+        recovered_results[int(idea_index)] = recovered[0]
+
+    _install_experiment_admission_batch_state(args, receipts)
+    batch_indices = sorted(int(index) for index in receipts)
+    if len(recovered_results) == len(receipts):
+        _record_local_research_attempt_objects(
+            args,
+            results=[recovered_results[index] for index in sorted(recovered_results)],
+        )
+        completion_refs = {
+            _load_experiment_admission_terminal_completion_ref(
+                lifecycle.repository.path,
+                start_object_id=str(receipt["start_object_id"]),
+            )
+            for receipt in receipts.values()
+        }
+        if len(completion_refs) != 1 or None in completion_refs:
+            raise ResearchGitError(
+                "recovered experiment admission batch has no atomic terminal refs"
+            )
+        terminal_commit = next(iter(completion_refs))
+        attempts = _validated_committed_experiment_admission_batch(
+            lifecycle,
+            receipts,
+            terminal_commit=terminal_commit,
+        )
+        for idea_index, receipt in receipts.items():
+            committed_results[int(idea_index)] = (
+                _project_result_from_committed_admission_attempt(
+                    lifecycle.repository.path,
+                    attempts[int(idea_index)],
+                    receipt,
+                    terminal_commit=terminal_commit,
+                    runtime_record=records_by_start.get(
+                        str(receipt["start_object_id"])
+                    ),
+                )
+            )
+        return {
+            **empty,
+            "active": True,
+            "committed_results": [
+                committed_results[index] for index in sorted(committed_results)
+            ],
+            "execute_indices": [],
+            "batch_indices": batch_indices,
+        }
+
+    args._experiment_admission_reuse_receipts = {
+        int(index): dict(receipt) for index, receipt in receipts.items()
+    }
+    args._experiment_admission_reuse_execute_indices = sorted(execute_indices)
+    return {
+        **empty,
+        "active": True,
+        "committed_results": [
+            committed_results[index] for index in sorted(committed_results)
+        ],
+        "recovered_results": [
+            recovered_results[index] for index in sorted(recovered_results)
+        ],
+        "execute_indices": sorted(execute_indices),
+        "batch_indices": batch_indices,
+        "pending_batch": True,
     }
 
 
@@ -1731,9 +2665,6 @@ def _research_attempt_provenance(
     )
     if dependency_lock_hashes:
         provenance["dependency_lock_hashes"] = dependency_lock_hashes
-    head = lifecycle.repository.status().get("head")
-    if isinstance(head, str) and len(head) in {40, 64}:
-        provenance["code_commit"] = head
     if preregistration_id:
         registration = lifecycle.repository.get(preregistration_id)
         dataset_hashes = _sha256_values(registration.get("payload") or {})
@@ -1771,6 +2702,491 @@ def _research_attempt_provenance(
     return provenance
 
 
+def _preflight_local_research_experiment_admission(
+    args: argparse.Namespace,
+    *,
+    idea_indices: list[int],
+    ideas_hash: str | None = None,
+    configuration_hash: str | None = None,
+    budget_hash: str | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Authorize each selected experiment before creating a worker or BFTS run."""
+
+    if not getattr(args, "_research_git_active", False):
+        return {}
+    from xscientist.research_git import (
+        ResearchGitError,
+        capture_environment_receipt,
+        _fsync_directory,
+        _repository_lock,
+        create_checkpoint,
+    )
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    lifecycle = ResearchLifecycle(args.project_dir)
+    if lifecycle.repository.experiment_admission_mode() != "required":
+        return {}
+    reuse_receipts = getattr(args, "_experiment_admission_reuse_receipts", None)
+    if isinstance(reuse_receipts, Mapping) and reuse_receipts:
+        execute_indices = getattr(
+            args, "_experiment_admission_reuse_execute_indices", []
+        )
+        if set(idea_indices) != set(execute_indices):
+            raise ResearchGitError(
+                "recovered experiment admission batch execution selection changed"
+            )
+        receipts = {
+            int(index): lifecycle.validate_finalized_experiment_admission_start(
+                receipt,
+                allow_descendant_head=True,
+                allow_terminal_state=True,
+            )
+            for index, receipt in reuse_receipts.items()
+        }
+        expected_scope = {
+            "ideas_hash": ideas_hash,
+            "configuration_hash": configuration_hash,
+            "budget_hash": budget_hash,
+        }
+        if any(
+            not isinstance(receipt.get("execution_scope"), Mapping)
+            or any(
+                expected is not None
+                and receipt["execution_scope"].get(field) != expected
+                for field, expected in expected_scope.items()
+            )
+            for receipt in receipts.values()
+        ):
+            raise ResearchGitError("recovered experiment admission batch scope changed")
+        _install_experiment_admission_batch_state(args, receipts)
+        print(
+            "🛡️ Research VCS 复用未完成实验准入批次: "
+            f"batch={len(receipts)} execute={len(execute_indices)}"
+        )
+        return receipts
+    if not idea_indices:
+        return {}
+    object_ids = getattr(args, "_research_vcs_ids", {})
+    plan_ids = object_ids.get("plans") or {}
+    preregistration_id = object_ids.get("preregistration")
+    receipts: dict[int, dict[str, Any]] = {}
+    admission_gate_ids: dict[int, str] = {}
+    admission_start_ids: dict[int, str] = {}
+    with _repository_lock(lifecycle.repository.path):
+        research_vcs_head = str(lifecycle.repository.status().get("head") or "").strip()
+        if not research_vcs_head:
+            raise ResearchGitError(
+                "required experiment admission needs a committed Research VCS HEAD"
+            )
+        environment_hash = str(
+            capture_environment_receipt(lifecycle.repository.path)["content_hash"]
+        )
+        requests: dict[int, dict[str, Any]] = {}
+        for idea_index in idea_indices:
+            if type(idea_index) is not int or idea_index < 0:
+                raise ResearchGitError(
+                    "required experiment admission has an invalid idea index"
+                )
+            if idea_index in requests:
+                raise ResearchGitError(
+                    f"required experiment admission repeats idea #{idea_index}"
+                )
+            plan_id = plan_ids.get(idea_index) or plan_ids.get(str(idea_index))
+            if not plan_id:
+                raise ResearchGitError(
+                    f"required experiment admission has no plan for idea #{idea_index}"
+                )
+            execution_scope: dict[str, Any] = {
+                "idea_index": idea_index,
+                "study_phase": "exploratory",
+                "environment_hash": environment_hash,
+            }
+            if ideas_hash:
+                execution_scope["ideas_hash"] = ideas_hash
+            if configuration_hash:
+                execution_scope["configuration_hash"] = configuration_hash
+            if budget_hash:
+                execution_scope["budget_hash"] = budget_hash
+            request = {
+                "plan_id": str(plan_id),
+                "preregistration_id": (
+                    str(preregistration_id)
+                    if idea_index == 0 and preregistration_id
+                    else None
+                ),
+                "execution_scope": execution_scope,
+                "expected_head": research_vcs_head,
+            }
+            preflight = lifecycle.preflight_experiment_admission(**request)
+            if preflight.get("status") != "authorized" or not preflight.get(
+                "admission_gate_id"
+            ):
+                raise ResearchGitError(
+                    f"required experiment admission did not authorize idea #{idea_index}"
+                )
+            requests[idea_index] = request
+
+        issued_receipts: dict[int, dict[str, Any]] = {}
+        start_paths: list[str] = []
+        created_start_paths: list[Path] = []
+        starts_committed = False
+        try:
+            for idea_index, request in requests.items():
+                issued = lifecycle.issue_experiment_admission_start(**request)
+                if not issued["start"].created:
+                    raise ResearchGitError(
+                        "experiment admission start object unexpectedly pre-existed"
+                    )
+                created_start_paths.append(issued["start"].path)
+                receipt = issued["receipt"]
+                gate_id = str(receipt.get("admission_gate_id") or "")
+                if receipt.get("status") != "authorized" or not gate_id:
+                    raise ResearchGitError(
+                        f"required experiment admission did not authorize idea #{idea_index}"
+                    )
+                issued_receipts[idea_index] = receipt
+                admission_gate_ids[idea_index] = gate_id
+                admission_start_ids[idea_index] = str(issued["start"].object_id)
+                start_paths.append(
+                    issued["start"]
+                    .path.resolve()
+                    .relative_to(lifecycle.repository.path)
+                    .as_posix()
+                )
+
+            checkpoint = create_checkpoint(
+                lifecycle.repository.path,
+                stage="experiment_admission_start",
+                subject=f"commit {len(start_paths)} experiment admission starts",
+                summary=(
+                    "Commit the complete selected runner batch before any experiment "
+                    "workspace, worker, or BFTS execution is created."
+                ),
+                status="locked",
+                only_paths=sorted(start_paths),
+            )
+            if not checkpoint.committed or not checkpoint.commit:
+                raise ResearchGitError(
+                    "required experiment admission start checkpoint was not committed"
+                )
+            starts_committed = True
+            for idea_index, issued_receipt in issued_receipts.items():
+                receipts[idea_index] = lifecycle.finalize_experiment_admission_start(
+                    issued_receipt,
+                    start_checkpoint=checkpoint.commit,
+                )
+        except BaseException:
+            if not starts_committed:
+                touched_parents: set[Path] = set()
+                for path in created_start_paths:
+                    path.unlink(missing_ok=True)
+                    touched_parents.add(path.parent)
+                for parent in touched_parents:
+                    _fsync_directory(parent)
+            raise
+
+    object_ids["admission_gates"] = admission_gate_ids
+    object_ids["admission_starts"] = admission_start_ids
+    args._research_vcs_ids = object_ids
+    args._experiment_admission_preflights = receipts
+    print(
+        "🛡️ Research VCS 实验准入预检通过: "
+        f"{len(receipts)} 个实验，snapshot={research_vcs_head[:12]} "
+        f"start={str(checkpoint.commit)[:12]}"
+    )
+    return receipts
+
+
+def _revalidate_experiment_admission_preflight(
+    project_dir: str | Path,
+    receipt: Mapping[str, Any] | None,
+    *,
+    bfts_config_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Recheck a parent-issued receipt immediately before entering BFTS."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        load_repository_config_at_ref,
+    )
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    project_root = Path(project_dir).expanduser().resolve()
+    research_config = project_root / "research.yaml"
+    try:
+        lifecycle = ResearchLifecycle(project_root)
+    except ResearchGitError:
+        if receipt is None and not (
+            research_config.is_file() or research_config.is_symlink()
+        ):
+            try:
+                load_repository_config_at_ref(project_root, "HEAD")
+            except ResearchGitError:
+                return None
+        raise
+    if receipt is None:
+        if lifecycle.repository.experiment_admission_mode() == "required":
+            raise ResearchGitError(
+                "required experiment admission preflight receipt is missing"
+            )
+        return None
+    validated = lifecycle.validate_finalized_experiment_admission_start(receipt)
+    scope = dict(validated["execution_scope"])
+    approved_configuration_hash = scope.get("configuration_hash")
+    if approved_configuration_hash is not None:
+        from ai_scientist.resources import resolve_bfts_config_path
+
+        try:
+            resolved_config = resolve_bfts_config_path(bfts_config_path)
+            current_configuration_hash = canonical_content_hash(
+                resolved_config.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ResearchGitError(
+                "experiment admission could not verify the approved BFTS configuration"
+            ) from exc
+        if current_configuration_hash != approved_configuration_hash:
+            raise ResearchGitError(
+                "experiment admission BFTS configuration changed after parent preflight"
+            )
+    code_commit = scope.pop("code_commit", None)
+    current = lifecycle.preflight_experiment_admission(
+        plan_id=str(validated.get("plan_id") or ""),
+        preregistration_id=(
+            str(validated["preregistration_id"])
+            if validated.get("preregistration_id")
+            else None
+        ),
+        admission_gate_id=str(validated.get("admission_gate_id") or ""),
+        execution_scope=scope,
+        code_commit=str(code_commit) if code_commit else None,
+        expected_head=str(validated["repository_head"]),
+    )
+    for field in (
+        "repository_id",
+        "plan_id",
+        "plan_hash",
+        "hypothesis_id",
+        "hypothesis_hash",
+        "preregistration_id",
+        "preregistration_hash",
+        "admission_gate_id",
+        "admission_gate_hash",
+        "execution_scope_hash",
+    ):
+        if current.get(field) != validated.get(field):
+            raise ResearchGitError(
+                f"experiment admission preflight changed at BFTS boundary: {field}"
+            )
+    return validated
+
+
+@contextmanager
+def _experiment_admission_execution_lease(
+    project_dir: str | Path,
+    receipt: Mapping[str, Any] | None,
+    *,
+    bfts_config_path: str | Path | None = None,
+    experiment_dir: str | Path | None = None,
+    idea_key: str | None = None,
+):
+    """Keep supported Research VCS writers off the admitted execution snapshot."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        _repository_read_lock,
+    )
+    from xscientist.research_lifecycle import ResearchLifecycle
+
+    try:
+        lifecycle = ResearchLifecycle(project_dir)
+    except ResearchGitError:
+        _revalidate_experiment_admission_preflight(
+            project_dir,
+            receipt,
+            bfts_config_path=bfts_config_path,
+        )
+        yield None
+        return
+    if lifecycle.repository.experiment_admission_mode() != "required":
+        _revalidate_experiment_admission_preflight(
+            project_dir,
+            receipt,
+            bfts_config_path=bfts_config_path,
+        )
+        yield None
+        return
+    with _repository_read_lock(lifecycle.repository.path):
+        validated = _revalidate_experiment_admission_preflight(
+            project_dir,
+            receipt,
+            bfts_config_path=bfts_config_path,
+        )
+        if validated is None:
+            raise ResearchGitError(
+                "required experiment admission did not produce a finalized receipt"
+            )
+        if experiment_dir is None and idea_key is None:
+            # Compatibility for direct lifecycle callers that predate the
+            # project worker contract. New project execution always supplies
+            # both fields and therefore always publishes claim v2.
+            from xscientist.research_git import _claim_experiment_admission_start
+
+            _claim_experiment_admission_start(
+                lifecycle.repository.path,
+                start_object_id=str(validated["start_object_id"]),
+                receipt_hash=str(validated["receipt_hash"]),
+            )
+            yield None
+            return
+        from xscientist.experiment_admission_runtime import (
+            claim_experiment_admission_start_v2,
+        )
+
+        claim = claim_experiment_admission_start_v2(
+            lifecycle.repository.path,
+            validated,
+            experiment_dir=experiment_dir or lifecycle.repository.path,
+            idea_key=(
+                str(idea_key)
+                if idea_key
+                else f"idea-{int((validated.get('execution_scope') or {}).get('idea_index', 0))}"
+            ),
+        )
+        yield claim
+
+
+def _required_terminal_batch_checkpoint(
+    repository_path: str | Path,
+    *,
+    attempts: list[Any],
+    attempt_paths: list[str],
+    start_object_ids: list[str],
+    status: str,
+) -> str | None:
+    """Return the one exact committed terminal batch, or ``None`` if uncommitted."""
+
+    from xscientist.research_git import (
+        ResearchGitError,
+        _load_experiment_admission_terminal_completion_ref,
+        _run_git,
+        list_research_objects_at_ref,
+        show_checkpoint,
+    )
+
+    if (
+        not attempts
+        or len(attempts) != len(attempt_paths)
+        or len(attempts) != len(start_object_ids)
+    ):
+        raise ResearchGitError("required experiment terminal batch is incomplete")
+    if (
+        len(set(attempt_paths)) != len(attempt_paths)
+        or len({str(attempt.object_id) for attempt in attempts}) != len(attempts)
+        or len(set(start_object_ids)) != len(start_object_ids)
+    ):
+        raise ResearchGitError(
+            "required experiment terminal batch has duplicate attempt identities"
+        )
+
+    completion_commits = [
+        _load_experiment_admission_terminal_completion_ref(
+            repository_path,
+            start_object_id=start_object_id,
+        )
+        for start_object_id in start_object_ids
+    ]
+    expected_paths = set(attempt_paths)
+    for attempt, relative_path in zip(attempts, attempt_paths):
+        if relative_path != (
+            f".xscientist/objects/experiment_attempt/{attempt.object_id}.json"
+        ):
+            raise ResearchGitError(
+                "required experiment terminal object path does not match its identity"
+            )
+    introductions: set[str] = set()
+    committed_count = 0
+    for attempt, relative_path in zip(attempts, attempt_paths):
+        history = _run_git(
+            Path(repository_path),
+            [
+                "log",
+                "--all",
+                "--full-history",
+                "--topo-order",
+                "--no-renames",
+                "--max-count=2",
+                "--format=%H",
+                "--",
+                relative_path,
+            ],
+        ).stdout.splitlines()
+        if len(history) > 1:
+            raise ResearchGitError(
+                "required experiment terminal object has ambiguous Git history"
+            )
+        if not history:
+            continue
+        committed_count += 1
+        introductions.add(history[0])
+
+    if committed_count == 0:
+        if any(commit is not None for commit in completion_commits):
+            raise ResearchGitError(
+                "required experiment terminal completion ref has no exact outcome"
+            )
+        return None
+    if committed_count != len(attempts):
+        raise ResearchGitError(
+            "required experiment terminal batch has partially committed outcomes"
+        )
+    if len(introductions) != 1:
+        raise ResearchGitError(
+            "required experiment terminal batch does not share one checkpoint"
+        )
+
+    introduction = next(iter(introductions))
+    shown = show_checkpoint(repository_path, introduction)
+    checkpoint = shown.get("checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    changed_paths = checkpoint.get("changed_paths")
+    if (
+        shown.get("checkpoint_hash_valid") is not True
+        or shown.get("commit") != introduction
+        or checkpoint.get("stage") != "experiment_admission_terminal"
+        or checkpoint.get("status") != status
+        or not isinstance(changed_paths, list)
+        or len(changed_paths) != len(expected_paths)
+        or len(set(changed_paths)) != len(changed_paths)
+        or set(changed_paths) != expected_paths
+    ):
+        raise ResearchGitError(
+            "required experiment terminal checkpoint does not exactly match the batch"
+        )
+    committed_at_introduction = {
+        str(item.get("object_id") or ""): item
+        for item in list_research_objects_at_ref(repository_path, introduction)
+    }
+    for attempt in attempts:
+        committed = committed_at_introduction.get(str(attempt.object_id))
+        if (
+            not isinstance(committed, Mapping)
+            or committed.get("kind") != "experiment_attempt"
+            or committed.get("content_hash") != attempt.object_hash
+        ):
+            raise ResearchGitError(
+                "required experiment terminal checkpoint contains a foreign outcome"
+            )
+    if any(
+        commit is not None and commit != introduction for commit in completion_commits
+    ):
+        raise ResearchGitError(
+            "required experiment terminal batch completion ref does not match its "
+            "unique checkpoint"
+        )
+    return introduction
+
+
 def _record_local_research_attempt_objects(
     args: argparse.Namespace,
     *,
@@ -1778,38 +3194,499 @@ def _record_local_research_attempt_objects(
 ) -> None:
     if not getattr(args, "_research_git_active", False):
         return
-    from xscientist.research_git import ResearchGitError
+    from xscientist.research_git import (
+        ResearchGitError,
+        _fsync_directory,
+        _load_experiment_admission_execution_claim,
+        _load_experiment_admission_terminal_reservation,
+        _publish_experiment_admission_terminal_completion_refs,
+        _repository_lock,
+        create_checkpoint,
+        list_research_objects_at_ref,
+        show_checkpoint,
+    )
     from xscientist.research_lifecycle import ResearchLifecycle
 
     try:
         lifecycle = ResearchLifecycle(args.project_dir)
         object_ids = getattr(args, "_research_vcs_ids", {})
         preregistration_id = object_ids.get("preregistration")
-        for fallback_index, result in enumerate(results):
-            idea_index = int(result.get("idea_idx", fallback_index))
-            payload = _compact_research_result(result)
-            payload["status"] = str(
-                result.get("registry_status") or result.get("status") or "failed"
+        plan_ids = object_ids.get("plans") or {}
+        gate_ids = object_ids.get("admission_gates") or {}
+        preflights = getattr(args, "_experiment_admission_preflights", {}) or {}
+        attempt_ids = dict(object_ids.get("attempts") or {})
+        attempt_paths: list[str] = []
+        terminal_start_ids: list[str] = []
+        created_attempt_paths: list[Path] = []
+        recorded_attempts: list[Any] = []
+        created_terminal_reservation_paths: list[Path] = []
+        prepared_attempts: list[tuple[int, dict[str, Any]]] = []
+        with _repository_lock(lifecycle.repository.path):
+            admission_required = (
+                lifecycle.repository.experiment_admission_mode() == "required"
             )
-            recorded = lifecycle.experiment_attempt(
-                payload,
-                preregistration_id=(preregistration_id if idea_index == 0 else None),
-                plan_id=(object_ids.get("plans") or {}).get(idea_index),
-                provenance=_research_attempt_provenance(
-                    lifecycle,
-                    result=result,
-                    preregistration_id=(
-                        preregistration_id if idea_index == 0 else None
-                    ),
-                ),
-                commit=False,
-            )
-            object_ids.setdefault("attempts", {})[idea_index] = recorded[
-                "attempt"
-            ].object_id
-        args._research_vcs_ids = object_ids
+            admission_starts = object_ids.get("admission_starts") or {}
+            if admission_required and not all(
+                isinstance(item, Mapping)
+                for item in (plan_ids, gate_ids, preflights, admission_starts)
+            ):
+                raise ResearchGitError(
+                    "required experiment admission batch mappings are invalid"
+                )
+            if (
+                admission_required
+                and not results
+                and not preflights
+                and not admission_starts
+            ):
+                return
+            seen_idea_indices: set[int] = set()
+            for fallback_index, result in enumerate(results):
+                raw_idea_index = result.get("idea_idx", fallback_index)
+                if admission_required:
+                    if (
+                        "idea_idx" not in result
+                        or type(raw_idea_index) is not int
+                        or raw_idea_index < 0
+                    ):
+                        raise ResearchGitError(
+                            "required experiment result has an invalid idea_idx"
+                        )
+                    idea_index = raw_idea_index
+                else:
+                    idea_index = int(raw_idea_index)
+                if admission_required and idea_index in seen_idea_indices:
+                    raise ResearchGitError(
+                        f"experiment result batch repeats idea #{idea_index}"
+                    )
+                seen_idea_indices.add(idea_index)
+                preflight = preflights.get(idea_index) or preflights.get(
+                    str(idea_index)
+                )
+                durable_result = dict(result)
+                runtime_binding: dict[str, Any] = {}
+                provenance: dict[str, Any] | None = None
+                if admission_required and isinstance(preflight, Mapping):
+                    start_object_id = str(preflight.get("start_object_id") or "")
+                    execution_claim = _load_experiment_admission_execution_claim(
+                        lifecycle.repository.path,
+                        start_object_id=start_object_id,
+                        receipt_hash=str(preflight.get("receipt_hash") or ""),
+                    )
+                    if (
+                        isinstance(execution_claim, Mapping)
+                        and execution_claim.get("schema")
+                        == "xscientist.experiment-admission-execution-claim.v2"
+                    ):
+                        from xscientist.experiment_admission_runtime import (
+                            execution_claim_owner_state,
+                            load_bfts_terminal,
+                            load_worker_terminal,
+                            validate_result_against_runtime_record,
+                        )
+
+                        bfts_terminal = load_bfts_terminal(
+                            lifecycle.repository.path,
+                            start_object_id=start_object_id,
+                            claim=execution_claim,
+                        )
+                        worker_terminal = load_worker_terminal(
+                            lifecycle.repository.path,
+                            start_object_id=start_object_id,
+                            claim=execution_claim,
+                        )
+                        durable_result, provenance = (
+                            validate_result_against_runtime_record(
+                                lifecycle.repository.path,
+                                {
+                                    "claim": execution_claim,
+                                    "bfts_terminal": bfts_terminal,
+                                    "worker_terminal": worker_terminal,
+                                    "owner_state": execution_claim_owner_state(
+                                        execution_claim
+                                    ),
+                                },
+                                result,
+                            )
+                        )
+                        runtime_binding = {
+                            "admission_runtime_claim_hash": execution_claim[
+                                "claim_hash"
+                            ],
+                            "admission_bfts_terminal_hash": (
+                                bfts_terminal.get("terminal_hash")
+                                if bfts_terminal is not None
+                                else None
+                            ),
+                            "admission_worker_terminal_hash": (
+                                worker_terminal.get("terminal_hash")
+                                if worker_terminal is not None
+                                else None
+                            ),
+                        }
+                payload = _compact_research_result(durable_result)
+                payload.update(runtime_binding)
+                payload["pipeline_status"] = str(
+                    durable_result.get("status") or "failed"
+                )
+                payload["status"] = str(
+                    durable_result.get("registry_status")
+                    or durable_result.get("status")
+                    or "failed"
+                )
+                if isinstance(preflight, Mapping):
+                    for field, value in (
+                        preflight.get("execution_scope") or {}
+                    ).items():
+                        if field != "code_commit":
+                            payload.setdefault(str(field), value)
+                if provenance is None:
+                    provenance = _research_attempt_provenance(
+                        lifecycle,
+                        result=durable_result,
+                        preregistration_id=(
+                            preregistration_id if idea_index == 0 else None
+                        ),
+                    )
+                if isinstance(preflight, Mapping):
+                    preflight_scope = preflight.get("execution_scope")
+                    if isinstance(preflight_scope, Mapping) and preflight_scope.get(
+                        "code_commit"
+                    ):
+                        provenance["code_commit"] = preflight_scope["code_commit"]
+                prepared_attempts.append(
+                    (
+                        idea_index,
+                        lifecycle.validate_experiment_attempt(
+                            payload,
+                            preregistration_id=(
+                                preregistration_id if idea_index == 0 else None
+                            ),
+                            plan_id=plan_ids.get(idea_index)
+                            or plan_ids.get(str(idea_index)),
+                            admission_gate_id=gate_ids.get(idea_index)
+                            or gate_ids.get(str(idea_index)),
+                            admission_preflight=preflight,
+                            provenance=provenance,
+                        ),
+                    )
+                )
+
+            if admission_required:
+
+                def normalized_indices(
+                    values: Mapping[Any, Any], *, label: str
+                ) -> set[int]:
+                    normalized: set[int] = set()
+                    for raw_index in values:
+                        if isinstance(raw_index, bool):
+                            raise ResearchGitError(
+                                f"required experiment {label} has an invalid idea index"
+                            )
+                        try:
+                            index = int(raw_index)
+                        except (TypeError, ValueError) as exc:
+                            raise ResearchGitError(
+                                f"required experiment {label} has an invalid idea index"
+                            ) from exc
+                        if index < 0 or str(index) != str(raw_index):
+                            raise ResearchGitError(
+                                f"required experiment {label} has an invalid idea index"
+                            )
+                        if index in normalized:
+                            raise ResearchGitError(
+                                f"required experiment {label} has an ambiguous idea index"
+                            )
+                        normalized.add(index)
+                    return normalized
+
+                start_indices = normalized_indices(
+                    admission_starts, label="admission starts"
+                )
+                preflight_indices = normalized_indices(
+                    preflights, label="admission preflights"
+                )
+                start_checkpoint_heads = {
+                    str(receipt.get("start_checkpoint") or "").strip()
+                    for receipt in preflights.values()
+                    if isinstance(receipt, Mapping)
+                }
+                if len(start_checkpoint_heads) != 1 or "" in start_checkpoint_heads:
+                    raise ResearchGitError(
+                        "required experiment terminal batch is not based on one "
+                        "dedicated admission-start checkpoint"
+                    )
+                start_checkpoint_head = next(iter(start_checkpoint_heads))
+                shown = show_checkpoint(
+                    lifecycle.repository.path,
+                    start_checkpoint_head,
+                )
+                start_checkpoint = shown.get("checkpoint")
+                start_checkpoint = (
+                    start_checkpoint if isinstance(start_checkpoint, Mapping) else {}
+                )
+                changed_paths = start_checkpoint.get("changed_paths")
+                parent_commit = str(start_checkpoint.get("parent_commit") or "").strip()
+                if (
+                    shown.get("checkpoint_hash_valid") is not True
+                    or start_checkpoint.get("stage") != "experiment_admission_start"
+                    or not parent_commit
+                    or not isinstance(changed_paths, list)
+                    or not changed_paths
+                    or len(set(changed_paths)) != len(changed_paths)
+                ):
+                    raise ResearchGitError(
+                        "required experiment terminal batch is not based on one "
+                        "dedicated admission-start checkpoint"
+                    )
+                committed_now = {
+                    str(item["object_id"]): item
+                    for item in list_research_objects_at_ref(
+                        lifecycle.repository.path, start_checkpoint_head
+                    )
+                }
+                committed_before = {
+                    str(item["object_id"]): item
+                    for item in list_research_objects_at_ref(
+                        lifecycle.repository.path, parent_commit
+                    )
+                }
+                committed_starts: dict[int, Mapping[str, Any]] = {}
+                for logical_path in changed_paths:
+                    parts = str(logical_path).split("/")
+                    if (
+                        len(parts) != 4
+                        or parts[:3] != [".xscientist", "objects", "context_snapshot"]
+                        or not parts[3].endswith(".json")
+                    ):
+                        raise ResearchGitError(
+                            "required experiment admission-start checkpoint contains "
+                            "non-start material"
+                        )
+                    start_object_id = parts[3][:-5]
+                    start_object = committed_now.get(start_object_id)
+                    start_payload = (
+                        start_object.get("payload")
+                        if isinstance(start_object, Mapping)
+                        else None
+                    )
+                    start_scope = (
+                        start_payload.get("execution_scope")
+                        if isinstance(start_payload, Mapping)
+                        else None
+                    )
+                    committed_idea_index = (
+                        start_scope.get("idea_index")
+                        if isinstance(start_scope, Mapping)
+                        else None
+                    )
+                    if (
+                        start_object_id in committed_before
+                        or not isinstance(start_object, Mapping)
+                        or start_object.get("kind") != "context_snapshot"
+                        or start_object.get("state") != "locked"
+                        or not isinstance(start_payload, Mapping)
+                        or start_payload.get("protocol_kind")
+                        != "xscientist.experiment-admission-start.v1"
+                        or start_payload.get("status") != "issued"
+                        or type(committed_idea_index) is not int
+                        or committed_idea_index < 0
+                        or committed_idea_index in committed_starts
+                    ):
+                        raise ResearchGitError(
+                            "required experiment admission-start checkpoint is "
+                            "ambiguous or invalid"
+                        )
+                    committed_starts[committed_idea_index] = start_object
+                committed_start_indices = set(committed_starts)
+                if (
+                    not committed_start_indices
+                    or start_indices != committed_start_indices
+                    or preflight_indices != committed_start_indices
+                    or seen_idea_indices != committed_start_indices
+                ):
+                    raise ResearchGitError(
+                        "required experiment result batch must exactly match every "
+                        "committed admission start"
+                    )
+                for idea_index in sorted(start_indices):
+                    receipt = preflights.get(idea_index) or preflights.get(
+                        str(idea_index)
+                    )
+                    start_id = admission_starts.get(
+                        idea_index, admission_starts.get(str(idea_index))
+                    )
+                    if (
+                        not isinstance(receipt, Mapping)
+                        or str(receipt.get("start_object_id") or "")
+                        != str(start_id or "")
+                        or str(start_id or "")
+                        != str(committed_starts[idea_index].get("object_id") or "")
+                        or receipt.get("start_checkpoint") != start_checkpoint_head
+                    ):
+                        raise ResearchGitError(
+                            "required experiment preflight does not match its admitted "
+                            f"start for idea #{idea_index}"
+                        )
+
+            terminal_committed = False
+            try:
+                for idea_index, prepared in prepared_attempts:
+                    reservation_preexisted = False
+                    if admission_required:
+                        start_id = admission_starts.get(
+                            idea_index, admission_starts.get(str(idea_index))
+                        )
+                        reservation_preexisted = (
+                            _load_experiment_admission_terminal_reservation(
+                                lifecycle.repository.path,
+                                start_object_id=str(start_id or ""),
+                            )
+                            is not None
+                        )
+                        terminal_start_ids.append(str(start_id or ""))
+                    recorded = lifecycle.record_validated_experiment_attempt(
+                        prepared,
+                        commit=False,
+                    )
+                    reservation_path = recorded.get("terminal_reservation")
+                    if (
+                        isinstance(reservation_path, Path)
+                        and not reservation_preexisted
+                    ):
+                        created_terminal_reservation_paths.append(reservation_path)
+                    if not admission_required and not recorded["attempt"].created:
+                        raise ResearchGitError(
+                            "experiment attempt object unexpectedly pre-existed"
+                        )
+                    if recorded["attempt"].created:
+                        created_attempt_paths.append(recorded["attempt"].path)
+                    recorded_attempts.append(recorded["attempt"])
+                    attempt_ids[idea_index] = recorded["attempt"].object_id
+                    attempt_paths.append(
+                        recorded["attempt"]
+                        .path.resolve()
+                        .relative_to(lifecycle.repository.path)
+                        .as_posix()
+                    )
+                if attempt_paths and admission_required:
+                    checkpoint_status = (
+                        recorded_attempts[0].state
+                        if len(recorded_attempts) == 1
+                        else (
+                            "completed"
+                            if any(
+                                attempt.state == "completed"
+                                for attempt in recorded_attempts
+                            )
+                            else "failed"
+                        )
+                    )
+                    committed_batch = _required_terminal_batch_checkpoint(
+                        lifecycle.repository.path,
+                        attempts=recorded_attempts,
+                        attempt_paths=attempt_paths,
+                        start_object_ids=terminal_start_ids,
+                        status=checkpoint_status,
+                    )
+                    created_terminal_checkpoint = committed_batch is None
+                    if committed_batch is None:
+                        checkpoint = create_checkpoint(
+                            lifecycle.repository.path,
+                            stage="experiment_admission_terminal",
+                            subject=(
+                                f"commit {len(attempt_paths)} admitted experiment outcomes"
+                            ),
+                            summary=(
+                                "Durably consume every committed admission start in a "
+                                "later, terminal-only checkpoint."
+                            ),
+                            status=checkpoint_status,
+                            only_paths=sorted(attempt_paths),
+                        )
+                        if not checkpoint.committed or not checkpoint.commit:
+                            raise ResearchGitError(
+                                "required experiment admission terminal checkpoint was "
+                                "not committed"
+                            )
+                        committed_batch = _required_terminal_batch_checkpoint(
+                            lifecycle.repository.path,
+                            attempts=recorded_attempts,
+                            attempt_paths=attempt_paths,
+                            start_object_ids=terminal_start_ids,
+                            status=checkpoint_status,
+                        )
+                        if committed_batch != checkpoint.commit:
+                            raise ResearchGitError(
+                                "required experiment terminal checkpoint identity changed"
+                            )
+                    _publish_experiment_admission_terminal_completion_refs(
+                        lifecycle.repository.path,
+                        start_object_ids=terminal_start_ids,
+                        commit=committed_batch,
+                    )
+                    if not created_terminal_checkpoint and created_attempt_paths:
+                        committed_paths = {
+                            (
+                                f".xscientist/objects/{item.get('kind')}/"
+                                f"{item.get('object_id')}.json"
+                            )
+                            for item in list_research_objects_at_ref(
+                                lifecycle.repository.path, "HEAD"
+                            )
+                        }
+                        for path in created_attempt_paths:
+                            relative = path.relative_to(
+                                lifecycle.repository.path
+                            ).as_posix()
+                            if relative not in committed_paths:
+                                path.unlink(missing_ok=True)
+                                _fsync_directory(path.parent)
+                    terminal_committed = True
+            except BaseException:
+                if not terminal_committed:
+                    try:
+                        committed_paths = {
+                            (
+                                f".xscientist/objects/{item.get('kind')}/"
+                                f"{item.get('object_id')}.json"
+                            )
+                            for item in list_research_objects_at_ref(
+                                lifecycle.repository.path, "HEAD"
+                            )
+                        }
+                        terminal_committed = any(
+                            path in committed_paths for path in attempt_paths
+                        )
+                    except BaseException:
+                        # Preserve recoverable state when commit state is uncertain.
+                        terminal_committed = True
+                if not terminal_committed:
+                    touched_parents: set[Path] = set()
+                    for path in (
+                        *created_attempt_paths,
+                        *created_terminal_reservation_paths,
+                    ):
+                        path.unlink(missing_ok=True)
+                        touched_parents.add(path.parent)
+                    for parent in touched_parents:
+                        _fsync_directory(parent)
+                raise
+        updated_object_ids = dict(object_ids)
+        updated_object_ids["attempts"] = attempt_ids
+        args._research_vcs_ids = updated_object_ids
         print(f"🧬 Research VCS 已记录 {len(results)} 个实验尝试（含失败结果）")
     except (ResearchGitError, OSError, ValueError) as exc:
+        try:
+            admission_required = (
+                lifecycle.repository.experiment_admission_mode() == "required"
+            )
+        except (ResearchGitError, OSError, UnboundLocalError):
+            admission_required = False
+        if admission_required:
+            raise RuntimeError(
+                f"required Research VCS experiment recording failed: {exc}"
+            ) from exc
         _research_vcs_failure(args, "experiment record", exc)
 
 
@@ -2848,9 +4725,12 @@ def improve_paper_with_review(
     }
 
 
-def process_single_idea(args):
+def _process_single_idea_impl(args):
     """处理单个想法的完整流程（可在子进程中运行）"""
     args = list(args)
+    admission_preflight = None
+    if len(args) == 42:
+        admission_preflight = args.pop()
     resume_from = None
     if len(args) == 41:
         resume_from = args.pop()
@@ -2904,9 +4784,16 @@ def process_single_idea(args):
         integrity_forensics_enabled,
     ) = args
     requested_workflow_mode = requested_workflow_mode or workflow_mode
-    current_stage = "initialization"
+    current_stage = "experiment_admission"
+    registry_status = "failed"
 
     try:
+        _revalidate_experiment_admission_preflight(
+            project_dir,
+            admission_preflight,
+            bfts_config_path=bfts_config_path,
+        )
+        current_stage = "initialization"
         strict_writing_guardrails = bool(strict_writing_guardrails or high_quality_mode)
         guardrail_repair_rounds = max(0, int(guardrail_repair_rounds))
         research_root = Path(research_root).expanduser()
@@ -3050,7 +4937,48 @@ def process_single_idea(args):
             resume_from=resume_from,
         )
 
-        experiment_result = perform_experiments_bfts(idea_config_path)
+        current_stage = "experiment_admission"
+        with _experiment_admission_execution_lease(
+            project_dir,
+            admission_preflight,
+            bfts_config_path=bfts_config_path,
+            experiment_dir=exp_dir,
+            idea_key=idea_key,
+        ) as admission_claim:
+            current_stage = "experiment"
+            if admission_claim is None:
+                experiment_result = perform_experiments_bfts(idea_config_path)
+            else:
+                experiment_result = perform_experiments_bfts(
+                    idea_config_path,
+                    admission_runtime={
+                        "repository_path": str(
+                            Path(project_dir).expanduser().resolve()
+                        ),
+                        "claim": admission_claim,
+                    },
+                )
+            current_stage = "experiment_admission"
+            from xscientist.research_git import ResearchGitError
+
+            try:
+                _revalidate_experiment_admission_preflight(
+                    project_dir,
+                    admission_preflight,
+                    bfts_config_path=bfts_config_path,
+                )
+            except ResearchGitError:
+                # The durable claim is the execution linearization point.  A later
+                # policy/configuration change quarantines the outcome but must not
+                # erase evidence that the run already happened.
+                if isinstance(experiment_result, dict):
+                    experiment_result["admission_post_execution_status"] = (
+                        "changed_after_claim"
+                    )
+            else:
+                if isinstance(experiment_result, dict):
+                    experiment_result["admission_post_execution_status"] = "unchanged"
+        current_stage = "experiment"
         if (
             isinstance(experiment_result, dict)
             and experiment_result.get("status") != "completed"
@@ -3082,6 +5010,8 @@ def process_single_idea(args):
                 "lock_path": experiment_result.get("lock_path"),
                 "lock_owner": experiment_result.get("lock_owner"),
             }
+
+        registry_status = "completed"
 
         # 复制实验结果
         latest_run_dir = find_latest_bfts_run_dir(exp_dir, logs_subdir="logs")
@@ -3137,6 +5067,7 @@ def process_single_idea(args):
                 "idea_idx": idea_idx,
                 "exp_dir": exp_dir,
                 "status": "failed",
+                "registry_status": registry_status,
                 "research_status": "blocked",
                 "stage": "sample_gate",
                 "sample_gate": sample_gate,
@@ -3242,6 +5173,7 @@ def process_single_idea(args):
                 **_paper_result_artifact_fields(exp_dir),
                 "idea_idx": idea_idx,
                 "status": "failed",
+                "registry_status": registry_status,
                 "stage": "writeup",
                 "writing_profile": writing_profile,
                 "writing_audit_rounds": writing_audit_rounds,
@@ -3301,6 +5233,7 @@ def process_single_idea(args):
                     **_paper_result_artifact_fields(exp_dir),
                     "idea_idx": idea_idx,
                     "status": "failed",
+                    "registry_status": registry_status,
                     "stage": "quality_fallback_blocked",
                     "workflow_mode": workflow_mode,
                     "template_profile": template_profile,
@@ -3604,6 +5537,7 @@ def process_single_idea(args):
                     **_paper_result_artifact_fields(exp_dir),
                     "idea_idx": idea_idx,
                     "status": "failed",
+                    "registry_status": registry_status,
                     "stage": "quality_fallback_blocked",
                     "workflow_mode": workflow_mode,
                     "template_profile": template_profile,
@@ -3690,6 +5624,7 @@ def process_single_idea(args):
                 ),
                 "idea_idx": idea_idx,
                 "status": "failed",
+                "registry_status": registry_status,
                 "stage": "hostile_critic",
                 "workflow_mode": workflow_mode,
                 "template_profile": template_profile,
@@ -3878,6 +5813,7 @@ def process_single_idea(args):
                     **_paper_result_artifact_fields(exp_dir, pdf_path=pdf_path),
                     "idea_idx": idea_idx,
                     "status": "failed",
+                    "registry_status": registry_status,
                     "research_status": "manuscript_draft",
                     "stage": "final_submission_bar",
                     "quality_score": quality_result.get("quality_score_after"),
@@ -3909,6 +5845,7 @@ def process_single_idea(args):
         return {
             "idea_idx": idea_idx,
             "status": "success",
+            "registry_status": registry_status,
             "research_status": (
                 "submission_ready"
                 if high_quality_mode and final_submission_gate.get("accepted") is True
@@ -4117,6 +6054,7 @@ def process_single_idea(args):
             **(_paper_result_artifact_fields(exp_dir) if "exp_dir" in locals() else {}),
             "idea_idx": idea_idx,
             "status": "failed",
+            "registry_status": registry_status,
             "stage": current_stage,
             "error": str(e),
             "pause_reason": (
@@ -4156,6 +6094,113 @@ def process_single_idea(args):
         # (multi-idea batches) starts clean and cannot leak this idea's ARA
         # root into the next one.
         deactivate_llm_tracing()
+
+
+def _process_admission_receipt(process_args: object) -> Mapping[str, Any] | None:
+    if not isinstance(process_args, (list, tuple)) or len(process_args) != 42:
+        return None
+    candidate = process_args[-1]
+    return candidate if isinstance(candidate, Mapping) else None
+
+
+def _worker_terminal_provenance(
+    project_dir: str | Path,
+    receipt: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Freeze provenance now so recovery never re-hashes a changed checkout."""
+
+    scope = receipt.get("execution_scope")
+    scope = scope if isinstance(scope, Mapping) else {}
+    fallback = {
+        field: scope[field]
+        for field in ("environment_hash", "code_commit")
+        if isinstance(scope.get(field), str) and scope.get(field)
+    }
+    try:
+        from xscientist.research_lifecycle import ResearchLifecycle
+
+        lifecycle = ResearchLifecycle(project_dir)
+        provenance = _research_attempt_provenance(
+            lifecycle,
+            result=dict(result),
+            preregistration_id=(
+                str(receipt["preregistration_id"])
+                if receipt.get("preregistration_id")
+                else None
+            ),
+        )
+        if isinstance(scope.get("code_commit"), str) and scope.get("code_commit"):
+            provenance["code_commit"] = scope["code_commit"]
+        return provenance
+    except Exception:
+        return fallback
+
+
+def _publish_process_worker_terminal(
+    process_args: object,
+    result: Mapping[str, Any],
+    *,
+    failure: object = None,
+) -> None:
+    receipt = _process_admission_receipt(process_args)
+    if receipt is None:
+        return
+    project_dir = process_args[0]  # type: ignore[index]
+    from xscientist.experiment_admission_runtime import (
+        load_execution_claim_v2,
+        publish_worker_terminal,
+    )
+
+    start_object_id = str(receipt.get("start_object_id") or "")
+    claim = load_execution_claim_v2(
+        project_dir,
+        start_object_id=start_object_id,
+        receipt_hash=str(receipt.get("receipt_hash") or ""),
+    )
+    if claim is None:
+        return
+    publish_worker_terminal(
+        project_dir,
+        claim,
+        result,
+        provenance=_worker_terminal_provenance(project_dir, receipt, result),
+        failure=failure,
+    )
+
+
+def process_single_idea(args):
+    """Run one idea and publish a durable worker terminal for every return."""
+
+    try:
+        result = _process_single_idea_impl(args)
+    except BaseException as exc:
+        receipt = _process_admission_receipt(args)
+        if receipt is not None:
+            scope = receipt.get("execution_scope")
+            scope = scope if isinstance(scope, Mapping) else {}
+            terminal_result = {
+                "idea_idx": scope.get("idea_index", 0),
+                "status": "failed",
+                "registry_status": "failed",
+                "research_status": "failed",
+                "stage": "worker_aborted",
+                "resumable": False,
+            }
+            _publish_process_worker_terminal(
+                args,
+                terminal_result,
+                failure=exc,
+            )
+        raise
+    if not isinstance(result, Mapping):
+        raise RuntimeError("experiment worker returned an invalid result")
+    _publish_process_worker_terminal(
+        args,
+        result,
+        failure=result.get("error"),
+    )
+    return dict(result)
 
 
 def run_parallel_experiments(
@@ -4219,6 +6264,7 @@ def run_parallel_experiments(
                 kwargs["integrity_forensics_enabled"],
                 kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
                 (kwargs.get("resume_checkpoints") or {}).get(idx),
+                (kwargs.get("admission_preflights") or {}).get(idx),
             )
         )
 
@@ -4505,6 +6551,9 @@ def save_project_summary(
 def main(argv=None):
     from ai_scientist.apps.project_cli import build_parser
 
+    invocation_arguments = [
+        str(item) for item in (sys.argv[1:] if argv is None else argv)
+    ]
     default_writing_profile = resolve_writing_profile_env(
         invalid_profile_logger=lambda exc, raw: print(
             "⚠️  忽略无效的 AI_SCIENTIST_WRITING_PROFILE="
@@ -4518,6 +6567,15 @@ def main(argv=None):
         workflow_modes=list_workflow_modes(),
     )
     args = parser.parse_args(argv)
+    args._project_bfts_config_cli_override = _project_cli_option_was_explicit(
+        invocation_arguments,
+        "--bfts-config",
+    )
+    args._project_budget_cli_overrides = frozenset(
+        attribute
+        for option, attribute in _PROJECT_BUDGET_CLI_OPTIONS.items()
+        if _project_cli_option_was_explicit(invocation_arguments, option)
+    )
     from ai_scientist.utils.research_model_roles import (
         enforce_glm53_project_role_boundary,
     )
@@ -4553,6 +6611,11 @@ def main(argv=None):
         apply_cache=True,
     )
     args.output_root = str(runtime.research_root)
+    args.project_dir = str(
+        _assert_managed_project_layout(
+            resolve_project_path(args.project_dir, output_root=args.output_root)
+        )
+    )
 
     strict_fallbacks = should_enforce_strict_fallbacks(
         args.workflow_mode,
@@ -4578,6 +6641,38 @@ def main(argv=None):
     if integrity_forensics_enabled:
         print("🔎 启用 integrity forensics：最终稿将生成可追溯一致性检查报告。")
 
+    existing_required_repository = _activate_existing_required_research_vcs(args)
+    early_admission_scope: dict[str, Any] | None = None
+    early_admission_recovery: dict[str, Any] | None = None
+    if existing_required_repository and args.resume:
+        early_admission_scope = _required_admission_resume_inputs(args)
+        early_admission_recovery = _reconcile_required_experiment_admission_runtime(
+            args,
+            selected_indices=early_admission_scope["selected_indices"],
+            ideas_hash=early_admission_scope["ideas_hash"],
+            configuration_hash=early_admission_scope["configuration_hash"],
+            budget_hash=early_admission_scope["budget_hash"],
+        )
+        if (
+            not early_admission_recovery.get("committed_results")
+            and not early_admission_recovery.get("recovered_results")
+            and not early_admission_recovery.get("pending_batch")
+        ):
+            early_admission_scope = None
+            early_admission_recovery = None
+    fully_recovered_resume = bool(
+        early_admission_recovery
+        and early_admission_recovery.get("active")
+        and not early_admission_recovery.get("execute_indices")
+        and early_admission_recovery.get("committed_results")
+    )
+    unfinished_required_resume = bool(
+        early_admission_scope is not None
+        and early_admission_recovery is not None
+        and early_admission_recovery.get("active")
+        and not fully_recovered_resume
+    )
+
     # 创建项目结构
     dirs = create_project_structure(args.project_dir, output_root=args.output_root)
     args.project_dir = str(dirs["root"])
@@ -4590,6 +6685,7 @@ def main(argv=None):
         and not args.idea_indices
         and not args.seed_from_ara
         and not args.seed_node_id
+        and not _required_experiment_admission_enabled(args.project_dir)
         else None
     )
     if completed_resume is not None:
@@ -4612,42 +6708,69 @@ def main(argv=None):
         _print_project_completion(args.project_dir, completed_resume)
         return
 
-    autopilot_config = _prepare_autopilot_bfts_config(args)
+    reuse_admitted_autopilot_config = False
+    if unfinished_required_resume:
+        admitted_config = _required_admission_resume_configuration_path(
+            args,
+            expected_configuration_hash=early_admission_scope["configuration_hash"],
+        )
+        args.bfts_config = str(admitted_config)
+        reuse_admitted_autopilot_config = bool(args.autopilot)
+    autopilot_config = (
+        None
+        if fully_recovered_resume
+        else _prepare_autopilot_bfts_config(
+            args,
+            reuse_existing=reuse_admitted_autopilot_config,
+        )
+    )
     if autopilot_config:
         print(f"⏱️ Autopilot 有限预算配置: {autopilot_config}")
 
-    from ai_scientist.utils.data_readiness import prepare_data_contract
+    if fully_recovered_resume:
+        args._data_contract = None
+        args._project_budget = None
+    else:
+        from ai_scientist.utils.data_readiness import prepare_data_contract
 
-    args._data_contract = prepare_data_contract(
-        args.project_dir,
-        data_dir=args.data_dir,
-        allow_synthetic=bool(args.allow_synthetic_data),
-        required=bool(args.autopilot and not args.skip_experiment),
-    )
-    args._project_budget = _configure_autopilot_project_budget(args)
-    if args.autopilot:
-        print(
-            "🧾 Autopilot 数据/预算门禁: "
-            f"data={args._data_contract['mode']} "
-            "budget=project-wide"
+        args._data_contract = prepare_data_contract(
+            args.project_dir,
+            data_dir=args.data_dir,
+            allow_synthetic=bool(args.allow_synthetic_data),
+            required=bool(args.autopilot and not args.skip_experiment),
+        )
+        args._project_budget = _configure_autopilot_project_budget(args)
+        if args.autopilot:
+            print(
+                "🧾 Autopilot 数据/预算门禁: "
+                f"data={args._data_contract['mode']} "
+                "budget=project-wide"
+            )
+    if unfinished_required_resume:
+        _validate_required_admission_resume_execution_inputs(
+            args,
+            early_admission_scope,
         )
 
     # 按实际模型检查 provider 凭证；完整恢复路径不会再次要求模型凭证。
     requested_models = _collect_requested_models(args)
-    require_model_credentials(requested_models)
-    autopilot_checks = _run_autopilot_preflight(args)
-    autopilot_receipt = _write_autopilot_receipt(
-        args,
-        checks=autopilot_checks,
-    )
-    if autopilot_receipt:
-        print(f"🧭 Autopilot 运行契约: {autopilot_receipt}")
-    args._research_git_active = _initialize_local_research_git(args)
-    record_model_provider_decisions(
-        args.project_dir,
-        requested_models,
-        producer="run_project.model_provider",
-    )
+    if not fully_recovered_resume:
+        require_model_credentials(requested_models)
+        autopilot_checks = _run_autopilot_preflight(args)
+        autopilot_receipt = _write_autopilot_receipt(
+            args,
+            checks=autopilot_checks,
+        )
+        if autopilot_receipt:
+            print(f"🧭 Autopilot 运行契约: {autopilot_receipt}")
+    if not getattr(args, "_research_git_active", False):
+        args._research_git_active = _initialize_local_research_git(args)
+    if not fully_recovered_resume:
+        record_model_provider_decisions(
+            args.project_dir,
+            requested_models,
+            producer="run_project.model_provider",
+        )
 
     # ARA fork-continue: stage a seed manifest so the first BFTS draft skips
     # the LLM. Uses env vars so it works transparently across subprocess
@@ -4736,40 +6859,54 @@ def main(argv=None):
         else None
     )
     default_indices = list(range(len(ideas))) if args.parallel else [0]
-    cached_selection = (
-        _load_project_progress(args.project_dir).get("selected_indices")
-        if args.resume and requested_indices is None
-        else None
+    required_admission = bool(
+        getattr(args, "_research_git_active", False)
+        and _required_experiment_admission_enabled(args.project_dir)
     )
-    idea_indices = []
-    if isinstance(cached_selection, list) and cached_selection:
-        for value in cached_selection:
-            try:
-                index = int(value)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= index < len(ideas):
-                idea_indices.append(index)
-    if idea_indices:
+    cached_selection = None
+    idea_indices: list[int] = []
+    if early_admission_recovery is not None:
+        idea_indices = [
+            int(index)
+            for index in early_admission_recovery.get("batch_indices")
+            or early_admission_scope["selected_indices"]
+        ]
         rankings = []
-        print(f"♻️ 复用上次已记录的 idea 选择: {idea_indices}")
     else:
-        idea_indices, rankings = select_ranked_idea_candidates(
-            ideas,
-            ranking_enabled=args.rank_ideas,
-            ranking_model=args.idea_rank_model or args.model_writeup,
-            target_venue=args.target_venue,
-            prioritize_breakthrough=args.breakthrough_mode,
-            research_root=Path(args.output_root).expanduser(),
-            ranking_output_path=osp.join(
-                args.project_dir, "04_logs", "idea_rankings.json"
-            ),
-            requested_indices=requested_indices,
-            default_indices=default_indices,
-            fallback_to_ranked=args.fallback_ranked_ideas,
-            use_ranked_all=args.parallel,
-            limit=args.top_k_ideas if args.rank_ideas else None,
+        cached_selection = (
+            _load_project_progress(args.project_dir).get("selected_indices")
+            if args.resume and requested_indices is None and not required_admission
+            else None
         )
+        if isinstance(cached_selection, list) and cached_selection:
+            for value in cached_selection:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(ideas):
+                    idea_indices.append(index)
+        if idea_indices:
+            rankings = []
+        else:
+            idea_indices, rankings = select_ranked_idea_candidates(
+                ideas,
+                ranking_enabled=args.rank_ideas,
+                ranking_model=args.idea_rank_model or args.model_writeup,
+                target_venue=args.target_venue,
+                prioritize_breakthrough=args.breakthrough_mode,
+                research_root=Path(args.output_root).expanduser(),
+                ranking_output_path=osp.join(
+                    args.project_dir, "04_logs", "idea_rankings.json"
+                ),
+                requested_indices=requested_indices,
+                default_indices=default_indices,
+                fallback_to_ranked=args.fallback_ranked_ideas,
+                use_ranked_all=args.parallel,
+                limit=args.top_k_ideas if args.rank_ideas else None,
+            )
+    if idea_indices and not rankings:
+        print(f"♻️ 复用上次已记录的 idea 选择: {idea_indices}")
     if rankings:
         ranking_event = record_ranking_fallbacks(
             args.project_dir,
@@ -4793,10 +6930,54 @@ def main(argv=None):
             )
 
     selected_idea_indices = list(idea_indices)
-    retained_progress = _load_project_progress(args.project_dir) if args.resume else {}
-    retained_progress_results = (
-        _latest_project_results(args.project_dir) if args.resume else []
-    )
+    from ai_scientist.resources import resolve_bfts_config_path
+
+    if early_admission_recovery is not None:
+        if (
+            early_admission_scope.get("ideas_hash") is not None
+            and run_ideas_hash != early_admission_scope["ideas_hash"]
+        ):
+            raise RuntimeError(
+                "persisted ideas changed after required admission reconciliation"
+            )
+        admission_configuration_hash = early_admission_scope["configuration_hash"]
+        admission_budget_hash = early_admission_scope["budget_hash"]
+        admission_recovery = early_admission_recovery
+    else:
+        admission_config_path = resolve_bfts_config_path(args.bfts_config)
+        admission_configuration_hash = canonical_content_hash(
+            admission_config_path.read_text(encoding="utf-8")
+        )
+        admission_budget = getattr(args, "_project_budget", None)
+        admission_budget_hash = (
+            canonical_content_hash(admission_budget)
+            if isinstance(admission_budget, Mapping)
+            else None
+        )
+        admission_recovery = _reconcile_required_experiment_admission_runtime(
+            args,
+            selected_indices=selected_idea_indices,
+            ideas_hash=run_ideas_hash,
+            configuration_hash=admission_configuration_hash,
+            budget_hash=admission_budget_hash,
+        )
+    if admission_recovery["active"]:
+        retained_progress = {}
+        authoritative_results = _upsert_project_results(
+            admission_recovery["committed_results"],
+            admission_recovery["recovered_results"],
+        )
+        retained_progress_results = list(authoritative_results)
+        if admission_recovery["batch_indices"]:
+            selected_idea_indices = list(admission_recovery["batch_indices"])
+    else:
+        retained_progress = (
+            _load_project_progress(args.project_dir) if args.resume else {}
+        )
+        authoritative_results = None
+        retained_progress_results = (
+            _latest_project_results(args.project_dir) if args.resume else []
+        )
     progress_selected_indices: list[int] = []
     for value in [
         *(retained_progress.get("selected_indices") or []),
@@ -4817,11 +6998,38 @@ def main(argv=None):
         len(progress_selected_indices),
         len(retained_progress_results),
     )
-    idea_indices, prior_results, resume_checkpoints = _resolve_resume_work(
-        args.project_dir,
-        selected_idea_indices,
-        enabled=bool(args.resume),
-    )
+    if (
+        admission_recovery["active"]
+        and not admission_recovery["execute_indices"]
+        and admission_recovery["committed_results"]
+    ):
+        idea_indices = []
+        prior_results = list(admission_recovery["committed_results"])
+        resume_checkpoints = {}
+    elif admission_recovery["pending_batch"]:
+        idea_indices = list(admission_recovery["execute_indices"])
+        prior_results = list(admission_recovery["committed_results"])
+        resume_checkpoints = {
+            int(result["idea_idx"]): str(result["checkpoint_path"])
+            for result in admission_recovery["recovered_results"]
+            if result.get("checkpoint_path")
+            and Path(str(result["checkpoint_path"])).expanduser().is_file()
+        }
+    else:
+        idea_indices, prior_results, resume_checkpoints = _resolve_resume_work(
+            args.project_dir,
+            selected_idea_indices,
+            enabled=bool(args.resume),
+            authoritative_results=authoritative_results,
+        )
+    if admission_recovery["active"]:
+        _save_project_progress(
+            args.project_dir,
+            ideas_hash=run_ideas_hash,
+            results=retained_progress_results,
+            total=progress_total,
+            selected_indices=progress_selected_indices,
+        )
     if args.resume:
         print(
             "♻️ 恢复计划: "
@@ -4836,6 +7044,14 @@ def main(argv=None):
         print(f"📁 项目目录: {args.project_dir}")
         print("📄 本次运行未生成论文。")
         return
+
+    _preflight_local_research_experiment_admission(
+        args,
+        idea_indices=idea_indices,
+        ideas_hash=run_ideas_hash,
+        configuration_hash=admission_configuration_hash,
+        budget_hash=admission_budget_hash,
+    )
 
     # 运行实验
     if not args.skip_experiment:
@@ -4886,9 +7102,17 @@ def main(argv=None):
             "template_capability": template_capability,
             "strict_fallbacks": strict_fallbacks,
             "integrity_forensics_enabled": integrity_forensics_enabled,
+            "admission_preflights": getattr(
+                args, "_experiment_admission_preflights", {}
+            ),
         }
-        results = list(prior_results)
-        executed_results: list[dict[str, Any]] = []
+        recovered_execution_results = list(
+            admission_recovery.get("recovered_results") or []
+        )
+        results = _upsert_project_results(
+            list(prior_results), recovered_execution_results
+        )
+        executed_results: list[dict[str, Any]] = list(recovered_execution_results)
 
         if args.parallel and len(idea_indices) > 1:
             # 并行处理
@@ -4966,6 +7190,7 @@ def main(argv=None):
                     kwargs["integrity_forensics_enabled"],
                     kwargs.get("requested_workflow_mode", kwargs["workflow_mode"]),
                     resume_checkpoints.get(idx),
+                    (kwargs.get("admission_preflights") or {}).get(idx),
                 )
 
                 result = process_single_idea(process_args)
@@ -4992,19 +7217,46 @@ def main(argv=None):
             for result in results
             if result.get("ara_manifest")
         ]
-        _record_local_research_attempt_objects(args, results=executed_results)
-        _record_local_research_checkpoint(
-            args,
-            stage="experiment",
-            subject=f"record {len(executed_results)} new experiment outcomes",
-            summary=(
-                f"Record {len(executed_results)} newly executed research outcomes while "
-                f"retaining {len(prior_results)} completed resume results, including "
-                "their ARA manifests and compact evidence state."
-            ),
-            status=_experiment_checkpoint_status(executed_results),
-            ara_paths=experiment_ara_paths,
-        )
+        if executed_results:
+            _record_local_research_attempt_objects(args, results=executed_results)
+        if admission_recovery["active"] and (
+            early_admission_recovery is None or executed_results
+        ):
+            finalized_recovery = _reconcile_required_experiment_admission_runtime(
+                args,
+                selected_indices=progress_selected_indices,
+                ideas_hash=run_ideas_hash,
+                configuration_hash=admission_configuration_hash,
+                budget_hash=admission_budget_hash,
+            )
+            if finalized_recovery["recovered_results"]:
+                raise RuntimeError(
+                    "required experiment admission remained uncommitted after recording"
+                )
+            results = _upsert_project_results(
+                results, finalized_recovery["committed_results"]
+            )
+            retained_progress_results = list(results)
+            _save_project_progress(
+                args.project_dir,
+                ideas_hash=run_ideas_hash,
+                results=retained_progress_results,
+                total=progress_total,
+                selected_indices=progress_selected_indices,
+            )
+        if executed_results:
+            _record_local_research_checkpoint(
+                args,
+                stage="experiment",
+                subject=f"record {len(executed_results)} new experiment outcomes",
+                summary=(
+                    f"Record {len(executed_results)} newly executed research outcomes while "
+                    f"retaining {len(prior_results)} completed resume results, including "
+                    "their ARA manifests and compact evidence state."
+                ),
+                status=_experiment_checkpoint_status(executed_results),
+                ara_paths=experiment_ara_paths,
+            )
 
         from ai_scientist.utils.insight_synthesis import synthesize_project_insights
 
@@ -5012,7 +7264,7 @@ def main(argv=None):
             args.project_dir,
             results,
             model=args.model_review,
-            use_llm=bool(args.autopilot),
+            use_llm=bool(args.autopilot and not fully_recovered_resume),
         )
         print(
             "💡 洞见报告: "

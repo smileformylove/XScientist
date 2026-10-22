@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/ara.v1/latent_trajectory.schema.json",
+  "title": "XScientist latent dynamics and belief-state trajectory projection",
+  "description": "A bounded, presentation-only projection of explicitly declared latent/belief trajectory facts from the admitted event ledger. It is never an authority or evidence ranking.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy",
+    "source",
+    "status",
+    "steps",
+    "integrity",
+    "complete",
+    "presentation_only",
+    "scientific_promotion_allowed",
+    "quality_claim_allowed",
+    "causal_claim_allowed",
+    "blockers",
+    "warnings",
+    "projection_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "xscientist.latent-trajectory.v1"},
+    "policy": {"const": "xscientist.latent-dynamics-presentation.v1"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "event_count",
+        "window_event_count",
+        "max_events",
+        "observed_event_count",
+        "ignored_event_count",
+        "ledger_window_truncated"
+      ],
+      "properties": {
+        "kind": {"const": "events/research_events.jsonl"},
+        "event_count": {"type": "integer", "minimum": 0},
+        "window_event_count": {"type": "integer", "minimum": 0, "maximum": 512},
+        "max_events": {"type": "integer", "minimum": 1, "maximum": 512},
+        "observed_event_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "ignored_event_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "ledger_window_truncated": {"type": "boolean"}
+      }
+    },
+    "status": {"enum": ["unavailable", "partial", "observed"]},
+    "steps": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/step"}
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordered",
+        "duplicate_event_count",
+        "invalid_component_count"
+      ],
+      "properties": {
+        "ordered": {"type": "boolean"},
+        "duplicate_event_count": {"type": "integer", "minimum": 0, "maximum": 512},
+        "invalid_component_count": {"type": "integer", "minimum": 0, "maximum": 3072}
+      }
+    },
+    "complete": {"const": false},
+    "presentation_only": {"const": true},
+    "scientific_promotion_allowed": {"const": false},
+    "quality_claim_allowed": {"const": false},
+    "causal_claim_allowed": {"const": false},
+    "blockers": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 128}
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 128}
+    },
+    "projection_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "text": {"type": "string", "maxLength": 240},
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": {"$ref": "#/$defs/text"},
+        "id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "latentState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_id"],
+      "properties": {
+        "state_id": {"$ref": "#/$defs/id"},
+        "representation_ref": {
+          "anyOf": [{"$ref": "#/$defs/hash"}, {"const": "redacted"}]
+        },
+        "encoder_id": {"$ref": "#/$defs/text"},
+        "space": {"$ref": "#/$defs/text"},
+        "dimension": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+        "summary": {"$ref": "#/$defs/text"}
+      }
+    },
+    "beliefState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["belief_id", "semantics"],
+      "properties": {
+        "belief_id": {"$ref": "#/$defs/id"},
+        "semantics": {"enum": ["producer_declared", "ordinal", "distribution"]},
+        "support_ref": {
+          "anyOf": [{"$ref": "#/$defs/hash"}, {"const": "redacted"}]
+        },
+        "summary": {"$ref": "#/$defs/text"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id"],
+      "properties": {
+        "action_id": {"$ref": "#/$defs/id"},
+        "label": {"$ref": "#/$defs/text"},
+        "policy_ref": {
+          "anyOf": [{"$ref": "#/$defs/hash"}, {"const": "redacted"}]
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation_ref"],
+      "properties": {
+        "observation_ref": {
+          "anyOf": [{"$ref": "#/$defs/hash"}, {"const": "redacted"}]
+        },
+        "kind": {"$ref": "#/$defs/text"},
+        "summary": {"$ref": "#/$defs/text"}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_state_id", "to_state_id"],
+      "properties": {
+        "from_state_id": {"$ref": "#/$defs/id"},
+        "to_state_id": {"$ref": "#/$defs/id"},
+        "operator": {"$ref": "#/$defs/text"},
+        "delta_ref": {
+          "anyOf": [{"$ref": "#/$defs/hash"}, {"const": "redacted"}]
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "event_id", "event_type", "timestamp", "subject", "components"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0, "maximum": 511},
+        "event_id": {"$ref": "#/$defs/id"},
+        "event_type": {"$ref": "#/$defs/text"},
+        "timestamp": {"$ref": "#/$defs/text"},
+        "subject": {"$ref": "#/$defs/subject"},
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {"enum": ["latent_state", "belief_state", "action", "observation", "transition"]}
+        },
+        "latent_state": {"anyOf": [{"$ref": "#/$defs/latentState"}, {"type": "null"}]},
+        "belief_state": {"anyOf": [{"$ref": "#/$defs/beliefState"}, {"type": "null"}]},
+        "action": {"anyOf": [{"$ref": "#/$defs/action"}, {"type": "null"}]},
+        "observation": {"anyOf": [{"$ref": "#/$defs/observation"}, {"type": "null"}]},
+        "transition": {"anyOf": [{"$ref": "#/$defs/transition"}, {"type": "null"}]}
+      }
+    }
+  }
+}

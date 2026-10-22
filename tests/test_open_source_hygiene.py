@@ -123,6 +123,7 @@ class OpenSourceHygieneTests(unittest.TestCase):
             "Makefile",
             "mkdocs.yml",
             "README.md",
+            "REVIEW.md",
             "THIRD_PARTY_NOTICES.md",
             "pyproject.toml",
             "requirements.txt",

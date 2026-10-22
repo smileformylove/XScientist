@@ -103,6 +103,16 @@ cross-system edge too. This makes the chain
 `memory/evidence -> context -> experiment/decision -> claim` inspectable by a
 human or an agent.
 
+For Research VCS source edges, the recorded relation remains `depends_on`.
+Its display category is `context` only when the receiving object is a
+`context_snapshot` whose context identity and exact source hashes validate,
+and the source belongs to that snapshot's recorded source closure. A free-form
+`context_source` role alone cannot reclassify an edge. Other dependencies stay
+`lineage`, snapshot `supersedes` edges stay `evolution`, and `uses_context`
+continues to link a snapshot to its consumer. Incomplete but identity-valid
+snapshots retain their source edges without gaining decision authority;
+invalid snapshots retain ordinary lineage edges and their proof blockers.
+
 New context snapshots also carry a retrieval receipt with the complete
 candidate set, deterministic ranks, score semantics, selection/rejection
 reasons, algorithm hash, and summary-transform lineage. A token budget can hide
@@ -172,7 +182,15 @@ The browser uses five deliberately narrow levels:
 | `traceable` | The object can be followed to its immediate scientific sources. |
 | `replayable` | Code, data, environment, dependency, and measurement identities needed for replay are present. |
 | `verified` | The applicable independent gate, authority, receipt, and reproduction checks passed. |
-| `contested` | Refuting or contradictory evidence targets this object; it must remain visible even if other checks pass. |
+| `contested` | An effective refuting or contradictory source targets this object at the selected Git snapshot, even if other checks pass. |
+
+A source explicitly marked `superseded`, or replaced through a `supersedes`
+relation from a `completed`, `verified`, or `promoted` object, no longer overrides
+the target's current proof level. Draft or unsuccessful replacements do not
+retire challenges. All historical challenge nodes and typed edges remain in the
+audit graph, and an older Git ref retains the challenge status known then.
+Removing a retired challenge override does not verify the target: the unchanged
+trace, replay, and verification checks determine its proof level.
 
 Selecting a node shows every individual check and its `trace`, `replay`, or
 `verify` layer. A green node is therefore not a generic “truth” badge. It means

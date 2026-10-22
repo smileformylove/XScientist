@@ -14,10 +14,12 @@ from ai_scientist.protocol.research_vcs import (
     RESEARCH_OBJECT_STATES,
     RESEARCH_RELATION_TYPES,
 )
+from ai_scientist.utils.atomic_io import atomic_write_json
 from ai_scientist.utils.privacy import (
     portable_path,
     redact_sensitive_payload,
     redact_sensitive_text,
+    relative_path_reference,
 )
 
 from .research_git import (
@@ -36,7 +38,6 @@ from .research_git import (
     load_research_object,
     merge_research_branch,
     preview_research_merge,
-    record_research_object,
     rename_research_branch,
     research_blame,
     repository_status,
@@ -65,6 +66,7 @@ from .opportunity_funnel import (
 )
 from .research_belief import audit_belief_context_projection
 from .research_rollout import audit_research_rollout, save_research_rollout
+from .research_vcs import ResearchRepository
 
 
 def _print_json(payload: Any) -> None:
@@ -160,6 +162,47 @@ def _parse_assignments(values: Sequence[str], *, label: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             parsed[name] = raw.strip()
     return parsed
+
+
+def _parse_json_assignments(values: Sequence[str], *, label: str) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for value in values:
+        name, separator, raw = value.partition("=")
+        name = name.strip()
+        if not separator or not name or not raw.strip():
+            raise ResearchGitError(f"{label} must use NAME=JSON")
+        if name in parsed:
+            raise ResearchGitError(f"duplicate {label} name: {name}")
+        try:
+            parsed[name] = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ResearchGitError(f"{label} value must be valid JSON") from exc
+    return parsed
+
+
+def _write_json_output(
+    path_value: str,
+    payload: Mapping[str, Any],
+    *,
+    force: bool,
+) -> Path:
+    lexical = Path(path_value).expanduser().absolute()
+    target = lexical.resolve(strict=False)
+    if lexical.is_symlink():
+        raise ResearchGitError("output path must not be a symlink")
+    if target.exists() and not force:
+        raise ResearchGitError("output already exists; pass --force to replace it")
+    try:
+        atomic_write_json(
+            target,
+            dict(payload),
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ResearchGitError("output JSON could not be written") from exc
+    return target
 
 
 def _parse_path_assignments(values: Sequence[str], *, label: str) -> dict[str, str]:
@@ -787,6 +830,52 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--json", action="store_true", dest="as_json"
     )
 
+    experiment_admission_parser = subparsers.add_parser(
+        "experiment-admission",
+        help=(
+            "Prepare or ingest an externally signed Ed25519 decision for one "
+            "exact experiment."
+        ),
+    )
+    experiment_admission_subparsers = experiment_admission_parser.add_subparsers(
+        dest="experiment_admission_command", required=True
+    )
+    experiment_admission_prepare = experiment_admission_subparsers.add_parser(
+        "prepare",
+        help="Build the exact non-authoritative payload an external verifier signs.",
+    )
+    experiment_admission_prepare.add_argument("--repo", default=".")
+    experiment_admission_prepare.add_argument("--plan", required=True)
+    experiment_admission_prepare.add_argument("--preregistration")
+    experiment_admission_prepare.add_argument(
+        "--decision", required=True, choices=["authorize", "deny"]
+    )
+    experiment_admission_prepare.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        metavar="NAME=JSON",
+        help="Exact execution-scope field and JSON value (repeatable).",
+    )
+    experiment_admission_prepare.add_argument("--expected-head")
+    experiment_admission_prepare.add_argument("--output", required=True)
+    experiment_admission_prepare.add_argument("--force", action="store_true")
+    experiment_admission_prepare.add_argument(
+        "--json", action="store_true", dest="as_json"
+    )
+    experiment_admission_ingest = experiment_admission_subparsers.add_parser(
+        "ingest",
+        help="Verify an external signature and record its host-derived gate.",
+    )
+    experiment_admission_ingest.add_argument("--repo", default=".")
+    experiment_admission_ingest.add_argument("--payload", required=True)
+    experiment_admission_ingest.add_argument("--attestation", required=True)
+    experiment_admission_ingest.add_argument("--trust-store", required=True)
+    experiment_admission_ingest.add_argument("--expected-head")
+    experiment_admission_ingest.add_argument(
+        "--json", action="store_true", dest="as_json"
+    )
+
     belief_parser = subparsers.add_parser(
         "belief",
         help=(
@@ -1112,6 +1201,18 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "--priority", help="Locked priority that selected an experiment design."
     )
     experiment_parser.add_argument("--preregistration")
+    experiment_parser.add_argument(
+        "--admission-gate",
+        help=(
+            "Verified deterministic experiment-admission gate bound to the exact "
+            "plan and hypothesis."
+        ),
+    )
+    experiment_parser.add_argument(
+        "--admission-preflight",
+        metavar="PATH",
+        help="JSON start receipt returned by the experiment-admission preflight.",
+    )
     experiment_parser.add_argument("--intervention", action="append", default=[])
     experiment_parser.add_argument("--boundary-condition", default="")
     experiment_parser.add_argument(
@@ -1327,6 +1428,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         "status", help="Show research and storage status."
     )
     status_parser.add_argument("--repo", default=".")
+    status_parser.add_argument(
+        "--summary", action="store_true",
+        help="Show exact counts and checkpoint identity without path lists or payloads; still scans the repository.",
+    )
     status_parser.add_argument("--json", action="store_true", dest="as_json")
 
     audit_parser = subparsers.add_parser(
@@ -1452,6 +1557,13 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         help="Write research-dag.json and an offline research-dag.html browser.",
     )
     dag_parser.add_argument(
+        "--advisory-index",
+        help=(
+            "Explicit repository-local advisory route index for the separate "
+            "Argument sidecar; requires --output and never scans by default."
+        ),
+    )
+    dag_parser.add_argument(
         "--metadata-only",
         action="store_true",
         help="Hide question, hypothesis, result, and claim summaries.",
@@ -1574,7 +1686,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     stage_parser = subparsers.add_parser(
         "stage", help="Select exact research changes for the next checkpoint."
     )
-    stage_parser.add_argument("paths", nargs="*")
+    stage_parser.add_argument(
+        "paths", nargs="*",
+        help="Repository-relative files or directories; selects changed files only.",
+    )
     stage_parser.add_argument("--repo", default=".")
     stage_parser.add_argument("--all", action="store_true", dest="all_changes")
     stage_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -1582,7 +1697,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     add_parser = subparsers.add_parser(
         "add", help="Git-style alias for selecting exact research changes."
     )
-    add_parser.add_argument("paths", nargs="*")
+    add_parser.add_argument(
+        "paths", nargs="*",
+        help="Repository-relative files or directories; selects changed files only.",
+    )
     add_parser.add_argument("--repo", default=".")
     add_parser.add_argument("-A", "--all", action="store_true", dest="all_changes")
     add_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -1822,10 +1940,39 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     reproduce_parser.add_argument(
         "--environment-policy",
         choices=["ignore", "warn", "strict"],
-        default="warn",
+        default=None,
+        help=(
+            "Environment drift policy; inspection defaults to warn, while "
+            "--execute defaults to strict."
+        ),
     )
     reproduce_parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
+
+
+def _status_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    previous = payload.get("last_checkpoint")
+    return {
+        **{key: payload[key] for key in (
+            "repository", "name", "branch", "head", "checkpoint_policy",
+            "auto_commit", "auto_push", "worktree_clean", "object_store",
+        )},
+        "view": "summary",
+        "path_lists_omitted": True,
+        "change_counts": {
+            "git_staged": len(payload["staged_paths"]),
+            "research_staged": len(payload["research_stage"]["paths"]),
+            "tracked": len(payload["tracked_changes"]),
+            "eligible": len(payload["eligible_changes"]),
+            "excluded": len(payload["excluded_changes"]),
+        },
+        "research_stage_head": payload["research_stage"]["head"],
+        "last_checkpoint": None if previous is None else {
+            key: previous.get(key) for key in (
+                "checkpoint_id", "sequence", "stage", "status", "created_at",
+            )
+        },
+    }
 
 
 def _human_status(payload: dict[str, Any]) -> None:
@@ -1834,12 +1981,16 @@ def _human_status(payload: dict[str, Any]) -> None:
     print(f"HEAD:              {payload['head'] or '(no commit)'}")
     print(f"Checkpoint policy: {payload['checkpoint_policy']}")
     print(f"Auto push:         {payload['auto_push']}")
-    print(f"Research staged:   {len(payload['research_stage']['paths'])}")
-    print(f"Eligible changes:  {len(payload['eligible_changes'])}")
-    print(f"Excluded changes:  {len(payload['excluded_changes'])}")
-    for path in payload["eligible_changes"]:
+    counts = (payload["change_counts"] if payload.get("view") == "summary"
+              else _status_summary(payload)["change_counts"])
+    print(f"Research staged:   {counts['research_staged']}")
+    print(f"Eligible changes:  {counts['eligible']}")
+    print(f"Excluded changes:  {counts['excluded']}")
+    if payload.get("path_lists_omitted"):
+        print("Path lists:        omitted (--summary)")
+    for path in payload.get("eligible_changes", []):
         print(f"  eligible:        {path}")
-    for path in payload["excluded_changes"]:
+    for path in payload.get("excluded_changes", []):
         print(f"  excluded:        {_display_text(path)}")
     store = payload["object_store"]
     print(f"Local CAS:         {store['objects']} objects / {store['bytes']} bytes")
@@ -2615,6 +2766,118 @@ def main(
             except PublicationAuthorityError as exc:
                 raise ResearchGitError(str(exc)) from exc
 
+        if args.command == "experiment-admission":
+            from ai_scientist.protocol.canonical_json import canonical_content_hash
+
+            from .experiment_admission import (
+                EXPERIMENT_ADMISSION_PROTOCOL,
+                prepare_experiment_admission_payload,
+            )
+            from .research_lifecycle import ResearchLifecycle
+
+            if args.experiment_admission_command == "prepare":
+                payload = prepare_experiment_admission_payload(
+                    args.repo,
+                    plan_id=args.plan,
+                    preregistration_id=args.preregistration,
+                    execution_scope=_parse_json_assignments(
+                        args.scope, label="experiment admission scope"
+                    ),
+                    decision=args.decision,
+                    expected_head=args.expected_head,
+                )
+                output_path = _write_json_output(
+                    args.output,
+                    payload,
+                    force=args.force,
+                )
+                result = {
+                    "schema_version": "xscientist.experiment-admission-cli.v1",
+                    "status": "prepared",
+                    "authoritative": False,
+                    "purpose": EXPERIMENT_ADMISSION_PROTOCOL,
+                    "repository_head": payload["repository_head"],
+                    "output": _display_path(output_path),
+                    "payload_hash": canonical_content_hash(payload),
+                    "next_command": shlex.join(
+                        [
+                            "xscientist",
+                            "evolution",
+                            "attest",
+                            "sign",
+                            "--payload",
+                            _display_path(output_path),
+                            "--purpose",
+                            EXPERIMENT_ADMISSION_PROTOCOL,
+                            "--identity",
+                            "VERIFIER_IDENTITY",
+                            "--key-id",
+                            "KEY_ID",
+                            "--private-key",
+                            "VERIFIER_PRIVATE_KEY",
+                            "--out",
+                            "attestation.json",
+                        ]
+                    ),
+                }
+                if args.as_json:
+                    _print_json(result)
+                else:
+                    print(f"Admission payload: {_display_path(output_path)}")
+                    print("Authority:         none (external signature required)")
+                    print(f"Next:              {result['next_command']}")
+                return 0
+
+            payload = _read_json_mapping(
+                args.payload, label="experiment admission payload"
+            )
+            attestation = _read_json_mapping(
+                args.attestation, label="experiment admission attestation"
+            )
+            ingested = ResearchLifecycle(args.repo).ingest_experiment_admission(
+                payload,
+                attestation=attestation,
+                trust_store=args.trust_store,
+                expected_head=args.expected_head,
+            )
+            gate = ingested["gate"]
+            checkpoint = ingested.get("checkpoint")
+            authority = ingested["authority_receipt"]
+            result = {
+                "schema_version": "xscientist.experiment-admission-cli.v1",
+                "status": "ingested",
+                "decision": payload["decision"],
+                "experiment_authorized": ingested["usable"],
+                "committed": ingested["committed"],
+                "active": ingested["active"],
+                "usable": ingested["usable"],
+                "gate": gate.to_dict(),
+                "checkpoint": (
+                    checkpoint.to_dict() if checkpoint is not None else None
+                ),
+                "verifier_identity": authority["verifier_identity"],
+                "key_id": authority["key_id"],
+                "attestation_hash": authority["attestation_hash"],
+                "trust_store_hash": authority["trust_store_hash"],
+                "authority_receipt_hash": authority["receipt_hash"],
+                "idempotent": ingested["idempotent"],
+            }
+            if args.as_json:
+                _print_json(result)
+            else:
+                print(f"Admission gate: {gate.object_id}")
+                print(f"Decision:       {payload['decision']}")
+                print(
+                    f"Verifier:       {_display_text(authority['verifier_identity'])}"
+                )
+                if checkpoint is None:
+                    print("Checkpoint:     existing committed gate (revalidated)")
+                else:
+                    print(f"Checkpoint:     {checkpoint.checkpoint_id}")
+                print(f"Active:         {'yes' if ingested['active'] else 'no'}")
+                print(f"Usable:         {'yes' if ingested['usable'] else 'no'}")
+            return 0
+
         if args.command == "belief":
             from .research_context import build_research_context_snapshot
 
@@ -2893,6 +3156,15 @@ def main(
                 plan_id=args.plan,
                 priority_id=args.priority,
                 preregistration_id=args.preregistration,
+                admission_gate_id=args.admission_gate,
+                admission_preflight=(
+                    _read_json_mapping(
+                        args.admission_preflight,
+                        label="experiment admission preflight",
+                    )
+                    if args.admission_preflight
+                    else None
+                ),
                 metrics=_parse_assignments(args.metric, label="metric"),
                 configuration=_parse_assignments(args.config, label="configuration"),
                 producer_id=args.producer_id,
@@ -3106,6 +3378,8 @@ def main(
 
         if args.command == "status":
             payload = repository_status(args.repo)
+            if args.summary:
+                payload = _status_summary(payload)
             _print_json(payload) if args.as_json else _human_status(payload)
             return 0
 
@@ -3353,13 +3627,22 @@ def main(
         if args.command == "dag":
             from .research_dag import build_research_dag, export_research_dag
 
-            if args.output:
+            output_requested = args.output is not None
+            advisory_index_requested = args.advisory_index is not None
+            if output_requested and not str(args.output).strip():
+                raise ResearchGitError("--output must not be empty")
+            if advisory_index_requested and not str(args.advisory_index).strip():
+                raise ResearchGitError("--advisory-index must not be empty")
+            if advisory_index_requested and not output_requested:
+                raise ResearchGitError("--advisory-index requires --output")
+            if output_requested:
                 exported = export_research_dag(
                     args.repo,
                     args.output,
                     ref=args.ref,
                     ara_roots=args.ara,
                     disclose_summaries=not args.metadata_only,
+                    advisory_index=args.advisory_index,
                 )
                 payload = exported["graph"]
             else:
@@ -3370,8 +3653,41 @@ def main(
                     ara_roots=args.ara,
                     disclose_summaries=not args.metadata_only,
                 )
+            advisory_status = (
+                str(exported["advisory_status"])
+                if exported is not None
+                else "NOT_SUPPLIED"
+            )
+            advisory_blocked_count = (
+                int(exported["advisory_blocked_count"]) if exported is not None else 0
+            )
+            advisory_route_count = (
+                int(exported["advisory_route_count"]) if exported is not None else 0
+            )
             if args.as_json:
-                _print_json(payload)
+                if exported is None or args.advisory_index is None:
+                    _print_json(payload)
+                else:
+                    _print_json(
+                        {
+                            "schema_version": "xscientist.research-dag-command.v1",
+                            "graph": payload,
+                            "advisory_status": advisory_status,
+                            "advisory_blocked_count": advisory_blocked_count,
+                            "advisory_route_count": advisory_route_count,
+                            "outputs": {
+                                "json": relative_path_reference(
+                                    exported["json"], base=Path.cwd()
+                                ),
+                                "argument": relative_path_reference(
+                                    exported["argument"], base=Path.cwd()
+                                ),
+                                "html": relative_path_reference(
+                                    exported["html"], base=Path.cwd()
+                                ),
+                            },
+                        }
+                    )
             else:
                 print(
                     f"Scientific DAG: {len(payload['nodes'])} nodes, "
@@ -3380,6 +3696,12 @@ def main(
                 print(f"DAG integrity:  {payload['integrity']['is_dag']}")
                 print(f"Closure:        {payload['scientific_closure']['status']}")
                 print(f"Verification:   {payload['proof_summary']}")
+                print(
+                    "Advisory:       "
+                    f"advisory_status={advisory_status} "
+                    f"blocked_count={advisory_blocked_count} "
+                    f"routes={advisory_route_count}"
+                )
                 ara_sources = [
                     source
                     for source in payload["sources"]
@@ -3404,6 +3726,7 @@ def main(
                     )
                 if exported:
                     print(f"JSON:           {_display_path(exported['json'])}")
+                    print(f"Argument:       {_display_path(exported['argument'])}")
                     print(f"Browser:        {_display_path(exported['html'])}")
                 else:
                     print(
@@ -3549,11 +3872,10 @@ def main(
                     ) from exc
                 if not isinstance(semantic_profile, dict):
                     raise ResearchGitError("semantic profile must be a JSON object")
-            result = record_research_object(
-                args.repo,
-                kind=args.kind,
+            result = ResearchRepository(args.repo).record(
+                args.kind,
+                _read_object_payload(args),
                 state=args.state,
-                payload=_read_object_payload(args),
                 relations=_parse_relations(args.relation),
                 semantic_profile=semantic_profile,
             )
@@ -4068,7 +4390,27 @@ def main(
                 print(f"Commit:           {payload['commit']}")
                 print(f"Checkpoint:       {payload['checkpoint']['checkpoint_id']}")
                 print(f"Objects complete: {payload['objects_complete']}")
-                print(f"Environment:      {payload['environment']['matches']}")
+                environment = payload["environment"]
+                matches = environment["matches"]
+                check_status = "not recorded"
+                if matches is not None:
+                    check_status = "matched" if matches else "mismatched"
+                print(f"Scoped checks:    {check_status}")
+                scope = environment.get("scope") or {}
+                if scope:
+                    print(
+                        "Identity scope:   launcher Python implementation/version; "
+                        "platform system/machine"
+                    )
+                    lockfile_status = (
+                        "checked"
+                        if scope.get("dependency_locks_checked")
+                        else "not checked"
+                    )
+                    print(f"Lockfile bytes:   {lockfile_status}")
+                    print("Not attested:     installed dependencies; child runtimes")
+                else:
+                    print("Check scope:      not recorded (legacy result)")
                 print(
                     "Command:          "
                     f"{_display_text(payload['command'] or '(not declared)')}"

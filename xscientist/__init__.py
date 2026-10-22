@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .client import XScientist
     from .models import CommandResult, ProjectRequest, ServiceSettings
     from .research_evolution import ResearchEvolution
+    from .experiment_admission import prepare_experiment_admission_payload
     from .research_lifecycle import ResearchLifecycle
     from .research_closure import audit_research_closure, closure_level_summary
     from .process_audit import build_process_summary
@@ -210,6 +211,10 @@ def __getattr__(name: str) -> Any:
         from .research_lifecycle import ResearchLifecycle
 
         value = ResearchLifecycle
+    elif name == "prepare_experiment_admission_payload":
+        from .experiment_admission import prepare_experiment_admission_payload
+
+        value = prepare_experiment_admission_payload
     elif name == "ResearchEvolution":
         from .research_evolution import ResearchEvolution
 
@@ -360,6 +365,7 @@ __all__ = [
     "inspect_workspace_checkpoint",
     "inspect_claim_depth",
     "preview_workspace_rollback",
+    "prepare_experiment_admission_payload",
     "rank_experiment_candidates",
     "research_strategy_template",
     "review_research_program",

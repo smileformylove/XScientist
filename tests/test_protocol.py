@@ -21,6 +21,7 @@ from ai_scientist.protocol import (
 )
 from ai_scientist.protocol.hashing import hash_matches
 from ai_scientist.utils.ara_artifact import export_ara
+from ai_scientist.utils.ara_paths import NODE_ID_PATTERN, validate_node_id
 
 
 def _write_journal(logs_dir: Path, run_name: str, nodes: list[dict]) -> None:
@@ -189,6 +190,49 @@ class SchemaTest(unittest.TestCase):
             schema = load_schema(name)
             Draft202012Validator.check_schema(schema)
             self.assertTrue(str(schema["$id"]).startswith("https://xscientist.io/"))
+
+    def test_exploration_graph_enforces_one_node_id_contract_everywhere(self) -> None:
+        from jsonschema import Draft202012Validator
+
+        schema = load_schema(Kind.EXPLORATION_GRAPH)
+        self.assertEqual(schema["$defs"]["nodeId"]["pattern"], NODE_ID_PATTERN)
+        validator = Draft202012Validator(schema)
+        graph = {
+            "schema_version": PROTOCOL_VERSION,
+            "nodes": [
+                {"id": "root", "parent_id": None, "children": ["child"]},
+                {"id": "child", "parent_id": "root", "children": []},
+            ],
+            "edges": [{"parent": "root", "child": "child"}],
+            "counts": {"nodes": 2, "edges": 1},
+        }
+        self.assertEqual(list(validator.iter_errors(graph)), [])
+
+        invalid_graphs = []
+        payload = json.loads(json.dumps(graph))
+        payload["nodes"][0]["id"] = 1
+        invalid_graphs.append(("non-string node id", payload))
+        for field in ("id", "parent_id"):
+            payload = json.loads(json.dumps(graph))
+            payload["nodes"][1][field] = "../../escape"
+            invalid_graphs.append((f"node {field}", payload))
+        payload = json.loads(json.dumps(graph))
+        payload["nodes"][0]["children"] = ["/absolute"]
+        invalid_graphs.append(("node children", payload))
+        for field in ("parent", "child"):
+            payload = json.loads(json.dumps(graph))
+            payload["edges"][0][field] = "bad/node"
+            invalid_graphs.append((f"edge {field}", payload))
+
+        for location, payload in invalid_graphs:
+            with self.subTest(location=location):
+                self.assertTrue(list(validator.iter_errors(payload)))
+
+    def test_node_id_contract_never_silently_normalizes_legacy_values(self) -> None:
+        for invalid in (1, " node ", "node/path", "节点"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "unsafe ARA node id"):
+                    validate_node_id(invalid)
 
 
 class MultiParentProvenanceTest(unittest.TestCase):

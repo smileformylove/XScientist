@@ -892,6 +892,29 @@ class ResearchStrategyTests(unittest.TestCase):
             self.assertIn('id="layer"', render_research_dag_html(graph))
             self.assertIn("Claim reasoning", render_research_dag_html(graph))
 
+    def test_dag_excludes_rejected_hypotheses_from_active_frontier(self):
+        with tempfile.TemporaryDirectory() as td:
+            repository = self._repository(Path(td) / "research")
+            active = repository.record(
+                "hypothesis",
+                {"statement": "the active candidate remains falsifiable"},
+            )
+            rejected = repository.record(
+                "hypothesis",
+                {"statement": "the rejected candidate failed its gate"},
+                state="rejected",
+            )
+            repository.commit(stage="decision", subject="reject one candidate")
+
+            graph = build_research_dag(repository.path)
+
+            self.assertEqual(
+                graph["theory_frontier"]["active_hypothesis_ids"],
+                [active.object_id],
+            )
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            self.assertEqual(nodes[rejected.object_id]["state"], "rejected")
+
     def test_dag_scopes_next_experiment_to_each_portfolio(self):
         with tempfile.TemporaryDirectory() as td:
             repository = self._repository(Path(td) / "research")

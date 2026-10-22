@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import shutil
@@ -34,6 +35,7 @@ from xscientist.research_commands import (
     save_preregistration,
 )
 from xscientist.research_git import (
+    ObjectPointerResult,
     ResearchGitError,
     create_checkpoint,
     reproduce_checkpoint,
@@ -147,6 +149,36 @@ class ConfirmatoryCampaignTests(unittest.TestCase):
     def setUp(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("Git is not installed")
+
+    def _confirmatory_study(
+        self,
+        temporary_root: str,
+    ) -> tuple[Path, ResearchRepository, dict[str, str]]:
+        root = Path(temporary_root) / "study"
+        repository = ResearchRepository.init(root, question="Fixed question")
+        hypothesis = save_hypothesis(
+            str(root),
+            statement="Method A improves accuracy",
+            falsifier="delta <= 0",
+        )
+        registration = save_preregistration(
+            str(root),
+            hypothesis_id=hypothesis["object"].object_id,
+            dataset="benchmark-v1",
+            metric="accuracy",
+            baseline="baseline-a",
+            split_hash=_digest("a"),
+            registered_by="lead-researcher",
+        )
+        return (
+            root,
+            repository,
+            {
+                "task_id": "primary",
+                "plan_id": registration["related"][0].object_id,
+                "preregistration_id": registration["object"].object_id,
+            },
+        )
 
     def _run_json(self, args: list[str]) -> tuple[int, dict]:
         with redirect_stdout(io.StringIO()) as output:
@@ -360,6 +392,511 @@ class ConfirmatoryCampaignTests(unittest.TestCase):
             self.assertIsNotNone(contender)
             contender.join(timeout=5)
             self.assertTrue(completed.is_set())
+
+    def test_confirmatory_artifact_revalidation_rejects_unrelated_pending_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "study"
+            repository = ResearchRepository.init(root, question="Fixed question")
+            hypothesis = save_hypothesis(
+                str(root),
+                statement="Method A improves accuracy",
+                falsifier="delta <= 0",
+            )
+            registration = save_preregistration(
+                str(root),
+                hypothesis_id=hypothesis["object"].object_id,
+                dataset="benchmark-v1",
+                metric="accuracy",
+                baseline="baseline-a",
+                split_hash=_digest("a"),
+                registered_by="lead-researcher",
+            )
+            artifact = Path(td) / "result.json"
+            artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+            unrelated = root / "question.md"
+
+            from xscientist import research_commands
+
+            real_add = research_commands._add_research_objects_atomically
+
+            def add_then_dirty(*args, **kwargs):
+                pointers = real_add(*args, **kwargs)
+                unrelated.write_text("unrelated pending change\n", encoding="utf-8")
+                return pointers
+
+            with mock.patch.object(
+                research_commands,
+                "_add_research_objects_atomically",
+                side_effect=add_then_dirty,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchGitError,
+                    "exact clean Research VCS lineage",
+                ):
+                    save_experiment(
+                        str(root),
+                        summary="sealed result",
+                        status="completed",
+                        study_phase="confirmatory",
+                        task_id="primary",
+                        plan_id=registration["related"][0].object_id,
+                        preregistration_id=registration["object"].object_id,
+                        producer_id="executor:sealed-runner",
+                        result_artifact_paths={"result": artifact},
+                    )
+
+            self.assertEqual(
+                repository.objects(kind="experiment_attempt"),
+                [],
+            )
+            self.assertEqual(list((root / "research-objects").glob("*.json")), [])
+            self.assertEqual(repository.status()["tracked_changes"], ["question.md"])
+
+    def test_public_attempt_validation_cannot_allow_pending_paths(self) -> None:
+        self.assertNotIn(
+            "_allowed_pending_paths",
+            inspect.signature(ResearchLifecycle.validate_experiment_attempt).parameters,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "study",
+                question="Fixed question",
+            )
+            lifecycle = ResearchLifecycle(repository)
+            with self.assertRaises(TypeError):
+                lifecycle.validate_experiment_attempt(
+                    {"summary": "forged allowance", "status": "completed"},
+                    _allowed_pending_paths={"question.md"},
+                )
+
+    def test_lineage_attestation_requires_exact_allowed_pending_set(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, repository, confirmatory = self._confirmatory_study(td)
+            (root / "question.md").write_text(
+                "pending question change\n", encoding="utf-8"
+            )
+            registration_id = confirmatory["preregistration_id"]
+            registration = repository.get(registration_id)
+            preregistration = registration["payload"]
+
+            with self.assertRaisesRegex(
+                ResearchGitError,
+                "exact clean Research VCS lineage",
+            ):
+                ResearchLifecycle(repository)._confirmatory_lineage_attestation(
+                    registration=registration,
+                    preregistration_id=registration_id,
+                    preregistration=preregistration,
+                    adaptive_freeze=preregistration["adaptive_state_freeze"],
+                    allowed_pending_paths={"question.md", "not-present.md"},
+                )
+
+    def test_confirmatory_artifact_revalidation_rejects_native_stage_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, repository, confirmatory = self._confirmatory_study(td)
+            artifact = Path(td) / "result.json"
+            artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+            question = repository.path / "question.md"
+            original_question = question.read_bytes()
+
+            from xscientist import research_commands
+
+            real_add = research_commands._add_research_objects_atomically
+
+            def add_then_leave_native_stage(*args, **kwargs):
+                pointers = real_add(*args, **kwargs)
+                question.write_text("temporary native-stage change\n", encoding="utf-8")
+                repository.stage(["question.md"])
+                question.write_bytes(original_question)
+                status = repository.status()
+                self.assertEqual(status["tracked_changes"], [])
+                self.assertEqual(len(status["eligible_changes"]), 1)
+                self.assertTrue(
+                    status["eligible_changes"][0].startswith("research-objects/")
+                )
+                self.assertEqual(status["research_stage"]["paths"], ["question.md"])
+                return pointers
+
+            with mock.patch.object(
+                research_commands,
+                "_add_research_objects_atomically",
+                side_effect=add_then_leave_native_stage,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchGitError,
+                    "exact clean Research VCS lineage",
+                ):
+                    save_experiment(
+                        str(root),
+                        summary="native stage must block",
+                        status="completed",
+                        study_phase="confirmatory",
+                        producer_id="executor:sealed-runner",
+                        result_artifact_paths={"result": artifact},
+                        **confirmatory,
+                    )
+
+            self.assertEqual(question.read_bytes(), original_question)
+            self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+            self.assertEqual(list((root / "research-objects").glob("*.json")), [])
+            self.assertEqual(
+                repository.status()["research_stage"]["paths"],
+                ["question.md"],
+            )
+
+    def test_rollback_preserves_pointer_created_after_transaction_begin(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, repository, confirmatory = self._confirmatory_study(td)
+            artifact = Path(td) / "result.json"
+            artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+
+            from xscientist import research_commands
+
+            real_add = research_commands._add_research_objects_atomically
+
+            def inject_pointer_before_writer(*args, **kwargs):
+                real_add(*args, **kwargs)
+                linked = real_add(*args, **kwargs)
+                self.assertTrue(linked[0].linked)
+                return linked
+
+            with mock.patch.object(
+                research_commands,
+                "_add_research_objects_atomically",
+                side_effect=inject_pointer_before_writer,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchGitError,
+                    "linked result artifact pointer",
+                ):
+                    save_experiment(
+                        str(root),
+                        summary="preserve post-begin pointer",
+                        status="completed",
+                        study_phase="confirmatory",
+                        producer_id="executor:sealed-runner",
+                        result_artifact_paths={"result": artifact},
+                        **confirmatory,
+                    )
+
+            self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+            retained = list((root / "research-objects").glob("*.json"))
+            self.assertEqual(len(retained), 1)
+            self.assertTrue(retained[0].is_file())
+
+    def test_forged_pointer_result_cannot_delete_an_unrelated_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, repository, confirmatory = self._confirmatory_study(td)
+            artifact = Path(td) / "result.json"
+            artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+            question = repository.path / "question.md"
+            original_question = question.read_bytes()
+
+            from xscientist import research_commands
+
+            real_add = research_commands._add_research_objects_atomically
+
+            def return_forged_pointer(*args, **kwargs):
+                actual = real_add(*args, **kwargs)[0]
+                return [
+                    ObjectPointerResult(
+                        pointer_path=question,
+                        store_path=actual.store_path,
+                        object_hash=actual.object_hash,
+                        size=actual.size,
+                        linked=False,
+                    )
+                ]
+
+            with mock.patch.object(
+                research_commands,
+                "_add_research_objects_atomically",
+                side_effect=return_forged_pointer,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchGitError,
+                    "configured directory",
+                ):
+                    save_experiment(
+                        str(root),
+                        summary="forged rollback path",
+                        status="completed",
+                        study_phase="confirmatory",
+                        producer_id="executor:sealed-runner",
+                        result_artifact_paths={"result": artifact},
+                        **confirmatory,
+                    )
+
+            self.assertEqual(question.read_bytes(), original_question)
+            self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+            self.assertEqual(len(list((root / "research-objects").glob("*.json"))), 1)
+
+    def test_result_artifact_transaction_rejects_pointer_result_permutations(
+        self,
+    ) -> None:
+        for same_content in (False, True):
+            with (
+                self.subTest(same_content=same_content),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                root, repository, confirmatory = self._confirmatory_study(td)
+                alpha = Path(td) / "alpha.json"
+                beta = Path(td) / "beta.json"
+                alpha.write_text('{"value": 1}\n', encoding="utf-8")
+                beta.write_text(
+                    '{"value": 1}\n' if same_content else '{"value": 2}\n',
+                    encoding="utf-8",
+                )
+
+                from xscientist import research_commands
+
+                real_add = research_commands._add_research_objects_atomically
+
+                def reverse_results(*args, **kwargs):
+                    return list(reversed(real_add(*args, **kwargs)))
+
+                with mock.patch.object(
+                    research_commands,
+                    "_add_research_objects_atomically",
+                    side_effect=reverse_results,
+                ):
+                    with self.assertRaisesRegex(ResearchGitError, "result artifact"):
+                        save_experiment(
+                            str(root),
+                            summary="reject pointer permutation",
+                            status="completed",
+                            study_phase="confirmatory",
+                            producer_id="executor:sealed-runner",
+                            result_artifact_paths={"alpha": alpha, "beta": beta},
+                            **confirmatory,
+                        )
+
+                self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+                self.assertEqual(
+                    list((root / "research-objects").glob("*.json")),
+                    [],
+                )
+
+    def test_result_artifact_revalidation_rejects_resigned_pointer_and_bad_cas(
+        self,
+    ) -> None:
+        for corruption in ("resigned_pointer", "cas"):
+            with (
+                self.subTest(corruption=corruption),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                root, repository, confirmatory = self._confirmatory_study(td)
+                artifact = Path(td) / "result.json"
+                artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+
+                from xscientist import research_commands
+
+                real_add = research_commands._add_research_objects_atomically
+
+                def add_then_corrupt(*args, **kwargs):
+                    pointers = real_add(*args, **kwargs)
+                    pointer = pointers[0]
+                    if corruption == "cas":
+                        pointer.store_path.write_bytes(b"tampered")
+                    else:
+                        payload = json.loads(
+                            pointer.pointer_path.read_text(encoding="utf-8")
+                        )
+                        payload["logical_path"] = "result-artifacts/other/result.json"
+                        payload["pointer_hash"] = canonical_content_hash(
+                            {
+                                key: value
+                                for key, value in payload.items()
+                                if key != "pointer_hash"
+                            }
+                        )
+                        pointer.pointer_path.write_text(
+                            json.dumps(payload),
+                            encoding="utf-8",
+                        )
+                    return pointers
+
+                with mock.patch.object(
+                    research_commands,
+                    "_add_research_objects_atomically",
+                    side_effect=add_then_corrupt,
+                ):
+                    with self.assertRaisesRegex(ResearchGitError, "result artifact"):
+                        save_experiment(
+                            str(root),
+                            summary="reject durable artifact corruption",
+                            status="completed",
+                            study_phase="confirmatory",
+                            producer_id="executor:sealed-runner",
+                            result_artifact_paths={"result": artifact},
+                            **confirmatory,
+                        )
+
+                self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+                self.assertEqual(
+                    len(list((root / "research-objects").glob("*.json"))),
+                    1,
+                )
+
+    def test_result_artifacts_are_rechecked_before_record_and_checkpoint(self) -> None:
+        for corruption_point in ("before_record", "after_record"):
+            with (
+                self.subTest(corruption_point=corruption_point),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                root, repository, confirmatory = self._confirmatory_study(td)
+                artifact = Path(td) / "result.json"
+                artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+                real_record = ResearchLifecycle.record_validated_experiment_attempt
+
+                def corrupt_pointer(prepared):
+                    relative = prepared["payload"]["result_artifacts"]["result"][
+                        "pointer_path"
+                    ]
+                    (root / relative).write_text("{}\n", encoding="utf-8")
+
+                def intercept_record(lifecycle, prepared, *args, **kwargs):
+                    if corruption_point == "before_record":
+                        corrupt_pointer(prepared)
+                    recorded = real_record(lifecycle, prepared, *args, **kwargs)
+                    if corruption_point == "after_record":
+                        corrupt_pointer(prepared)
+                    return recorded
+
+                with mock.patch.object(
+                    ResearchLifecycle,
+                    "record_validated_experiment_attempt",
+                    new=intercept_record,
+                ):
+                    with self.assertRaisesRegex(ResearchGitError, "result artifact"):
+                        save_experiment(
+                            str(root),
+                            summary="recheck transaction boundary",
+                            status="completed",
+                            study_phase="confirmatory",
+                            producer_id="executor:sealed-runner",
+                            result_artifact_paths={"result": artifact},
+                            **confirmatory,
+                        )
+
+                self.assertEqual(repository.objects(kind="experiment_attempt"), [])
+                self.assertEqual(
+                    len(list((root / "research-objects").glob("*.json"))),
+                    1,
+                )
+
+    def test_confirmatory_artifacts_support_linked_and_mixed_pointer_sets(self) -> None:
+        for include_new_pointer in (False, True):
+            with (
+                self.subTest(include_new_pointer=include_new_pointer),
+                tempfile.TemporaryDirectory() as td,
+            ):
+                root = Path(td) / "study"
+                repository = ResearchRepository.init(root, question="Fixed question")
+                shared = Path(td) / "shared.json"
+                shared.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+                save_experiment(
+                    str(root),
+                    summary="commit reusable pointer",
+                    status="completed",
+                    result_artifact_paths={"shared": shared},
+                )
+                hypothesis = save_hypothesis(
+                    str(root),
+                    statement="Method A improves accuracy",
+                    falsifier="delta <= 0",
+                )
+                registration = save_preregistration(
+                    str(root),
+                    hypothesis_id=hypothesis["object"].object_id,
+                    dataset="benchmark-v1",
+                    metric="accuracy",
+                    baseline="baseline-a",
+                    split_hash=_digest("a"),
+                    registered_by="lead-researcher",
+                )
+                artifacts = {"shared": shared}
+                if include_new_pointer:
+                    new_artifact = Path(td) / "new.json"
+                    new_artifact.write_text('{"loss": 0.2}\n', encoding="utf-8")
+                    artifacts["new"] = new_artifact
+
+                saved = save_experiment(
+                    str(root),
+                    summary="reuse committed durable result",
+                    status="completed",
+                    study_phase="confirmatory",
+                    task_id="primary",
+                    plan_id=registration["related"][0].object_id,
+                    preregistration_id=registration["object"].object_id,
+                    producer_id="executor:sealed-runner",
+                    result_artifact_paths=artifacts,
+                )
+
+                payload = repository.get(saved["object"].object_id)["payload"]
+                self.assertEqual(set(payload["result_artifacts"]), set(artifacts))
+                self.assertTrue(saved["checkpoint"].committed)
+                self.assertTrue(repository.status()["worktree_clean"])
+
+    def test_confirmatory_artifact_uses_configured_pointer_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "study"
+            repository = ResearchRepository.init(root, question="Fixed question")
+            config_path = root / "research.yaml"
+            config = config_path.read_text(encoding="utf-8")
+            config = config.replace(
+                '    - "research-objects/**"',
+                '    - "result-pointers/**"',
+            ).replace(
+                "pointer_directory: research-objects",
+                "pointer_directory: result-pointers",
+            )
+            config_path.write_text(config, encoding="utf-8")
+            configured = create_checkpoint(
+                root,
+                stage="config",
+                subject="configure result pointer directory",
+                only_paths=["research.yaml"],
+            )
+            self.assertTrue(configured.committed)
+            hypothesis = save_hypothesis(
+                str(root),
+                statement="Method A improves accuracy",
+                falsifier="delta <= 0",
+            )
+            registration = save_preregistration(
+                str(root),
+                hypothesis_id=hypothesis["object"].object_id,
+                dataset="benchmark-v1",
+                metric="accuracy",
+                baseline="baseline-a",
+                split_hash=_digest("a"),
+                registered_by="lead-researcher",
+            )
+            artifact = Path(td) / "result.json"
+            artifact.write_text('{"accuracy": 0.8}\n', encoding="utf-8")
+
+            saved = save_experiment(
+                str(root),
+                summary="configured pointer directory",
+                status="completed",
+                study_phase="confirmatory",
+                task_id="primary",
+                plan_id=registration["related"][0].object_id,
+                preregistration_id=registration["object"].object_id,
+                producer_id="executor:sealed-runner",
+                result_artifact_paths={"result": artifact},
+            )
+
+            payload = repository.get(saved["object"].object_id)["payload"]
+            pointer_path = payload["result_artifacts"]["result"]["pointer_path"]
+            self.assertTrue(pointer_path.startswith("result-pointers/"))
+            self.assertTrue((root / pointer_path).is_file())
+            self.assertTrue(repository.status()["worktree_clean"])
 
     def test_experiment_result_artifact_reports_damaged_and_missing_cas(
         self,

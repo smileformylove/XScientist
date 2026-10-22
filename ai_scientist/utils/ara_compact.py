@@ -51,19 +51,25 @@ def _compact_graph(root: Path) -> dict[str, dict[str, Any]]:
     edges: list[dict[str, Any]] = [
         dict(edge) for edge in graph.get("edges") or [] if isinstance(edge, dict)
     ]
+    use_node_mirrors = graph.get("topology_encoding") != "edges"
     for node in nodes:
-        node_id = str(node.get("id") or "").strip()
-        parent = str(node.get("parent_id") or "").strip()
-        if parent and node_id:
-            edges.append(
-                {"parent": parent, "child": node_id, "stage": node.get("stage")}
-            )
-        for child_value in node.get("children") or []:
-            child = str(child_value or "").strip()
-            if node_id and child:
+        if use_node_mirrors:
+            node_id = str(node.get("id") or "").strip()
+            parent = str(node.get("parent_id") or "").strip()
+            if parent and node_id:
                 edges.append(
-                    {"parent": node_id, "child": child, "stage": node.get("stage")}
+                    {"parent": parent, "child": node_id, "stage": node.get("stage")}
                 )
+            for child_value in node.get("children") or []:
+                child = str(child_value or "").strip()
+                if node_id and child:
+                    edges.append(
+                        {
+                            "parent": node_id,
+                            "child": child,
+                            "stage": node.get("stage"),
+                        }
+                    )
         node.pop("parent_id", None)
         node.pop("parent_id_conflicts", None)
         node.pop("children", None)

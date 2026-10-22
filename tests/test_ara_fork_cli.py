@@ -33,12 +33,21 @@ def _write_journal(logs_dir: Path, nodes: list[dict]) -> None:
 def _make_ara(tmp: Path, sub: str, code: str = "print('ok')") -> Path:
     project = tmp / sub
     exp = project / "02_experiments" / f"20260709_{sub}"
-    _write_journal(exp / "logs", [{
-        "id": "n1", "step": 0, "code": code,
-        "_term_out": [],
-        "metric": {"value": 0.5, "maximize": True, "name": "acc"},
-        "is_buggy": False, "parent_id": None, "children": [],
-    }])
+    _write_journal(
+        exp / "logs",
+        [
+            {
+                "id": "n1",
+                "step": 0,
+                "code": code,
+                "_term_out": [],
+                "metric": {"value": 0.5, "maximize": True, "name": "acc"},
+                "is_buggy": False,
+                "parent_id": None,
+                "children": [],
+            }
+        ],
+    )
     (exp / "idea.json").write_text(json.dumps({"Name": sub}), encoding="utf-8")
     result = export_ara(project_dir=project, exp_dir=exp, idea={"Name": sub})
     return Path(result.root)
@@ -73,8 +82,9 @@ class CLIDiffTests(unittest.TestCase):
     def test_diff_exit_code_on_diff(self) -> None:
         a = _make_ara(self.tmp, "a", code="print(1)")
         b = _make_ara(self.tmp, "b", code="print(2)")
-        rc, _, _ = _run("diff", "--ara", str(a), "--other", str(b),
-                        "--exit-code-on-diff")
+        rc, _, _ = _run(
+            "diff", "--ara", str(a), "--other", str(b), "--exit-code-on-diff"
+        )
         self.assertEqual(rc, 1)
 
     def test_diff_human_output_has_headers(self) -> None:
@@ -142,8 +152,12 @@ class CLIRefsTests(unittest.TestCase):
     def test_refs_bad_name_returns_error(self) -> None:
         a = _make_ara(self.tmp, "a")
         rc, _, err = _run(
-            "refs", "--ara", str(a),
-            "--set", "../escape", "sha256:" + "1" * 64,
+            "refs",
+            "--ara",
+            str(a),
+            "--set",
+            "../escape",
+            "sha256:" + "1" * 64,
         )
         self.assertEqual(rc, 2)
         self.assertIn("refused", err)
@@ -231,6 +245,25 @@ class CLIGraphTests(unittest.TestCase):
         self.assertIn("dag:", out)
         self.assertTrue((ara / "exploration_graph.html").exists())
 
+    def test_graph_rejects_noncanonical_node_ids(self) -> None:
+        for invalid_id in (" node ", 1):
+            with self.subTest(invalid_id=invalid_id):
+                ara = _make_ara(self.tmp, f"invalid-{type(invalid_id).__name__}")
+                graph_path = ara / "exploration_graph.json"
+                graph = json.loads(graph_path.read_text(encoding="utf-8"))
+                graph["nodes"][0]["id"] = invalid_id
+                graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+                rc, out, _ = _run("graph", "--ara", str(ara), "--json")
+
+                self.assertEqual(rc, 8)
+                payload = json.loads(out)
+                self.assertFalse(payload["is_dag"])
+                self.assertIn(
+                    "invalid_node_id",
+                    {issue["code"] for issue in payload["issues"]},
+                )
+
 
 class CLIVerifyLockTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -269,8 +302,14 @@ class CLIVerifyLockTests(unittest.TestCase):
         rc, out, _ = _run("verify-lock", "--ara", str(a), "--json")
         self.assertEqual(rc, 0)
         payload = json.loads(out)
-        for key in ("ok", "state", "base_hash", "current_hash",
-                    "revision_count", "detail"):
+        for key in (
+            "ok",
+            "state",
+            "base_hash",
+            "current_hash",
+            "revision_count",
+            "detail",
+        ):
             self.assertIn(key, payload)
         self.assertEqual(payload["state"], "clean")
         self.assertTrue(payload["ok"])

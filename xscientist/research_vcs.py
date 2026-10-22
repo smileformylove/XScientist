@@ -7,9 +7,13 @@ from typing import Any, Mapping, Sequence
 
 from .research_git import (
     CheckpointResult,
+    ResearchGitError,
     ResearchObjectResult,
     ResearchMergeResult,
     ResearchStageResult,
+    _EXPERIMENT_ADMISSION_INTERNAL,
+    _repository_lock,
+    _synchronize_experiment_admission_policy_high_water,
     commit_research_stage,
     create_checkpoint,
     create_research_branch,
@@ -19,9 +23,11 @@ from .research_git import (
     list_research_objects,
     list_research_branches,
     list_research_tags,
+    load_repository_config,
     merge_research_branch,
     load_research_object,
     record_research_object,
+    repository_experiment_admission_mode,
     rename_research_branch,
     repository_status,
     research_diff,
@@ -50,6 +56,9 @@ class ResearchRepository:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve()
+        # Validated attempts must carry an issuer bound to this repository
+        # instance; a module-global capability would be reusable by callers.
+        self._validated_attempt_issuer = object()
         repository_status(self.path)
 
     @classmethod
@@ -78,6 +87,11 @@ class ResearchRepository:
     def status(self) -> dict[str, Any]:
         return repository_status(self.path)
 
+    def experiment_admission_mode(self) -> str:
+        """Return the repository-wide monotonic experiment-admission policy."""
+
+        return repository_experiment_admission_mode(self.path)
+
     def record(
         self,
         kind: str,
@@ -89,6 +103,73 @@ class ResearchRepository:
         provenance: Mapping[str, Any] | None = None,
         semantic_profile: Mapping[str, Any] | None = None,
     ) -> ResearchObjectResult:
+        with _repository_lock(self.path):
+            if (
+                kind == "gate_decision"
+                and payload.get("protocol_kind") == "xscientist.experiment-admission.v1"
+            ):
+                raise ResearchGitError(
+                    "raw experiment-admission gate recording is disabled; "
+                    "admission authority must enter through a trusted verifier"
+                )
+            if (
+                kind == "context_snapshot"
+                and payload.get("protocol_kind")
+                == "xscientist.experiment-admission-start.v1"
+            ):
+                raise ResearchGitError(
+                    "raw experiment-admission start recording is disabled; "
+                    "use ResearchLifecycle.issue_experiment_admission_start"
+                )
+            if (
+                kind == "experiment_attempt"
+                and _synchronize_experiment_admission_policy_high_water(self.path)
+                == "required"
+            ):
+                raise ResearchGitError(
+                    "raw experiment_attempt recording is disabled when experiment "
+                    "admission is required; use ResearchLifecycle.experiment_attempt"
+                )
+            return self._record(
+                kind,
+                payload,
+                state=state,
+                relations=relations,
+                actor=actor,
+                provenance=provenance,
+                semantic_profile=semantic_profile,
+            )
+
+    def _record(
+        self,
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        state: str = "draft",
+        relations: Sequence[Mapping[str, Any]] = (),
+        actor: Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
+        semantic_profile: Mapping[str, Any] | None = None,
+        _issuer: object | None = None,
+    ) -> ResearchObjectResult:
+        """Internal persistence path for lifecycle-validated transitions."""
+
+        required_attempt = (
+            kind == "experiment_attempt"
+            and self.experiment_admission_mode() == "required"
+        )
+        if required_attempt and _issuer is not self._validated_attempt_issuer:
+            raise ResearchGitError(
+                "required experiment attempts need the repository-local validated "
+                "attempt issuer"
+            )
+        capability = (
+            _EXPERIMENT_ADMISSION_INTERNAL
+            if kind != "experiment_attempt"
+            or _issuer is self._validated_attempt_issuer
+            else None
+        )
+
         return record_research_object(
             self.path,
             kind=kind,
@@ -100,6 +181,7 @@ class ResearchRepository:
             semantic_profile=(
                 dict(semantic_profile) if semantic_profile is not None else None
             ),
+            _admission_capability=capability,
         )
 
     def get(self, object_id: str) -> dict[str, Any]:
@@ -523,12 +605,17 @@ class ResearchRepository:
         )
 
     def fsck(
-        self, *, commit: str = "HEAD", verify_objects: bool = True
+        self,
+        *,
+        commit: str = "HEAD",
+        verify_objects: bool = True,
+        audit_runtime: bool | None = None,
     ) -> dict[str, Any]:
         return verify_research_repository(
             self.path,
             commit=commit,
             verify_objects=verify_objects,
+            audit_runtime=audit_runtime,
         )
 
     def audit(

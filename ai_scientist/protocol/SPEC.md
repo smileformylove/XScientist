@@ -114,11 +114,21 @@ them defeats the purpose of the protocol. The graph MUST be a directed acyclic
 graph (DAG): node ids are unique, every edge endpoint exists in `nodes[]`, and
 the combined `edges[]` / `parent_id` / `children` relation contains no cycle.
 
+ARA v1 node IDs are portable ASCII names, not paths. Every node `id`,
+`parent_id`, `children[]` value, and edge `parent` / `child` endpoint MUST match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Producers and filesystem-facing consumers
+MUST reject non-matching IDs; they MUST NOT trim, coerce, or otherwise silently
+normalize a legacy value into a bundle path. This is a security tightening of
+the v1 contract: an older artifact outside this grammar must be explicitly
+migrated before it can be materialized or replayed.
+
 Required top-level keys: `schema_version`, `nodes`, `edges`, `counts`.
 
 Each **node entry** in `nodes[]` must contain `id`. Recommended:
-`content_hash`, `is_buggy`, `metric`, `step`, `stage`. New producers SHOULD
-set `topology_encoding: "edges"` and omit the redundant node-local
+`content_hash`, `is_buggy`, `scientific_outcome`, `metric`, `step`, `stage`.
+`is_buggy` records execution health; `scientific_outcome` records the distinct
+scientific interpretation, such as a rejected hypothesis after a successful
+run. New producers SHOULD set `topology_encoding: "edges"` and omit the redundant node-local
 `parent_id` / `children` mirrors. Consumers MUST continue accepting those
 fields from legacy producers.
 
@@ -192,6 +202,7 @@ If a node's `code` is non-empty, its `nodes/<id>/` directory SHOULD contain:
 {
   "metric": {"name": "acc", "value": 0.82, "maximize": true},
   "analysis": "brief text",
+  "scientific_outcome": "rejected_hypothesis",
   "is_buggy": false,
   "content_hash": "sha256:..."
 }
@@ -723,7 +734,11 @@ compact overview. `--term-tail K` caps the log tail at K bytes (default 4000).
 **`describe --ara <path> [--json]`** — At-a-glance summary of a whole
 ARA: idea name, node counts (total / buggy), the top-metric node,
 whether a seed snapshot (§12) is present, verify state, and provenance
-ancestry (§7). Cheap enough to run inside listing loops.
+ancestry (§7). Node/edge/buggy counts are recomputed from
+`exploration_graph.json`; the JSON form also reports `count_source`,
+`manifest_count_mismatch`, and graph diagnostics so stale manifest metadata is
+visible instead of silently overriding the graph. Cheap enough to run inside
+listing loops.
 
 **`env --ara <path>`** — JSON summary of `<ara>/env/*.json`
 (`bfts_config.yaml`, `model_fingerprint.json`, and whether
@@ -1130,3 +1145,111 @@ For a pinned official venue template, the archive digest and every extracted
 source-file digest are independent verifier constants. A mutable
 `template_source.json` receipt is audit evidence, not its own trust root;
 changing both a style file and the receipt MUST still fail source verification.
+
+## 23. External Experiment Admission
+
+`experiment_admission.schema.json` defines the non-authoritative decision
+payload prepared before an experiment starts. The payload binds `authorize` or
+`deny` to the repository identity, exact committed HEAD, plan, its single
+committed hypothesis, optional preregistration, and a closed execution scope.
+Preparation MUST NOT record a gate or set an authoritative execution flag.
+
+Authority enters the repository only through an Ed25519 attestation over that
+exact payload. The host MUST load the trust store explicitly from outside the
+Research VCS repository, its Git common directory, and every main or linked
+worktree sharing that common directory. It MUST reject shared-secret HMAC,
+unknown or revoked keys, and recompute every object binding and scope hash from
+the signed HEAD before writing. The verified signing principal MUST be disjoint
+from every actor and payload producer in the committed provenance closure and
+from `scope.producer_id` after canonical principal normalization.
+Caller-supplied actor labels, decisions outside the signed payload, and raw
+`gate_decision` recording MUST NOT mint admission authority.
+
+The persisted `xscientist.experiment-admission.v1` gate uses a host-owned
+`deterministic_gate` actor. Its immutable payload includes the signed request,
+a lossless hex-encoded public attestation record, signer and key identifiers,
+attestation hash,
+normalized trust-store digest, producer closure, and authority-receipt hash.
+The host derives `experiment_authorized` from the signed decision and always
+sets `claim_promotion_allowed` to false. A successful write MUST be a dedicated
+checkpoint containing only that gate; uncommitted ingestion is invalid. Every
+consumer MUST reconstruct the original signed payload and Ed25519 envelope from
+the persisted receipt, re-verify it against the current external trust store,
+and recompute the complete producer closure before authorizing execution.
+
+Scope matching is an exact projection over all recognized admission fields.
+An omitted field is not a wildcard for an unsigned runtime `command_hash`,
+`environment_hash`, `code_commit`, dataset binding, or other recognized
+dimension. `allowed_seeds` is the only constraint form: it cannot coexist with
+signed `seeds`; both signed and runtime seed arrays must be non-empty, unique,
+integer-only arrays with booleans and floating-point aliases rejected. A
+runtime seed set must be a subset of `allowed_seeds`. `idea_index` likewise
+uses a non-negative concrete integer, not a boolean or floating-point alias.
+`repository_head` is the signed Research VCS snapshot; `code_commit` is a
+separate execution-code identity and MUST NOT be synthesized from later gate or
+start checkpoints.
+
+An exact repeated ingestion MAY return the already committed gate without a
+new write after re-verifying the current external trust policy. Any other HEAD
+drift MUST fail closed. A new signed decision supersedes active gates only when
+plan, hypothesis, preregistration, and the complete scope are identical;
+cross-scope relations cannot neutralize a denial. `supersedes` remains a graph
+explanation and is not the source of authorization truth.
+
+After the dedicated checkpoint, the host appends a hash-chained per-subject
+high-water event below the shared Git common directory. Decision state is
+repository-wide, not checkout-local: every branch and linked worktree observes
+the same high-water lattice. A denial applies to every overlapping runtime
+scope, including a mixed seed batch containing one denied seed, while an
+authorization not yet published into this lattice MUST NOT be discovered merely
+because its Git object exists. A pending transition is also repository-wide and
+MUST block consumption until exact recovery completes.
+
+Each published high-water head has a hidden
+`refs/xscientist/admission/<subject-hash>` retention ref bound to its checkpoint.
+This ref keeps authoritative history reachable after branch/worktree deletion,
+reflog expiration, and Git garbage collection. A missing, divergent, malformed,
+or orphan retention ref is an integrity failure. Consumers require the newest
+fully verified dedicated gate on first-parent history to equal the high-water
+event; a crash between checkpoint, event, and ref publication therefore fails
+closed and an exact retry may recover without another gate commit. Event and
+pending-marker publication is atomic, bounded, and no-follow; a historical
+event cannot be replayed as newest.
+
+Before creating an experiment worker, the runner MUST commit the complete
+selected batch of `xscientist.experiment-admission-start.v1` objects in one
+dedicated `experiment_admission_start` checkpoint. Immediately before entering
+the execution boundary, it atomically publishes a single-use execution claim
+under the Git common directory. This durable claim, not process return or a
+later revalidation, is the execution linearization point. Without it, no
+terminal attempt may consume the start.
+
+After a claim exists, later denial, key revocation, trust-policy change, or
+repository-wide transition MUST NOT erase evidence of the executed outcome.
+The terminal attempt is validated against its immutable start snapshot and is
+recorded with `admitted_at_start: true`, a specific `current_policy_status`, and
+`quarantined: true` when current policy no longer authorizes it.
+`claim_promotion_allowed` remains false: preservation is not scientific
+promotion.
+
+Terminal consumption first publishes a common-directory reservation binding
+the start ID and receipt hash to one exact attempt object ID and content hash.
+New reservations also bind a canonically hashed immutable snapshot of
+`admitted_at_start`, `current_policy_status`, `quarantined`, and
+`claim_promotion_allowed`. A retry MUST reuse that snapshot before rebuilding
+the attempt identity; a later denial, revocation, or policy transition is a new
+governance fact and MUST NOT rewrite an already reserved scientific outcome.
+Equal retries are idempotent; any different identity or policy snapshot fails
+closed. Recovery MUST support a reservation with no object, an exact
+uncommitted object, and a fully committed object. An already committed retry is
+successful only after proving that the exact object entered first-parent
+history through a terminal-only `experiment_admission_terminal` checkpoint. A
+batch checkpoint MUST consume the complete admitted batch and contain no
+non-attempt material. Legacy v1 reservations remain readable and may recover
+only when the regenerated exact attempt identity still matches; they contain no
+policy snapshot from which a changed-policy retry can be reconstructed.
+
+The Git common directory and all admission state below it are a host security
+boundary. Production executors MUST NOT be able to write, delete, replace, or
+redirect them. The cooperative local implementation cannot defend against a
+process that already has arbitrary write access to that control directory.

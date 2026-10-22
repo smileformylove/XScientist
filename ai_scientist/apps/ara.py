@@ -45,6 +45,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.utils.ara_paths import (
+    resolve_node_directory,
+    resolve_node_file,
+    resolve_node_paths,
+    validate_node_id,
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -111,36 +118,25 @@ def _resolve_ara_root(raw: str) -> Path:
 
 
 def _load_node(ara_root: Path, node_id: str) -> tuple[dict[str, Any], Path]:
-    node_dir = ara_root / "nodes" / node_id
+    try:
+        node_dir, _, _ = resolve_node_paths(ara_root, node_id)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if not node_dir.exists():
         raise SystemExit(f"Node {node_id} not found under nodes/")
     try:
         graph = _load_strict_json(ara_root / "exploration_graph.json")
     except ValueError as exc:
-        return [
-            {
-                "node_id": "@exploration-graph",
-                "state": "drift",
-                "stored_hash": None,
-                "computed_hash": None,
-                "notes": str(exc),
-            }
-        ]
+        raise SystemExit(f"Invalid exploration_graph.json: {exc}") from exc
     if not isinstance(graph, dict):
-        return [
-            {
-                "node_id": "@exploration-graph",
-                "state": "drift",
-                "stored_hash": None,
-                "computed_hash": None,
-                "notes": "exploration_graph.json must contain an object",
-            }
-        ]
+        raise SystemExit("Invalid exploration_graph.json: expected an object")
     meta: dict[str, Any] = {}
     for node in graph.get("nodes") or []:
-        if isinstance(node, dict) and str(node.get("id")) == node_id:
+        if isinstance(node, dict) and node.get("id") == node_id:
             meta = node
             break
+    if not meta:
+        raise SystemExit(f"Node {node_id} is not indexed by exploration_graph.json")
     return meta, node_dir
 
 
@@ -160,17 +156,18 @@ def _node_relationships(
             parents.append(parent)
         if parent == node_id and child and child not in children:
             children.append(child)
-    for node in graph.get("nodes") or []:
-        if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
-            continue
-        parent = str(node.get("parent_id") or "").strip()
-        if parent and parent not in parents:
-            parents.append(parent)
-        for child_value in node.get("children") or []:
-            child = str(child_value or "").strip()
-            if child and child not in children:
-                children.append(child)
-        break
+    if graph.get("topology_encoding") != "edges":
+        for node in graph.get("nodes") or []:
+            if not isinstance(node, dict) or str(node.get("id") or "") != node_id:
+                continue
+            parent = str(node.get("parent_id") or "").strip()
+            if parent and parent not in parents:
+                parents.append(parent)
+            for child_value in node.get("children") or []:
+                child = str(child_value or "").strip()
+                if child and child not in children:
+                    children.append(child)
+            break
     return parents, children
 
 
@@ -193,17 +190,14 @@ def _compare_metrics(
 
 
 def _write_verify_report(ara_root: Path, node_id: str, report: dict[str, Any]) -> Path:
-    from ai_scientist.utils.ara_reexec import persist_reexec_verdict
+    from ai_scientist.utils.ara_reexec import (
+        persist_reexec_verdict,
+        write_unique_json_report,
+    )
 
     verify_dir = ara_root / "verify"
-    verify_dir.mkdir(parents=True, exist_ok=True)
-    stamp = re.sub(r"[^0-9T]", "", _now_iso())[:14] or "run"
-    path = verify_dir / f"{node_id}_{stamp}.json"
     compact = persist_reexec_verdict(ara_root, report)
-    path.write_text(
-        json.dumps(compact, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
+    path = write_unique_json_report(verify_dir, node_id, compact)
     try:
         from ai_scientist.utils.ara_catalog import rebuild_semantic_catalog
 
@@ -223,7 +217,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     meta, node_dir = _load_node(ara_root, args.node_id)
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     parents, _ = _node_relationships(graph, args.node_id)
-    metrics = _load_json(node_dir / "metrics.json") or {}
+    metrics_path = resolve_node_file(node_dir, "metrics.json")
+    code_path = resolve_node_file(node_dir, "code.py")
+    term_path = resolve_node_file(node_dir, "term_out.log")
+    metrics = _load_json(metrics_path) or {}
     print(f"# Node {args.node_id}")
     print("ARA root:      .")
     print(f"Node dir:      {node_dir.relative_to(ara_root).as_posix()}")
@@ -233,23 +230,24 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"Parent:        {parents[0] if parents else None}")
     print(f"Metric:        {metrics.get('metric')}")
     print(f"Analysis:      {(metrics.get('analysis') or '').strip()[:400]}")
-    if (node_dir / "code.py").exists():
-        print(f"Code size:     {(node_dir / 'code.py').stat().st_size} bytes")
-    if (node_dir / "term_out.log").exists():
-        print(f"Term out size: {(node_dir / 'term_out.log').stat().st_size} bytes")
+    if code_path.exists():
+        print(f"Code size:     {code_path.stat().st_size} bytes")
+    if term_path.exists():
+        print(f"Term out size: {term_path.stat().st_size} bytes")
     return 0
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
-    from ai_scientist.utils.privacy import (
-        redact_sensitive_payload,
-        redact_sensitive_text,
-        relative_path_reference,
-        resolve_portable_path,
-    )
+    from ai_scientist.utils.ara_reexec import reexec_node, validate_reexec_options
+    from ai_scientist.utils.privacy import redact_sensitive_text
 
     ara_root = _resolve_ara_root(args.ara)
     meta, node_dir = _load_node(ara_root, args.node_id)
+    try:
+        validate_reexec_options(timeout=args.timeout, tolerance=args.tolerance)
+    except ValueError as exc:
+        print(f"[ara-fork] refused: {exc}", file=sys.stderr)
+        return 9
     context_pack_ref = None
     context_error = None
     try:
@@ -275,84 +273,46 @@ def cmd_exec(args: argparse.Namespace) -> int:
         Exception
     ) as exc:  # Legacy ARAs remain executable; the report exposes the gap.
         context_error = redact_sensitive_text(str(exc))
-    code_path = node_dir / "code.py"
+    code_path = resolve_node_file(node_dir, "code.py")
     if not code_path.exists():
         print(
             f"Node {args.node_id} has no code.py — nothing to execute.", file=sys.stderr
         )
         return 3
 
-    manifest = _load_json(ara_root / "manifest.json") or {}
-    default_cwd = resolve_portable_path(manifest.get("source_exp_dir"), base=ara_root)
-    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else default_cwd
-    if cwd is None or not cwd.exists():
-        cwd = node_dir  # last-resort fallback so the subprocess starts somewhere valid
-
-    python_bin = args.python or sys.executable
-    cwd_view = relative_path_reference(cwd, base=ara_root)
-    print(
-        f"[ara-fork] exec node={args.node_id} cwd={cwd_view} "
-        f"python={Path(python_bin).name}"
-    )
-
-    started_at = _now_iso()
     try:
-        completed = subprocess.run(
-            [python_bin, str(code_path)],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
+        report = reexec_node(
+            ara_root,
+            args.node_id,
+            python=args.python,
+            cwd=args.cwd,
             timeout=args.timeout,
+            tolerance=args.tolerance,
         )
-        timed_out = False
-    except subprocess.TimeoutExpired as exc:
-        completed = None
-        timed_out = True
-        stdout_text = exc.stdout or ""
-        stderr_text = exc.stderr or ""
-        returncode = -1
-
-    if not timed_out:
-        stdout_text = completed.stdout or ""
-        stderr_text = completed.stderr or ""
-        returncode = completed.returncode
-
-    fresh_metric = _parse_metric_from_stdout(stdout_text + "\n" + stderr_text)
-    metrics_recorded = (_load_json(node_dir / "metrics.json") or {}).get("metric")
-    comparison = _compare_metrics(metrics_recorded, fresh_metric, args.tolerance)
-
-    report = redact_sensitive_payload(
-        {
-            "schema": "ara.verify.v1",
-            "node_id": args.node_id,
-            "ara_root": ".",
-            "started_at": started_at,
-            "finished_at": _now_iso(),
-            "python": Path(python_bin).name,
-            "cwd": cwd_view,
-            "timeout_seconds": args.timeout,
-            "returncode": returncode,
-            "timed_out": timed_out,
-            "recorded_metric": metrics_recorded,
-            "fresh_metric": fresh_metric,
-            "comparison": comparison,
-            "context_pack_ref": context_pack_ref,
-            "context_error": context_error,
-            "stdout_tail": redact_sensitive_text(stdout_text[-4000:]),
-            "stderr_tail": redact_sensitive_text(stderr_text[-4000:]),
-        }
-    )
+    except ValueError as exc:
+        print(f"[ara-fork] refused: {exc}", file=sys.stderr)
+        return 9
+    report["schema"] = "ara.verify.v1"
+    report["timeout_seconds"] = args.timeout
+    report["context_pack_ref"] = context_pack_ref
+    report["context_error"] = context_error
     report_path = _write_verify_report(ara_root, args.node_id, report)
     print(
         "[ara-fork] verify report: " f"{report_path.relative_to(ara_root).as_posix()}"
     )
     print(
-        f"[ara-fork] returncode={returncode} timed_out={timed_out} comparison={comparison}"
+        f"[ara-fork] returncode={report['returncode']} "
+        f"timed_out={report['timed_out']} comparison={report['comparison']}"
     )
-    if timed_out:
+    if report["timed_out"]:
         return 4
-    if returncode != 0 and not args.allow_nonzero:
+    if report["returncode"] != 0 and not args.allow_nonzero:
         return 5
+    if report["input_integrity"]["status"] != "clean":
+        return 7
+    comparison = report["comparison"]
+    if comparison.get("status") != "compared":
+        return 6
     if comparison.get("within_tolerance") is False and not args.allow_metric_drift:
         return 6
     return 0
@@ -391,18 +351,24 @@ def cmd_fork(args: argparse.Namespace) -> int:
     dest.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy the node bundle into <dest>/nodes/<node_id>/ (canonical ARA layout).
-    dest_nodes_dir = dest / "nodes" / args.node_id
+    try:
+        dest_nodes_dir = resolve_node_directory(dest, args.node_id)
+    except ValueError as exc:
+        print(f"[ara-fork] refused destination: {exc}", file=sys.stderr)
+        return 2
     shutil.copytree(node_dir, dest_nodes_dir, dirs_exist_ok=True)
 
     # 2. Compute / re-use content hash. If the parent had one, keep it; else
     #    reconstruct from code+metric so the fork is still content-addressable.
-    parent_metrics = _load_json(node_dir / "metrics.json") or {}
+    parent_metrics_path = resolve_node_file(node_dir, "metrics.json")
+    parent_code_path = resolve_node_file(node_dir, "code.py")
+    parent_metrics = _load_json(parent_metrics_path) or {}
     parent_hash = (
         parent_metrics.get("content_hash") if isinstance(parent_metrics, dict) else None
     )
     parent_code = (
-        (node_dir / "code.py").read_text(encoding="utf-8")
-        if (node_dir / "code.py").exists()
+        parent_code_path.read_text(encoding="utf-8")
+        if parent_code_path.exists()
         else ""
     )
     parent_metric = (
@@ -465,7 +431,7 @@ def cmd_fork(args: argparse.Namespace) -> int:
     parent_graph = _load_json(ara_root / "exploration_graph.json") or {}
     parent_node_entry: dict[str, Any] = {}
     for node in parent_graph.get("nodes") or []:
-        if isinstance(node, dict) and str(node.get("id")) == args.node_id:
+        if isinstance(node, dict) and node.get("id") == args.node_id:
             parent_node_entry = node
             break
 
@@ -975,19 +941,26 @@ def cmd_show(args: argparse.Namespace) -> int:
     graph = _load_json(ara_root / "exploration_graph.json") or {}
     meta: dict[str, Any] = {}
     for node in graph.get("nodes") or []:
-        if isinstance(node, dict) and str(node.get("id")) == args.node:
+        if isinstance(node, dict) and node.get("id") == args.node:
             meta = node
             break
-    node_dir = ara_root / "nodes" / args.node
+    try:
+        node_dir = resolve_node_directory(ara_root, args.node)
+        metrics_path = resolve_node_file(node_dir, "metrics.json")
+        plots_path = resolve_node_file(node_dir, "plots.json")
+        code_path = resolve_node_file(node_dir, "code.py")
+        term_path = resolve_node_file(node_dir, "term_out.log")
+    except ValueError as exc:
+        print(f"[ara-show] refused: {exc}", file=sys.stderr)
+        return 3
     if not meta and not node_dir.exists():
         print(f"[ara-show] node {args.node} not found in {ara_root}", file=sys.stderr)
         return 3
 
-    metrics = _load_json(node_dir / "metrics.json") or {}
-    plots = _load_json(node_dir / "plots.json") or {}
+    metrics = _load_json(metrics_path) or {}
+    plots = _load_json(plots_path) or {}
     parents, children = _node_relationships(graph, args.node)
 
-    code_path = node_dir / "code.py"
     code_text: str | None = None
     if code_path.exists():
         try:
@@ -995,7 +968,6 @@ def cmd_show(args: argparse.Namespace) -> int:
         except OSError:
             code_text = None
 
-    term_path = node_dir / "term_out.log"
     term_tail: str | None = None
     term_size = 0
     if term_path.exists():
@@ -1154,14 +1126,22 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
     for node in graph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        node_id = str(node.get("id") or "").strip()
-        if not node_id:
-            continue
-
         stored_hash = node.get("content_hash")
-        node_dir = ara_root / "nodes" / node_id
-        code_path = node_dir / "code.py"
-        metrics = _load_json(node_dir / "metrics.json") or {}
+        try:
+            node_id = validate_node_id(node.get("id"))
+            node_dir, code_path, metrics_path = resolve_node_paths(ara_root, node_id)
+        except ValueError as exc:
+            entries.append(
+                {
+                    "node_id": node.get("id"),
+                    "state": "unsafe_path",
+                    "stored_hash": stored_hash,
+                    "computed_hash": None,
+                    "notes": str(exc),
+                }
+            )
+            continue
+        metrics = _load_json(metrics_path) or {}
 
         # Mirror _export_nodes_from_journal's binding logic exactly.
         llm_refs_raw = node.get("llm_call_refs") or []
@@ -1195,7 +1175,7 @@ def _hash_check_ara(ara_root: Path) -> list[dict[str, Any]]:
             ("plot_spec_hash", "plot_spec.json"),
         ):
             declared_hash = node.get(field)
-            spec_path = node_dir / filename
+            spec_path = resolve_node_file(node_dir, filename)
             try:
                 spec_payload = (
                     _load_strict_json(spec_path) if spec_path.is_file() else None
@@ -1495,6 +1475,7 @@ def cmd_describe(args: argparse.Namespace) -> int:
     block by default; ``--json`` returns a machine-readable dict.
     """
     from ai_scientist.protocol import hash_manifest
+    from ai_scientist.protocol import analyze_exploration_graph
     from ai_scientist.utils.ara_log import ara_log
     from ai_scientist.utils.ara_manifest_lock import verify_manifest_lock
 
@@ -1506,16 +1487,48 @@ def cmd_describe(args: argparse.Namespace) -> int:
         )
         return 3
     graph = _load_json(ara_root / "exploration_graph.json") or {}
+    if not isinstance(graph, dict):
+        graph = {}
     nodes = [n for n in (graph.get("nodes") or []) if isinstance(n, dict)]
+    # The graph is the derived source of truth for topology counts.  Manifest
+    # counts are retained only for drift diagnostics because a stale manifest
+    # must not make describe disagree with the graph/graph command.
+    graph_dag = analyze_exploration_graph(graph)
+    valid_nodes: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        try:
+            node_id = validate_node_id(node.get("id"))
+        except ValueError:
+            continue
+        valid_nodes.setdefault(node_id, node)
+    graph_buggy = sum(1 for node in valid_nodes.values() if node.get("is_buggy"))
     counts = manifest.get("counts") or {}
     if not isinstance(counts, dict):
         counts = {}
-    buggy = _safe_int(
-        counts.get("buggy_nodes"),
-        default=sum(1 for n in nodes if n.get("is_buggy")),
-    )
-    node_count = _safe_int(counts.get("nodes"), default=len(nodes))
-    edge_count = _safe_int(counts.get("edges"), default=len(graph.get("edges") or []))
+    buggy = graph_buggy
+    node_count = int(graph_dag.get("node_count") or 0)
+    edge_count = int(graph_dag.get("edge_count") or 0)
+    manifest_count_mismatch: dict[str, dict[str, Any]] = {}
+    for manifest_key, actual in (
+        ("nodes", node_count),
+        ("edges", edge_count),
+        ("buggy_nodes", buggy),
+    ):
+        if manifest_key not in counts:
+            continue
+        declared = _safe_int(counts.get(manifest_key), default=None)
+        if declared is None:
+            manifest_count_mismatch[manifest_key] = {
+                "manifest": counts.get(manifest_key),
+                "graph": actual,
+                "reason": "unparseable",
+            }
+        elif declared != actual:
+            manifest_count_mismatch[manifest_key] = {
+                "manifest": declared,
+                "graph": actual,
+                "reason": "value_mismatch",
+            }
     seed_count = sum(1 for n in nodes if n.get("is_seed_node"))
 
     top = _pick_top_metric_node(nodes)
@@ -1588,6 +1601,13 @@ def cmd_describe(args: argparse.Namespace) -> int:
                         "edges": edge_count,
                         "revisions": lock_payload["revision"],
                     },
+                    "count_source": "exploration_graph",
+                    "manifest_count_mismatch": manifest_count_mismatch,
+                    "graph_diagnostics": {
+                        "is_dag": graph_dag.get("is_dag"),
+                        "errors": graph_dag.get("error_count"),
+                        "warnings": graph_dag.get("warning_count"),
+                    },
                     "top_metric_node": top_payload,
                     "seed": seed_payload,
                     "lock": lock_payload,
@@ -1610,6 +1630,11 @@ def cmd_describe(args: argparse.Namespace) -> int:
     print(
         f"Nodes:           {node_count}  (buggy: {buggy}, seeds: {seed_count}, edges: {edge_count})"
     )
+    if manifest_count_mismatch:
+        print(
+            "Count warning:   manifest counts differ from exploration_graph.json "
+            f"({', '.join(sorted(manifest_count_mismatch))})"
+        )
     if top_payload is None:
         print("Top metric:      (no scored nodes)")
     else:
@@ -2578,37 +2603,53 @@ def cmd_verify(args: argparse.Namespace) -> int:
     Delegates to ``ai_scientist.utils.ara_reexec.reexec_ara`` — the CLI's job
     is to expose the knobs and translate exit codes.
     """
-    from ai_scientist.utils.ara_reexec import reexec_ara
+    from ai_scientist.utils.ara_reexec import (
+        reexec_ara,
+        reexec_verdict_compared,
+        reexec_verdict_passed,
+    )
 
     ara_root = _resolve_ara_root(args.ara)
     node_ids = args.node_ids if args.node_ids else None
-    summary = reexec_ara(
-        ara_root,
-        node_ids=node_ids,
-        limit=args.limit,
-        include_buggy=args.include_buggy,
-        python=args.python,
-        timeout=args.timeout,
-        tolerance=args.tolerance,
-    )
+    try:
+        summary = reexec_ara(
+            ara_root,
+            node_ids=node_ids,
+            limit=args.limit,
+            include_buggy=args.include_buggy,
+            python=args.python,
+            timeout=args.timeout,
+            tolerance=args.tolerance,
+        )
+    except ValueError as exc:
+        print(f"[ara-verify] refused: {exc}", file=sys.stderr)
+        return 9
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     if summary.get("status") != "ok":
         return 9
 
-    # Non-zero exit when *no* verdict landed within tolerance — makes CI usage
-    # trivial. Callers who don't care about drift can pass --allow-drift.
+    # Batch report paths are relative to the ARA root, not the caller's cwd.
+    # Treat a missing or empty report as a failed verification rather than
+    # silently turning it into an empty set of verdicts.
     report_path = summary.get("report_path")
-    if report_path:
-        report = _load_json(Path(report_path)) or {}
-        verdicts = report.get("verdicts") or []
-        within = sum(
-            1
-            for v in verdicts
-            if isinstance(v, dict)
-            and (v.get("comparison") or {}).get("within_tolerance") is True
-        )
-        if within == 0 and verdicts and not args.allow_drift:
-            return 10
+    if not isinstance(report_path, str) or not report_path:
+        return 10
+    resolved_report_path = Path(report_path).expanduser()
+    if not resolved_report_path.is_absolute():
+        resolved_report_path = ara_root / resolved_report_path
+    report = _load_json(resolved_report_path)
+    verdicts = report.get("verdicts") if isinstance(report, dict) else None
+    if not isinstance(verdicts, list) or not verdicts:
+        return 10
+
+    # --allow-drift only relaxes metric agreement. Every selected node must
+    # still finish normally and produce an actual recorded-vs-fresh comparison.
+    if not all(reexec_verdict_compared(verdict) for verdict in verdicts):
+        return 10
+    if not args.allow_drift and not all(
+        reexec_verdict_passed(verdict) for verdict in verdicts
+    ):
+        return 10
     return 0
 
 

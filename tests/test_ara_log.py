@@ -245,6 +245,24 @@ class WalkNodeAncestryTests(unittest.TestCase):
         self.assertEqual(sorted(e["id"] for e in chain), ["n1", "n2"])
         self.assertIn("cycle", (chain[-1].get("note") or ""))
 
+    def test_edges_encoding_ignores_stale_parent_mirrors(self) -> None:
+        ara = self.tmp / "edges-only"
+        _write_exploration_graph(
+            ara,
+            [_node("root", parent="child"), _node("child")],
+        )
+        graph_path = ara / "exploration_graph.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["topology_encoding"] = "edges"
+        graph["edges"] = [{"parent": "root", "child": "child"}]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+        chain = walk_node_ancestry(ara, "child")
+
+        self.assertEqual([entry["id"] for entry in chain], ["child", "root"])
+        self.assertIsNone(chain[-1]["parent_id"])
+        self.assertNotIn("note", chain[-1])
+
 
 # ---------------------------------------------------------------------------
 # CLI: `log --node <id>` — thin driver around walk_node_ancestry

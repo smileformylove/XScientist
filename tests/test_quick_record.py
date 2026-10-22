@@ -22,7 +22,7 @@ from xscientist.research_git import (
     research_object_origin_checkpoint,
     show_checkpoint,
 )
-from xscientist.research_journey import build_research_guide
+from xscientist.research_journey import build_research_guide, start_guided_research
 from xscientist.research_vcs import ResearchRepository
 
 
@@ -114,7 +114,10 @@ class QuickRecordTests(unittest.TestCase):
             )
             self.assertEqual(evidence[0]["payload"]["metrics"]["sleep_score"], 0.4)
             guide = build_research_guide(workspace)
-            self.assertEqual(guide["progress"]["completed_stages"], 4)
+            self.assertEqual(guide["progress"]["completed_stages"], 3)
+            self.assertEqual(
+                guide["progress"]["scope"]["type"], "latest_plan_lineage"
+            )
             git_status = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=workspace,
@@ -588,6 +591,269 @@ class QuickRecordTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("choose", json.loads(stderr.getvalue())["error"].lower())
             self.assertEqual(repository.objects(kind="evidence"), [])
+
+    def test_question_only_plan_overrides_historical_experiment_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            self._explore(workspace)
+            repository = ResearchRepository(workspace)
+            historical_attempt = research_commands_module.save_experiment(
+                str(workspace),
+                summary="A historical experiment with no bound evidence.",
+                status="completed",
+                plan_id=repository.resolve("@latest:research_plan"),
+                commit=True,
+            )["object"].object_id
+            historical_evidence = research_commands_module.save_evidence(
+                str(workspace),
+                result_summary="Historical evidence from the superseded plan.",
+                attempt_ids=[historical_attempt],
+                commit=True,
+            )["object"].object_id
+            restricted_plan = repository.record(
+                "research_plan",
+                {
+                    "summary": "Resolve a theorem question before experiments.",
+                    "status": "question_only",
+                    "hypothesis_registration_authorized": False,
+                    "experiment_authorized": False,
+                    "training_authorized": False,
+                    "ara_authorized": False,
+                    "research_permissions": {
+                        "hypothesis_allowed": False,
+                        "empirical_experiment_allowed": False,
+                        "training_allowed": False,
+                        "ara_allowed": False,
+                    },
+                },
+                state="locked",
+            )
+            repository.commit(
+                stage="plan",
+                subject="lock question-only theorem plan",
+                status="locked",
+            )
+
+            guide = build_research_guide(workspace, language="en")
+
+            self.assertEqual(
+                guide["primary_action"]["code"], "continue_locked_plan"
+            )
+            self.assertEqual(
+                guide["primary_action"]["target_object_id"],
+                restricted_plan.object_id,
+            )
+            self.assertNotIn(
+                "bind_evidence", {step["code"] for step in guide["next_steps"]}
+            )
+            self.assertNotIn(
+                "lock_hypothesis_portfolio",
+                {step["code"] for step in guide["next_steps"]},
+            )
+            self.assertEqual(
+                guide["active_plan"]["authorization"]["experiment_authorized"],
+                False,
+            )
+            self.assertEqual(
+                guide["active_plan"]["ignored_historical_attempt_ids"],
+                [historical_attempt],
+            )
+            self.assertEqual(
+                guide["progress"],
+                {
+                    "completed_stages": 1,
+                    "total_stages": 8,
+                    "percent": 12,
+                    "scope": {
+                        "type": "latest_plan_lineage",
+                        "root_object_id": restricted_plan.object_id,
+                        "object_count": 1,
+                    },
+                },
+            )
+            self.assertEqual(guide["counts"]["experiment_attempt"], 1)
+            self.assertEqual(guide["counts"]["evidence"], 1)
+            self.assertEqual(guide["experiment_states"], {"completed": 1})
+            self.assertNotIn(
+                historical_evidence,
+                guide["active_plan"]["lineage_object_ids"],
+            )
+            self.assertNotIn(
+                "portfolio_missing",
+                {
+                    item["gap"]
+                    for item in guide["program_review"]["recommendations"]
+                },
+            )
+            self.assertIn(
+                "portfolio_missing",
+                {
+                    item["gap"]
+                    for item in guide["program_review"]["deferred_recommendations"]
+                },
+            )
+
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en", "--json"]),
+                    0,
+                )
+            status = json.loads(status_output.getvalue())
+            experiment = status["deliverables"]["experiment"]
+            self.assertEqual(experiment["scope"], {"type": "repository_history"})
+            self.assertEqual(experiment["runs"], 1)
+            self.assertEqual(experiment["recorded_attempts"], 1)
+            self.assertEqual(
+                experiment["active_plan"],
+                {
+                    "object_id": restricted_plan.object_id,
+                    "scope": {
+                        "type": "latest_plan_lineage",
+                        "root_object_id": restricted_plan.object_id,
+                        "object_count": 1,
+                    },
+                    "runs": 0,
+                    "recorded_attempts": 0,
+                },
+            )
+
+            human_output = io.StringIO()
+            with contextlib.redirect_stdout(human_output):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en"]),
+                    0,
+                )
+            self.assertIn(
+                "Research outputs: active-plan experiments=0; "
+                "repository-history experiments=1; paper=not started",
+                human_output.getvalue(),
+            )
+
+    def test_progress_without_a_plan_remains_repository_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            start_guided_research(
+                workspace,
+                question="Does walking improve sleep?",
+                hypothesis="Walking improves sleep.",
+                falsifier="Sleep is unchanged or worse.",
+                language="en",
+            )
+
+            guide = build_research_guide(workspace, language="en")
+
+            self.assertEqual(guide["progress"]["completed_stages"], 1)
+            self.assertEqual(guide["progress"]["percent"], 12)
+            self.assertEqual(
+                guide["progress"]["scope"],
+                {
+                    "type": "repository",
+                    "root_object_id": None,
+                    "object_count": 3,
+                },
+            )
+
+            status_output = io.StringIO()
+            with contextlib.redirect_stdout(status_output):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--lang", "en", "--json"]),
+                    0,
+                )
+            experiment = json.loads(status_output.getvalue())["deliverables"][
+                "experiment"
+            ]
+            self.assertNotIn("scope", experiment)
+            self.assertNotIn("active_plan", experiment)
+
+    def test_training_and_ara_denials_do_not_block_authorized_experiment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            self._explore(workspace)
+            repository = ResearchRepository(workspace)
+            historical_attempt = research_commands_module.save_experiment(
+                str(workspace),
+                summary="An unbound attempt from the superseded plan.",
+                status="completed",
+                plan_id=repository.resolve("@latest:research_plan"),
+                commit=True,
+            )["object"].object_id
+            active_plan = repository.record(
+                "research_plan",
+                {
+                    "summary": "Run the authorized next experiment without ARA.",
+                    "status": "active",
+                    "hypothesis_registration_authorized": True,
+                    "experiment_authorized": True,
+                    "training_authorized": False,
+                    "ara_authorized": False,
+                },
+                state="locked",
+            )
+            repository.commit(
+                stage="plan",
+                subject="authorize experiment without training or ARA",
+                status="locked",
+            )
+
+            guide = build_research_guide(workspace, language="en")
+
+            self.assertEqual(guide["primary_action"]["code"], "run_experiment")
+            self.assertEqual(guide["active_plan"]["object_id"], active_plan.object_id)
+            self.assertEqual(
+                guide["active_plan"]["ignored_historical_attempt_ids"],
+                [historical_attempt],
+            )
+            self.assertFalse(
+                guide["active_plan"]["authorization"]["training_authorized"]
+            )
+            self.assertFalse(
+                guide["active_plan"]["authorization"]["ara_authorized"]
+            )
+            self.assertNotIn(
+                "continue_locked_plan",
+                {step["code"] for step in guide["next_steps"]},
+            )
+
+    def test_registration_denial_does_not_block_an_authorized_existing_plan(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            self._explore(workspace)
+            repository = ResearchRepository(workspace)
+            repository.record(
+                "research_plan",
+                {
+                    "summary": "Execute the locked hypothesis without registering more.",
+                    "status": "active",
+                    "hypothesis_registration_authorized": False,
+                    "experiment_authorized": True,
+                    "training_authorized": False,
+                    "ara_authorized": False,
+                },
+                state="locked",
+            )
+            repository.commit(
+                stage="plan",
+                subject="authorize existing hypothesis experiment",
+                status="locked",
+            )
+
+            guide = build_research_guide(workspace, language="en")
+
+            self.assertEqual(guide["primary_action"]["code"], "run_experiment")
+            self.assertNotIn(
+                "continue_locked_plan",
+                {step["code"] for step in guide["next_steps"]},
+            )
+            self.assertNotIn(
+                "portfolio_missing",
+                {
+                    item["gap"]
+                    for item in guide["program_review"]["recommendations"]
+                },
+            )
 
     def test_failed_result_guidance_uses_neutral_bounded_interpretation(self) -> None:
         with tempfile.TemporaryDirectory() as td:

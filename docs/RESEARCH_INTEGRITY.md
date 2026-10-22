@@ -161,6 +161,15 @@ Confirmatory records must add these fields to the normal experiment registry:
 - `holdout_access: verifier_only`
 - `producer_id`
 
+The host deterministic evaluator supports the classification metrics
+`accuracy`, `precision`, `recall`, `f1`, and `roc_auc`, regression metrics
+`mse`, `rmse`, `mae`, and `r2`, plus world-model probability metrics
+`log_loss`/NLL, multiclass `brier`, and ten-bin equal-width `ece`. Probability
+metrics require finite vectors or matrices in `[0,1]`, normalized rows for
+matrices, and unambiguous integer target indices. A verified metric is still
+only an artifact-internal recomputation; it does not establish data validity,
+independent holdout access, or a fair latent-versus-observable comparison.
+
 The clean-room report must contain every required criterion, with no omitted or
 failed criterion, and must list exactly the completed confirmatory and
 reproduction `record_id`s. It also binds the same empirical manifest and

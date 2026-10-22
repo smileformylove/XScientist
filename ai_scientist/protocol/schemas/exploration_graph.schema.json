@@ -4,6 +4,13 @@
   "title": "ARA Exploration Graph",
   "description": "The full tree-search graph — nodes + edges + counts. Failed branches MUST be present, not filtered out.",
   "type": "object",
+  "$defs": {
+    "nodeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "description": "ARA v1 portable ASCII node identifier. It is a name, never a filesystem path."
+    }
+  },
   "required": ["schema_version", "nodes", "edges", "counts"],
   "properties": {
     "schema_version": {"type": "string"},
@@ -43,7 +50,7 @@
         "type": "object",
         "required": ["id"],
         "properties": {
-          "id": {"type": "string"},
+          "id": {"$ref": "#/$defs/nodeId"},
           "content_hash": {
             "type": ["string", "null"],
             "description": "sha256:<hex>. See content_hash_inputs for which fields fed the hash."
@@ -114,12 +121,21 @@
           },
           "stage": {"type": ["string", "null"]},
           "step": {"type": ["integer", "null"]},
-          "parent_id": {"type": ["string", "null"]},
-          "children": {"type": "array", "items": {"type": "string"}},
+          "parent_id": {
+            "anyOf": [
+              {"$ref": "#/$defs/nodeId"},
+              {"type": "null"}
+            ]
+          },
+          "children": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/nodeId"}
+          },
           "is_buggy": {"type": ["boolean", "null"]},
           "is_seed_node": {"type": ["boolean", "null"]},
           "is_seed_agg_node": {"type": ["boolean", "null"]},
           "metric": {"type": ["object", "null"]},
+          "scientific_outcome": {"type": ["string", "null"]},
           "metric_provenance": {
             "type": "string",
             "enum": ["deterministic_verified", "agent_reported", "unavailable"]
@@ -139,8 +155,8 @@
         "type": "object",
         "required": ["parent", "child"],
         "properties": {
-          "parent": {"type": "string"},
-          "child": {"type": "string"},
+          "parent": {"$ref": "#/$defs/nodeId"},
+          "child": {"$ref": "#/$defs/nodeId"},
           "stage": {"type": ["string", "null"]}
         },
         "additionalProperties": true

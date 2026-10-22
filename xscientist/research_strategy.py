@@ -145,7 +145,10 @@ def _targets(
 def _effective_objects(repository: ResearchRepository) -> dict[str, dict[str, Any]]:
     objects = {str(item["object_id"]): item for item in repository.objects()}
     superseded = {
-        target for item in objects.values() for target in _targets(item, {"supersedes"})
+        target
+        for item in objects.values()
+        if item.get("state") in {"completed", "verified", "promoted"}
+        for target in _targets(item, {"supersedes"})
     }
     return {
         object_id: item

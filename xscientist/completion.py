@@ -11,7 +11,8 @@ COMMANDS = (
 
 RESEARCH_COMMANDS = (
     "doctor start guide hypothesis plan discovery program opportunity rollout "
-    "rollout-audit verifier-authority belief belief-audit literature preregister confirm "
+    "rollout-audit verifier-authority experiment-admission belief belief-audit literature "
+    "preregister confirm "
     "trajectory-bind attempt-disposition "
     "experiment evidence estimand effect infer ingest review claim init status audit "
     "context decide tree dag adapter fsck checkpoint record objects stage add unstage "
@@ -27,6 +28,7 @@ RESEARCH_SUBCOMMANDS = {
     ),
     "opportunity": "direction pool attempt judge grade allocate inspect",
     "verifier-authority": "prepare finalize verify",
+    "experiment-admission": "prepare ingest",
     "literature": "plan receipt source update passage",
     "adapter": "list doctor sync",
     "object": "add",
@@ -48,7 +50,7 @@ SUBCOMMANDS = {
     "capability": "list check",
     "privacy": "audit",
     "history": "list show diff save rollback",
-    "evolution": "candidate benchmark canary harness-audit attest deploy rollback",
+    "evolution": "candidate benchmark canary refine harness-audit attest deploy rollback",
     "research": RESEARCH_COMMANDS,
     "git": RESEARCH_COMMANDS,
 }

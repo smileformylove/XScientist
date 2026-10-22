@@ -12,6 +12,7 @@
     },
     "evaluation_report": {"type": ["object", "null"]},
     "analysis": {"type": ["string", "null"]},
+    "scientific_outcome": {"type": ["string", "null"]},
     "is_buggy": {"type": ["boolean", "null"]},
     "is_buggy_plots": {"type": ["boolean", "null"]},
     "exc_type": {"type": ["string", "null"]},

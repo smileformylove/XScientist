@@ -5,13 +5,17 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+from ai_scientist.utils.ara_paths import validate_node_id
+
 
 def _node_sort_key(node: dict[str, Any]) -> tuple[float, int, str]:
     ctime = node.get("ctime")
     ctime_value = float(ctime) if isinstance(ctime, (int, float)) else float("inf")
     step = node.get("step")
-    step_value = int(step) if isinstance(step, int) and not isinstance(step, bool) else 10**9
-    return (ctime_value, step_value, str(node.get("id") or ""))
+    step_value = (
+        int(step) if isinstance(step, int) and not isinstance(step, bool) else 10**9
+    )
+    return (ctime_value, step_value, node["id"])
 
 
 def _graph_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
@@ -26,30 +30,48 @@ def _record_issue(
     message: str,
     path: str,
 ) -> None:
-    issues.append({
-        "severity": severity,
-        "code": code,
-        "message": message,
-        "path": path,
-    })
+    issues.append(
+        {
+            "severity": severity,
+            "code": code,
+            "message": message,
+            "path": path,
+        }
+    )
 
 
-def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
-    """Return DAG diagnostics for an ARA ``exploration_graph.json`` payload."""
+def analyze_exploration_graph(
+    graph: dict[str, Any], *, portable_node_ids: bool = True
+) -> dict[str, Any]:
+    """Return DAG diagnostics for an ARA or explicitly namespaced graph payload."""
 
     nodes = _graph_nodes(graph)
     issues: list[dict[str, Any]] = []
     node_by_id: dict[str, dict[str, Any]] = {}
     duplicate_ids: set[str] = set()
 
+    def exact_node_id(value: Any) -> str:
+        if portable_node_ids:
+            return validate_node_id(value)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"invalid namespaced graph node id: {value!r}")
+        return value
+
     for index, node in enumerate(nodes):
-        node_id = str(node.get("id") or "").strip()
-        if not node_id:
+        raw_node_id = node.get("id")
+        try:
+            node_id = exact_node_id(raw_node_id)
+        except ValueError:
+            missing = raw_node_id is None or raw_node_id == ""
             _record_issue(
                 issues,
                 severity="error",
-                code="missing_node_id",
-                message="node entry is missing a non-empty id",
+                code="missing_node_id" if missing else "invalid_node_id",
+                message=(
+                    "node entry is missing a non-empty id"
+                    if missing
+                    else "node id violates the portable ARA v1 id contract"
+                ),
                 path=f"nodes[{index}].id",
             )
             continue
@@ -68,15 +90,21 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
     edge_seen: set[tuple[str, str]] = set()
     edge_entries: list[dict[str, Any]] = []
 
-    def add_edge(parent: Any, child: Any, *, source: str, path: str, stage: Any = None) -> None:
-        parent_id = str(parent or "").strip()
-        child_id = str(child or "").strip()
-        if not parent_id or not child_id:
+    def add_edge(
+        parent: Any, child: Any, *, source: str, path: str, stage: Any = None
+    ) -> None:
+        try:
+            parent_id = exact_node_id(parent)
+            child_id = exact_node_id(child)
+        except ValueError:
             _record_issue(
                 issues,
                 severity="error",
                 code="invalid_edge",
-                message="edge is missing parent or child",
+                message=(
+                    "edge is missing a valid parent or child under the portable "
+                    "ARA v1 id contract"
+                ),
                 path=path,
             )
             return
@@ -108,12 +136,14 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
         if edge_key in edge_seen:
             return
         edge_seen.add(edge_key)
-        edge_entries.append({
-            "parent": parent_id,
-            "child": child_id,
-            "stage": stage,
-            "source": source,
-        })
+        edge_entries.append(
+            {
+                "parent": parent_id,
+                "child": child_id,
+                "stage": stage,
+                "source": source,
+            }
+        )
 
     for index, edge in enumerate(graph.get("edges") or []):
         if not isinstance(edge, dict):
@@ -133,37 +163,41 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
             stage=edge.get("stage"),
         )
 
-    for index, node in enumerate(nodes):
-        node_id = str(node.get("id") or "").strip()
-        if not node_id or node_id in duplicate_ids:
-            continue
-        parent_id = node.get("parent_id")
-        if parent_id:
-            add_edge(
-                parent_id,
-                node_id,
-                source="parent_id",
-                path=f"nodes[{index}].parent_id",
-                stage=node.get("stage"),
-            )
-        children = node.get("children") or []
-        if isinstance(children, list):
-            for child_index, child_id in enumerate(children):
+    if graph.get("topology_encoding") != "edges":
+        for index, node in enumerate(nodes):
+            try:
+                node_id = exact_node_id(node.get("id"))
+            except ValueError:
+                continue
+            if node_id in duplicate_ids:
+                continue
+            parent_id = node.get("parent_id")
+            if parent_id is not None:
                 add_edge(
+                    parent_id,
                     node_id,
-                    child_id,
-                    source="children",
-                    path=f"nodes[{index}].children[{child_index}]",
+                    source="parent_id",
+                    path=f"nodes[{index}].parent_id",
                     stage=node.get("stage"),
                 )
-        elif children:
-            _record_issue(
-                issues,
-                severity="warning",
-                code="invalid_children",
-                message="children field is not an array",
-                path=f"nodes[{index}].children",
-            )
+            children = node.get("children") or []
+            if isinstance(children, list):
+                for child_index, child_id in enumerate(children):
+                    add_edge(
+                        node_id,
+                        child_id,
+                        source="children",
+                        path=f"nodes[{index}].children[{child_index}]",
+                        stage=node.get("stage"),
+                    )
+            elif children:
+                _record_issue(
+                    issues,
+                    severity="warning",
+                    code="invalid_children",
+                    message="children field is not an array",
+                    path=f"nodes[{index}].children",
+                )
 
     adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_by_id}
     indegree: dict[str, int] = {node_id: 0 for node_id in node_by_id}
@@ -177,8 +211,7 @@ def analyze_exploration_graph(graph: dict[str, Any]) -> dict[str, Any]:
             indegree[child] += 1
 
     ordered_ids = [
-        str(node.get("id"))
-        for node in sorted(node_by_id.values(), key=_node_sort_key)
+        node["id"] for node in sorted(node_by_id.values(), key=_node_sort_key)
     ]
     order_index = {node_id: index for index, node_id in enumerate(ordered_ids)}
     queue = deque([node_id for node_id in ordered_ids if indegree.get(node_id, 0) == 0])

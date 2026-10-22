@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from ai_scientist.protocol import analyze_exploration_graph
 from ai_scientist.utils.ara_artifact import (
     ARA_SCHEMA_VERSION,
+    _export_nodes_from_journal,
     ara_dir_for_idea,
     ara_root_for_project,
     export_ara,
@@ -92,6 +94,7 @@ class ARAExporterTest(unittest.TestCase):
                 "_term_out": ["Traceback\n", "RuntimeError: oops\n"],
                 "metric": None,
                 "analysis": "bug",
+                "scientific_outcome": "rejected_hypothesis",
                 "is_buggy": True,
                 "exc_type": "RuntimeError",
                 "parent_id": "node_root",
@@ -165,11 +168,94 @@ class ARAExporterTest(unittest.TestCase):
         self.assertTrue(root_metrics["execution_isolation"]["isolated"])
         root_graph_node = {node["id"]: node for node in graph["nodes"]}["node_root"]
         self.assertEqual(root_graph_node["execution_backend"], "docker")
+        child_graph_node = {node["id"]: node for node in graph["nodes"]}["node_child"]
+        self.assertEqual(child_graph_node["scientific_outcome"], "rejected_hypothesis")
+        child_metrics = json.loads(
+            (result.root / "nodes" / "node_child" / "metrics.json").read_text()
+        )
+        self.assertEqual(child_metrics["scientific_outcome"], "rejected_hypothesis")
 
         # ARA lives under `<project_dir>/ara/`.
         self.assertTrue(
             str(result.root).startswith(str(ara_root_for_project(self.project_dir)))
         )
+
+    def _assert_unsafe_node_id_is_rejected_before_writes(
+        self, malicious_node_id: str, escaped_target: Path
+    ) -> None:
+        ara_dir = self.project_dir / "ara-path-preflight"
+        nodes_root = ara_dir / "nodes"
+        nodes_root.mkdir(parents=True)
+        _write_journal(
+            self.exp_dir / "logs",
+            "path-preflight",
+            [
+                {"id": "safe-first", "code": "print('safe')", "children": []},
+                {
+                    "id": malicious_node_id,
+                    "code": "print('must not be written')",
+                    "children": [],
+                },
+            ],
+        )
+
+        with self.assertRaisesRegex(ValueError, "unsafe ARA node id"):
+            _export_nodes_from_journal(
+                self.exp_dir / "logs" / "path-preflight" / "journal.json",
+                "path-preflight",
+                nodes_root,
+                exp_dir=self.exp_dir,
+                ara_dir=ara_dir,
+            )
+
+        self.assertFalse(escaped_target.exists())
+        self.assertFalse((nodes_root / "safe-first").exists())
+        self.assertEqual(list(nodes_root.iterdir()), [])
+
+    def test_export_rejects_absolute_node_id_before_any_node_write(self) -> None:
+        outside = self.project_dir / "outside-absolute-node"
+        self._assert_unsafe_node_id_is_rejected_before_writes(str(outside), outside)
+
+    def test_export_rejects_traversal_node_id_before_any_node_write(self) -> None:
+        ara_dir = self.project_dir / "ara-path-preflight"
+        malicious_node_id = "../../outside-traversal-node"
+        escaped_target = (ara_dir / "nodes" / malicious_node_id).resolve()
+        self._assert_unsafe_node_id_is_rejected_before_writes(
+            malicious_node_id, escaped_target
+        )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
+    def test_export_rejects_symlink_node_before_any_node_write(self) -> None:
+        ara_dir = self.project_dir / "ara-path-preflight"
+        nodes_root = ara_dir / "nodes"
+        nodes_root.mkdir(parents=True)
+        outside = self.project_dir / "outside-symlink-node"
+        outside.mkdir()
+        (nodes_root / "escape").symlink_to(outside, target_is_directory=True)
+        _write_journal(
+            self.exp_dir / "logs",
+            "path-preflight",
+            [
+                {"id": "safe-first", "code": "print('safe')", "children": []},
+                {
+                    "id": "escape",
+                    "code": "print('must not be written')",
+                    "children": [],
+                },
+            ],
+        )
+
+        with self.assertRaisesRegex(ValueError, "symlinks are not allowed"):
+            _export_nodes_from_journal(
+                self.exp_dir / "logs" / "path-preflight" / "journal.json",
+                "path-preflight",
+                nodes_root,
+                exp_dir=self.exp_dir,
+                ara_dir=ara_dir,
+            )
+
+        self.assertFalse((nodes_root / "safe-first").exists())
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_missing_journal_recorded_not_fatal(self) -> None:
         result = export_ara(
@@ -227,6 +313,36 @@ class ARAExporterTest(unittest.TestCase):
         self.assertTrue(dag["is_dag"])
         self.assertEqual(dag["edge_count"], 1)
         self.assertEqual(dag["topological_order"], ["root", "child"])
+
+    def test_graph_analyzer_rejects_node_id_normalization(self) -> None:
+        for invalid_id in (" node ", 1):
+            with self.subTest(invalid_id=invalid_id):
+                dag = analyze_exploration_graph(
+                    {
+                        "nodes": [{"id": invalid_id}],
+                        "edges": [],
+                        "topology_encoding": "edges",
+                    }
+                )
+
+                self.assertFalse(dag["is_dag"])
+                self.assertEqual(dag["node_count"], 0)
+                self.assertIn(
+                    "invalid_node_id", {issue["code"] for issue in dag["issues"]}
+                )
+
+    def test_graph_analyzer_rejects_edge_endpoint_normalization(self) -> None:
+        dag = analyze_exploration_graph(
+            {
+                "nodes": [{"id": "root"}, {"id": "child"}],
+                "edges": [{"parent": " root ", "child": "child"}],
+                "topology_encoding": "edges",
+            }
+        )
+
+        self.assertFalse(dag["is_dag"])
+        self.assertEqual(dag["edge_count"], 0)
+        self.assertIn("invalid_edge", {issue["code"] for issue in dag["issues"]})
 
     def test_export_uses_serialized_journal_node2parent_for_dag_edges(self) -> None:
         _write_serialized_journal(
@@ -328,7 +444,140 @@ class ARAExporterTest(unittest.TestCase):
             }
         )
         self.assertIn("Array.isArray(n.children)", html)
-        self.assertIn("explicitEdges.push([String(n.id), String(child)])", html)
+        self.assertIn("addEdge(n.id, child)", html)
+
+    def test_html_renderer_derives_node_details_from_canonical_edges(self) -> None:
+        html = render_exploration_graph_html(
+            {
+                "topology_encoding": "edges",
+                "nodes": [{"id": "root"}, {"id": "child"}],
+                "edges": [
+                    {"parent": "root", "child": "child"},
+                    {"parent": "root", "child": "child"},
+                ],
+            }
+        )
+
+        self.assertIn("const addEdge = (parent, child)", html)
+        self.assertIn(
+            "const useNodeMirrors = graph.topology_encoding !== 'edges'", html
+        )
+        self.assertIn("if (useNodeMirrors)", html)
+        self.assertIn(
+            "relatives.get(parent).children.push(child)",
+            html,
+        )
+        self.assertIn(
+            "relatives.get(child).parents.push(parent)",
+            html,
+        )
+        self.assertIn("nodeRelatives.parents.join(', ')", html)
+        self.assertIn("nodeRelatives.children.join(', ')", html)
+        self.assertNotIn("esc(n.parent_id || '-')", html)
+        self.assertNotIn("esc((n.children || []).join(', ') || '-')", html)
+
+    def test_html_renderer_has_accessible_fit_zoom_and_pan_controls(self) -> None:
+        html = render_exploration_graph_html(
+            {
+                "topology_encoding": "edges",
+                "nodes": [{"id": f"node-{index}"} for index in range(25)],
+                "edges": [
+                    {"parent": f"node-{index}", "child": f"node-{index + 1}"}
+                    for index in range(24)
+                ],
+            }
+        )
+
+        self.assertIn('role="toolbar" aria-label="Graph view controls"', html)
+        self.assertIn('id="graph-viewport" tabindex="0"', html)
+        self.assertIn('aria-describedby="graph-view-help"', html)
+        self.assertIn('id="zoom-out" type="button" aria-label="Zoom out"', html)
+        self.assertIn('id="zoom-in" type="button" aria-label="Zoom in"', html)
+        self.assertIn('id="zoom-fit" type="button"', html)
+        self.assertIn('aria-label="Fit graph to view"', html)
+        self.assertIn('id="zoom-reset" type="button"', html)
+        self.assertIn('aria-label="Reset graph to 100 percent"', html)
+        self.assertIn('aria-live="polite"', html)
+        self.assertIn("window.requestAnimationFrame(fitGraph)", html)
+        self.assertIn("const fitZoom = Math.min(", html)
+        self.assertIn("svg.style.width = `${width * zoom}px`", html)
+        self.assertIn("viewport.scrollLeft = drag.left", html)
+        self.assertIn("if (ev.pointerType !== 'mouse'", html)
+        self.assertIn("if (!ev.ctrlKey && !ev.metaKey) return", html)
+        self.assertIn("overflow-wrap: anywhere", html)
+        self.assertNotIn('width="${width}" height="${height}"', html)
+
+    def test_html_renderer_exposes_presentation_only_state_legend(self) -> None:
+        html = render_exploration_graph_html({"nodes": [{"id": "root"}], "edges": []})
+
+        self.assertIn('data-presentation-only="true"', html)
+        self.assertIn("Rendering legend", html)
+        self.assertIn("scientific outcome rejected", html)
+        self.assertIn("execution failed", html)
+        self.assertIn("do not add scientific evidence", html)
+
+    def test_html_renderer_keeps_node_activation_when_view_is_zoomable(self) -> None:
+        html = render_exploration_graph_html(
+            {
+                "nodes": [
+                    {"id": "root", "children": ["child"]},
+                    {"id": "child", "children": []},
+                ],
+                "edges": [],
+            }
+        )
+
+        self.assertIn('role="button" aria-label="node ${esc(id)}"', html)
+        self.assertIn("el.addEventListener('click', () => show(node))", html)
+        self.assertIn("ev.key === 'Enter' || ev.key === ' '", html)
+        self.assertIn("el.classList.toggle('selected', selected)", html)
+        self.assertIn("el.setAttribute('aria-pressed', String(selected))", html)
+        self.assertIn(
+            "if (ev.target.closest && ev.target.closest('.node')) return", html
+        )
+
+    def test_html_renderer_distinguishes_execution_from_scientific_outcome(
+        self,
+    ) -> None:
+        html = render_exploration_graph_html(
+            {
+                "nodes": [
+                    {
+                        "id": "decision",
+                        "is_buggy": False,
+                        "scientific_outcome": "rejected_hypothesis",
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+        self.assertIn("scientificOutcome.toLowerCase().startsWith('rejected')", html)
+        self.assertIn("scientificRejected ? 'scientific-rejected' : ''", html)
+        self.assertIn(".node.scientific-rejected rect", html)
+        self.assertIn("n.is_buggy === true ? 'buggy' : ''", html)
+        self.assertIn("scientific outcome", html)
+        self.assertIn("execution ok", html)
+        self.assertIn("execution unknown", html)
+        self.assertIn("scientificOutcome.slice(0, 28) + '...'", html)
+
+    def test_edges_encoding_ignores_stale_node_mirrors_in_dag_analysis(self) -> None:
+        graph = {
+            "topology_encoding": "edges",
+            "nodes": [
+                {"id": "root", "parent_id": "child", "children": []},
+                {"id": "child", "parent_id": None, "children": ["root"]},
+            ],
+            "edges": [{"parent": "root", "child": "child"}],
+        }
+
+        dag = analyze_exploration_graph(graph)
+
+        self.assertTrue(dag["is_dag"])
+        self.assertEqual(dag["edge_count"], 1)
+        self.assertEqual(dag["root_ids"], ["root"])
+        self.assertEqual(dag["leaf_ids"], ["child"])
+        self.assertEqual(dag["max_depth"], 1)
 
 
 class ClaimRegistryTest(unittest.TestCase):

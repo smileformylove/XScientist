@@ -5697,6 +5697,55 @@ def _write_daily_summary(status: dict[str, Any], daemon_dir: Path) -> dict[str, 
     return summary
 
 
+def _terminate_cycle_process(
+    process: subprocess.Popen[Any], *, grace_seconds: float = 2.0
+) -> bool:
+    """Terminate a timed-out cycle and report whether its direct child was reaped.
+
+    Cycles run in their own POSIX process group so a generator that launches
+    workers does not outlive the daemon's timeout.  SIGTERM gets a short grace
+    period before SIGKILL; every branch waits on the direct child to avoid
+    recording a timeout while leaving a zombie behind.
+    """
+
+    posix = os.name == "posix"
+
+    def signal_process(sig: signal.Signals) -> None:
+        try:
+            if posix:
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGTERM:  # pragma: no cover - Windows CI
+                process.terminate()
+            else:  # pragma: no cover - Windows CI
+                process.kill()
+        except OSError:
+            # The child can exit between timeout and signalling.  ``wait``
+            # below remains the authoritative reaping check.
+            if posix and sig == signal.SIGTERM:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+
+    signal_process(signal.SIGTERM)
+    try:
+        process.wait(timeout=max(0.0, float(grace_seconds)))
+        if posix:
+            # The leader may exit on TERM while a worker in its group ignores
+            # it. Reaping the leader alone does not finish group cleanup.
+            signal_process(signal.SIGKILL)
+        return True
+    except subprocess.TimeoutExpired:
+        signal_process(signal.SIGKILL)
+        try:
+            process.wait(timeout=max(0.0, float(grace_seconds)))
+            return True
+        except (OSError, subprocess.TimeoutExpired):
+            return process.poll() is not None
+    except OSError:
+        return process.poll() is not None
+
+
 def _default_daemon_status(
     parsed: argparse.Namespace, daemon_dir: Path
 ) -> dict[str, Any]:
@@ -5712,6 +5761,15 @@ def _default_daemon_status(
         "last_cycle_started_at": None,
         "last_cycle_finished_at": None,
         "last_returncode": None,
+        "last_cycle_execution": {},
+        "last_cycle_execution_status": None,
+        "last_cycle_execution_finished_at": None,
+        "last_cycle_timed_out": False,
+        "last_cycle_process_reaped": False,
+        "last_cycle_postprocessing_status": None,
+        "last_cycle_postprocessing_finished_at": None,
+        "last_cycle_postprocessing_error": None,
+        "last_cycle_history_error": None,
         "last_error": None,
         "next_cycle_at": None,
         "last_views": {},
@@ -5771,13 +5829,40 @@ def _run_cycle(
     _append_log(heartbeat_log, f"starting cycle {cycle_index}: {' '.join(cmd)}")
 
     if parsed.dry_run:
+        execution_finished_at = _now_iso()
+        execution = {
+            "cycle": cycle_index,
+            "status": "succeeded",
+            "started_at": status["last_cycle_started_at"],
+            "finished_at": execution_finished_at,
+            "duration_seconds": 0.0,
+            "returncode": 0,
+            "timed_out": False,
+            "process_reaped": True,
+        }
+        status["last_cycle_execution"] = execution
+        status["last_cycle_execution_status"] = "succeeded"
+        status["last_cycle_execution_finished_at"] = execution_finished_at
+        status["last_cycle_timed_out"] = False
+        status["last_cycle_process_reaped"] = True
+        status["last_cycle_postprocessing_status"] = "not_run"
+        status["last_cycle_postprocessing_finished_at"] = execution_finished_at
+        status["last_cycle_postprocessing_error"] = None
+        status["last_cycle_history_error"] = None
+        status["updated_at"] = execution_finished_at
+        _safe_write_json(status_path, status)
         _append_jsonl(
             history_path,
             {
                 "cycle": cycle_index,
                 "started_at": status["last_cycle_started_at"],
                 "finished_at": _now_iso(),
+                "execution_finished_at": execution_finished_at,
                 "returncode": 0,
+                "execution_status": "succeeded",
+                "timed_out": False,
+                "process_reaped": True,
+                "postprocessing_status": "not_run",
                 "mode": "dry_run",
                 "command": cmd,
                 "guardrail_mode": status.get("guardrail_mode"),
@@ -5848,7 +5933,10 @@ def _run_cycle(
             stderr=subprocess.STDOUT,
             text=True,
             env=child_env,
+            start_new_session=os.name == "posix",
         )
+        process_reaped = False
+        timed_out = False
         try:
             timeout_seconds = (
                 parsed.cycle_timeout_minutes * 60
@@ -5856,29 +5944,135 @@ def _run_cycle(
                 else None
             )
             returncode = process.wait(timeout=timeout_seconds)
+            process_reaped = True
         except subprocess.TimeoutExpired:
-            process.kill()
+            timed_out = True
+            process_reaped = _terminate_cycle_process(process)
             returncode = 124
             log_handle.write(
                 f"\n[daemon] cycle timed out after {parsed.cycle_timeout_minutes} minutes\n"
             )
         duration_seconds = round(time.time() - started, 2)
+    execution_finished_at = _now_iso()
+    execution_status = "timed_out" if timed_out else (
+        "succeeded" if returncode == 0 else "failed"
+    )
+    execution = {
+        "cycle": cycle_index,
+        "status": execution_status,
+        "started_at": status["last_cycle_started_at"],
+        "finished_at": execution_finished_at,
+        "duration_seconds": duration_seconds,
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "process_reaped": process_reaped,
+    }
+    # Persist the child outcome before any manager rebuild or export.  The
+    # execution result is authoritative even if later presentation work fails.
+    status["last_cycle_execution"] = execution
+    status["last_cycle_execution_status"] = execution_status
+    status["last_cycle_execution_finished_at"] = execution_finished_at
+    status["last_cycle_timed_out"] = timed_out
+    status["last_cycle_process_reaped"] = process_reaped
+    status["last_cycle_postprocessing_status"] = "running"
+    status["last_cycle_postprocessing_finished_at"] = None
+    status["last_cycle_postprocessing_error"] = None
+    status["last_cycle_history_error"] = None
+    status["updated_at"] = execution_finished_at
+    _safe_write_json(status_path, status)
 
-    manager = ResearchManager(parsed.research_dir)
-    manager.rebuild_index()
-    status["source_quality_feedback"] = _build_source_quality_feedback(manager, parsed)
-    history_feedback = build_active_source_feedback_snapshot(status)
-    status["active_source_feedback_snapshot"] = history_feedback
-    views = _export_cycle_views(manager, parsed, daemon_dir)
-    status["last_views"] = views
-    _append_jsonl(
-        history_path,
-        {
+    views: dict[str, Any] = {}
+    history_feedback: dict[str, Any] = {}
+    postprocessing_status = "completed"
+    postprocessing_error: str | None = None
+    postprocessing_finished_at = execution_finished_at
+    try:
+        manager = ResearchManager(parsed.research_dir)
+        manager.rebuild_index()
+        status["source_quality_feedback"] = _build_source_quality_feedback(
+            manager, parsed
+        )
+        history_feedback = build_active_source_feedback_snapshot(status)
+        status["active_source_feedback_snapshot"] = history_feedback
+        views = _export_cycle_views(manager, parsed, daemon_dir)
+        status["last_views"] = views
+        runtime = _refresh_source_runtime_state(
+            status, status.get("source_queue") or []
+        )
+        active_key = status.get("active_source_key")
+        if active_key and active_key in runtime:
+            runtime[active_key]["total_cycles"] = (
+                int(runtime[active_key].get("total_cycles", 0) or 0) + 1
+            )
+            runtime[active_key]["cycles_today"] = (
+                int(runtime[active_key].get("cycles_today", 0) or 0) + 1
+            )
+            runtime[active_key]["last_finished_at"] = _now_iso()
+            if returncode == 0:
+                runtime[active_key]["total_successes"] = (
+                    int(runtime[active_key].get("total_successes", 0) or 0) + 1
+                )
+                runtime[active_key]["successes_today"] = (
+                    int(runtime[active_key].get("successes_today", 0) or 0) + 1
+                )
+                runtime[active_key]["consecutive_failures"] = 0
+            else:
+                runtime[active_key]["consecutive_failures"] = (
+                    int(runtime[active_key].get("consecutive_failures", 0) or 0) + 1
+                )
+            active_source = status.get("active_source") or {}
+            cooldown_cycles = int(active_source.get("cooldown_cycles", 0) or 0)
+            command = active_source.get("source_command") or {}
+            if command.get("cooldown_cycles_once") is not None:
+                try:
+                    cooldown_cycles = max(
+                        cooldown_cycles,
+                        int(command.get("cooldown_cycles_once") or 0),
+                    )
+                except (TypeError, ValueError):
+                    pass
+            if cooldown_cycles > 0:
+                runtime[active_key]["cooldown_until_cycle"] = (
+                    cycle_index + cooldown_cycles
+                )
+        matched_key = status.get("active_source_command_key")
+        if matched_key:
+            _consume_source_command(daemon_dir, status, matched_key)
+            status["active_source_command_key"] = None
+        _append_log(
+            heartbeat_log,
+            f"finished cycle {cycle_index} with returncode={returncode}; views={views}",
+        )
+    except Exception as exc:
+        postprocessing_status = "failed"
+        postprocessing_error = f"{type(exc).__name__}: {exc}"
+        try:
+            _append_log(
+                heartbeat_log,
+                f"cycle {cycle_index} postprocessing failed after execution "
+                f"returncode={returncode}: {postprocessing_error}",
+            )
+        except Exception:
+            pass
+    finally:
+        postprocessing_finished_at = _now_iso()
+        status["last_cycle_postprocessing_status"] = postprocessing_status
+        status["last_cycle_postprocessing_finished_at"] = postprocessing_finished_at
+        status["last_cycle_postprocessing_error"] = postprocessing_error
+        status["updated_at"] = postprocessing_finished_at
+        history_entry = {
             "cycle": cycle_index,
             "started_at": status["last_cycle_started_at"],
-            "finished_at": _now_iso(),
+            "finished_at": postprocessing_finished_at,
+            "execution_finished_at": execution_finished_at,
+            "postprocessing_finished_at": postprocessing_finished_at,
             "duration_seconds": duration_seconds,
             "returncode": returncode,
+            "execution_status": execution_status,
+            "timed_out": timed_out,
+            "process_reaped": process_reaped,
+            "postprocessing_status": postprocessing_status,
+            "postprocessing_error": postprocessing_error,
             "command": cmd,
             "batch_name": batch_name,
             "cycle_log": str(cycle_log),
@@ -5886,50 +6080,20 @@ def _run_cycle(
             "guardrail_mode": status.get("guardrail_mode"),
             "guardrail_reason": status.get("guardrail_reason"),
             "active_source_feedback": history_feedback,
-        },
-    )
-    runtime = _refresh_source_runtime_state(status, status.get("source_queue") or [])
-    active_key = status.get("active_source_key")
-    if active_key and active_key in runtime:
-        runtime[active_key]["total_cycles"] = (
-            int(runtime[active_key].get("total_cycles", 0) or 0) + 1
-        )
-        runtime[active_key]["cycles_today"] = (
-            int(runtime[active_key].get("cycles_today", 0) or 0) + 1
-        )
-        runtime[active_key]["last_finished_at"] = _now_iso()
-        if returncode == 0:
-            runtime[active_key]["total_successes"] = (
-                int(runtime[active_key].get("total_successes", 0) or 0) + 1
-            )
-            runtime[active_key]["successes_today"] = (
-                int(runtime[active_key].get("successes_today", 0) or 0) + 1
-            )
-            runtime[active_key]["consecutive_failures"] = 0
-        else:
-            runtime[active_key]["consecutive_failures"] = (
-                int(runtime[active_key].get("consecutive_failures", 0) or 0) + 1
-            )
-        active_source = status.get("active_source") or {}
-        cooldown_cycles = int(active_source.get("cooldown_cycles", 0) or 0)
-        command = active_source.get("source_command") or {}
-        if command.get("cooldown_cycles_once") is not None:
+        }
+        try:
+            _append_jsonl(history_path, history_entry)
+        except Exception as exc:
+            status["last_cycle_history_error"] = f"{type(exc).__name__}: {exc}"
             try:
-                cooldown_cycles = max(
-                    cooldown_cycles, int(command.get("cooldown_cycles_once") or 0)
+                _append_log(
+                    heartbeat_log,
+                    f"cycle {cycle_index} history append failed after execution "
+                    f"returncode={returncode}: {status['last_cycle_history_error']}",
                 )
-            except (TypeError, ValueError):
+            except Exception:
                 pass
-        if cooldown_cycles > 0:
-            runtime[active_key]["cooldown_until_cycle"] = cycle_index + cooldown_cycles
-    matched_key = status.get("active_source_command_key")
-    if matched_key:
-        _consume_source_command(daemon_dir, status, matched_key)
-        status["active_source_command_key"] = None
-    _append_log(
-        heartbeat_log,
-        f"finished cycle {cycle_index} with returncode={returncode}; views={views}",
-    )
+        _safe_write_json(status_path, status)
     if parsed.source_rotation == "round_robin" and status.get("source_queue"):
         status["source_index"] = (int(status.get("source_index", 0)) + 1) % len(
             status.get("source_queue", [])

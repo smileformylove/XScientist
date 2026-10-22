@@ -53,13 +53,38 @@ class DistributionBuildTests(unittest.TestCase):
         if shutil.which(sys.executable) is None:
             self.skipTest("python executable unavailable")
         repo_root = Path(__file__).resolve().parents[1]
-        self.addCleanup(
-            shutil.rmtree,
-            repo_root / "compat" / "xscientist.egg-info",
-            ignore_errors=True,
-        )
         with tempfile.TemporaryDirectory() as td:
-            out_dir = Path(td)
+            temporary_root = Path(td)
+            source_root = temporary_root / "source"
+            out_dir = temporary_root / "dist"
+            out_dir.mkdir()
+
+            def ignore_generated_source(directory: str, names: list[str]) -> set[str]:
+                ignored = {
+                    name
+                    for name in names
+                    if name == "__pycache__"
+                    or name.endswith((".egg-info", ".pyc", ".pyo"))
+                }
+                if Path(directory) == repo_root:
+                    ignored.update(
+                        {
+                            ".ci-output",
+                            ".git",
+                            ".pytest_cache",
+                            "build",
+                            "dist",
+                            "site",
+                        }
+                    )
+                return ignored
+
+            shutil.copytree(
+                repo_root,
+                source_root,
+                symlinks=True,
+                ignore=ignore_generated_source,
+            )
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -70,7 +95,7 @@ class DistributionBuildTests(unittest.TestCase):
                     "--outdir",
                     str(out_dir),
                 ],
-                cwd=repo_root,
+                cwd=source_root,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -191,6 +216,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/protocol/schemas/research_rollout_audit.schema.json",
                 "ai_scientist/protocol/schemas/belief_context.schema.json",
                 "ai_scientist/protocol/schemas/belief_context_audit.schema.json",
+                "ai_scientist/protocol/schemas/latent_trajectory.schema.json",
                 "ai_scientist/protocol/schemas/process_audit.schema.json",
                 "ai_scientist/protocol/schemas/evidence_index.schema.json",
                 "ai_scientist/protocol/schemas/system_comparison.schema.json",

@@ -398,6 +398,9 @@ def test_confirmation_seed_worker_uses_host_only_verification(
 
 def test_metric_selection_and_worker_count_are_host_bounded(tmp_path: Path) -> None:
     assert set(metric_selection_spec.json_schema["properties"]["metric"]["enum"]) == {
+        "log_loss",
+        "brier",
+        "ece",
         "accuracy",
         "precision",
         "recall",

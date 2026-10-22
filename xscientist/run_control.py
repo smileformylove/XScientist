@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import shlex
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,39 @@ from ai_scientist.utils.privacy import (
 RUN_SCHEMA = "xscientist.local-run.v1"
 RUN_STATE_ENV = "XSCIENTIST_RUN_STATE"
 DETACHED_STARTUP_GRACE_SECONDS = 1.0
+_DARWIN_PROC_PIDTBSDINFO = 3
+_DARWIN_PROC_BSDINFO_SIZE = 136
+_DARWIN_ZOMBIE_STATUS = 5
+_MAX_SIGNED_PID = (1 << 31) - 1
+_DARWIN_PROCESS_IDENTITY_DOMAIN = b"xscientist.darwin-process-identity.v1\0"
+_TRUSTED_PS_EXECUTABLES = (Path("/bin/ps"), Path("/usr/bin/ps"))
+
+
+class _DarwinProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
 
 
 class RunControlError(RuntimeError):
@@ -150,21 +185,142 @@ def _pid_is_alive(pid: Any, *, hostname: str | None = None) -> bool:
     return True
 
 
-def _process_identity(pid: int) -> str | None:
-    """Hash OS-owned start/command metadata to guard against PID reuse."""
+def _darwin_process_metadata(pid: int) -> tuple[int, int, bytes, bytes] | None:
+    """Return stable kernel-owned metadata when Darwin cannot execute ``ps``."""
 
-    if os.name != "posix":  # pragma: no cover - Windows has no portable ps
+    if (
+        sys.platform != "darwin"
+        or type(pid) is not int
+        or pid <= 0
+        or pid > _MAX_SIGNED_PID
+        or ctypes.sizeof(_DarwinProcBSDInfo) != _DARWIN_PROC_BSDINFO_SIZE
+    ):
         return None
-    completed = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
-        text=True,
-        capture_output=True,
-        check=False,
+    info = _DarwinProcBSDInfo()
+    try:
+        proc_pidinfo = ctypes.CDLL(
+            "/usr/lib/libproc.dylib", use_errno=True
+        ).proc_pidinfo
+        proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        proc_pidinfo.restype = ctypes.c_int
+        size = ctypes.sizeof(info)
+        received = proc_pidinfo(
+            pid,
+            _DARWIN_PROC_PIDTBSDINFO,
+            0,
+            ctypes.byref(info),
+            size,
+        )
+    except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+        return None
+    if (
+        received != size
+        or info.pbi_pid != pid
+        or info.pbi_status == _DARWIN_ZOMBIE_STATUS
+        or info.pbi_start_tvsec <= 0
+        or info.pbi_start_tvusec >= 1_000_000
+    ):
+        return None
+    command = bytes(info.pbi_comm).split(b"\0", 1)[0]
+    name = bytes(info.pbi_name).split(b"\0", 1)[0]
+    return (
+        int(info.pbi_start_tvsec),
+        int(info.pbi_start_tvusec),
+        command,
+        name,
     )
-    value = completed.stdout.strip()
-    if completed.returncode or not value:
+
+
+def _ps_process_identity(pid: int) -> str | None:
+    for executable in _TRUSTED_PS_EXECUTABLES:
+        try:
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "-p",
+                    str(pid),
+                    "-o",
+                    "lstart=",
+                    "-o",
+                    "command=",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = completed.stdout.strip()
+        if completed.returncode == 0 and value:
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return None
+
+
+def _darwin_process_identity(pid: int) -> str | None:
+    metadata = _darwin_process_metadata(pid)
+    if metadata is None:
         return None
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    seconds, microseconds, command, name = metadata
+    payload = _DARWIN_PROCESS_IDENTITY_DOMAIN + struct.pack(
+        ">IQQHH", pid, seconds, microseconds, len(command), len(name)
+    )
+    return hashlib.sha256(payload + command + name).hexdigest()
+
+
+def _process_identity(pid: int) -> str | None:
+    """Hash OS-owned process-start metadata to guard against PID reuse."""
+
+    if type(pid) is not int or pid <= 0 or pid > _MAX_SIGNED_PID:
+        return None
+    if os.name != "posix":  # pragma: no cover - Windows has no portable source
+        return None
+    legacy = _ps_process_identity(pid)
+    if legacy is not None or sys.platform != "darwin":
+        return legacy
+    return _darwin_process_identity(pid)
+
+
+def _process_identity_matches(pid: int, expected: str) -> bool | None:
+    """Compare across every available process-identity provider.
+
+    Darwin can observe the same process through either ``ps`` or libproc.  A
+    match from either provider proves ownership, while a mismatch proves PID
+    reuse only when both providers are available.  Missing evidence remains
+    indeterminate so callers can fail closed.
+    """
+
+    if (
+        type(pid) is not int
+        or pid <= 0
+        or pid > _MAX_SIGNED_PID
+        or not isinstance(expected, str)
+        or not expected
+    ):
+        return None
+    preferred = _process_identity(pid)
+    if preferred == expected:
+        return True
+    if os.name != "posix":  # pragma: no cover - Windows has no portable source
+        return None
+    if sys.platform != "darwin":
+        return None if preferred is None else False
+
+    ps_identity = _ps_process_identity(pid)
+    if ps_identity == expected:
+        return True
+    native_identity = _darwin_process_identity(pid)
+    if native_identity == expected:
+        return True
+    if ps_identity is None or native_identity is None:
+        return None
+    return False
 
 
 _PUBLIC_VALUE_FLAGS = {
@@ -319,8 +475,10 @@ def _reconcile(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         stored_identity = payload.get("process_identity")
         if not stored_identity or payload.get("hostname") != socket.gethostname():
             return payload
-        current_identity = _process_identity(int(payload["pid"]))
-        if current_identity == stored_identity:
+        identity_match = _process_identity_matches(
+            int(payload["pid"]), str(stored_identity)
+        )
+        if identity_match is not False:
             return payload
     reconciled = dict(payload)
     reconciled["status"] = (
@@ -574,8 +732,12 @@ def cancel_run(workspace: str | Path, run_id: str) -> dict[str, Any]:
     pid = int(payload.get("pid") or 0)
     if os.name == "posix":
         stored_identity = payload.get("process_identity")
-        current_identity = _process_identity(pid)
-        if not stored_identity or current_identity != stored_identity:
+        identity_match = (
+            _process_identity_matches(pid, str(stored_identity))
+            if stored_identity
+            else None
+        )
+        if identity_match is not True:
             raise RunControlError(
                 "run process identity cannot be verified; refusing to signal"
             )

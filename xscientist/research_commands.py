@@ -39,13 +39,16 @@ from ai_scientist.utils.trajectory_binding import (
 
 from .research_git import (
     CheckpointResult,
+    ObjectPointerResult,
     ResearchGitError,
     ResearchObjectResult,
     _add_research_objects_atomically,
+    _fsync_directory,
     _repository_lock,
-    _rollback_new_research_object_pointers_locked,
+    _resolve_configured_path,
     capture_environment_receipt,
     create_checkpoint,
+    load_repository_config,
     research_object_introduction_order,
     repository_status,
     validate_research_logical_component,
@@ -519,6 +522,32 @@ def _finish(
             reproduce_command=reproduce_command,
         )
     return {"object": result, "related": list(related), "checkpoint": checkpoint}
+
+
+def _planned_result_artifact_pointer_bindings(
+    repository: ResearchRepository,
+    *,
+    logical_paths: Mapping[str, str],
+    artifact_hashes: Mapping[str, str],
+) -> dict[Path, tuple[str, str]]:
+    """Resolve the exact pointer leaves an artifact transaction may create."""
+
+    config = load_repository_config(repository.path)
+    pointer_root = _resolve_configured_path(
+        repository.path,
+        (config.get("storage") or {}).get("pointer_directory") or "research-objects",
+        label="pointer directory",
+    )
+    planned: dict[Path, tuple[str, str]] = {}
+    for name, logical_path in logical_paths.items():
+        object_hash = str(artifact_hashes[name])
+        digest = object_hash.removeprefix("sha256:")
+        logical_digest = hashlib.sha256(logical_path.encode("utf-8")).hexdigest()[:16]
+        planned[pointer_root / f"sha256-{digest}-{logical_digest}.json"] = (
+            object_hash,
+            logical_path,
+        )
+    return planned
 
 
 def save_hypothesis(
@@ -1097,6 +1126,8 @@ def save_experiment(
     plan_id: str | None = None,
     priority_id: str | None = None,
     preregistration_id: str | None = None,
+    admission_gate_id: str | None = None,
+    admission_preflight: Mapping[str, Any] | None = None,
     metrics: Mapping[str, Any] | None = None,
     configuration: Mapping[str, Any] | None = None,
     producer_id: str | None = None,
@@ -1148,7 +1179,6 @@ def save_experiment(
         else {}
     )
     artifact_pointers: dict[str, Any] = {}
-    pointer_paths: set[str] = set()
     pointer_refs: set[str] = set()
     artifact_sources: dict[str, Path] = {}
     if result_artifact_paths:
@@ -1198,6 +1228,7 @@ def save_experiment(
         )
         payload["boundary_role"] = boundary_role
     environment = capture_environment_receipt(repository.path)
+    admission_required = repository.experiment_admission_mode() == "required"
     provenance: dict[str, Any] = {
         "environment_hash": environment_hash or environment["content_hash"],
         "dependency_lock_hashes": _hashes(
@@ -1217,7 +1248,7 @@ def save_experiment(
         code_commit
         or (
             ""
-            if str(study_phase).strip().lower() == "confirmatory"
+            if admission_required or str(study_phase).strip().lower() == "confirmatory"
             else repository.status().get("head") or ""
         )
     )
@@ -1256,7 +1287,11 @@ def save_experiment(
                 "`xscientist status` and retry `xscientist record`"
             )
         transaction_head = str(repository.status().get("head") or "")
-        if not code_commit and str(study_phase).strip().lower() != "confirmatory":
+        if (
+            not admission_required
+            and not code_commit
+            and str(study_phase).strip().lower() != "confirmatory"
+        ):
             provenance["code_commit"] = transaction_head
         lifecycle = ResearchLifecycle(repository)
         prepared = lifecycle.validate_experiment_attempt(
@@ -1264,43 +1299,94 @@ def save_experiment(
             preregistration_id=preregistration_id,
             plan_id=plan_id,
             priority_id=priority_id,
+            admission_gate_id=admission_gate_id,
+            admission_preflight=admission_preflight,
             provenance=provenance,
         )
+        planned_pointer_bindings = _planned_result_artifact_pointer_bindings(
+            repository,
+            logical_paths=artifact_logical_paths,
+            artifact_hashes=artifact_hashes,
+        )
+        pointer_transaction = lifecycle._begin_result_artifact_pointer_transaction(
+            planned_pointer_bindings
+        )
         pointer_results = []
+        rollback_receipt = None
+        pending_pointer_paths: set[str] = set()
         recorded_result: ResearchObjectResult | None = None
+        terminal_reservation_path: Path | None = None
         try:
             pointer_results = _add_research_objects_atomically(
                 repository.path,
                 artifact_requests,
             )
+            rollback_receipt = (
+                lifecycle._capture_result_artifact_pointer_rollback_receipt(
+                    pointer_transaction,
+                    pointer_results,
+                )
+            )
+            if len(pointer_results) != len(artifact_sources):
+                raise ResearchGitError(
+                    "result artifact transaction returned the wrong pointer count"
+                )
             pointers_by_label = dict(
                 zip(sorted(artifact_sources), pointer_results, strict=True)
             )
             for name, pointer in sorted(pointers_by_label.items()):
+                if type(pointer) is not ObjectPointerResult:
+                    raise ResearchGitError(
+                        "result artifact transaction returned an invalid pointer result"
+                    )
                 logical_path = artifact_logical_paths[name]
-                pointer_path = pointer.pointer_path.relative_to(
-                    repository.path
-                ).as_posix()
+                try:
+                    pointer_path = (
+                        pointer.pointer_path.resolve()
+                        .relative_to(repository.path)
+                        .as_posix()
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise ResearchGitError(
+                        "result artifact pointer is outside the research repository"
+                    ) from exc
                 artifact_pointers[name] = {
                     "logical_name": name,
                     "content_hash": pointer.object_hash,
                     "logical_path": logical_path,
                     "pointer_path": pointer_path,
                 }
-                pointer_paths.add(pointer_path)
+                if not pointer.linked:
+                    pending_pointer_paths.add(pointer_path)
                 pointer_refs.add(pointer.object_hash)
             if artifact_pointers:
-                prepared_payload = dict(prepared["payload"])
-                prepared_payload["result_artifacts"] = artifact_pointers
-                prepared = {**prepared, "payload": prepared_payload}
+                prepared = lifecycle._validate_experiment_attempt_with_result_artifacts(
+                    prepared,
+                    artifact_pointers,
+                    pointer_results=pointer_results,
+                    pointer_transaction=pointer_transaction,
+                    preregistration_id=preregistration_id,
+                    plan_id=plan_id,
+                    priority_id=priority_id,
+                    admission_gate_id=admission_gate_id,
+                    admission_preflight=admission_preflight,
+                )
             recorded = lifecycle.record_validated_experiment_attempt(
                 prepared,
                 commit=False,
             )
             result = recorded["attempt"]
             recorded_result = result
-            stage = "experiment" if result.state == "completed" else "failed"
-            return _finish(
+            reservation_path = recorded.get("terminal_reservation")
+            if isinstance(reservation_path, Path):
+                terminal_reservation_path = reservation_path
+            lifecycle._revalidate_sealed_result_artifacts(prepared)
+            stage = (
+                "experiment_admission_terminal"
+                if admission_required
+                else ("experiment" if result.state == "completed" else "failed")
+            )
+            finished = _finish(
                 repository,
                 result,
                 stage=stage,
@@ -1308,15 +1394,45 @@ def save_experiment(
                 status=result.state,
                 commit=commit,
                 reproduce_command=reproduce_command,
-                include_paths=sorted(pointer_paths),
+                include_paths=sorted(pending_pointer_paths),
                 object_refs=sorted(pointer_refs),
             )
+            if admission_required and commit:
+                checkpoint = finished.get("checkpoint")
+                if (
+                    not isinstance(checkpoint, CheckpointResult)
+                    or not checkpoint.committed
+                    or not checkpoint.commit
+                ):
+                    raise ResearchGitError(
+                        "required experiment admission terminal checkpoint was not "
+                        "committed"
+                    )
+            return finished
         except BaseException:
-            current_head = str(repository.status().get("head") or "")
-            if current_head == transaction_head:
-                _rollback_new_research_object_pointers_locked(pointer_results)
+            terminal_committed = True
+            try:
+                current_head = str(repository.status().get("head") or "")
+                terminal_committed = current_head != transaction_head
+            except BaseException:
+                # Preserve terminal state unless the unchanged HEAD proves that
+                # this transaction did not create a checkpoint.
+                pass
+            if not terminal_committed:
+                if rollback_receipt is not None:
+                    lifecycle._rollback_result_artifact_pointer_transaction(
+                        pointer_transaction,
+                        rollback_receipt,
+                    )
+                touched_parents: set[Path] = set()
                 if recorded_result is not None and recorded_result.created:
                     recorded_result.path.unlink(missing_ok=True)
+                    touched_parents.add(recorded_result.path.parent)
+                if terminal_reservation_path is not None:
+                    terminal_reservation_path.unlink(missing_ok=True)
+                    touched_parents.add(terminal_reservation_path.parent)
+                for parent in touched_parents:
+                    _fsync_directory(parent)
             raise
 
 

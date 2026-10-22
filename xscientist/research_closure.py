@@ -2380,7 +2380,10 @@ def audit_research_closure(
     )
     claims, superseded_claim_ids = _effective_claim_frontier(all_claims, objects)
     fsck = verify_research_repository(
-        repo, commit=resolved, verify_objects=verify_objects
+        repo,
+        commit=resolved,
+        verify_objects=verify_objects,
+        audit_runtime=ref == "HEAD",
     )
     integrity = {key: value for key, value in fsck.items() if key != "repository"}
     blockers: list[dict[str, str]] = []

@@ -111,19 +111,19 @@ def iter_events(ara_root: str | Path) -> Iterator[dict[str, Any]]:
     if not path.is_file():
         return
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    row.setdefault("_line", line_number)
+                    yield row
     except OSError:
         return
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            row.setdefault("_line", line_number)
-            yield row
 
 
 def append_event(

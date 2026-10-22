@@ -23,7 +23,19 @@
         "recorded": {"type": "boolean"},
         "matches": {"type": ["boolean", "null"]},
         "recorded_content_hash": {"type": ["string", "null"]},
-        "mismatch_fields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        "mismatch_fields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "scope": {
+          "type": "object",
+          "required": ["runtime_identity", "dependency_locks", "dependency_locks_checked", "installed_dependencies_attested", "child_runtime_attested"],
+          "properties": {
+            "runtime_identity": {"const": "launcher_python_implementation_version_platform_system_machine"},
+            "dependency_locks": {"const": "declared_checkpoint_file_bytes"},
+            "dependency_locks_checked": {"type": "boolean"},
+            "installed_dependencies_attested": {"const": false},
+            "child_runtime_attested": {"const": false}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

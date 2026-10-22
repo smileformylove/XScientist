@@ -470,6 +470,7 @@ _ACTION_OWNERS = {
     "replace_contested_claim": "researcher",
     "reproduce": "independent_reproducer",
     "inspect_dag": "researcher",
+    "continue_locked_plan": "researcher",
     "strengthen_research_program": "researcher",
 }
 
@@ -708,6 +709,42 @@ def build_research_guide(
     latest_hypothesis = guide_latest("hypothesis")
     latest_plan = guide_latest("research_plan")
 
+    def explicit_permission(*values: Any) -> bool | None:
+        declared = [value for value in values if isinstance(value, bool)]
+        if False in declared:
+            return False
+        if True in declared:
+            return True
+        return None
+
+    latest_plan_payload = (latest_plan or {}).get("payload") or {}
+    research_permissions = latest_plan_payload.get("research_permissions") or {}
+    active_authorization = {
+        "hypothesis_registration_authorized": explicit_permission(
+            latest_plan_payload.get("hypothesis_registration_authorized"),
+            research_permissions.get("hypothesis_allowed"),
+        ),
+        "experiment_authorized": explicit_permission(
+            latest_plan_payload.get("experiment_authorized"),
+            research_permissions.get("empirical_experiment_allowed"),
+        ),
+        "training_authorized": explicit_permission(
+            latest_plan_payload.get("training_authorized"),
+            research_permissions.get("training_allowed"),
+        ),
+        "ara_authorized": explicit_permission(
+            latest_plan_payload.get("ara_authorized"),
+            research_permissions.get("ara_allowed"),
+        ),
+    }
+    active_plan_restricted = latest_plan is not None and (
+        active_authorization["experiment_authorized"] is False
+        or (
+            not counts["hypothesis"]
+            and active_authorization["hypothesis_registration_authorized"] is False
+        )
+    )
+
     def ordered_kind(kind: str) -> list[dict[str, Any]]:
         return sorted(
             (item for item in objects if item.get("kind") == kind),
@@ -724,7 +761,41 @@ def build_research_guide(
             if relation.get("type") == relation_type and relation.get("target")
         }
 
-    attempts = ordered_kind("experiment_attempt")
+    all_attempts = ordered_kind("experiment_attempt")
+    active_lineage_ids: set[str] = set()
+    if latest_plan is not None:
+        active_lineage_ids.add(str(latest_plan["object_id"]))
+        plan_sequence = sequences[str(latest_plan["object_id"])]
+        changed = True
+        while changed:
+            changed = False
+            for item in objects:
+                object_id = str(item["object_id"])
+                if (
+                    object_id in active_lineage_ids
+                    or sequences[object_id] < plan_sequence
+                ):
+                    continue
+                if any(
+                    str(relation.get("target") or "") in active_lineage_ids
+                    for relation in item.get("relations") or []
+                ):
+                    active_lineage_ids.add(object_id)
+                    changed = True
+    attempts = (
+        [
+            item
+            for item in all_attempts
+            if str(item["object_id"]) in active_lineage_ids
+        ]
+        if latest_plan is not None
+        else all_attempts
+    )
+    ignored_historical_attempt_ids = [
+        str(item["object_id"])
+        for item in all_attempts
+        if item not in attempts
+    ]
     attempt_ids = {str(item["object_id"]) for item in attempts}
     evidence_objects = ordered_kind("evidence")
     experimental_evidence = [
@@ -943,7 +1014,54 @@ def build_research_guide(
             }
         )
 
-    if not counts["hypothesis"]:
+    if ignored_historical_attempt_ids:
+        warnings.append(
+            {
+                "code": "historical_attempts_outside_active_lineage",
+                "message": _text(
+                    selected_language,
+                    (
+                        f"Ignored {len(ignored_historical_attempt_ids)} historical "
+                        "experiment attempt(s) outside the latest plan lineage."
+                    ),
+                    (
+                        f"已忽略最新计划谱系之外的 "
+                        f"{len(ignored_historical_attempt_ids)} 个历史实验对象。"
+                    ),
+                ),
+                "object_ids": ignored_historical_attempt_ids,
+            }
+        )
+
+    if active_plan_restricted:
+        active_plan_id = str(latest_plan["object_id"])
+        restrictions = [
+            name.replace("_authorized", "")
+            for name, value in active_authorization.items()
+            if value is False
+        ]
+        next_steps.append(
+            _step(
+                selected_language,
+                code="continue_locked_plan",
+                title_en="Continue only the work authorized by the active plan",
+                title_zh="只继续当前计划明确授权的工作",
+                why_en=(
+                    "The latest plan explicitly restricts "
+                    + ", ".join(restrictions)
+                    + ". Historical experiment or hypothesis backlogs must not "
+                    "override that active gate."
+                ),
+                why_zh=(
+                    "最新计划明确限制了 "
+                    + "、".join(restrictions)
+                    + "；历史实验或假设积压不得覆盖当前门禁。"
+                ),
+                command=f"xscientist research objects {shlex.quote(active_plan_id)}",
+                target_object_id=active_plan_id,
+            )
+        )
+    elif not counts["hypothesis"]:
         next_steps.append(
             _step(
                 selected_language,
@@ -1099,7 +1217,7 @@ def build_research_guide(
                 ),
             )
         )
-    elif not attempts:
+    elif not attempts and contested_claim is None:
         next_steps.append(
             _step(
                 selected_language,
@@ -1111,7 +1229,7 @@ def build_research_guide(
                 command="xscientist record .",
             )
         )
-    elif unbound_attempts:
+    elif unbound_attempts and contested_claim is None:
         attempt_ids_to_bind = [str(item["object_id"]) for item in unbound_attempts]
         if len(attempt_ids_to_bind) == 1:
             next_steps.append(
@@ -1151,7 +1269,7 @@ def build_research_guide(
                     candidate_object_ids=attempt_ids_to_bind,
                 )
             )
-    elif uninterpreted_evidence:
+    elif uninterpreted_evidence and contested_claim is None:
         evidence_ids_to_interpret = [
             str(item["object_id"]) for item in uninterpreted_evidence
         ]
@@ -1204,7 +1322,7 @@ def build_research_guide(
                 ),
             )
         )
-    elif unreviewed_inferences:
+    elif unreviewed_inferences and contested_claim is None:
         inference_ids_to_review = [
             str(item["object_id"]) for item in unreviewed_inferences
         ]
@@ -1248,7 +1366,7 @@ def build_research_guide(
                 ),
             )
         )
-    elif unclaimed_reviewed_inferences:
+    elif unclaimed_reviewed_inferences and contested_claim is None:
         inference_ids_to_claim = [
             str(item["object_id"]) for item in unclaimed_reviewed_inferences
         ]
@@ -1483,7 +1601,33 @@ def build_research_guide(
 
     program_review = review_research_program(repository.path, record=False)
     program_report = program_review.get("report") or {}
-    if counts["experiment_attempt"] and program_report.get("gaps"):
+    program_gaps = list(program_report.get("gaps") or [])
+    program_recommendations = list(program_report.get("recommended_actions") or [])
+    deferred_program_gaps: list[dict[str, Any]] = []
+    deferred_program_recommendations: list[dict[str, Any]] = []
+    if active_authorization["hypothesis_registration_authorized"] is False:
+        deferred_codes = {"portfolio_missing"}
+        deferred_program_gaps = [
+            item for item in program_gaps if item.get("code") in deferred_codes
+        ]
+        program_gaps = [
+            item for item in program_gaps if item.get("code") not in deferred_codes
+        ]
+        deferred_program_recommendations = [
+            item
+            for item in program_recommendations
+            if item.get("gap") in deferred_codes
+        ]
+        program_recommendations = [
+            item
+            for item in program_recommendations
+            if item.get("gap") not in deferred_codes
+        ]
+    if (
+        not active_plan_restricted
+        and counts["experiment_attempt"]
+        and program_gaps
+    ):
         next_steps.append(
             _step(
                 selected_language,
@@ -1491,12 +1635,12 @@ def build_research_guide(
                 title_en="Review the open scientific-strategy gaps",
                 title_zh="检查尚未解决的科研策略缺口",
                 why_en=(
-                    f"The deterministic review found {len(program_report['gaps'])} "
+                    f"The deterministic review found {len(program_gaps)} "
                     "open gap(s), such as rival explanations, mechanisms, evidence "
                     "quality, or transfer boundaries."
                 ),
                 why_zh=(
-                    f"确定性审查发现 {len(program_report['gaps'])} 个尚未解决的缺口，"
+                    f"确定性审查发现 {len(program_gaps)} 个尚未解决的缺口，"
                     "可能涉及竞争解释、机制、证据质量或迁移边界。"
                 ),
                 command="xscientist research program review",
@@ -1508,8 +1652,18 @@ def build_research_guide(
             step["command"], command_repo if command_repo is not None else repo
         )
 
+    progress_objects = (
+        [
+            item
+            for item in objects
+            if str(item["object_id"]) in active_lineage_ids
+        ]
+        if latest_plan is not None
+        else objects
+    )
+    progress_counts = Counter(str(item["kind"]) for item in progress_objects)
     completed_stages = sum(
-        bool(counts[kind])
+        bool(progress_counts[kind])
         for kind in (
             "hypothesis",
             "research_plan",
@@ -1546,16 +1700,41 @@ def build_research_guide(
             "completed_stages": completed_stages,
             "total_stages": 8,
             "percent": round(completed_stages / 8 * 100),
+            "scope": {
+                "type": (
+                    "latest_plan_lineage"
+                    if latest_plan is not None
+                    else "repository"
+                ),
+                "root_object_id": (
+                    str(latest_plan["object_id"])
+                    if latest_plan is not None
+                    else None
+                ),
+                "object_count": len(progress_objects),
+            },
         },
         "primary_action": primary_action,
         "counts": dict(sorted(counts.items())),
         "experiment_states": dict(sorted(experiment_states.items())),
+        "active_plan": (
+            {
+                "object_id": str(latest_plan["object_id"]),
+                "authorization": active_authorization,
+                "lineage_object_ids": sorted(active_lineage_ids),
+                "ignored_historical_attempt_ids": ignored_historical_attempt_ids,
+            }
+            if latest_plan is not None
+            else None
+        ),
         "next_steps": next_steps,
         "warnings": warnings,
         "program_review": {
-            "gap_count": len(program_report.get("gaps") or []),
-            "gaps": program_report.get("gaps") or [],
-            "recommendations": program_report.get("recommended_actions") or [],
+            "gap_count": len(program_gaps),
+            "gaps": program_gaps,
+            "recommendations": program_recommendations,
+            "deferred_gaps": deferred_program_gaps,
+            "deferred_recommendations": deferred_program_recommendations,
         },
     }
 

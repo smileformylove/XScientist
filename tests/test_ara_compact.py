@@ -117,6 +117,26 @@ class ARACompactionTests(unittest.TestCase):
         self.assertEqual(verify_manifest_lock(destination)["state"], "clean")
         self.assertTrue(validate_ara(destination).ok)
 
+    def test_edges_encoding_does_not_promote_stale_mirrors(self) -> None:
+        graph_path = self.source / "exploration_graph.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["topology_encoding"] = "edges"
+        graph["nodes"][0]["parent_id"] = "child"
+        graph["nodes"][1]["children"] = ["root"]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+        destination = self.tmp / "compact-edges-only"
+        compact_ara(self.source, destination)
+
+        compact_graph = json.loads(
+            (destination / "exploration_graph.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [(edge["parent"], edge["child"]) for edge in compact_graph["edges"]],
+            [("root", "child")],
+        )
+        self.assertTrue(validate_ara(destination).ok)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

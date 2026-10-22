@@ -461,11 +461,13 @@ def _inside_boundary(path: Path, roots: Iterable[Path]) -> bool:
     return False
 
 
-def _load_ed25519_trust_store(
+def load_ed25519_trust_store(
     path_value: str | os.PathLike[str],
     *,
     forbidden_roots: Iterable[str | os.PathLike[str]] | None = None,
 ) -> dict[str, Any]:
+    """Load an external Ed25519 trust store without crossing forbidden roots."""
+
     raw_path = Path(os.path.abspath(os.path.expanduser(str(path_value))))
     boundaries = _normalized_boundary_roots(forbidden_roots)
     if _inside_boundary(raw_path, boundaries):
@@ -525,6 +527,10 @@ def _load_ed25519_trust_store(
             "revoked": entry.get("revoked") is True,
         }
     return loaded
+
+
+# Retain the private name for integrations that patched the historical helper.
+_load_ed25519_trust_store = load_ed25519_trust_store
 
 
 def _blocked(errors: Iterable[str], **metadata: Any) -> dict[str, Any]:
@@ -720,5 +726,6 @@ __all__ = [
     "build_verifier_authority_payload",
     "build_verifier_authority_receipt",
     "canonical_principal",
+    "load_ed25519_trust_store",
     "verify_verifier_authority_receipt",
 ]

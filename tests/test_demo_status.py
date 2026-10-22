@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from xscientist.cli import _contextual_action, main as cli_main
 from xscientist.research_git import init_repository
 from xscientist.research_journey import workspace_action_contract
 from xscientist.research_vcs import ResearchRepository
+from xscientist.run_control import RUN_SCHEMA
 from xscientist.workspace_history import save_workspace_checkpoint
 from xscientist.workspace_status import (
     _MAX_POINTER_RECORDS,
@@ -304,6 +306,171 @@ class DemoStatusTests(unittest.TestCase):
             self.assertEqual(
                 payload["workspace_id"], repository_config["repository_id"]
             )
+
+    def test_status_does_not_call_stage_less_progress_a_live_run(self) -> None:
+        """Historical progress must not promote a workspace to ``running``."""
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            repository = ResearchRepository.init(
+                workspace,
+                name="status-liveness-test",
+                question="Does the recorded attempt support the question?",
+                git_user_name="Status Test",
+                git_user_email="status@example.invalid",
+            )
+            repository.record(
+                "experiment_attempt",
+                {"status": "completed", "summary": "offline fixture"},
+                state="completed",
+            )
+            repository.commit(stage="experiment", subject="record attempt")
+            logs = workspace / "04_logs"
+            logs.mkdir()
+            (logs / "progress.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "iclr-lwm-progress.v1",
+                        "updated_at": "2026-09-11T21:30:08+08:00",
+                        "phase": "phase_0_question_only",
+                        "scientific_status": "question_only",
+                        "completed": ["initialized_research_vcs"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "scientific_followup")
+            self.assertTrue(payload["run"]["started"])
+            self.assertFalse(payload["run"]["active"])
+            self.assertFalse(payload["run"]["live"])
+            self.assertEqual(payload["run"]["activity_source"], "progress_history")
+            self.assertIsNone(payload["run"]["current_stage"])
+            self.assertIsNone(payload["background_run"])
+
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                self.assertEqual(
+                    cli_main(["status", str(workspace), "--verbose"]),
+                    0,
+                )
+            self.assertIn(
+                "Research pipeline: not active (offline research history)",
+                human.getvalue(),
+            )
+
+    def test_status_does_not_watch_an_unverified_background_run(self) -> None:
+        """A claimed run without local process evidence remains diagnostic only."""
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True)
+            state_path = runs / "deadbeefdeadbeef.json"
+            state = {
+                "schema": RUN_SCHEMA,
+                "id": state_path.stem,
+                "status": "running",
+                "hostname": "unavailable.example.invalid",
+                "pid": 12345,
+                "process_identity": "identity-not-observed",
+                "created_at": "2026-09-11T21:30:08+00:00",
+                "started_at": "2026-09-11T21:30:08+00:00",
+                "resume_argv": ["start", str(workspace), "--question", "q"],
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            before = state_path.read_bytes()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "needs_attention")
+            self.assertTrue(payload["attention_required"])
+            self.assertFalse(payload["run"]["active"])
+            self.assertFalse(payload["run"]["live"])
+            self.assertEqual(
+                payload["run"]["activity_source"], "unverified_background_run"
+            )
+            self.assertEqual(
+                payload["background_run"]["liveness"], "unverified_active_record"
+            )
+            self.assertEqual(
+                payload["next_steps"][0]["code"],
+                "inspect_unverified_background_run",
+            )
+            self.assertNotIn(
+                "watch_background_run",
+                {item["code"] for item in payload["next_steps"]},
+            )
+            self.assertEqual(state_path.read_bytes(), before)
+
+    def test_status_marks_only_verified_background_run_as_live(self) -> None:
+        """A local PID with matching identity is the sole running evidence."""
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td) / "study"
+            repository = ResearchRepository.init(
+                workspace,
+                name="status-live-run-test",
+                question="Does the live record remain observable?",
+                git_user_name="Status Test",
+                git_user_email="status@example.invalid",
+            )
+            repository.record(
+                "experiment_attempt",
+                {"status": "completed", "summary": "live fixture"},
+                state="completed",
+            )
+            repository.commit(stage="experiment", subject="record live fixture")
+            runs = workspace / "04_logs" / "runs"
+            runs.mkdir(parents=True, exist_ok=True)
+            state_path = runs / "cafebabecafebabe.json"
+            state = {
+                "schema": RUN_SCHEMA,
+                "id": state_path.stem,
+                "status": "running",
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "process_identity": "identity-observed-by-test-double",
+                "created_at": "2026-09-13T00:00:00+00:00",
+                "started_at": "2026-09-13T00:00:00+00:00",
+                "resume_argv": ["start", str(workspace), "--question", "q"],
+            }
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            before = state_path.read_bytes()
+
+            with mock.patch(
+                "xscientist.run_control._process_identity_matches",
+                return_value=True,
+            ), mock.patch(
+                "xscientist.run_control._pid_is_alive",
+                return_value=True,
+            ):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = cli_main(["status", str(workspace), "--json"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["operational_state"], "running")
+            self.assertTrue(payload["run"]["declared_active"])
+            self.assertTrue(payload["run"]["active"])
+            self.assertTrue(payload["run"]["live"])
+            self.assertEqual(
+                payload["run"]["activity_source"], "verified_background_run"
+            )
+            self.assertEqual(payload["background_run"]["liveness"], "verified_process")
+            self.assertEqual(payload["next_steps"][0]["code"], "watch_background_run")
+            self.assertEqual(state_path.read_bytes(), before)
 
     def test_status_surfaces_experiment_paper_and_checkpoint_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -915,7 +1082,7 @@ class DemoStatusTests(unittest.TestCase):
             rendered = status_output.getvalue()
             self.assertIn("Workspace: demo", rendered)
             self.assertIn("State: experiment recorded; more evidence needed", rendered)
-            self.assertIn("Scientific progress: 7/8", rendered)
+            self.assertIn("Scientific progress: 6/8", rendered)
             self.assertIn("History: main@", rendered)
             self.assertIn("Checks: trace=pass, replay=pass, verify=pending", rendered)
             self.assertIn("Resolve or narrow the contested claim", rendered)

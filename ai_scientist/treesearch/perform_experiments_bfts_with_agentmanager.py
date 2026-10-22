@@ -672,7 +672,11 @@ def journal_to_rich_tree(journal: Journal, cfg, stage: Stage | None = None):
     return tree
 
 
-def _perform_experiments_bfts_locked(config_path: str):
+def _perform_experiments_bfts_locked(
+    config_path: str,
+    *,
+    admission_runtime: dict | None = None,
+):
     config_path = Path(config_path)
     initialization_phase = "configuration"
     try:
@@ -1366,8 +1370,7 @@ def _perform_experiments_bfts_locked(config_path: str):
         "persistence_errors": persistence_errors,
     }
     run_status_path = cfg.log_dir / "run_status.json"
-    write_json_atomic(run_status_path, status_payload)
-    return {
+    result = {
         "status": run_status,
         "log_dir": str(cfg.log_dir),
         "workspace_dir": str(cfg.workspace_dir),
@@ -1378,12 +1381,62 @@ def _perform_experiments_bfts_locked(config_path: str):
         "manager_state_path": (
             str(manager_state_path) if manager_state_path is not None else None
         ),
+        "current_stage": status_payload["current_stage"],
         "resumable": bool(checkpoint_path),
         "persistence_errors": persistence_errors,
     }
+    _publish_admission_bfts_terminal(admission_runtime, result)
+    write_json_atomic(run_status_path, status_payload)
+    return result
 
 
-def perform_experiments_bfts(config_path: str):
+def _publish_admission_bfts_terminal(
+    admission_runtime: dict | None,
+    result: dict,
+) -> None:
+    """Publish required-admission truth before mutable compatibility caches."""
+
+    if admission_runtime is None:
+        return
+    if not isinstance(admission_runtime, dict):
+        raise ValueError("experiment admission runtime context is invalid")
+    repository_path = admission_runtime.get("repository_path")
+    claim = admission_runtime.get("claim")
+    if not repository_path or not isinstance(claim, dict):
+        raise ValueError("experiment admission runtime context is incomplete")
+    from xscientist.experiment_admission_runtime import publish_bfts_terminal
+
+    raw_status = str(result.get("status") or "").strip().lower()
+    status = {
+        "completed": "completed",
+        "budget_exhausted": "budget_exhausted",
+        "interrupted": "interrupted",
+        "initialization_interrupted": "interrupted",
+    }.get(raw_status, "failed")
+    stage = str(
+        result.get("current_stage") or result.get("initialization_phase") or "bfts"
+    )
+    stage = re.sub(r"[^A-Za-z0-9._-]+", "_", stage)[:128] or "bfts"
+    publish_bfts_terminal(
+        repository_path,
+        claim,
+        status=status,
+        stage=stage,
+        resumable=bool(result.get("resumable")),
+        failure=result.get("failure_error") or result.get("budget_error"),
+        artifact_paths=[
+            result.get("checkpoint_path"),
+            result.get("manager_state_path"),
+            result.get("initialization_status_path"),
+        ],
+    )
+
+
+def perform_experiments_bfts(
+    config_path: str,
+    *,
+    admission_runtime: dict | None = None,
+):
     config_path = Path(config_path).expanduser().resolve()
     lock_root = experiment_lock_root(config_path)
     run_lock = ExperimentRunLock(lock_root, config_path=config_path)
@@ -1391,7 +1444,7 @@ def perform_experiments_bfts(config_path: str):
         with termination_signal_guard():
             run_lock.acquire()
     except ExperimentRunLocked as exc:
-        return {
+        result = {
             "status": "locked",
             "config_path": str(config_path),
             "lock_path": str(exc.lock_path),
@@ -1404,43 +1457,55 @@ def perform_experiments_bfts(config_path: str):
             },
             "resumable": False,
         }
+        _publish_admission_bfts_terminal(admission_runtime, result)
+        return result
     except Exception as exc:
         run_lock.release()
-        return initialization_status_result(
+        result = initialization_status_result(
             config_path,
             lock_root,
             status="initialization_failed",
             phase="run_lock",
             cause=exc,
         )
+        _publish_admission_bfts_terminal(admission_runtime, result)
+        return result
     except KeyboardInterrupt as exc:
         run_lock.release()
-        return initialization_status_result(
+        result = initialization_status_result(
             config_path,
             lock_root,
             status="initialization_interrupted",
             phase="run_lock",
             cause=exc,
         )
+        _publish_admission_bfts_terminal(admission_runtime, result)
+        return result
 
     try:
-        return _perform_experiments_bfts_locked(str(config_path))
+        return _perform_experiments_bfts_locked(
+            str(config_path), admission_runtime=admission_runtime
+        )
     except ExperimentInitializationError as exc:
-        return initialization_status_result(
+        result = initialization_status_result(
             config_path,
             lock_root,
             status="initialization_failed",
             phase=exc.phase,
             cause=exc.cause,
         )
+        _publish_admission_bfts_terminal(admission_runtime, result)
+        return result
     except ExperimentInitializationInterrupted as exc:
-        return initialization_status_result(
+        result = initialization_status_result(
             config_path,
             lock_root,
             status="initialization_interrupted",
             phase=exc.phase,
             cause=exc.cause,
         )
+        _publish_admission_bfts_terminal(admission_runtime, result)
+        return result
     finally:
         run_lock.release()
 

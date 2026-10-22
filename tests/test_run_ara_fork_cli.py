@@ -96,6 +96,45 @@ class DescribeCLITests(unittest.TestCase):
         self.assertIn("nodes", payload["counts"])
         self.assertIn("buggy", payload["counts"])
         self.assertIn("state", payload["lock"])
+        self.assertEqual(payload["count_source"], "exploration_graph")
+        self.assertEqual(payload["manifest_count_mismatch"], {})
+
+    def test_describe_prefers_graph_counts_and_reports_stale_manifest(self) -> None:
+        a = _make_ara(self.tmp, "stale", [
+            _node("nA", value=0.5, is_buggy=False),
+            _node("nB", value=0.4, is_buggy=True),
+        ])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"].update({"nodes": 99, "edges": 77, "buggy_nodes": 0})
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["nodes"], 2)
+        self.assertEqual(payload["counts"]["edges"], 0)
+        self.assertEqual(payload["counts"]["buggy"], 1)
+        mismatch = payload["manifest_count_mismatch"]
+        self.assertEqual(mismatch["nodes"], {"manifest": 99, "graph": 2, "reason": "value_mismatch"})
+        self.assertEqual(mismatch["edges"], {"manifest": 77, "graph": 0, "reason": "value_mismatch"})
+        self.assertEqual(mismatch["buggy_nodes"], {"manifest": 0, "graph": 1, "reason": "value_mismatch"})
+
+    def test_describe_reports_unparseable_manifest_count(self) -> None:
+        a = _make_ara(self.tmp, "badcount", [_node("nA")])
+        manifest_path = a / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["counts"]["nodes"] = "not-an-int"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        rc, out, _ = _run("describe", "--ara", str(a), "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["nodes"], 1)
+        self.assertEqual(
+            payload["manifest_count_mismatch"]["nodes"],
+            {"manifest": "not-an-int", "graph": 1, "reason": "unparseable"},
+        )
 
     def test_describe_top_metric_picks_highest_when_maximize(self) -> None:
         a = _make_ara(self.tmp, "hi", [

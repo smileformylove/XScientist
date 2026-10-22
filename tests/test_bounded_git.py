@@ -46,7 +46,7 @@ class BoundedGitCaptureTests(unittest.TestCase):
             )
         return completed, children[0]
 
-    def test_captures_git_pipe_output_and_enforces_hard_limit(self) -> None:
+    def test_captures_real_git_pipe_output(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             self._git(root, "init")
@@ -58,20 +58,34 @@ class BoundedGitCaptureTests(unittest.TestCase):
             completed = research_git._run_git_bounded(
                 root,
                 ["cat-file", "blob", object_id],
-                max_output_bytes=len(payload),
             )
 
+            self.assertEqual(completed.returncode, 0)
             self.assertEqual(completed.stdout.encode("utf-8"), payload)
-            self.assertEqual(completed.stderr, "")
-            with self.assertRaisesRegex(
-                research_git.ResearchGitError,
-                "exceeded output limit",
-            ):
-                research_git._run_git_bounded(
-                    root,
-                    ["cat-file", "blob", object_id],
-                    max_output_bytes=128,
-                )
+
+    def test_exact_output_limit_and_one_byte_overflow(self) -> None:
+        exact_size = 4096
+        exact, child = self._run_python_child(
+            "import sys; "
+            f"sys.stdout.buffer.write(b'x' * {exact_size}); "
+            "sys.stdout.flush()",
+            max_output_bytes=exact_size,
+        )
+
+        self.assertEqual(exact.stdout, "x" * exact_size)
+        self.assertEqual(exact.stderr, "")
+        self.assertIsNotNone(child.poll())
+
+        with self.assertRaisesRegex(
+            research_git.ResearchGitError,
+            "exceeded output limit",
+        ):
+            self._run_python_child(
+                "import sys; "
+                f"sys.stdout.buffer.write(b'x' * {exact_size + 1}); "
+                "sys.stdout.flush()",
+                max_output_bytes=exact_size,
+            )
 
     def test_nonzero_git_result_retains_stderr_when_check_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/experiment-admission.v1/experiment_admission.schema.json",
+  "title": "XScientist externally signed experiment-admission decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "repository_id",
+    "repository_head",
+    "decision",
+    "input_bindings",
+    "scope",
+    "scope_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "xscientist.experiment-admission-request.v1"
+    },
+    "purpose": {"const": "xscientist.experiment-admission.v1"},
+    "repository_id": {"type": "string", "pattern": "^ws-[0-9a-f]{16}$"},
+    "repository_head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "decision": {"enum": ["authorize", "deny"]},
+    "input_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hypothesis", "plan", "preregistration"],
+      "properties": {
+        "hypothesis": {"$ref": "#/$defs/binding"},
+        "plan": {"$ref": "#/$defs/binding"},
+        "preregistration": {
+          "oneOf": [
+            {"$ref": "#/$defs/binding"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": ["allowed_seeds", "seeds"]
+          }
+        },
+        {
+          "if": {"required": ["arm_ids"]},
+          "then": {"required": ["resource_contract_hash"]}
+        },
+        {
+          "if": {"required": ["resource_contract_hash"]},
+          "then": {"required": ["arm_ids"]}
+        }
+      ],
+      "properties": {
+        "arm_ids": {"$ref": "#/$defs/arm_ids"},
+        "allowed_seeds": {"$ref": "#/$defs/seeds"},
+        "budget_hash": {"$ref": "#/$defs/hash"},
+        "candidate_id": {"$ref": "#/$defs/text"},
+        "code_commit": {"$ref": "#/$defs/text"},
+        "command_hash": {"$ref": "#/$defs/hash"},
+        "configuration_hash": {"$ref": "#/$defs/hash"},
+        "dataset_hashes": {"$ref": "#/$defs/hash_list"},
+        "environment_hash": {"$ref": "#/$defs/hash"},
+        "idea_index": {"type": "integer", "minimum": 0},
+        "ideas_hash": {"$ref": "#/$defs/hash"},
+        "interventions": {"$ref": "#/$defs/text_list"},
+        "producer_id": {"$ref": "#/$defs/text"},
+        "resource_contract_hash": {"$ref": "#/$defs/hash"},
+        "seeds": {"$ref": "#/$defs/seeds"},
+        "study_phase": {"$ref": "#/$defs/text"},
+        "task_id": {"$ref": "#/$defs/text"}
+      }
+    },
+    "scope_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "content_hash"],
+      "properties": {
+        "object_id": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "seeds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "integer"}
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "text_list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/text"}
+    },
+    "hash_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/hash"}
+    },
+    "arm_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+      }
+    }
+  }
+}

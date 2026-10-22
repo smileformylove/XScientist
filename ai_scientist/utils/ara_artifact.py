@@ -75,6 +75,12 @@ from ai_scientist.utils.ara_manifest_lock import (
     append_manifest_revision,
     write_manifest_lock,
 )
+from ai_scientist.utils.ara_paths import (
+    resolve_node_directory,
+    resolve_node_file,
+    resolve_nodes_root,
+    validate_node_id,
+)
 from ai_scientist.utils.privacy import (
     redact_sensitive_payload,
     relativize_path_fields,
@@ -885,7 +891,7 @@ def _write_node_run_bundle(
             "the current interpreter's package versions."
         ),
     }
-    _safe_write_json(node_dir / "env.json", env_payload)
+    _safe_write_json(resolve_node_file(node_dir, "env.json"), env_payload)
 
     # Portable POSIX runner: cd into the original exp_dir so imports resolve,
     # execute the node's code with the current interpreter. Downstream tools
@@ -914,12 +920,99 @@ def _write_node_run_bundle(
         'cd "$EXP_DIR"\n'
         'exec "$PYTHON" "$CODE_FILE" "$@"\n'
     )
-    run_sh_path = node_dir / "run.sh"
+    run_sh_path = resolve_node_file(node_dir, "run.sh")
     run_sh_path.write_text(run_sh, encoding="utf-8")
     try:
         run_sh_path.chmod(0o755)
     except OSError:  # pragma: no cover - platform-specific
         pass
+
+
+_NODE_BUNDLE_FILENAMES = (
+    "code.py",
+    "plot_code.py",
+    "term_out.log",
+    "plot_term_out.log",
+    "metrics.json",
+    "evaluation.json",
+    "implementation_spec.json",
+    "repair_spec.json",
+    "parse_metrics_spec.json",
+    "plot_spec.json",
+    "plots.json",
+    "env.json",
+    "run.sh",
+)
+
+
+def _export_node_id(value: Any, *, location: str) -> str:
+    """Validate one journal ID at the legacy serialization boundary."""
+
+    try:
+        return validate_node_id(value)
+    except ValueError as exc:
+        raise ValueError(f"ARA export refused {location}: {exc}") from exc
+
+
+def _preflight_journal_node_paths(
+    raw_nodes: Any,
+    node2parent: dict[Any, Any],
+    *,
+    ara_dir: Path,
+    nodes_root: Path,
+) -> tuple[
+    list[tuple[dict[str, Any], str, Path, dict[str, Path]]],
+    dict[str, str],
+]:
+    """Validate every emitted node/reference before any node bundle is written."""
+
+    safe_nodes_root = resolve_nodes_root(ara_dir)
+    if nodes_root.expanduser().resolve(strict=False) != safe_nodes_root:
+        raise ValueError("ARA export refused nodes directory outside the ARA root")
+
+    normalized_parents: dict[str, str] = {}
+    for raw_child_id, raw_parent_id in node2parent.items():
+        if raw_child_id in (None, "") or raw_parent_id in (None, ""):
+            continue
+        child_id = _export_node_id(
+            raw_child_id, location="journal node2parent child id"
+        )
+        parent_id = _export_node_id(
+            raw_parent_id, location=f"journal parent id for {child_id!r}"
+        )
+        normalized_parents[child_id] = parent_id
+
+    prepared: list[tuple[dict[str, Any], str, Path, dict[str, Path]]] = []
+    for index, raw in enumerate(raw_nodes if isinstance(raw_nodes, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        raw_node_id = raw.get("id")
+        if raw_node_id in (None, ""):
+            continue
+        node_id = _export_node_id(raw_node_id, location=f"journal node[{index}].id")
+
+        raw_parent_id = raw.get("parent_id")
+        if raw_parent_id not in (None, ""):
+            _export_node_id(
+                raw_parent_id, location=f"journal node {node_id!r} parent_id"
+            )
+
+        raw_children = raw.get("children")
+        if isinstance(raw_children, list):
+            for child_index, raw_child_id in enumerate(raw_children):
+                _export_node_id(
+                    raw_child_id,
+                    location=(f"journal node {node_id!r} children[{child_index}]"),
+                )
+
+        node_dir = resolve_node_directory(ara_dir, node_id)
+        node_files = {
+            filename: resolve_node_file(node_dir, filename)
+            for filename in _NODE_BUNDLE_FILENAMES
+        }
+        prepared.append((raw, node_id, node_dir, node_files))
+
+    return prepared, normalized_parents
 
 
 def _export_nodes_from_journal(
@@ -946,6 +1039,13 @@ def _export_nodes_from_journal(
         if isinstance(payload.get("node2parent"), dict)
         else {}
     )
+    prepared_nodes, node2parent = _preflight_journal_node_paths(
+        raw_nodes,
+        node2parent,
+        ara_dir=ara_dir,
+        nodes_root=nodes_root,
+    )
+    nodes_root = resolve_nodes_root(ara_dir)
     child_map: dict[str, list[str]] = {}
     for child_id, parent_id in node2parent.items():
         if child_id and parent_id:
@@ -953,35 +1053,28 @@ def _export_nodes_from_journal(
     node_entries: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
 
-    for raw in raw_nodes:
-        if not isinstance(raw, dict):
-            continue
-        node_id = str(raw.get("id") or "").strip()
-        if not node_id:
-            continue
-
-        node_dir = nodes_root / node_id
+    for raw, node_id, node_dir, node_files in prepared_nodes:
         node_dir.mkdir(parents=True, exist_ok=True)
 
         # 1. Exact code the node executed.
         code = raw.get("code")
         if isinstance(code, str) and code.strip():
-            (node_dir / "code.py").write_text(code, encoding="utf-8")
+            node_files["code.py"].write_text(code, encoding="utf-8")
 
         plot_code = raw.get("plot_code")
         if isinstance(plot_code, str) and plot_code.strip():
-            (node_dir / "plot_code.py").write_text(plot_code, encoding="utf-8")
+            node_files["plot_code.py"].write_text(plot_code, encoding="utf-8")
 
         # 2. Untrimmed terminal output — Node.to_dict() keeps _term_out raw.
         term_out = raw.get("_term_out")
         if isinstance(term_out, list):
-            (node_dir / "term_out.log").write_text("".join(term_out), encoding="utf-8")
+            node_files["term_out.log"].write_text("".join(term_out), encoding="utf-8")
         elif isinstance(term_out, str) and term_out:
-            (node_dir / "term_out.log").write_text(term_out, encoding="utf-8")
+            node_files["term_out.log"].write_text(term_out, encoding="utf-8")
 
         plot_term_out = raw.get("plot_term_out")
         if isinstance(plot_term_out, list) and plot_term_out:
-            (node_dir / "plot_term_out.log").write_text(
+            node_files["plot_term_out.log"].write_text(
                 "".join(plot_term_out), encoding="utf-8"
             )
 
@@ -991,6 +1084,7 @@ def _export_nodes_from_journal(
             "metric_provenance": raw.get("metric_provenance") or "unavailable",
             "evaluation_report": raw.get("evaluation_report"),
             "analysis": raw.get("analysis"),
+            "scientific_outcome": raw.get("scientific_outcome"),
             "is_buggy": raw.get("is_buggy"),
             "is_buggy_plots": raw.get("is_buggy_plots"),
             "exc_type": raw.get("exc_type"),
@@ -1109,25 +1203,25 @@ def _export_nodes_from_journal(
             metrics_payload["content_hash_inputs"] = hash_inputs
             metrics_payload["identity_profile"] = NODE_IDENTITY_PROFILE
             metrics_payload["execution_identity"] = execution_identity
-        _safe_write_json(node_dir / "metrics.json", metrics_payload)
+        _safe_write_json(node_files["metrics.json"], metrics_payload)
         if isinstance(raw.get("evaluation_report"), dict):
-            _safe_write_json(node_dir / "evaluation.json", raw["evaluation_report"])
+            _safe_write_json(node_files["evaluation.json"], raw["evaluation_report"])
         if isinstance(implementation_spec, dict) and isinstance(
             implementation_spec_hash, str
         ):
             _safe_write_strict_json(
-                node_dir / "implementation_spec.json", implementation_spec
+                node_files["implementation_spec.json"], implementation_spec
             )
         if isinstance(repair_spec, dict) and isinstance(repair_spec_hash, str):
-            _safe_write_strict_json(node_dir / "repair_spec.json", repair_spec)
+            _safe_write_strict_json(node_files["repair_spec.json"], repair_spec)
         if isinstance(parse_metrics_spec, dict) and isinstance(
             parse_metrics_spec_hash, str
         ):
             _safe_write_strict_json(
-                node_dir / "parse_metrics_spec.json", parse_metrics_spec
+                node_files["parse_metrics_spec.json"], parse_metrics_spec
             )
         if isinstance(plot_spec, dict) and isinstance(plot_spec_hash, str):
-            _safe_write_strict_json(node_dir / "plot_spec.json", plot_spec)
+            _safe_write_strict_json(node_files["plot_spec.json"], plot_spec)
 
         # 4. Plot references.
         plots_payload = {
@@ -1137,7 +1231,7 @@ def _export_nodes_from_journal(
             "vlm_feedback_summary": raw.get("vlm_feedback_summary") or [],
             "plots_generated": raw.get("plots_generated"),
         }
-        _safe_write_json(node_dir / "plots.json", plots_payload)
+        _safe_write_json(node_files["plots.json"], plots_payload)
 
         # 5. Per-node run bundle (see `_write_node_run_bundle` for rationale).
         # Only emit if the node has code — otherwise nothing to re-execute.
@@ -1180,6 +1274,7 @@ def _export_nodes_from_journal(
                 "is_seed_agg_node": raw.get("is_seed_agg_node"),
                 "metric": raw.get("metric"),
                 "metric_provenance": raw.get("metric_provenance") or "unavailable",
+                "scientific_outcome": raw.get("scientific_outcome"),
                 "evaluation_report": raw.get("evaluation_report"),
                 "plan_excerpt": (raw.get("plan") or "")[:400],
                 "exp_results_dir": raw.get("exp_results_dir"),
@@ -1709,7 +1804,7 @@ def export_ara(
     ara_dir.mkdir(parents=True, exist_ok=True)
 
     missing: list[str] = []
-    nodes_root = ara_dir / "nodes"
+    nodes_root = resolve_nodes_root(ara_dir)
     nodes_root.mkdir(parents=True, exist_ok=True)
 
     # 1. Exploration graph: iterate every journal.json under logs/*.
@@ -1902,7 +1997,9 @@ def export_ara(
             "fork": (
                 "complete"
                 if any(
-                    (nodes_root / str(node.get("id") or "") / "code.py").exists()
+                    resolve_node_file(
+                        resolve_node_directory(ara_dir, node.get("id")), "code.py"
+                    ).exists()
                     for node in all_nodes
                 )
                 else "unavailable"

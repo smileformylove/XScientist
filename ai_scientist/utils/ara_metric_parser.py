@@ -12,7 +12,10 @@ experiments routinely emit several.
 from __future__ import annotations
 
 import json
+import math
 import re
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Any
 
 # ARA_METRIC={...} JSON marker — the canonical, machine-friendly format.
@@ -24,6 +27,44 @@ _TAIL_RE = re.compile(
     r"^\s*metric\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$",
     re.MULTILINE,
 )
+
+
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def numeric_metric_fraction(value: Any) -> tuple[Fraction | None, str | None]:
+    """Return an exact base-10 value and a stable error category."""
+    if isinstance(value, bool):
+        return None, "non_numeric_metric"
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, "non_numeric_metric"
+    if not decimal_value.is_finite():
+        return None, "non_finite_metric"
+    return Fraction(decimal_value), None
+
+
+def validate_metric_tolerance(tolerance: Any) -> Fraction:
+    """Validate an absolute metric tolerance without losing precision."""
+    value, error = numeric_metric_fraction(tolerance)
+    if error is not None or value is None or value < 0:
+        raise ValueError("tolerance must be a finite non-negative number")
+    return value
+
+
+def _serializable_delta(delta: Fraction) -> int | float | str:
+    """Keep exact integer deltas and avoid emitting JSON Infinity."""
+    if delta.denominator == 1:
+        return delta.numerator
+    try:
+        as_float = float(delta)
+    except OverflowError:
+        return f"{delta.numerator}/{delta.denominator}"
+    if math.isfinite(as_float):
+        return as_float
+    return f"{delta.numerator}/{delta.denominator}"
 
 
 def parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
@@ -44,10 +85,13 @@ def parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
         match = candidate  # keep the last one
     if match:
         try:
-            payload = json.loads(match.group(1))
+            payload = json.loads(
+                match.group(1),
+                parse_constant=_reject_json_constant,
+            )
             if isinstance(payload, dict) and "value" in payload:
                 return {"available": True, **payload}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             pass
 
     tail = None
@@ -55,7 +99,11 @@ def parse_metric_from_stdout(stdout: str) -> dict[str, Any]:
         tail = candidate
     if tail:
         try:
-            return {"available": True, "value": float(tail.group(1)), "source": "text_tail"}
+            return {
+                "available": True,
+                "value": float(tail.group(1)),
+                "source": "text_tail",
+            }
         except ValueError:
             pass
 
@@ -70,27 +118,70 @@ def compare_metrics(
     Statuses:
       - ``no_metric_parsed``    — we couldn't pull a value out of stdout.
       - ``missing_recorded_value`` — the ARA had no metric to compare against.
+      - ``metric_name_mismatch`` — the two named metrics have different names.
+      - ``metric_direction_mismatch`` — the two metrics disagree on direction.
       - ``non_numeric_metric``  — value present but not float-coercible.
+      - ``non_finite_metric``   — a numeric value is NaN or infinite.
       - ``compared``            — good comparison; ``within_tolerance`` set.
     """
+    exact_tolerance = validate_metric_tolerance(tolerance)
     if not fresh.get("available"):
         return {"status": "no_metric_parsed", "delta": None, "within_tolerance": None}
     recorded_value = None
+    recorded_name = None
     if isinstance(recorded, dict):
         recorded_value = recorded.get("value")
+        recorded_name = recorded.get("name")
     elif isinstance(recorded, (int, float)):
         recorded_value = recorded
     fresh_value = fresh.get("value")
     if recorded_value is None or fresh_value is None:
-        return {"status": "missing_recorded_value", "delta": None, "within_tolerance": None}
-    try:
-        delta = float(fresh_value) - float(recorded_value)
-    except (TypeError, ValueError):
-        return {"status": "non_numeric_metric", "delta": None, "within_tolerance": None}
+        return {
+            "status": "missing_recorded_value",
+            "delta": None,
+            "within_tolerance": None,
+        }
+    fresh_name = fresh.get("name")
+    if (
+        recorded_name not in (None, "")
+        and fresh_name not in (None, "")
+        and str(recorded_name) != str(fresh_name)
+    ):
+        return {
+            "status": "metric_name_mismatch",
+            "recorded_name": str(recorded_name),
+            "fresh_name": str(fresh_name),
+            "delta": None,
+            "within_tolerance": None,
+        }
+    recorded_maximize = recorded.get("maximize") if isinstance(recorded, dict) else None
+    fresh_maximize = fresh.get("maximize")
+    if (
+        recorded_maximize is not None
+        and fresh_maximize is not None
+        and (
+            type(recorded_maximize) is not bool
+            or type(fresh_maximize) is not bool
+            or recorded_maximize is not fresh_maximize
+        )
+    ):
+        return {
+            "status": "metric_direction_mismatch",
+            "recorded_maximize": recorded_maximize,
+            "fresh_maximize": fresh_maximize,
+            "delta": None,
+            "within_tolerance": None,
+        }
+    recorded_exact, recorded_error = numeric_metric_fraction(recorded_value)
+    fresh_exact, fresh_error = numeric_metric_fraction(fresh_value)
+    error = recorded_error or fresh_error
+    if error is not None or recorded_exact is None or fresh_exact is None:
+        return {"status": error, "delta": None, "within_tolerance": None}
+    exact_delta = fresh_exact - recorded_exact
     return {
         "status": "compared",
         "recorded_value": recorded_value,
         "fresh_value": fresh_value,
-        "delta": delta,
-        "within_tolerance": abs(delta) <= tolerance,
+        "delta": _serializable_delta(exact_delta),
+        "within_tolerance": abs(exact_delta) <= exact_tolerance,
     }

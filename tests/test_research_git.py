@@ -22,6 +22,7 @@ from xscientist.research_git import (
     ResearchGitError,
     add_research_object,
     auto_checkpoint,
+    commit_research_stage,
     create_checkpoint,
     create_research_bundle,
     create_research_tag,
@@ -29,9 +30,11 @@ from xscientist.research_git import (
     merge_research_branch,
     repository_status,
     reproduce_checkpoint,
+    research_stage,
     restore_research_bundle,
     research_diff,
     research_log,
+    research_trajectory,
     show_checkpoint,
     verify_research_bundle,
     verify_research_repository,
@@ -214,6 +217,37 @@ class LocalResearchGitTests(unittest.TestCase):
             after = repository_status(root)
             self.assertEqual(after["eligible_changes"], [])
             self.assertTrue(after["worktree_clean"])
+
+    def test_canonical_ara_node_metrics_are_builtin_checkpoint_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            canonical = root / "ara" / "run" / "nodes" / "node-1" / "metrics.json"
+            nested = canonical.parent / "deep" / "metrics.json"
+            canonical.parent.mkdir(parents=True)
+            nested.parent.mkdir()
+            canonical.write_text("{}\n", encoding="utf-8")
+            nested.write_text("{}\n", encoding="utf-8")
+
+            before = repository_status(root)
+
+            self.assertIn(
+                "ara/run/nodes/node-1/metrics.json", before["eligible_changes"]
+            )
+            self.assertNotIn(
+                "ara/run/nodes/node-1/deep/metrics.json", before["eligible_changes"]
+            )
+            checkpoint = auto_checkpoint(
+                root,
+                stage="evidence",
+                subject="retain hash-bound ARA node detail",
+            )
+            committed = set(
+                self._git(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+            )
+            self.assertTrue(checkpoint.committed)
+            self.assertIn("ara/run/nodes/node-1/metrics.json", committed)
+            self.assertNotIn("ara/run/nodes/node-1/deep/metrics.json", committed)
 
     def test_init_preserves_existing_project_files_and_commits_only_managed_paths(
         self,
@@ -851,6 +885,100 @@ class LocalResearchGitTests(unittest.TestCase):
                 {key: value for key, value in bundle.items() if key != "destination"},
                 load_schema("research_bundle"),
             )
+
+    def test_staged_checkpoint_refs_only_selected_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            historical_source = base / "historical.bin"
+            historical_source.write_bytes(b"historical evidence")
+            historical = add_research_object(
+                root,
+                historical_source,
+                logical_path="results/historical.bin",
+            )
+            create_checkpoint(root, stage="evidence", subject="bind history")
+
+            selected_source = base / "selected.bin"
+            selected_source.write_bytes(b"selected evidence")
+            selected = add_research_object(
+                root,
+                selected_source,
+                logical_path="results/selected.bin",
+            )
+            research_stage(
+                root,
+                [f"research-objects/{selected.pointer_path.name}"],
+            )
+
+            checkpoint = commit_research_stage(
+                root,
+                stage="review",
+                subject="bind selected pointer",
+            )
+            payload = json.loads(checkpoint.checkpoint_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["object_refs"], [selected.object_hash])
+            self.assertNotIn(historical.object_hash, payload["object_refs"])
+
+    def test_staged_checkpoint_rejects_pointer_swap_after_ref_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            root = base / "research"
+            self._init(root)
+            source = base / "selected.bin"
+            source.write_bytes(b"selected evidence")
+            selected = add_research_object(
+                root,
+                source,
+                logical_path="results/selected.bin",
+            )
+            research_stage(
+                root,
+                [f"research-objects/{selected.pointer_path.name}"],
+            )
+            head_before = self._git(root, "rev-parse", "HEAD")
+            real_atomic_write_json = research_git_module._atomic_write_json
+            swapped = False
+
+            def swap_pointer_after_checkpoint_write(path, payload):
+                nonlocal swapped
+                real_atomic_write_json(path, payload)
+                if not swapped and path.parent.name == "checkpoints":
+                    swapped = True
+                    pointer = json.loads(
+                        selected.pointer_path.read_text(encoding="utf-8")
+                    )
+                    pointer["created_at"] = "2099-01-01T00:00:00Z"
+                    pointer["pointer_hash"] = content_hash(
+                        {
+                            key: value
+                            for key, value in pointer.items()
+                            if key != "pointer_hash"
+                        }
+                    )
+                    real_atomic_write_json(selected.pointer_path, pointer)
+
+            with (
+                mock.patch.object(
+                    research_git_module,
+                    "_atomic_write_json",
+                    side_effect=swap_pointer_after_checkpoint_write,
+                ),
+                self.assertRaisesRegex(
+                    ResearchGitError,
+                    "staged research pointer differs from its selected fingerprint",
+                ),
+            ):
+                commit_research_stage(
+                    root,
+                    stage="review",
+                    subject="reject pointer race",
+                )
+
+            self.assertTrue(swapped)
+            self.assertEqual(self._git(root, "rev-parse", "HEAD"), head_before)
 
     def test_research_object_rejects_symlink_sources_and_private_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1643,6 +1771,72 @@ class LocalResearchGitTests(unittest.TestCase):
             with self.assertRaisesRegex(ResearchGitError, "parent_commit"):
                 show_checkpoint(root)
 
+    def test_ara_manifest_trailers_exactly_match_checkpoint_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "research"
+            self._init(root)
+            manifest_paths: list[str] = []
+            for name, score in (("run-a", 1), ("run-b", 2)):
+                manifest = root / "ara" / name / "manifest.json"
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(
+                    json.dumps({"run": name, "score": score}) + "\n",
+                    encoding="utf-8",
+                )
+                manifest_paths.append(manifest.relative_to(root).as_posix())
+            checkpoint = create_checkpoint(
+                root,
+                stage="evidence",
+                subject="bind ARA snapshot",
+                ara_paths=manifest_paths,
+            )
+            payload = show_checkpoint(root, checkpoint.commit or "HEAD")["checkpoint"]
+            expected = [item["manifest_hash"] for item in payload["ara_manifests"]]
+            self.assertEqual(len(expected), 2)
+            fake = "sha256:" + "0" * 64
+            cases = {
+                "missing": expected[:-1],
+                "extra": [*expected, fake],
+                "fake": [fake, expected[1]],
+                "duplicate": [*expected, expected[0]],
+                "reordered": list(reversed(expected)),
+            }
+            for label, ara_trailers in cases.items():
+                with self.subTest(label=label):
+                    lines = [
+                        "mismatched ARA trailer fixture",
+                        "",
+                        f"Research-Checkpoint: {payload['checkpoint_id']}",
+                        f"Research-Stage: {payload['stage']}",
+                        f"Research-State: {payload['status']}",
+                        f"Research-Event: {payload['content_hash']}",
+                        *(
+                            f"Research-Parent: {value}"
+                            for value in payload["parent_checkpoint_hashes"]
+                        ),
+                        *(f"ARA-Manifest: {value}" for value in ara_trailers),
+                    ]
+                    self._git(root, "commit", "--amend", "-m", "\n".join(lines))
+                    with self.assertRaisesRegex(
+                        ResearchGitError,
+                        "ARA-Manifest trailers do not match",
+                    ):
+                        show_checkpoint(root)
+                    fsck = verify_research_repository(root)
+                    self.assertFalse(fsck["ok"])
+                    self.assertTrue(
+                        any(
+                            "ARA-Manifest trailers do not match" in error
+                            for error in fsck["errors"]
+                        ),
+                        fsck["errors"],
+                    )
+                    with self.assertRaisesRegex(
+                        ResearchGitError,
+                        "without an exact, hash-valid Research VCS checkpoint",
+                    ):
+                        research_trajectory(root)
+
     def test_environment_receipt_supports_strict_reproduction(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -1792,17 +1986,170 @@ class LocalResearchGitTests(unittest.TestCase):
                 reproduce_command="python .xscientist/verify.py",
             )
 
-            reproduction = reproduce_checkpoint(
-                root,
-                commit=checkpoint.commit or "HEAD",
-                destination=base / "execute",
-                execute=True,
-                timeout_seconds=10,
+            empty_parent_path = base / "empty-parent-path"
+            empty_parent_path.mkdir()
+            sanitize_environment = (
+                research_git_module._sanitized_reproduction_environment
             )
+
+            def sanitize_with_empty_parent_path(worktree: Path) -> dict[str, str]:
+                with mock.patch.dict(
+                    "os.environ", {"PATH": str(empty_parent_path)}, clear=False
+                ):
+                    return sanitize_environment(worktree)
+
+            with mock.patch.object(
+                research_git_module,
+                "_sanitized_reproduction_environment",
+                side_effect=sanitize_with_empty_parent_path,
+            ):
+                reproduction = reproduce_checkpoint(
+                    root,
+                    commit=checkpoint.commit or "HEAD",
+                    destination=base / "execute",
+                    execute=True,
+                    timeout_seconds=10,
+                )
 
             self.assertEqual(reproduction["returncode"], 0)
             self.assertFalse(reproduction["timed_out"])
             self.assertEqual(reproduction["stdout"].strip(), "verified")
+
+    def test_reproduction_command_parser_binds_only_bare_python_aliases(self) -> None:
+        expected_python = os.path.abspath(research_git_module.sys.executable)
+
+        for parent_path, command, platform_name in (
+            ("", "python verify.py", "posix"),
+            ("attacker-controlled-bin", "python3 verify.py", "posix"),
+            ("", "PYTHON.EXE verify.py", "nt"),
+            ("attacker-controlled-bin", "Python3.Exe verify.py", "nt"),
+            ("attacker-controlled-bin", '"python.exe" "verify.py"', "nt"),
+        ):
+            with (
+                self.subTest(
+                    parent_path=parent_path,
+                    command=command,
+                    platform_name=platform_name,
+                ),
+                mock.patch.dict("os.environ", {"PATH": parent_path}, clear=False),
+            ):
+                argv = research_git_module._parse_reproduction_command(
+                    command, platform_name=platform_name
+                )
+                self.assertEqual(argv, [expected_python, "verify.py"])
+
+        for command, platform_name, expected_executable in (
+            ("/usr/bin/python verify.py", "posix", "/usr/bin/python"),
+            ("./python verify.py", "posix", "./python"),
+            ("python.exe verify.py", "posix", "python.exe"),
+            ("C:/Python/python.exe verify.py", "nt", "C:/Python/python.exe"),
+            (
+                '"C:/Program Files/Python/python.exe" verify.py',
+                "nt",
+                "C:/Program Files/Python/python.exe",
+            ),
+        ):
+            with self.subTest(command=command, platform_name=platform_name):
+                argv = research_git_module._parse_reproduction_command(
+                    command,
+                    platform_name=platform_name,
+                )
+                self.assertEqual(argv[0], expected_executable)
+
+    def test_reproduction_command_parser_absolutizes_without_resolving(self) -> None:
+        configured_python = "relative-runtime/bin/python"
+        with (
+            mock.patch.object(
+                research_git_module.sys,
+                "executable",
+                configured_python,
+            ),
+            mock.patch.object(
+                research_git_module.Path,
+                "resolve",
+                side_effect=AssertionError("Python executable must not be resolved"),
+            ),
+        ):
+            argv = research_git_module._parse_reproduction_command("python verify.py")
+
+        self.assertEqual(argv[0], os.path.abspath(configured_python))
+
+    def test_reproduction_command_parser_rejects_malformed_quoting(self) -> None:
+        with self.assertRaisesRegex(ResearchGitError, "malformed quoting"):
+            research_git_module._parse_reproduction_command('python "unterminated')
+
+    def test_reproduction_command_parser_rejects_unquoted_windows_backslashes(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ResearchGitError, "unquoted backslash"):
+            research_git_module._parse_reproduction_command(
+                r"python .xscientist\verify.py",
+                platform_name="nt",
+            )
+
+    def test_reproduction_command_parser_allows_non_path_backslashes_in_quotes(
+        self,
+    ) -> None:
+        expected_python = os.path.abspath(research_git_module.sys.executable)
+
+        for command, expected_argv in (
+            (
+                r"""python -c 'print("\\n")'""",
+                [expected_python, "-c", r'print("\\n")'],
+            ),
+            (
+                r"""python --pattern '\\d+' verify.py""",
+                [expected_python, "--pattern", r"\\d+", "verify.py"],
+            ),
+            (
+                r'''python -c "print(\"ok\")"''',
+                [expected_python, "-c", 'print("ok")'],
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    research_git_module._parse_reproduction_command(
+                        command,
+                        platform_name="nt",
+                    ),
+                    expected_argv,
+                )
+
+    def test_reproduction_command_parser_handles_windows_unc_literals(self) -> None:
+        for command in (
+            r'''python "\\server\share\verify.py"''',
+            r'''python --script="\\server\share\verify.py"''',
+            r'''python /source:"\\server\share\verify.py"''',
+            r'''python "--script=\\server\share\verify.py"''',
+            r'''python "/source:\\server\share\verify.py"''',
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(
+                    ResearchGitError, "consecutive backslashes inside double quotes"
+                ):
+                    research_git_module._parse_reproduction_command(
+                        command,
+                        platform_name="nt",
+                    )
+
+        argv = research_git_module._parse_reproduction_command(
+            r"python '\\server\share\verify.py'",
+            platform_name="nt",
+        )
+        self.assertEqual(argv[1], r"\\server\share\verify.py")
+
+    def test_sanitized_reproduction_environment_preserves_parent_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            worktree = Path(td) / "worktree"
+            worktree.mkdir()
+            parent_path = str(Path(td) / "attacker-controlled-bin")
+
+            with mock.patch.dict("os.environ", {"PATH": parent_path}, clear=False):
+                environment = research_git_module._sanitized_reproduction_environment(
+                    worktree
+                )
+
+            self.assertEqual(environment["PATH"], parent_path)
 
     def test_reproduction_execution_does_not_inherit_host_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -102,7 +102,9 @@ class ProductivityP2Tests(unittest.TestCase):
             benchmark_first_run(profile="unknown")
 
     def test_first_run_benchmark_is_zero_cost_and_path_free(self) -> None:
-        payload = benchmark_first_run(max_seconds=30)
+        # This test checks the offline/path-safe contract, not a machine-specific
+        # wall-clock SLA. Keep enough headroom for loaded CI and audit hosts.
+        payload = benchmark_first_run(max_seconds=120)
         validate(payload, load_schema("first_run_benchmark"))
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["network_used"])

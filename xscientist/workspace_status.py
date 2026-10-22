@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import socket
 import subprocess
 from copy import deepcopy
 from itertools import islice
@@ -818,6 +819,54 @@ def _deliverables_summary(
     artifact_entries = (
         manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
     )
+    experiment_summary: dict[str, Any] = {
+        "runs": max(
+            len(progress_results),
+            recorded_attempts,
+            successful_runs + failed_runs,
+        ),
+        "successful": successful_runs,
+        "failed": failed_runs,
+        "recorded_attempts": recorded_attempts,
+        "terminal_states": dict(sorted(attempt_states.items())),
+        "registry_status": (
+            (artifact_entries.get("experiment_registry") or {}).get("status")
+            if isinstance(artifact_entries.get("experiment_registry"), dict)
+            else None
+        ),
+    }
+    active_plan = (research.get("guide") or {}).get("active_plan")
+    if isinstance(active_plan, dict) and active_plan.get("object_id"):
+        ignored_attempt_ids = {
+            str(object_id)
+            for object_id in active_plan.get("ignored_historical_attempt_ids") or []
+            if object_id
+        }
+        repository_recorded_attempts = sum(
+            _count(value) for value in attempt_states.values()
+        )
+        active_plan_recorded_attempts = max(
+            0,
+            repository_recorded_attempts - len(ignored_attempt_ids),
+        )
+        active_plan_id = str(active_plan["object_id"])
+        experiment_summary.update(
+            {
+                "scope": {"type": "repository_history"},
+                "active_plan": {
+                    "object_id": active_plan_id,
+                    "scope": {
+                        "type": "latest_plan_lineage",
+                        "root_object_id": active_plan_id,
+                        "object_count": len(
+                            active_plan.get("lineage_object_ids") or []
+                        ),
+                    },
+                    "runs": active_plan_recorded_attempts,
+                    "recorded_attempts": active_plan_recorded_attempts,
+                },
+            }
+        )
     return (
         {
             "available": bool(
@@ -832,22 +881,7 @@ def _deliverables_summary(
                 if experiment_root is not None
                 else None
             ),
-            "experiment": {
-                "runs": max(
-                    len(progress_results),
-                    recorded_attempts,
-                    successful_runs + failed_runs,
-                ),
-                "successful": successful_runs,
-                "failed": failed_runs,
-                "recorded_attempts": recorded_attempts,
-                "terminal_states": dict(sorted(attempt_states.items())),
-                "registry_status": (
-                    (artifact_entries.get("experiment_registry") or {}).get("status")
-                    if isinstance(artifact_entries.get("experiment_registry"), dict)
-                    else None
-                ),
-            },
+            "experiment": experiment_summary,
             "paper": {
                 "state": paper_state,
                 "manuscript_revisions": manuscript_revisions,
@@ -902,28 +936,56 @@ def _empty_closure_levels(status: str = "unavailable") -> dict[str, dict[str, An
 
 
 def _selected_background_run(root: Path) -> dict[str, Any] | None:
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    candidates: list[tuple[str, dict[str, Any], bool]] = []
     runs_root = root / "04_logs" / "runs"
     if _state_path_error(runs_root, root=root) or not runs_root.is_dir():
         return None
+    # Status is a read-only view.  Validate liveness locally instead of calling
+    # run-control reconciliation, which intentionally persists terminal state.
+    try:
+        from .run_control import (
+            _pid_is_alive,
+            _process_identity_matches,
+        )
+    except (ImportError, OSError):
+        return None
+    active_states = {"queued", "running", "cancelling"}
     for path in runs_root.glob("*.json"):
         payload, error = _read_json(path, root=root)
         if error or payload.get("schema") != RUN_SCHEMA:
             continue
-        candidates.append((path.name, payload))
+        status = str(payload.get("status") or "")
+        live = False
+        if status in {"running", "cancelling"}:
+            hostname = str(payload.get("hostname") or "")
+            identity = payload.get("process_identity")
+            pid = payload.get("pid")
+            if (
+                hostname == socket.gethostname()
+                and isinstance(identity, str)
+                and bool(identity)
+                and type(pid) is int
+                and pid > 0
+                and _process_identity_matches(pid, identity) is True
+                and _pid_is_alive(pid, hostname=hostname)
+            ):
+                live = True
+        candidates.append((path.name, payload, live))
     if not candidates:
         return None
-    active_states = {"queued", "running", "cancelling"}
-    _selected_name, selected = max(
+    _selected_name, selected, live = max(
         candidates,
         key=lambda item: (
+            item[2],
             str(item[1].get("status") or "") in active_states,
             item[0],
         ),
     )
+    status = str(selected.get("status") or "")
+    declared_active = status in active_states
     return {
         "id": selected.get("id"),
-        "status": selected.get("status"),
+        "status": status or None,
         "created_at": selected.get("created_at"),
         "finished_at": selected.get("finished_at"),
         "provider": selected.get("provider"),
@@ -931,6 +993,14 @@ def _selected_background_run(root: Path) -> dict[str, Any] | None:
         "profile": selected.get("profile"),
         "returncode": selected.get("returncode"),
         "selection_basis": "active_state_then_stable_run_id",
+        "declared_active": declared_active,
+        "active": live,
+        "live": live,
+        "liveness": (
+            "verified_process"
+            if live
+            else "unverified_active_record" if declared_active else "not_active"
+        ),
     }
 
 
@@ -1109,6 +1179,16 @@ def build_workspace_status(
         try:
             repo_status = repository_status(root)
             guide = build_research_guide(root, language=language, command_repo=".")
+            guide_summary = {
+                "progress": guide.get("progress"),
+                "counts": guide.get("counts"),
+                "experiment_states": guide.get("experiment_states"),
+                "next_steps": guide.get("next_steps"),
+                "warnings": guide.get("warnings"),
+                "program_review": guide.get("program_review"),
+            }
+            if guide.get("active_plan") is not None:
+                guide_summary["active_plan"] = guide.get("active_plan")
             research.update(
                 {
                     "branch": repo_status.get("branch"),
@@ -1117,14 +1197,7 @@ def build_workspace_status(
                     + len((repo_status.get("research_stage") or {}).get("paths") or []),
                     "worktree_clean": repo_status.get("worktree_clean"),
                     "last_checkpoint": repo_status.get("last_checkpoint"),
-                    "guide": {
-                        "progress": guide.get("progress"),
-                        "counts": guide.get("counts"),
-                        "experiment_states": guide.get("experiment_states"),
-                        "next_steps": guide.get("next_steps"),
-                        "warnings": guide.get("warnings"),
-                        "program_review": guide.get("program_review"),
-                    },
+                    "guide": guide_summary,
                 }
             )
         except (OSError, ResearchGitError, ValueError) as exc:
@@ -1280,6 +1353,18 @@ def build_workspace_status(
             }
         )
     background_run = _selected_background_run(root)
+    background_status = str((background_run or {}).get("status") or "")
+    background_declared_active = bool(
+        isinstance(background_run, dict)
+        and background_run.get("declared_active") is True
+        and background_status in {"queued", "running", "cancelling"}
+    )
+    background_live = bool(
+        isinstance(background_run, dict)
+        and background_run.get("live") is True
+        and background_status in {"running", "cancelling"}
+    )
+    background_active = background_live
     next_steps = list((research.get("guide") or {}).get("next_steps") or [])
     deliverable_step: dict[str, str] | None = None
     if not research_enabled and deliverables.get("available"):
@@ -1378,11 +1463,16 @@ def build_workspace_status(
                     "command": (f"xscientist runs show {run_id} --workspace ."),
                 },
             )
-    elif isinstance(background_run, dict) and background_run.get("status") in {
-        "queued",
-        "running",
-        "cancelling",
-    }:
+    elif (
+        isinstance(background_run, dict)
+        and background_run.get("status")
+        in {
+            "queued",
+            "running",
+            "cancelling",
+        }
+        and background_live
+    ):
         run_id = str(background_run.get("id") or "").strip()
         if run_id:
             next_steps.insert(
@@ -1391,6 +1481,17 @@ def build_workspace_status(
                     "code": "watch_background_run",
                     "title": "Watch the active background run",
                     "command": (f"xscientist runs watch {run_id} --workspace ."),
+                },
+            )
+    elif background_declared_active and not background_live:
+        run_id = str((background_run or {}).get("id") or "").strip()
+        if run_id:
+            next_steps.insert(
+                0,
+                {
+                    "code": "inspect_unverified_background_run",
+                    "title": "Inspect the background run whose process is not verified",
+                    "command": (f"xscientist runs show {run_id} --workspace ."),
                 },
             )
     if not next_steps and not research_enabled and not errors:
@@ -1402,7 +1503,6 @@ def build_workspace_status(
             }
         ]
     workspace_name, workspace_id = _workspace_identity(root)
-    background_status = str((background_run or {}).get("status") or "")
     guide_counts = (research.get("guide") or {}).get("counts") or {}
     scientific_work_exists = any(
         _count(guide_counts.get(kind)) > 0
@@ -1425,13 +1525,14 @@ def build_workspace_status(
         errors
         or readiness_blockers
         or contract_attention
+        or (background_declared_active and not background_live)
         or background_status in {"failed", "cancelled", "interrupted"}
     )
     if errors:
         operational_state = "invalid"
     elif attention_required:
         operational_state = "needs_attention"
-    elif background_status in {"queued", "running", "cancelling"}:
+    elif background_live:
         operational_state = "running"
     elif progress.get("current_stage") == "complete":
         operational_state = (
@@ -1439,8 +1540,6 @@ def build_workspace_status(
             if insight.get("epistemic_status") == "verified"
             else "scientific_followup"
         )
-    elif progress:
-        operational_state = "running"
     elif scientific_work_exists:
         operational_state = (
             "complete"
@@ -1460,7 +1559,21 @@ def build_workspace_status(
         "workspace_id": workspace_id,
         "research": research,
         "run": {
+            # ``started`` is retained as a compatibility/history signal.  It
+            # must not be interpreted as proof that a process is alive.
             "started": bool(progress),
+            "declared_active": background_declared_active,
+            "active": background_active,
+            "live": background_live,
+            "activity_source": (
+                "verified_background_run"
+                if background_live
+                else (
+                    "unverified_background_run"
+                    if background_declared_active
+                    else "progress_history" if progress else "none"
+                )
+            ),
             "current_stage": progress.get("current_stage"),
             "completed": len(progress.get("results") or []),
             "selected": len(progress.get("selected_indices") or []),

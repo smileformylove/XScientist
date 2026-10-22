@@ -394,6 +394,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="command metadata for a later explicit reproduction; not run now",
     )
     record_parser.add_argument(
+        "--admission-gate",
+        help=("verified experiment-admission gate required by governed repositories"),
+    )
+    record_parser.add_argument(
         "--seed",
         action="append",
         type=int,
@@ -1668,6 +1672,7 @@ def _run_record(parsed: argparse.Namespace) -> int:
                 summary=str(parsed.summary).strip(),
                 status=str(parsed.status),
                 plan_id=plan_id,
+                admission_gate_id=parsed.admission_gate,
                 metrics=metrics,
                 result_artifact_paths=artifacts,
                 seeds=parsed.seed,
@@ -7074,6 +7079,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     int(experiment.get("runs") or 0),
                     int(experiment.get("recorded_attempts") or 0),
                 )
+                active_plan_experiment = experiment.get("active_plan")
+                active_plan_experiment_count = (
+                    max(
+                        int(active_plan_experiment.get("runs") or 0),
+                        int(active_plan_experiment.get("recorded_attempts") or 0),
+                    )
+                    if isinstance(active_plan_experiment, dict)
+                    else None
+                )
                 paper_state = str(paper.get("state") or "not_started")
                 if language == "zh":
                     paper_state = {
@@ -7083,9 +7097,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "revision_needed": "需要修订",
                         "submission_ready": "已达到投稿准备状态",
                     }.get(paper_state, paper_state)
-                    output_parts = [f"实验={experiment_count}"]
+                    output_parts = (
+                        [
+                            f"当前计划实验={active_plan_experiment_count}",
+                            f"仓库历史实验={experiment_count}",
+                        ]
+                        if active_plan_experiment_count is not None
+                        else [f"实验={experiment_count}"]
+                    )
                     if experiment.get("failed"):
-                        output_parts.append(f"失败={experiment['failed']}")
+                        output_parts.append(
+                            (
+                                f"仓库历史失败={experiment['failed']}"
+                                if active_plan_experiment_count is not None
+                                else f"失败={experiment['failed']}"
+                            )
+                        )
                     output_parts.append(f"论文={paper_state}")
                     figures = paper.get("figures") or {}
                     if figures.get("total"):
@@ -7104,9 +7131,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "revision_needed": "revision needed",
                         "submission_ready": "submission ready",
                     }.get(paper_state, paper_state)
-                    output_parts = [f"experiments={experiment_count}"]
+                    output_parts = (
+                        [
+                            f"active-plan experiments={active_plan_experiment_count}",
+                            f"repository-history experiments={experiment_count}",
+                        ]
+                        if active_plan_experiment_count is not None
+                        else [f"experiments={experiment_count}"]
+                    )
                     if experiment.get("failed"):
-                        output_parts.append(f"failed={experiment['failed']}")
+                        output_parts.append(
+                            (
+                                f"repository-history failed={experiment['failed']}"
+                                if active_plan_experiment_count is not None
+                                else f"failed={experiment['failed']}"
+                            )
+                        )
                     output_parts.append(f"paper={paper_state}")
                     figures = paper.get("figures") or {}
                     if figures.get("total"):
@@ -7135,9 +7175,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                             f"Audit trail: {checkpointed}/{total} checkpointed; "
                             f"pending={pending}; unbound={unbound}"
                         )
-            if run["started"]:
+            if run.get("live"):
                 run_state = run["current_stage"] or (
-                    "已启动" if language == "zh" else "started"
+                    "运行中" if language == "zh" else "running"
+                )
+                progress = (research.get("guide") or {}).get("progress") or {}
+                closure_pending = str(run_state) == "complete" and (
+                    float(progress.get("percent") or 0) < 100
+                    or result.get("epistemic_status") != "verified"
+                )
+                if closure_pending:
+                    run_state = (
+                        "运行已完成；科学闭环待完成"
+                        if language == "zh"
+                        else "run complete; scientific closure pending"
+                    )
+                elif language == "zh":
+                    run_state = {
+                        "complete": "已完成",
+                        "failed": "失败",
+                        "cancelled": "已取消",
+                        "running": "运行中",
+                    }.get(str(run_state), run_state)
+            elif run.get("active"):
+                background_state = str((background_run or {}).get("status") or "")
+                run_state = {
+                    "queued": "排队中" if language == "zh" else "queued",
+                    "cancelling": "取消中" if language == "zh" else "cancelling",
+                    "running": (
+                        "运行中（等待进程确认）"
+                        if language == "zh"
+                        else "running (process verification pending)"
+                    ),
+                }.get(
+                    background_state,
+                    (
+                        "运行中（等待进程确认）"
+                        if language == "zh"
+                        else "running (process verification pending)"
+                    ),
+                )
+            elif run["started"]:
+                # A progress file records resumable history, not process
+                # liveness.  Keep terminal-stage rendering for compatibility,
+                # but make a stage-less historical file explicitly non-live.
+                run_state = run["current_stage"] or (
+                    "未运行（已有离线科研历史）"
+                    if language == "zh"
+                    else "not active (offline research history)"
                 )
                 progress = (research.get("guide") or {}).get("progress") or {}
                 closure_pending = str(run_state) == "complete" and (

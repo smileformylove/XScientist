@@ -53,7 +53,7 @@
           "target": {"type": "string", "minLength": 1},
           "type": {"type": "string", "minLength": 1},
           "role": {"type": "string"},
-          "category": {"enum": ["lineage", "support", "challenge", "verification", "evolution", "context", "argument", "provenance", "decision", "theory", "boundary", "strategy"]}
+          "category": {"enum": ["lineage", "unknown", "support", "challenge", "verification", "evolution", "context", "argument", "provenance", "decision", "theory", "boundary", "strategy"]}
         },
         "additionalProperties": false
       }
@@ -63,7 +63,11 @@
       "type": "object",
       "required": ["active_hypothesis_ids", "portfolio_ids", "prediction_ids", "posterior_ids", "mechanism_ids", "open_anomaly_ids", "open_questions", "portfolio_frontiers", "next_experiments", "next_experiment", "frontier_hash"],
       "properties": {
-        "active_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "historical_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "All recorded hypothesis objects, including contested, terminal, and superseded history."},
+        "contested_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "Effective hypotheses with a terminal state or an effective negative relation. This classification records contestation without granting the relation actor decision authority."},
+        "open_theory_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "Effective non-terminal hypotheses without an effective negative relation. These are open theories, not submission candidates."},
+        "active_hypothesis_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "description": "Backward-compatible alias of open_theory_hypothesis_ids; never the submission-candidate pool."},
+        "submission_candidate_pool": {"$ref": "#/$defs/submissionCandidatePool", "description": "The latest unambiguous gate report that explicitly declares candidate_count, evaluated_candidate_ids, and experiment_authorized."},
         "portfolio_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "prediction_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "posterior_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
@@ -108,6 +112,11 @@
         "review_due": {"type": "boolean"},
         "latest_review_id": {"type": ["string", "null"]},
         "open_anomaly_count": {"type": "integer", "minimum": 0},
+        "historical_hypothesis_count": {"type": "integer", "minimum": 0},
+        "contested_hypothesis_count": {"type": "integer", "minimum": 0},
+        "open_theory_hypothesis_count": {"type": "integer", "minimum": 0},
+        "submission_candidate_count": {"type": ["integer", "null"], "minimum": 0},
+        "experiment_authorized": {"type": ["boolean", "null"]},
         "claim_depth_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
       },
       "additionalProperties": false
@@ -119,6 +128,25 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "submissionCandidatePool": {
+      "type": "object",
+      "required": ["status", "source_gate_ids", "source_gate_id", "source_gate_state", "source_gate_actor_id", "source_gate_authority", "source_gate_authoritative", "candidate_count", "evaluated_candidate_ids", "experiment_authorized", "decision", "gate_status"],
+      "properties": {
+        "status": {"enum": ["unreported", "reported", "ambiguous"]},
+        "source_gate_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "source_gate_id": {"type": ["string", "null"]},
+        "source_gate_state": {"type": ["string", "null"]},
+        "source_gate_actor_id": {"type": ["string", "null"]},
+        "source_gate_authority": {"type": ["string", "null"]},
+        "source_gate_authoritative": {"type": "boolean"},
+        "candidate_count": {"type": ["integer", "null"], "minimum": 0},
+        "evaluated_candidate_ids": {"type": "array", "items": {"type": "string"}},
+        "experiment_authorized": {"type": ["boolean", "null"]},
+        "decision": {"type": ["string", "null"]},
+        "gate_status": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
     "nextExperiment": {
       "type": "object",
       "required": ["portfolio_id", "priority_object_id", "candidate_id", "design_object_id", "summary", "expected_information_gain", "utility_score"],

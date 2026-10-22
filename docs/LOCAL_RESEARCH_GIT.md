@@ -98,6 +98,12 @@ xscientist research status
 xscientist research log
 ```
 
+For a large working tree, `xscientist research status --summary` shows exact
+change counts and the latest checkpoint identity without listing every path
+or checkpoint payload. Add `--json` for the compact structured view. This is
+a presentation option, not a cheaper or partial repository scan; omitting
+`--summary` preserves the full output.
+
 Initialization creates `research.yaml`, `question.md`, a safety-oriented
 `.gitignore`, local ARA/CAS directories, and an initial `research(init)`
 checkpoint commit. If Git has no configured identity, the repository receives
@@ -143,6 +149,18 @@ xscientist research checkpoint \
   --subject "bind c12 to confirmatory and counter evidence" \
   --claim c12
 ```
+
+`research stage PATH...` and its `research add` alias accept repository-relative
+files or directories. A directory selects only changed descendant files,
+including tracked deletions, not unchanged files or similarly named siblings.
+The native stage records each exact file fingerprint; it does not store a live
+directory selector. Explicit directory selection follows the same policy as
+explicit file selection: deny patterns, size limits, privacy scanning, and Git
+ignore rules still apply. Symlink paths are refused. Use `--all` for all eligible
+changes; `.` and absolute or parent-traversing paths are not accepted. Existing
+native selections are preserved, and a nonempty Git index blocks staging.
+Replacing a tracked file with a directory is rejected without changing the
+native stage; directory expansion does not support file-type transitions.
 
 Research commits contain machine-readable trailers in the current adapter:
 
@@ -266,13 +284,30 @@ xscientist research reproduce HEAD --dest ../reproduce-run --execute \
   --environment-policy strict
 ```
 
+`reproduce --execute` runs a single program without a shell. Unquoted shell
+operators such as `&&`, `|`, and `>` are rejected during checkpoint creation
+and execution. For multiple checks, record one verifier script that invokes
+every check and propagates failures; quote operator characters when they are
+literal arguments.
+
 `reproduce` verifies the checkpoint, pointer, object size, and object SHA-256,
 then copies CAS payloads into the detached worktree so experiments cannot
 mutate the store through hard links. It resolves pointers from the selected
 commit, not from the latest tree. Every new checkpoint also binds a compact,
-secret-free environment receipt containing Python/platform identity and hashes
-of supported dependency lock files. `warn` is the compatibility default;
-`strict` refuses runtime or lock drift; `ignore` records but does not gate it.
+secret-free environment receipt containing the XScientist launcher's Python/
+platform identity and hashes of supported dependency lock files. Inspection
+and artifact-only materialization default to `warn`; `--execute` defaults to
+`strict`. Strict refuses mismatches in the launcher's Python
+implementation/version, platform system/machine, or declared lockfile bytes;
+`ignore` records but does not gate those mismatches. Lockfile bytes are checked
+after materialization, not during inspection-only replay. New results and
+receipts expose this validation scope and whether the lockfile check ran.
+These checks do not attest installed dependencies or arbitrary child runtimes.
+Bare `python` and `python3` commands bind to the XScientist launcher; versioned
+executables, explicit paths, wrappers and their children are not rewritten or
+independently attested. For example, a versioned Python command resolved via
+PATH can differ while the launcher checks still match. Old receipts without
+the optional scope field remain readable; they do not gain child attestation.
 Every inspection, materialization, and rerun produces a
 `reproduction_receipt.schema.json` receipt. It stores hashes of the command and
 retained stdout/stderr tails rather than duplicating their contents, and binds

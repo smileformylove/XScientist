@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover - POSIX
 import yaml
 from jsonschema import ValidationError, validate as validate_json
 
+from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.protocol.hashing import content_hash, hash_manifest
 from ai_scientist.protocol.research_vcs import (
     RESEARCH_RELATION_TARGET_KINDS,
@@ -84,6 +85,96 @@ _MAX_RESEARCH_STAGE_BYTES = 1 * 1024 * 1024
 _MAX_RESEARCH_STAGE_ENTRIES = 4096
 _MAX_BUNDLE_POINTER_BYTES = 1 * 1024 * 1024
 _MAX_PRIVACY_SCANNABLE_OBJECT_BYTES = 4_000_000
+_MAX_REPOSITORY_CONFIG_BYTES = 512 * 1024
+_MAX_GIT_WORKTREE_LIST_BYTES = 1 * 1024 * 1024
+_MAX_GIT_WORKTREE_RECORDS = 4096
+_MAX_EXPERIMENT_ADMISSION_POLICY_COMMITS = 256
+_MAX_EXPERIMENT_ADMISSION_POLICY_MARKER_BYTES = 16 * 1024
+_MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKER_BYTES = 16 * 1024
+_MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKERS = 4096
+_MAX_EXPERIMENT_ADMISSION_RETENTION_REFS = 4096
+_MAX_EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REFS = 4096
+_MAX_EXPERIMENT_ADMISSION_CHECKPOINT_PATHS = 64
+_EXPERIMENT_ADMISSION_POLICY_MARKER_SCHEMA = (
+    "xscientist.experiment-admission-policy-high-water.v1"
+)
+_EXPERIMENT_ADMISSION_POLICY_MARKER_FIELDS = frozenset(
+    {"schema_version", "mode", "source_commit", "content_hash"}
+)
+_EXPERIMENT_ADMISSION_EXECUTION_CLAIM_SCHEMA = (
+    "xscientist.experiment-admission-execution-claim.v1"
+)
+_EXPERIMENT_ADMISSION_EXECUTION_CLAIM_V2_SCHEMA = (
+    "xscientist.experiment-admission-execution-claim.v2"
+)
+_EXPERIMENT_ADMISSION_EXECUTION_CLAIM_FIELDS = frozenset(
+    {"schema", "start_object_id", "receipt_hash", "claimed_at", "process_id"}
+)
+_EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA = (
+    "xscientist.experiment-admission-terminal-reservation.v1"
+)
+_EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_FIELDS = frozenset(
+    {
+        "schema",
+        "start_object_id",
+        "receipt_hash",
+        "attempt_object_id",
+        "attempt_object_hash",
+        "reserved_at",
+        "process_id",
+    }
+)
+_EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_SCHEMA = (
+    "xscientist.experiment-admission-terminal-reservation.v2"
+)
+_EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_FIELDS = (
+    _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_FIELDS
+    | {"terminal_policy_snapshot", "terminal_policy_snapshot_hash"}
+)
+_EXPERIMENT_ADMISSION_TERMINAL_POLICY_SNAPSHOT_SCHEMA = (
+    "xscientist.experiment-admission-terminal-policy-snapshot.v1"
+)
+_EXPERIMENT_ADMISSION_TERMINAL_POLICY_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema",
+        "admitted_at_start",
+        "current_policy_status",
+        "quarantined",
+        "claim_promotion_allowed",
+    }
+)
+_EXPERIMENT_ADMISSION_TERMINAL_POLICY_STATUSES = frozenset(
+    {
+        "authorized",
+        "denied_after_start",
+        "signer_revoked_after_start",
+        "decision_transition_after_start",
+        "authority_policy_changed_after_start",
+        "authorization_changed_after_start",
+    }
+)
+_EXPERIMENT_ADMISSION_TERMINAL_IDENTITY_FIELDS = (
+    "start_object_id",
+    "receipt_hash",
+    "attempt_object_id",
+    "attempt_object_hash",
+)
+_EXPERIMENT_ADMISSION_OBJECT_ID_RE = re.compile(r"rso-[0-9a-f]{16}")
+_EXPERIMENT_ADMISSION_HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_EXPERIMENT_ADMISSION_RUNTIME_MARKER_NAME_RE = re.compile(
+    r"(?P<start_object_id>rso-[0-9a-f]{16})\.json"
+)
+_EXPERIMENT_ADMISSION_RETENTION_REF_RE = re.compile(
+    r"refs/xscientist/admission/(?P<subject>[0-9a-f]{64})"
+)
+_EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REF_RE = re.compile(
+    r"refs/xscientist/admission-terminal/(?P<start>[0-9a-f]{64})"
+)
+_EXPERIMENT_ADMISSION_START_PROTOCOL = "xscientist.experiment-admission-start.v1"
+_EXPERIMENT_ADMISSION_PREFLIGHT_PROTOCOL = (
+    "xscientist.experiment-admission-preflight.v1"
+)
+_EXPERIMENT_ADMISSION_FINAL_PROTOCOL = "xscientist.experiment-admission-preflight.v2"
 
 DEFAULT_TRACK_PATTERNS = (
     ".gitignore",
@@ -366,6 +457,7 @@ class ResearchGitError(RuntimeError):
     """A safe local-repository operation could not be completed."""
 
 
+_EXPERIMENT_ADMISSION_INTERNAL = object()
 _PROCESS_REPOSITORY_LOCKS: dict[str, threading.RLock] = {}
 _PROCESS_REPOSITORY_LOCKS_GUARD = threading.Lock()
 _REPOSITORY_LOCK_STATE = threading.local()
@@ -384,16 +476,207 @@ if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX capability
     os.register_at_fork(after_in_child=_reset_repository_locks_after_fork)
 
 
+def _existing_git_directory_without_links(path: Path, *, label: str) -> Path:
+    """Resolve an existing directory while rejecting every symlink component."""
+
+    if not path.is_absolute() or ".." in path.parts:
+        raise ResearchGitError(f"{label} path is invalid")
+    lexical = Path(os.path.abspath(path))
+    if lexical != path:
+        raise ResearchGitError(f"{label} path is not canonical")
+
+    identities: list[tuple[Path, int, int, int]] = []
+    cursor = Path(lexical.anchor)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for part in lexical.parts[1:]:
+        cursor /= part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise ResearchGitError(f"{label} does not exist") from exc
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise ResearchGitError(f"{label} path contains a symbolic link")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ResearchGitError(f"{label} is not a directory")
+        identities.append((cursor, metadata.st_dev, metadata.st_ino, metadata.st_mode))
+
+    try:
+        resolved = lexical.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ResearchGitError(f"{label} cannot be resolved") from exc
+    for component, device, inode, mode in identities:
+        try:
+            current = component.lstat()
+        except OSError as exc:
+            raise ResearchGitError(f"{label} changed during validation") from exc
+        if (
+            current.st_dev != device
+            or current.st_ino != inode
+            or current.st_mode != mode
+        ):
+            raise ResearchGitError(f"{label} changed during validation")
+    return resolved
+
+
+def _repository_common_git_dir(repo: Path) -> Path:
+    """Return the repository-wide Git control directory for every worktree."""
+
+    raw = _run_git(repo, ["rev-parse", "--git-common-dir"]).stdout
+    if not isinstance(raw, str) or not raw or "\x00" in raw or "\ufffd" in raw:
+        raise ResearchGitError("Git common directory path is invalid")
+    value = raw[:-1] if raw.endswith("\n") else raw
+    if not value or "\n" in value or "\r" in value:
+        raise ResearchGitError("Git common directory path is invalid")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ResearchGitError("Git common directory path is invalid") from exc
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        if ".." in candidate.parts:
+            raise ResearchGitError("Git common directory path is invalid")
+        candidate = Path(os.path.abspath(repo / candidate))
+    return _existing_git_directory_without_links(
+        candidate,
+        label="Git common directory",
+    )
+
+
+def _parse_git_worktree_list_porcelain_z(raw: str) -> tuple[str, ...]:
+    """Parse ``git worktree list --porcelain -z`` without guessing on damage."""
+
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or "\ufffd" in raw
+        or not raw.endswith("\x00\x00")
+    ):
+        raise ResearchGitError("Git worktree list output is invalid")
+    try:
+        raw.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ResearchGitError("Git worktree list output is invalid") from exc
+
+    records = raw[:-2].split("\x00\x00")
+    if (
+        not records
+        or len(records) > _MAX_GIT_WORKTREE_RECORDS
+        or any(not record for record in records)
+    ):
+        raise ResearchGitError("Git worktree list output is invalid")
+
+    paths: list[str] = []
+    for record in records:
+        fields = record.split("\x00")
+        if not fields or any(not field for field in fields):
+            raise ResearchGitError("Git worktree record is invalid")
+        if not fields[0].startswith("worktree "):
+            raise ResearchGitError("Git worktree record is invalid")
+        worktree_path = fields[0][len("worktree ") :]
+        if (
+            not worktree_path
+            or any(ord(character) < 32 for character in worktree_path)
+            or "\ufffd" in worktree_path
+        ):
+            raise ResearchGitError("Git worktree path is invalid")
+
+        seen: set[str] = set()
+        checkout_state: str | None = None
+        for field in fields[1:]:
+            if field.startswith("HEAD "):
+                key = "HEAD"
+                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", field[5:]) is None:
+                    raise ResearchGitError("Git worktree HEAD is invalid")
+            elif field.startswith("branch "):
+                key = "branch"
+                branch = field[7:]
+                if not branch.startswith("refs/heads/") or any(
+                    ord(character) < 32 for character in branch
+                ):
+                    raise ResearchGitError("Git worktree branch is invalid")
+                checkout_state = "branch"
+            elif field == "detached":
+                key = "detached"
+                checkout_state = "detached"
+            elif field == "locked" or field.startswith("locked "):
+                key = "locked"
+            elif field.startswith("prunable "):
+                key = "prunable"
+            else:
+                raise ResearchGitError("Git worktree record field is invalid")
+            if key in seen:
+                raise ResearchGitError("Git worktree record contains a duplicate field")
+            seen.add(key)
+        if "HEAD" not in seen or checkout_state is None:
+            raise ResearchGitError("Git worktree record is incomplete")
+        if "branch" in seen and "detached" in seen:
+            raise ResearchGitError("Git worktree checkout state is ambiguous")
+        paths.append(worktree_path)
+    return tuple(paths)
+
+
+def _parse_git_worktree_head_commits_porcelain_z(raw: str) -> tuple[str, ...]:
+    """Return validated live-worktree HEADs from porcelain output."""
+
+    _parse_git_worktree_list_porcelain_z(raw)
+    records = raw[:-2].split("\x00\x00")
+    heads: list[str] = []
+    for record in records:
+        head = next(
+            field[5:] for field in record.split("\x00")[1:] if field.startswith("HEAD ")
+        )
+        if head not in heads:
+            heads.append(head)
+    return tuple(heads)
+
+
+def _repository_admission_forbidden_roots(repo: str | Path) -> tuple[Path, ...]:
+    """Return the common Git dir and every worktree as trust-store boundaries."""
+
+    root = _repository_root(repo, require_config=False)
+    common_dir = _repository_common_git_dir(root)
+    completed = _run_git_bounded(
+        root,
+        ["worktree", "list", "--porcelain", "-z"],
+        max_output_bytes=_MAX_GIT_WORKTREE_LIST_BYTES,
+    )
+    raw_paths = _parse_git_worktree_list_porcelain_z(completed.stdout)
+    worktrees = tuple(
+        _existing_git_directory_without_links(
+            Path(raw_path),
+            label="Git worktree",
+        )
+        for raw_path in raw_paths
+    )
+    if root not in worktrees:
+        raise ResearchGitError("Git worktree list omits the current repository")
+
+    roots = (common_dir, *worktrees)
+    path_keys: set[str] = set()
+    inode_keys: set[tuple[int, int]] = set()
+    for candidate in roots:
+        path_key = os.path.normcase(str(candidate))
+        try:
+            metadata = candidate.lstat()
+        except OSError as exc:
+            raise ResearchGitError(
+                "Git trust boundary changed during validation"
+            ) from exc
+        inode_key = (metadata.st_dev, metadata.st_ino)
+        if path_key in path_keys or inode_key in inode_keys:
+            raise ResearchGitError("Git trust boundary contains a duplicate path")
+        path_keys.add(path_key)
+        inode_keys.add(inode_key)
+    return roots
+
+
 @contextmanager
 def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
     """Serialize scientific state transitions without leaving stale locks."""
 
-    raw_path = _run_git(
-        repo, ["rev-parse", "--git-path", "xscientist-research.lock"]
-    ).stdout.strip()
-    lock_path = Path(raw_path)
-    if not lock_path.is_absolute():
-        lock_path = repo / lock_path
+    lock_path = _repository_common_git_dir(repo) / "xscientist-research.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_key = str(lock_path.resolve())
     deadline = time.monotonic() + timeout_seconds
@@ -413,6 +696,11 @@ def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
         )
     try:
         held = getattr(_REPOSITORY_LOCK_STATE, "held", set())
+        read_held = getattr(_REPOSITORY_LOCK_STATE, "read_held", set())
+        if lock_key in read_held and lock_key not in held:
+            raise ResearchGitError(
+                "cannot mutate research history during an active experiment lease"
+            )
         if lock_key in held:
             yield
             return
@@ -438,11 +726,749 @@ def _repository_lock(repo: Path, *, timeout_seconds: float = 30.0):
         process_lock.release()
 
 
+@contextmanager
+def _repository_read_lock(repo: Path, *, timeout_seconds: float = 30.0):
+    """Hold a shared, cross-process lease against Research VCS mutations."""
+
+    lock_path = _repository_common_git_dir(repo) / "xscientist-research.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_key = str(lock_path.resolve())
+    deadline = time.monotonic() + timeout_seconds
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _PROCESS_REPOSITORY_LOCKS_GUARD.acquire(timeout=remaining):
+        raise ResearchGitError(
+            f"timed out waiting for research repository lease: {lock_path}"
+        )
+    try:
+        process_lock = _PROCESS_REPOSITORY_LOCKS.setdefault(lock_key, threading.RLock())
+    finally:
+        _PROCESS_REPOSITORY_LOCKS_GUARD.release()
+    remaining = max(0.0, deadline - time.monotonic())
+    if not process_lock.acquire(timeout=remaining):
+        raise ResearchGitError(
+            f"timed out waiting for research repository lease: {lock_path}"
+        )
+    try:
+        held = getattr(_REPOSITORY_LOCK_STATE, "held", set())
+        read_held = getattr(_REPOSITORY_LOCK_STATE, "read_held", set())
+        if lock_key in held or lock_key in read_held:
+            yield
+            return
+        _REPOSITORY_LOCK_STATE.read_held = {*read_held, lock_key}
+        try:
+            with lock_path.open("a+b") as stream:
+                _acquire_repository_file_lock(
+                    stream,
+                    lock_path=lock_path,
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
+                    shared=True,
+                )
+                try:
+                    yield
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    elif msvcrt is not None:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            _REPOSITORY_LOCK_STATE.read_held = read_held
+    finally:
+        process_lock.release()
+
+
+def _experiment_admission_runtime_state_directory(
+    repo: str | Path,
+    *,
+    directory_name: str,
+    label: str,
+    create: bool,
+) -> Path:
+    """Return one symlink-free Git-common admission state directory."""
+
+    root = _repository_root(repo)
+    state_dir = _repository_common_git_dir(root) / "xscientist"
+    for path, path_label in (
+        (state_dir, "state"),
+        (state_dir / directory_name, label),
+    ):
+        if path.is_symlink():
+            raise ResearchGitError(
+                f"experiment admission {path_label} directory is unsafe"
+            )
+        existed = path.exists()
+        if create and not existed:
+            path.mkdir(parents=False, exist_ok=True)
+            _fsync_directory(path.parent)
+        if not path.exists():
+            return state_dir / directory_name
+        if not path.is_dir() or path.is_symlink():
+            raise ResearchGitError(
+                f"experiment admission {path_label} directory is unsafe"
+            )
+    return state_dir / directory_name
+
+
+def _experiment_admission_runtime_marker_path(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+    directory_name: str,
+    label: str,
+    create: bool,
+) -> Path:
+    if (
+        not isinstance(start_object_id, str)
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(start_object_id) is None
+    ):
+        raise ResearchGitError("experiment admission start id is invalid")
+    directory = _experiment_admission_runtime_state_directory(
+        repo,
+        directory_name=directory_name,
+        label=label,
+        create=create,
+    )
+    return directory / f"{start_object_id}.json"
+
+
+def _decode_experiment_admission_runtime_marker(
+    path: Path,
+    *,
+    label: str,
+) -> dict[str, Any] | None:
+    """Read one bounded regular marker without following or racing a replacement."""
+
+    if not path.exists():
+        if path.is_symlink():
+            raise ResearchGitError(f"experiment admission {label} marker is unsafe")
+        return None
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} marker is unreadable"
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > _MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKER_BYTES
+    ):
+        raise ResearchGitError(f"experiment admission {label} marker is unsafe")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} marker is unreadable"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or opened.st_size > _MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKER_BYTES
+        ):
+            raise ResearchGitError(
+                f"experiment admission {label} marker changed during read"
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKER_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65_536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            (after.st_dev, after.st_ino, after.st_size)
+            != (opened.st_dev, opened.st_ino, opened.st_size)
+            or getattr(after, "st_mtime_ns", None)
+            != getattr(opened, "st_mtime_ns", None)
+            or getattr(after, "st_ctime_ns", None)
+            != getattr(opened, "st_ctime_ns", None)
+        ):
+            raise ResearchGitError(
+                f"experiment admission {label} marker changed during read"
+            )
+    finally:
+        os.close(descriptor)
+    if len(encoded) > _MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKER_BYTES:
+        raise ResearchGitError(f"experiment admission {label} marker is too large")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        decoded: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate key")
+            decoded[key] = value
+        return decoded
+
+    try:
+        marker = json.loads(
+            encoded.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} marker is invalid JSON"
+        ) from exc
+    if not isinstance(marker, dict):
+        raise ResearchGitError(f"experiment admission {label} marker is invalid")
+    return marker
+
+
+def _validate_experiment_admission_runtime_timestamp(
+    value: Any,
+    *,
+    label: str,
+) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ResearchGitError(f"experiment admission {label} timestamp is invalid")
+    rendered = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(rendered)
+    except ValueError as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} timestamp is invalid"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ResearchGitError(f"experiment admission {label} timestamp is invalid")
+
+
+def _validate_experiment_admission_runtime_process_id(
+    value: Any,
+    *,
+    label: str,
+) -> None:
+    if type(value) is not int or value <= 0 or value > (2**63 - 1):
+        raise ResearchGitError(f"experiment admission {label} process id is invalid")
+
+
+def _load_experiment_admission_execution_claim(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+    receipt_hash: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one fully validated durable execution claim, if present."""
+
+    if receipt_hash is not None and (
+        not isinstance(receipt_hash, str)
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(receipt_hash) is None
+    ):
+        raise ResearchGitError("experiment admission receipt hash is invalid")
+    path = _experiment_admission_runtime_marker_path(
+        repo,
+        start_object_id=start_object_id,
+        directory_name="admission-claims",
+        label="claims",
+        create=False,
+    )
+    claim = _decode_experiment_admission_runtime_marker(path, label="execution claim")
+    if claim is None:
+        return None
+    if claim.get("schema") == _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_V2_SCHEMA:
+        # Imported lazily because the runtime module reuses the hardened Git
+        # common-directory primitives defined here.
+        from .experiment_admission_runtime import load_execution_claim_v2
+
+        return load_execution_claim_v2(
+            repo,
+            start_object_id=start_object_id,
+            receipt_hash=receipt_hash,
+        )
+    if (
+        set(claim) != _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_FIELDS
+        or claim.get("schema") != _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_SCHEMA
+        or claim.get("start_object_id") != start_object_id
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(str(claim.get("receipt_hash") or ""))
+        is None
+    ):
+        raise ResearchGitError("experiment admission execution claim marker is invalid")
+    _validate_experiment_admission_runtime_timestamp(
+        claim.get("claimed_at"), label="execution claim"
+    )
+    _validate_experiment_admission_runtime_process_id(
+        claim.get("process_id"), label="execution claim"
+    )
+    if receipt_hash is not None and claim.get("receipt_hash") != receipt_hash:
+        raise ResearchGitError(
+            "experiment admission execution claim receipt hash does not match"
+        )
+    return claim
+
+
+def _normalize_experiment_admission_terminal_policy_snapshot(
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return one strict immutable policy snapshot suitable for a v2 marker."""
+
+    if not isinstance(snapshot, Mapping):
+        raise ResearchGitError(
+            "experiment admission terminal reservation policy snapshot is invalid"
+        )
+    normalized = dict(snapshot)
+    status = normalized.get("current_policy_status")
+    quarantined = normalized.get("quarantined")
+    if (
+        set(normalized) != _EXPERIMENT_ADMISSION_TERMINAL_POLICY_SNAPSHOT_FIELDS
+        or normalized.get("schema")
+        != _EXPERIMENT_ADMISSION_TERMINAL_POLICY_SNAPSHOT_SCHEMA
+        or normalized.get("admitted_at_start") is not True
+        or status not in _EXPERIMENT_ADMISSION_TERMINAL_POLICY_STATUSES
+        or type(quarantined) is not bool
+        or quarantined is not (status != "authorized")
+        or normalized.get("claim_promotion_allowed") is not False
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal reservation policy snapshot is invalid"
+        )
+    return normalized
+
+
+def _validate_experiment_admission_terminal_policy_snapshot(
+    reservation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Validate and return the immutable retry policy carried by v2 markers."""
+
+    schema = reservation.get("schema")
+    if schema == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA:
+        return None
+    if schema != _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_SCHEMA:
+        raise ResearchGitError(
+            "experiment admission terminal reservation marker is invalid"
+        )
+    normalized = _normalize_experiment_admission_terminal_policy_snapshot(
+        reservation.get("terminal_policy_snapshot")
+    )
+    if reservation.get("terminal_policy_snapshot_hash") != canonical_content_hash(
+        normalized
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal reservation policy snapshot is invalid"
+        )
+    return normalized
+
+
+def _load_experiment_admission_terminal_reservation(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+) -> dict[str, Any] | None:
+    """Return one fully validated durable terminal reservation, if present."""
+
+    path = _experiment_admission_runtime_marker_path(
+        repo,
+        start_object_id=start_object_id,
+        directory_name="admission-terminal-reservations",
+        label="terminal reservations",
+        create=False,
+    )
+    reservation = _decode_experiment_admission_runtime_marker(
+        path, label="terminal reservation"
+    )
+    if reservation is None:
+        return None
+    schema = reservation.get("schema")
+    expected_fields = (
+        _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_FIELDS
+        if schema == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+        else _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_FIELDS
+    )
+    if (
+        set(reservation) != expected_fields
+        or schema
+        not in {
+            _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA,
+            _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_SCHEMA,
+        }
+        or reservation.get("start_object_id") != start_object_id
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(
+            str(reservation.get("receipt_hash") or "")
+        )
+        is None
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(
+            str(reservation.get("attempt_object_id") or "")
+        )
+        is None
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(
+            str(reservation.get("attempt_object_hash") or "")
+        )
+        is None
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal reservation marker is invalid"
+        )
+    _validate_experiment_admission_runtime_timestamp(
+        reservation.get("reserved_at"), label="terminal reservation"
+    )
+    _validate_experiment_admission_runtime_process_id(
+        reservation.get("process_id"), label="terminal reservation"
+    )
+    _validate_experiment_admission_terminal_policy_snapshot(reservation)
+    return reservation
+
+
+def _publish_experiment_admission_runtime_marker(
+    path: Path,
+    payload: Mapping[str, Any],
+    *,
+    temporary_prefix: str,
+) -> bool:
+    """Publish one immutable marker without exposing partially written bytes."""
+
+    encoded = (
+        json.dumps(
+            dict(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+    ).encode("utf-8")
+    descriptor = -1
+    temporary_name = ""
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=temporary_prefix,
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        os.chmod(temporary_name, 0o600)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError(
+                    "experiment admission runtime marker write made no progress"
+                )
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(temporary_name, path)
+        except FileExistsError:
+            return False
+        # Never remove the complete final hard link after this point. If the
+        # directory flush is uncertain, callers fail conservatively and a retry
+        # observes either this whole marker or no marker after a host crash.
+        _fsync_directory(path.parent)
+        return True
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
+            try:
+                _fsync_directory(path.parent)
+            except OSError:
+                pass
+
+
+def _claim_experiment_admission_start(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+    receipt_hash: str,
+) -> Path:
+    """Atomically and durably prevent a start receipt from executing twice."""
+
+    if (
+        not isinstance(start_object_id, str)
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(start_object_id) is None
+    ):
+        raise ResearchGitError("experiment admission start id is invalid")
+    if (
+        not isinstance(receipt_hash, str)
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(receipt_hash) is None
+    ):
+        raise ResearchGitError("experiment admission receipt hash is invalid")
+    existing = _load_experiment_admission_execution_claim(
+        repo, start_object_id=start_object_id
+    )
+    if existing is not None:
+        raise ResearchGitError(
+            "experiment admission start has already been claimed for execution"
+        )
+    claim_path = _experiment_admission_runtime_marker_path(
+        repo,
+        start_object_id=start_object_id,
+        directory_name="admission-claims",
+        label="claims",
+        create=True,
+    )
+    payload = {
+        "schema": _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_SCHEMA,
+        "start_object_id": start_object_id,
+        "receipt_hash": receipt_hash,
+        "claimed_at": _now_iso(),
+        "process_id": os.getpid(),
+    }
+    if not _publish_experiment_admission_runtime_marker(
+        claim_path,
+        payload,
+        temporary_prefix=".admission-claim-",
+    ):
+        _load_experiment_admission_execution_claim(
+            repo, start_object_id=start_object_id
+        )
+        raise ResearchGitError(
+            "experiment admission start has already been claimed for execution"
+        )
+    return claim_path
+
+
+def _terminal_reservation_matches(
+    reservation: Mapping[str, Any],
+    identity: Mapping[str, str],
+    terminal_policy_snapshot: Mapping[str, Any] | None,
+) -> bool:
+    if not all(
+        reservation.get(field) == identity[field]
+        for field in _EXPERIMENT_ADMISSION_TERMINAL_IDENTITY_FIELDS
+    ):
+        return False
+    existing_snapshot = _validate_experiment_admission_terminal_policy_snapshot(
+        reservation
+    )
+    # Legacy callers may still inspect/replay an exact v1 identity, but a
+    # production v2 retry must not infer the missing policy snapshot.  The
+    # reservation path handles that case only after validating an existing
+    # attempt that carries the complete snapshot.
+    if existing_snapshot is None:
+        return terminal_policy_snapshot is None
+    return terminal_policy_snapshot is not None and existing_snapshot == dict(
+        terminal_policy_snapshot
+    )
+
+
+def _experiment_admission_terminal_policy_snapshot_from_attempt(
+    attempt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recover a v2 policy snapshot only from a validated existing attempt."""
+
+    payload = attempt.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    return _normalize_experiment_admission_terminal_policy_snapshot(
+        {
+            "schema": _EXPERIMENT_ADMISSION_TERMINAL_POLICY_SNAPSHOT_SCHEMA,
+            **{
+                field: payload.get(field)
+                for field in (
+                    "admitted_at_start",
+                    "current_policy_status",
+                    "quarantined",
+                    "claim_promotion_allowed",
+                )
+            },
+        }
+    )
+
+
+def _validate_legacy_terminal_reservation_migration(
+    repo: str | Path,
+    *,
+    reservation: Mapping[str, Any],
+    terminal_policy_snapshot: Mapping[str, Any],
+) -> None:
+    """Allow a v1-to-v2 retry only when an existing attempt proves its policy."""
+
+    root = _repository_root(repo)
+    attempt_object_id = str(reservation["attempt_object_id"])
+    attempt = _worktree_experiment_admission_research_object(
+        root,
+        kind="experiment_attempt",
+        object_id=attempt_object_id,
+    )
+    if attempt is None:
+        resolved = _run_git(root, ["rev-parse", "HEAD"]).stdout.strip()
+        committed = _committed_experiment_admission_research_object(
+            root,
+            resolved=resolved,
+            kind="experiment_attempt",
+            object_id=attempt_object_id,
+        )
+        attempt = committed[0] if committed is not None else None
+    if attempt is None:
+        raise ResearchGitError(
+            "legacy v1 terminal reservation has no existing attempt; manual "
+            "recovery is required"
+        )
+    _validate_experiment_admission_terminal_object(
+        attempt=attempt,
+        reservation=reservation,
+    )
+    try:
+        recovered = _experiment_admission_terminal_policy_snapshot_from_attempt(attempt)
+    except ResearchGitError as exc:
+        raise ResearchGitError(
+            "legacy v1 terminal reservation attempt cannot support validated v2 "
+            "migration; manual recovery is required"
+        ) from exc
+    if recovered != dict(terminal_policy_snapshot):
+        raise ResearchGitError(
+            "legacy v1 terminal reservation attempt policy does not match the v2 "
+            "retry; manual recovery is required"
+        )
+
+
+def _reserve_experiment_admission_terminal(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+    receipt_hash: str,
+    attempt_object_id: str,
+    attempt_object_hash: str,
+    terminal_policy_snapshot: Mapping[str, Any] | None = None,
+) -> Path:
+    """Atomically reserve one start; exact v2 identity retries are idempotent.
+
+    ``terminal_policy_snapshot=None`` exists only for compatibility with
+    legacy/manual recovery tooling.  Production callers must supply the
+    immutable policy snapshot and therefore publish v2 reservations.
+    """
+
+    if (
+        not isinstance(start_object_id, str)
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(start_object_id) is None
+    ):
+        raise ResearchGitError("experiment admission start id is invalid")
+    if (
+        not isinstance(receipt_hash, str)
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(receipt_hash) is None
+    ):
+        raise ResearchGitError("experiment admission receipt hash is invalid")
+    if (
+        not isinstance(attempt_object_id, str)
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(attempt_object_id) is None
+    ):
+        raise ResearchGitError("experiment attempt id is invalid")
+    if (
+        not isinstance(attempt_object_hash, str)
+        or _EXPERIMENT_ADMISSION_HASH_RE.fullmatch(attempt_object_hash) is None
+    ):
+        raise ResearchGitError("experiment attempt hash is invalid")
+    normalized_policy_snapshot = (
+        _normalize_experiment_admission_terminal_policy_snapshot(
+            terminal_policy_snapshot
+        )
+        if terminal_policy_snapshot is not None
+        else None
+    )
+    identity = {
+        "start_object_id": start_object_id,
+        "receipt_hash": receipt_hash,
+        "attempt_object_id": attempt_object_id,
+        "attempt_object_hash": attempt_object_hash,
+    }
+    reservation_path = _experiment_admission_runtime_marker_path(
+        repo,
+        start_object_id=start_object_id,
+        directory_name="admission-terminal-reservations",
+        label="terminal reservations",
+        create=False,
+    )
+    existing = _load_experiment_admission_terminal_reservation(
+        repo, start_object_id=start_object_id
+    )
+    if existing is not None:
+        if _terminal_reservation_matches(
+            existing,
+            identity,
+            normalized_policy_snapshot,
+        ):
+            return reservation_path
+        if (
+            existing.get("schema") == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+            and all(
+                existing.get(field) == identity[field]
+                for field in _EXPERIMENT_ADMISSION_TERMINAL_IDENTITY_FIELDS
+            )
+            and normalized_policy_snapshot is not None
+        ):
+            _validate_legacy_terminal_reservation_migration(
+                repo,
+                reservation=existing,
+                terminal_policy_snapshot=normalized_policy_snapshot,
+            )
+            return reservation_path
+        raise ResearchGitError(
+            "experiment admission start has already been reserved for terminal "
+            "recording with a conflicting attempt identity"
+        )
+    reservation_path = _experiment_admission_runtime_marker_path(
+        repo,
+        start_object_id=start_object_id,
+        directory_name="admission-terminal-reservations",
+        label="terminal reservations",
+        create=True,
+    )
+    payload: dict[str, Any] = {
+        "schema": (
+            _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_V2_SCHEMA
+            if normalized_policy_snapshot is not None
+            else _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+        ),
+        **identity,
+        "reserved_at": _now_iso(),
+        "process_id": os.getpid(),
+    }
+    if normalized_policy_snapshot is not None:
+        payload.update(
+            {
+                "terminal_policy_snapshot": normalized_policy_snapshot,
+                "terminal_policy_snapshot_hash": canonical_content_hash(
+                    normalized_policy_snapshot
+                ),
+            }
+        )
+    if not _publish_experiment_admission_runtime_marker(
+        reservation_path,
+        payload,
+        temporary_prefix=".admission-terminal-",
+    ):
+        existing = _load_experiment_admission_terminal_reservation(
+            repo, start_object_id=start_object_id
+        )
+        if existing is not None and _terminal_reservation_matches(
+            existing,
+            identity,
+            normalized_policy_snapshot,
+        ):
+            return reservation_path
+        raise ResearchGitError(
+            "experiment admission start has already been reserved for terminal "
+            "recording with a conflicting attempt identity"
+        )
+    return reservation_path
+
+
+def _experiment_admission_terminal_reserved(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+) -> bool:
+    """Return whether any worktree reserved this start for terminal recording."""
+
+    return (
+        _load_experiment_admission_terminal_reservation(
+            repo, start_object_id=start_object_id
+        )
+        is not None
+    )
+
+
 def _acquire_repository_file_lock(
     stream: Any,
     *,
     lock_path: Path,
     timeout_seconds: float,
+    shared: bool = False,
 ) -> None:
     """Acquire the cross-process half of a repository lock."""
 
@@ -454,7 +1480,8 @@ def _acquire_repository_file_lock(
     while True:
         try:
             if fcntl is not None:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                fcntl.flock(stream.fileno(), mode | fcntl.LOCK_NB)
             elif msvcrt is not None:
                 stream.seek(0)
                 msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
@@ -958,10 +1985,20 @@ def _environment_receipt_hash_valid(receipt: Any) -> bool:
 
 
 def _compare_runtime_environment(receipt: Any) -> dict[str, Any]:
+    scope = {
+        "runtime_identity": (
+            "launcher_python_implementation_version_platform_system_machine"
+        ),
+        "dependency_locks": "declared_checkpoint_file_bytes",
+        "dependency_locks_checked": False,
+        "installed_dependencies_attested": False,
+        "child_runtime_attested": False,
+    }
     if not isinstance(receipt, dict) or not _environment_receipt_hash_valid(receipt):
         return {
             "recorded": False,
             "matches": None,
+            "scope": scope,
             "mismatches": [
                 {
                     "field": "reproduce.environment",
@@ -992,6 +2029,7 @@ def _compare_runtime_environment(receipt: Any) -> dict[str, Any]:
     return {
         "recorded": True,
         "matches": not mismatches,
+        "scope": scope,
         "mismatches": mismatches,
         "recorded_content_hash": receipt.get("content_hash"),
     }
@@ -1132,12 +2170,10 @@ def _has_symlink_component(root: Path, raw_path: Any) -> bool:
     return False
 
 
-def load_repository_config(repo: str | Path) -> dict[str, Any]:
-    root = _repository_root(repo)
-    try:
-        payload = yaml.safe_load((root / "research.yaml").read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise ResearchGitError(f"cannot read research.yaml: {exc}") from exc
+def _validate_repository_config_payload(
+    root: Path,
+    payload: Any,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ResearchGitError("research.yaml must contain a YAML mapping")
     try:
@@ -1157,6 +2193,311 @@ def load_repository_config(repo: str | Path) -> dict[str, Any]:
         label="pointer directory",
     )
     return payload
+
+
+def load_repository_config(repo: str | Path) -> dict[str, Any]:
+    root = _repository_root(repo)
+    try:
+        payload = yaml.safe_load((root / "research.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ResearchGitError(f"cannot read research.yaml: {exc}") from exc
+    return _validate_repository_config_payload(root, payload)
+
+
+def load_repository_config_at_ref(
+    repo: str | Path,
+    ref: str = "HEAD",
+) -> dict[str, Any]:
+    """Read a validated repository policy from an immutable Git snapshot."""
+
+    root = _repository_root(repo, require_config=False)
+    resolved = _run_git_bounded(
+        root,
+        ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+        max_output_bytes=4096,
+        check=False,
+    )
+    commit = resolved.stdout.strip()
+    if resolved.returncode or re.fullmatch(r"[0-9a-f]{40,64}", commit) is None:
+        raise ResearchGitError(f"cannot resolve repository configuration ref: {ref}")
+    entry = _tree_entry(root, commit, "research.yaml", bounded=True)
+    if entry is None or entry[0] not in {"100644", "100755"}:
+        raise ResearchGitError(
+            f"research.yaml is not a regular file at repository ref: {ref}"
+        )
+    object_id = entry[1]
+    size_result = _run_git_bounded(
+        root,
+        ["cat-file", "-s", object_id],
+        max_output_bytes=4096,
+        check=False,
+    )
+    try:
+        size = int(size_result.stdout.strip())
+    except (TypeError, ValueError) as exc:
+        raise ResearchGitError(
+            f"cannot inspect research.yaml at repository ref: {ref}"
+        ) from exc
+    if size_result.returncode or size < 0 or size > _MAX_REPOSITORY_CONFIG_BYTES:
+        raise ResearchGitError(
+            f"research.yaml exceeds the snapshot safety limit at ref: {ref}"
+        )
+    rendered = _run_git_bounded(
+        root,
+        ["cat-file", "blob", object_id],
+        max_output_bytes=max(4096, size + 1024),
+        check=False,
+    )
+    if rendered.returncode:
+        raise ResearchGitError(f"cannot read research.yaml at repository ref: {ref}")
+    try:
+        payload = yaml.safe_load(rendered.stdout)
+    except yaml.YAMLError as exc:
+        raise ResearchGitError(
+            f"cannot parse research.yaml at repository ref: {ref}"
+        ) from exc
+    return _validate_repository_config_payload(root, payload)
+
+
+def _configured_experiment_admission_mode(config: Mapping[str, Any]) -> str:
+    admission = config.get("experiment_admission")
+    admission = admission if isinstance(admission, Mapping) else {}
+    mode = admission.get("mode", "legacy")
+    if mode not in {"legacy", "required"}:  # pragma: no cover - schema defense
+        raise ResearchGitError("experiment admission policy mode is invalid")
+    return str(mode)
+
+
+def _experiment_admission_policy_marker_path(root: Path, *, create: bool) -> Path:
+    state_dir = _repository_common_git_dir(root) / "xscientist"
+    if state_dir.is_symlink():
+        raise ResearchGitError("experiment admission policy state directory is unsafe")
+    if create:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    if state_dir.exists() and (not state_dir.is_dir() or state_dir.is_symlink()):
+        raise ResearchGitError("experiment admission policy state directory is unsafe")
+    return state_dir / "admission-policy-required.json"
+
+
+def _load_experiment_admission_policy_marker(root: Path) -> dict[str, Any] | None:
+    path = _experiment_admission_policy_marker_path(root, create=False)
+    if path.is_symlink():
+        raise ResearchGitError("experiment admission policy marker is unsafe")
+    if not path.exists():
+        return None
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ResearchGitError(
+            "experiment admission policy marker is unreadable"
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > _MAX_EXPERIMENT_ADMISSION_POLICY_MARKER_BYTES
+    ):
+        raise ResearchGitError("experiment admission policy marker is unsafe")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ResearchGitError(
+            "experiment admission policy marker is unreadable"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or opened.st_size > _MAX_EXPERIMENT_ADMISSION_POLICY_MARKER_BYTES
+        ):
+            raise ResearchGitError(
+                "experiment admission policy marker changed during read"
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_EXPERIMENT_ADMISSION_POLICY_MARKER_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65_536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        if len(encoded) != opened.st_size:
+            raise ResearchGitError(
+                "experiment admission policy marker changed during read"
+            )
+    finally:
+        os.close(descriptor)
+    if len(encoded) > _MAX_EXPERIMENT_ADMISSION_POLICY_MARKER_BYTES:
+        raise ResearchGitError("experiment admission policy marker is too large")
+    try:
+        marker = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResearchGitError(
+            "experiment admission policy marker is invalid JSON"
+        ) from exc
+    if not isinstance(marker, dict):
+        raise ResearchGitError("experiment admission policy marker is invalid")
+    core = {key: value for key, value in marker.items() if key != "content_hash"}
+    if (
+        set(marker) != _EXPERIMENT_ADMISSION_POLICY_MARKER_FIELDS
+        or marker.get("schema_version") != _EXPERIMENT_ADMISSION_POLICY_MARKER_SCHEMA
+        or marker.get("mode") != "required"
+        or re.fullmatch(r"[0-9a-f]{40,64}", str(marker.get("source_commit") or ""))
+        is None
+        or marker.get("content_hash") != content_hash(core)
+    ):
+        raise ResearchGitError("experiment admission policy marker is invalid")
+    return marker
+
+
+def _record_experiment_admission_policy_required(
+    root: Path,
+    *,
+    source_commit: str,
+) -> dict[str, Any]:
+    existing = _load_experiment_admission_policy_marker(root)
+    if existing is not None:
+        return existing
+    if re.fullmatch(r"[0-9a-f]{40,64}", source_commit) is None:
+        raise ResearchGitError(
+            "experiment admission required-policy source commit is invalid"
+        )
+    core = {
+        "schema_version": _EXPERIMENT_ADMISSION_POLICY_MARKER_SCHEMA,
+        "mode": "required",
+        "source_commit": source_commit,
+    }
+    marker = {**core, "content_hash": content_hash(core)}
+    encoded = (
+        json.dumps(marker, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    path = _experiment_admission_policy_marker_path(root, create=True)
+    temporary_descriptor = -1
+    temporary_name = ""
+    try:
+        temporary_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".admission-policy-",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        os.chmod(temporary_name, 0o600)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(temporary_descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError(
+                    "experiment admission policy marker write made no progress"
+                )
+            offset += written
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        try:
+            os.link(temporary_name, path)
+        except FileExistsError:
+            existing = _load_experiment_admission_policy_marker(root)
+            if existing is None:  # pragma: no cover - defensive race handling
+                raise ResearchGitError("experiment admission policy marker disappeared")
+            return existing
+        _fsync_directory(path.parent)
+    except BaseException:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        raise
+    finally:
+        if temporary_name:
+            Path(temporary_name).unlink(missing_ok=True)
+            _fsync_directory(path.parent)
+    return marker
+
+
+def _committed_required_experiment_admission_policy(root: Path) -> str | None:
+    worktrees = _run_git_bounded(
+        root,
+        ["worktree", "list", "--porcelain", "-z"],
+        max_output_bytes=_MAX_GIT_WORKTREE_LIST_BYTES,
+    )
+    worktree_heads = _parse_git_worktree_head_commits_porcelain_z(worktrees.stdout)
+    history = _run_git_bounded(
+        root,
+        [
+            "rev-list",
+            "--full-history",
+            f"--max-count={_MAX_EXPERIMENT_ADMISSION_POLICY_COMMITS + 1}",
+            "--all",
+            *worktree_heads,
+            "--",
+            "research.yaml",
+        ],
+        max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+    )
+    commits = history.stdout.splitlines()
+    if len(commits) > _MAX_EXPERIMENT_ADMISSION_POLICY_COMMITS:
+        raise ResearchGitError(
+            "experiment admission policy history exceeds the bounded audit limit"
+        )
+    if any(re.fullmatch(r"[0-9a-f]{40,64}", commit) is None for commit in commits):
+        raise ResearchGitError("experiment admission policy history is invalid")
+    for commit in commits:
+        config = load_repository_config_at_ref(root, commit)
+        if _configured_experiment_admission_mode(config) == "required":
+            return commit
+    return None
+
+
+def _effective_experiment_admission_policy(root: Path) -> tuple[str, str | None]:
+    current_config = load_repository_config_at_ref(root, "HEAD")
+    marker = _load_experiment_admission_policy_marker(root)
+    if marker is not None:
+        return "required", str(marker["source_commit"])
+    current_mode = _configured_experiment_admission_mode(current_config)
+    source_commit = _head(root) if current_mode == "required" else None
+    if source_commit is None:
+        source_commit = _committed_required_experiment_admission_policy(root)
+    return (
+        ("required", source_commit) if source_commit is not None else ("legacy", None)
+    )
+
+
+def repository_experiment_admission_mode(repo: str | Path) -> str:
+    """Read the repository-wide monotonic experiment-admission policy.
+
+    Once ``required`` appears in committed history, every linked worktree keeps
+    enforcing it.  This query is read-only so it remains valid inside an active
+    experiment lease; writable transitions publish the shared high-water mark.
+    """
+
+    root = _repository_root(repo, require_config=False)
+    with _repository_read_lock(root):
+        mode, _source_commit = _effective_experiment_admission_policy(root)
+        return mode
+
+
+def _synchronize_experiment_admission_policy_high_water(root: Path) -> str:
+    """Publish ``required`` only while an exclusive repository lock is held."""
+
+    lock_path = _repository_common_git_dir(root) / "xscientist-research.lock"
+    held = getattr(_REPOSITORY_LOCK_STATE, "held", set())
+    if str(lock_path.resolve()) not in held:
+        raise ResearchGitError(
+            "experiment admission policy synchronization requires the exclusive "
+            "repository lock"
+        )
+    mode, source_commit = _effective_experiment_admission_policy(root)
+    if mode == "required":
+        if source_commit is None:  # pragma: no cover - defensive invariant
+            raise ResearchGitError(
+                "experiment admission required policy lacks a source commit"
+            )
+        _record_experiment_admission_policy_required(
+            root,
+            source_commit=source_commit,
+        )
+    return mode
 
 
 def _config_text(
@@ -1740,6 +3081,7 @@ def record_research_object(
     actor: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
     semantic_profile: dict[str, Any] | None = None,
+    _admission_capability: object | None = None,
 ) -> ResearchObjectResult:
     """Record one immutable scientific object in the repository working state.
 
@@ -1750,6 +3092,35 @@ def record_research_object(
 
     root = _repository_root(repo)
     with _repository_lock(root):
+        if (
+            kind == "gate_decision"
+            and payload.get("protocol_kind") == "xscientist.experiment-admission.v1"
+            and _admission_capability is not _EXPERIMENT_ADMISSION_INTERNAL
+        ):
+            raise ResearchGitError(
+                "raw experiment-admission gate recording is disabled; "
+                "admission authority must enter through a trusted verifier"
+            )
+        if (
+            kind == "context_snapshot"
+            and payload.get("protocol_kind")
+            == "xscientist.experiment-admission-start.v1"
+            and _admission_capability is not _EXPERIMENT_ADMISSION_INTERNAL
+        ):
+            raise ResearchGitError(
+                "raw experiment-admission start recording is disabled; "
+                "use ResearchLifecycle.issue_experiment_admission_start"
+            )
+        if kind == "experiment_attempt":
+            admission_mode = _synchronize_experiment_admission_policy_high_water(root)
+            if (
+                _admission_capability is not _EXPERIMENT_ADMISSION_INTERNAL
+                and admission_mode == "required"
+            ):
+                raise ResearchGitError(
+                    "raw experiment_attempt recording is disabled when experiment "
+                    "admission is required; use ResearchLifecycle.experiment_attempt"
+                )
         return _record_research_object_locked(
             root,
             kind=kind,
@@ -2223,7 +3594,7 @@ def research_stage(
     *,
     all_changes: bool = False,
 ) -> ResearchStageResult:
-    """Select exact scientific changes for the next research commit."""
+    """Select changed files or directory descendants for the next commit."""
 
     root = _repository_root(repo)
     with _repository_lock(root):
@@ -2237,21 +3608,60 @@ def research_stage(
             raise ResearchGitError(
                 "research staging refused because the backend index is not clean"
             )
-        requested = (
-            set(changed)
-            if all_changes
-            else {_normalise_relative(path) for path in paths}
-        )
-        if not requested:
-            raise ResearchGitError("specify research paths or use all_changes=True")
-        missing = sorted(requested - changed)
+        requested: set[str] = set(changed) if all_changes else set()
+        missing: list[str] = []
+        if not all_changes:
+            for relative in sorted({_normalise_relative(path) for path in paths}):
+                if _has_symlink_component(root, relative):
+                    raise ResearchGitError(
+                        f"research staging refuses symbolic links: {relative}"
+                    )
+                target = root / relative
+                if target.is_dir() and relative in changed:
+                    raise ResearchGitError(
+                        "research staging refuses changed directory selectors "
+                        "(file-to-directory replacements or nested repositories): "
+                        + relative
+                    )
+                # Expand only Git's changed set, never an unbounded filesystem
+                # walk. The slash boundary excludes similarly named siblings.
+                if target.is_dir() or (
+                    not target.exists() and relative not in changed
+                ):
+                    descendants = {
+                        path for path in changed if path.startswith(relative + "/")
+                    }
+                    if descendants:
+                        requested.update(descendants)
+                        continue
+                elif relative in changed:
+                    requested.add(relative)
+                    continue
+                missing.append(relative)
+            for relative in sorted(requested):
+                if _has_symlink_component(root, relative):
+                    raise ResearchGitError(
+                        f"research staging refuses symbolic links: {relative}"
+                    )
         if missing:
             raise ResearchGitError(
                 "research paths have no working-state change: " + ", ".join(missing)
             )
+        if not requested:
+            raise ResearchGitError("specify research paths or use all_changes=True")
         selected, excluded = _select_paths(root, config, requested, explicit=paths)
         if not selected:
             return ResearchStageResult(paths=(), excluded=tuple(excluded))
+        for relative in selected:
+            target = root / relative
+            if _has_symlink_component(root, relative):
+                raise ResearchGitError(
+                    f"research staging refuses symbolic links: {relative}"
+                )
+            if target.exists() and not target.is_file():
+                raise ResearchGitError(
+                    f"research staging requires a regular file: {relative}"
+                )
         findings = scan_paths(root, selected)
         if findings:
             raise ResearchGitError(
@@ -2334,8 +3744,13 @@ def _select_paths(
         if relative != ".env.example" and _matches(relative, denied_patterns):
             excluded.append(f"{relative} (denied pattern)")
             continue
+        canonical_ara_metrics = re.fullmatch(
+            r"ara/[^/]+/nodes/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/metrics\.json",
+            relative,
+        )
         if not (
             _matches(relative, allowed_patterns)
+            or canonical_ara_metrics is not None
             or _path_is_explicit(relative, explicit)
         ):
             excluded.append(f"{relative} (not tracked by policy)")
@@ -2860,6 +4275,22 @@ def _validate_checkpoint_payload(
     return payload
 
 
+def _validate_ara_manifest_trailer_binding(
+    trailers: Mapping[str, Sequence[str]],
+    payload: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    expected = [
+        str(item["manifest_hash"]) for item in payload.get("ara_manifests") or []
+    ]
+    actual = [str(item) for item in trailers.get("ARA-Manifest") or []]
+    if actual != expected:
+        raise ResearchGitError(
+            f"{context} ARA-Manifest trailers do not match its checkpoint"
+        )
+
+
 def _checkpoint_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# {payload['subject']}",
@@ -2967,6 +4398,49 @@ def _index_entry(repo: Path, path: str) -> tuple[str, str] | None:
     ):
         raise ResearchGitError(f"cannot parse checkpoint index entry for {path}")
     return fields[0], fields[1]
+
+
+def _pointer_records_at_index(
+    repo: Path,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+    """Read pointer semantics and exact byte fingerprints from the Git index."""
+
+    records: dict[str, list[dict[str, Any]]] = {}
+    fingerprints: dict[str, str] = {}
+    logical_bindings: dict[tuple[str, ...], tuple[str, str]] = {}
+    pointer_paths = sorted(
+        path
+        for path in _git_paths(repo, ["ls-files", "-z", "--", "research-objects"])
+        if path.startswith("research-objects/") and path.endswith(".json")
+    )
+    for pointer_path in pointer_paths:
+        entry = _index_entry(repo, pointer_path)
+        if entry is None:  # pragma: no cover - ls-files/index race guard
+            raise ResearchGitError(
+                f"research object pointer disappeared from the index: {pointer_path}"
+            )
+        mode, object_id = entry
+        if mode not in {"100644", "100755"}:
+            raise ResearchGitError(
+                f"research object pointer is not a regular index blob: {pointer_path}"
+            )
+        raw = _bundle_pointer_blob(repo, object_id)
+        fingerprints[pointer_path] = "sha256:" + hashlib.sha256(raw).hexdigest()
+        try:
+            payload = json.loads(raw.decode("utf-8", errors="strict"))
+            payload = _validate_pointer_payload(payload, pointer_path=pointer_path)
+        except (UnicodeDecodeError, json.JSONDecodeError, ResearchGitError) as exc:
+            raise ResearchGitError(
+                f"cannot validate research object pointer in the index: {pointer_path}"
+            ) from exc
+        object_hash = str(payload.get("object_hash") or "")
+        _record_pointer(
+            records,
+            logical_bindings,
+            object_hash=object_hash,
+            record={**payload, "pointer_path": pointer_path},
+        )
+    return records, fingerprints
 
 
 def _material_changes_between(
@@ -3120,6 +4594,7 @@ def _create_checkpoint_locked(
     reproduce_command: str | None = None,
     include: Sequence[str] = (),
     only_paths: Sequence[str] | None = None,
+    expected_path_fingerprints: Mapping[str, str] | None = None,
     additional_parent_refs: Sequence[str] = (),
     allow_backend_stage: bool = False,
     reverts_commit: str | None = None,
@@ -3146,6 +4621,8 @@ def _create_checkpoint_locked(
         )
     if reproduce_command and any(char in reproduce_command for char in "\r\n"):
         raise ResearchGitError("reproduction command must be a single line")
+    if reproduce_command:
+        _parse_reproduction_command(reproduce_command)
     # Validate the scientific parent before inspecting or materializing a new
     # checkpoint. In particular, never let an ordinary checkpoint bridge a raw
     # Git commit above an existing Research VCS ancestor.
@@ -3174,6 +4651,21 @@ def _create_checkpoint_locked(
         candidates,
         explicit=explicit_paths,
     )
+    normalized_expected_fingerprints: dict[str, str] | None = None
+    if expected_path_fingerprints is not None:
+        normalized_expected_fingerprints = {}
+        for raw_path, fingerprint in expected_path_fingerprints.items():
+            relative = _normalise_relative(raw_path)
+            if relative in normalized_expected_fingerprints or (
+                fingerprint != "deleted"
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+            ):
+                raise ResearchGitError("native research stage has invalid fingerprints")
+            normalized_expected_fingerprints[relative] = fingerprint
+        if set(normalized_expected_fingerprints) != set(selected):
+            raise ResearchGitError(
+                "native research stage does not exactly match the selected paths"
+            )
     if allow_backend_stage:
         excluded_backend_paths = sorted(set(staged_before) - set(selected))
         if excluded_backend_paths:
@@ -3312,11 +4804,34 @@ def _create_checkpoint_locked(
     )
     manifests = [previous_manifests[path] for path in sorted(previous_manifests)]
 
+    selected_pointer_paths = {
+        path for path in selected if path.startswith("research-objects/")
+    }
+    selected_pointer_fingerprints = {
+        path: _worktree_fingerprint(root, path) for path in selected_pointer_paths
+    }
+    if normalized_expected_fingerprints is not None:
+        stale_pointers = sorted(
+            path
+            for path, fingerprint in selected_pointer_fingerprints.items()
+            if normalized_expected_fingerprints[path] != fingerprint
+        )
+        if stale_pointers:
+            raise ResearchGitError(
+                "staged research pointer changed after selection: "
+                + ", ".join(stale_pointers)
+                + "; stage it again"
+            )
+
     pointers = _pointer_records(root, strict=True)
+    selected_pointer_refs = {
+        object_hash
+        for object_hash, items in pointers.items()
+        if any(item.get("pointer_path") in selected_pointer_paths for item in items)
+    }
+    checkpoint_pointer_refs = set(pointers)
     if only_paths is not None:
-        selected_pointer_paths = {
-            path for path in selected if path.startswith("research-objects/")
-        }
+        checkpoint_pointer_refs = set(selected_pointer_refs)
         head = _head(root)
         committed_pointers = (
             _pointer_records_at_commit(root, head, strict=True) if head else {}
@@ -3345,7 +4860,7 @@ def _create_checkpoint_locked(
     resolved_object_refs = sorted(
         {
             *(str(item) for item in object_refs if str(item).startswith("sha256:")),
-            *pointers.keys(),
+            *checkpoint_pointer_refs,
         }
     )
     environment = _environment_receipt(root)
@@ -3479,6 +4994,37 @@ def _create_checkpoint_locked(
                 "checkpoint refused because staged content differs from the "
                 "working copy: " + ", ".join(sorted(index_drift))
             )
+        prepared_index_tree = _run_git(root, ["write-tree"]).stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40,64}", prepared_index_tree) is None:
+            raise ResearchGitError("cannot bind checkpoint to the prepared Git index")
+        index_pointers, index_pointer_fingerprints = _pointer_records_at_index(root)
+        changed_pointer_bytes = sorted(
+            path
+            for path, fingerprint in selected_pointer_fingerprints.items()
+            if index_pointer_fingerprints.get(path, "deleted") != fingerprint
+        )
+        if changed_pointer_bytes:
+            raise ResearchGitError(
+                "staged research pointer differs from its selected fingerprint: "
+                + ", ".join(changed_pointer_bytes)
+            )
+        index_checkpoint_pointer_refs = set(index_pointers)
+        if only_paths is not None:
+            index_checkpoint_pointer_refs = {
+                object_hash
+                for object_hash, items in index_pointers.items()
+                if any(
+                    item.get("pointer_path") in selected_pointer_paths for item in items
+                )
+            }
+        if index_checkpoint_pointer_refs != checkpoint_pointer_refs:
+            raise ResearchGitError(
+                "checkpoint research object refs differ from the prepared Git index"
+            )
+        if _run_git(root, ["write-tree"]).stdout.strip() != prepared_index_tree:
+            raise ResearchGitError(
+                "checkpoint index changed during research pointer validation"
+            )
         privacy_findings = scan_paths(root, staged_for_commit)
         if privacy_findings:
             raise ResearchGitError(
@@ -3501,6 +5047,8 @@ def _create_checkpoint_locked(
                 "checkpoint refused because staged content changed during privacy "
                 "validation: " + ", ".join(sorted(index_drift))
             )
+        if _run_git(root, ["write-tree"]).stdout.strip() != prepared_index_tree:
+            raise ResearchGitError("checkpoint index changed during final validation")
         if _run_git(root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
             raise ResearchGitError("checkpoint produced no staged Git change")
         trailers = [
@@ -3544,6 +5092,8 @@ def _create_checkpoint_locked(
         _fsync_directory(checkpoint_path.parent)
         raise
     commit_hash = _head(root)
+    if "research.yaml" in material:
+        _synchronize_experiment_admission_policy_high_water(root)
     return CheckpointResult(
         created=True,
         committed=True,
@@ -3648,6 +5198,7 @@ def commit_research_stage(
             object_refs=object_refs,
             reproduce_command=reproduce_command,
             only_paths=tuple(entries),
+            expected_path_fingerprints=entries,
         )
         if result.committed:
             _write_research_stage(root, {})
@@ -4696,6 +6247,11 @@ def _checkpoint_at_commit(
                 f"commit {resolved} research checkpoint binding mismatch: "
                 f"{key} does not match {checkpoint_path}"
             )
+    _validate_ara_manifest_trailer_binding(
+        trailers,
+        payload,
+        context=f"commit {resolved}",
+    )
 
     ancestry = _run_git(
         repo,
@@ -5001,17 +6557,1501 @@ def list_research_objects_at_ref(
     ]
 
 
+def _experiment_admission_runtime_marker_ids(
+    repo: Path,
+    *,
+    directory_name: str,
+    label: str,
+) -> list[str]:
+    """Enumerate one runtime-marker directory without following entries."""
+
+    directory = _experiment_admission_runtime_state_directory(
+        repo,
+        directory_name=directory_name,
+        label=label,
+        create=False,
+    )
+    if not directory.exists() and not directory.is_symlink():
+        return []
+    try:
+        before = directory.lstat()
+    except OSError as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} directory is unreadable"
+        ) from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise ResearchGitError(f"experiment admission {label} directory is unsafe")
+
+    start_ids: list[str] = []
+    try:
+        for entry in directory.iterdir():
+            if len(start_ids) >= _MAX_EXPERIMENT_ADMISSION_RUNTIME_MARKERS:
+                raise ResearchGitError(
+                    f"experiment admission {label} directory has too many entries"
+                )
+            match = _EXPERIMENT_ADMISSION_RUNTIME_MARKER_NAME_RE.fullmatch(entry.name)
+            if match is None:
+                raise ResearchGitError(
+                    f"experiment admission {label} directory entry is invalid"
+                )
+            metadata = entry.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise ResearchGitError(f"experiment admission {label} marker is unsafe")
+            start_ids.append(match.group("start_object_id"))
+        after = directory.lstat()
+    except ResearchGitError:
+        raise
+    except OSError as exc:
+        raise ResearchGitError(
+            f"experiment admission {label} directory is unreadable"
+        ) from exc
+    if (
+        stat.S_ISLNK(after.st_mode)
+        or not stat.S_ISDIR(after.st_mode)
+        or (after.st_dev, after.st_ino, after.st_mode)
+        != (before.st_dev, before.st_ino, before.st_mode)
+    ):
+        raise ResearchGitError(
+            f"experiment admission {label} directory changed during enumeration"
+        )
+    return sorted(start_ids)
+
+
+def _experiment_admission_retention_refs(repo: Path) -> dict[str, str]:
+    """Return every direct, commit-valued admission retention ref."""
+
+    completed = _run_git_bounded(
+        repo,
+        [
+            "for-each-ref",
+            f"--count={_MAX_EXPERIMENT_ADMISSION_RETENTION_REFS + 1}",
+            "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(symref)",
+            "refs/xscientist/admission/",
+        ],
+        max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+    )
+    if "\ufffd" in completed.stdout or "\x00" in completed.stderr:
+        raise ResearchGitError(
+            "experiment admission checkpoint retention refs are unreadable"
+        )
+    rows = completed.stdout.splitlines()
+    if len(rows) > _MAX_EXPERIMENT_ADMISSION_RETENTION_REFS:
+        raise ResearchGitError(
+            "experiment admission checkpoint retention refs exceed the audit cap"
+        )
+    refs: dict[str, str] = {}
+    for row in rows:
+        fields = row.split("\x00")
+        if len(fields) != 4:
+            raise ResearchGitError(
+                "experiment admission checkpoint retention ref is invalid"
+            )
+        ref_name, object_type, commit, symbolic_target = fields
+        match = _EXPERIMENT_ADMISSION_RETENTION_REF_RE.fullmatch(ref_name)
+        if (
+            match is None
+            or object_type != "commit"
+            or symbolic_target
+            or re.fullmatch(r"[0-9a-f]{40,64}", commit) is None
+        ):
+            raise ResearchGitError(
+                "experiment admission checkpoint retention ref is invalid"
+            )
+        subject_hash = f"sha256:{match.group('subject')}"
+        if subject_hash in refs:
+            raise ResearchGitError(
+                "experiment admission checkpoint retention ref is duplicated"
+            )
+        refs[subject_hash] = commit
+    return refs
+
+
+def _experiment_admission_terminal_completion_ref_name(
+    start_object_id: str,
+) -> str:
+    """Return the repository-wide retention ref for one admission start."""
+
+    if (
+        not isinstance(start_object_id, str)
+        or _EXPERIMENT_ADMISSION_OBJECT_ID_RE.fullmatch(start_object_id) is None
+    ):
+        raise ResearchGitError("experiment admission start id is invalid")
+    digest = hashlib.sha256(start_object_id.encode("utf-8")).hexdigest()
+    return f"refs/xscientist/admission-terminal/{digest}"
+
+
+def _experiment_admission_terminal_completion_ref_rows(
+    repo: Path,
+    *,
+    exact_ref: str | None = None,
+) -> dict[str, str]:
+    """Return bounded, direct terminal-completion refs keyed by start digest."""
+
+    if exact_ref is not None and (
+        not isinstance(exact_ref, str)
+        or _EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REF_RE.fullmatch(exact_ref) is None
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref name is invalid"
+        )
+    maximum = (
+        1
+        if exact_ref is not None
+        else (_MAX_EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REFS)
+    )
+    completed = _run_git_bounded(
+        repo,
+        [
+            "for-each-ref",
+            f"--count={maximum + 1}",
+            "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(symref)",
+            exact_ref or "refs/xscientist/admission-terminal/",
+        ],
+        max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+    )
+    if "\ufffd" in completed.stdout or "\x00" in completed.stderr:
+        raise ResearchGitError(
+            "experiment admission terminal completion refs are unreadable"
+        )
+    rows = completed.stdout.splitlines()
+    if len(rows) > maximum:
+        raise ResearchGitError(
+            "experiment admission terminal completion refs exceed the audit cap"
+        )
+
+    refs: dict[str, str] = {}
+    for row in rows:
+        fields = row.split("\x00")
+        if len(fields) != 4:
+            raise ResearchGitError(
+                "experiment admission terminal completion ref is invalid"
+            )
+        ref_name, object_type, commit, symbolic_target = fields
+        match = _EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REF_RE.fullmatch(ref_name)
+        if (
+            match is None
+            or (exact_ref is not None and ref_name != exact_ref)
+            or object_type != "commit"
+            or symbolic_target
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None
+        ):
+            raise ResearchGitError(
+                "experiment admission terminal completion ref is invalid"
+            )
+        start_digest = match.group("start")
+        if start_digest in refs:
+            raise ResearchGitError(
+                "experiment admission terminal completion ref is duplicated"
+            )
+        refs[start_digest] = commit
+    return refs
+
+
+def _experiment_admission_terminal_completion_refs(
+    repo: str | Path,
+) -> dict[str, str]:
+    """Enumerate the bounded repository-wide terminal retention namespace."""
+
+    root = _repository_root(repo)
+    return _experiment_admission_terminal_completion_ref_rows(root)
+
+
+def _load_experiment_admission_terminal_completion_ref(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+) -> str | None:
+    """Load one direct, commit-valued terminal-completion ref, if present."""
+
+    root = _repository_root(repo)
+    ref_name = _experiment_admission_terminal_completion_ref_name(start_object_id)
+    refs = _experiment_admission_terminal_completion_ref_rows(
+        root,
+        exact_ref=ref_name,
+    )
+    if not refs:
+        return None
+    start_digest = hashlib.sha256(start_object_id.encode("utf-8")).hexdigest()
+    if set(refs) != {start_digest}:
+        raise ResearchGitError(
+            "experiment admission terminal completion ref name is invalid"
+        )
+    return refs[start_digest]
+
+
+def _publish_experiment_admission_terminal_completion_refs(
+    repo: str | Path,
+    *,
+    start_object_ids: Sequence[str],
+    commit: str,
+) -> str:
+    """Atomically CAS-publish one terminal commit for every admitted start."""
+
+    root = _repository_root(repo)
+    if isinstance(start_object_ids, (str, bytes)):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref batch is invalid"
+        )
+    try:
+        identifiers = tuple(start_object_ids)
+    except TypeError as exc:
+        raise ResearchGitError(
+            "experiment admission terminal completion ref batch is invalid"
+        ) from exc
+    if (
+        not identifiers
+        or len(identifiers) > _MAX_EXPERIMENT_ADMISSION_TERMINAL_RETENTION_REFS
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref batch is invalid"
+        )
+    ref_names = tuple(
+        _experiment_admission_terminal_completion_ref_name(start_object_id)
+        for start_object_id in identifiers
+    )
+    if len(set(ref_names)) != len(ref_names):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref batch is invalid"
+        )
+    if (
+        not isinstance(commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit) is None
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal completion commit is invalid"
+        )
+    object_type = _run_git_bounded(
+        root,
+        ["cat-file", "-t", commit],
+        max_output_bytes=4096,
+        check=False,
+    )
+    if object_type.returncode != 0 or object_type.stdout != "commit\n":
+        raise ResearchGitError(
+            "experiment admission terminal completion commit is invalid"
+        )
+
+    existing_by_ref = {
+        ref_name: _load_experiment_admission_terminal_completion_ref(
+            root,
+            start_object_id=start_object_id,
+        )
+        for start_object_id, ref_name in zip(identifiers, ref_names)
+    }
+    if any(
+        existing is not None and existing != commit
+        for existing in existing_by_ref.values()
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref conflicts with its "
+            "existing commit"
+        )
+    missing_refs = [
+        ref_name for ref_name, existing in existing_by_ref.items() if existing is None
+    ]
+    if not missing_refs:
+        return commit
+
+    commands = ["start", "option no-deref"]
+    commands.extend(
+        f"verify {ref_name} {commit}"
+        for ref_name, existing in existing_by_ref.items()
+        if existing is not None
+    )
+    commands.extend(f"create {ref_name} {commit}" for ref_name in missing_refs)
+    commands.extend(("prepare", "commit"))
+    try:
+        published = subprocess.run(
+            ["git", "-C", str(root), "update-ref", "--stdin"],
+            input="\n".join(commands) + "\n",
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except FileNotFoundError as exc:
+        raise ResearchGitError("Git is required for local research history") from exc
+    except OSError as exc:
+        raise ResearchGitError("cannot start Git command") from exc
+    if published.returncode:
+        raced = {
+            ref_name: _load_experiment_admission_terminal_completion_ref(
+                root,
+                start_object_id=start_object_id,
+            )
+            for start_object_id, ref_name in zip(identifiers, ref_names)
+        }
+        if all(existing == commit for existing in raced.values()):
+            return commit
+        if any(
+            existing is not None and existing != commit for existing in raced.values()
+        ):
+            raise ResearchGitError(
+                "experiment admission terminal completion ref conflicts with its "
+                "existing commit"
+            )
+        raise ResearchGitError(
+            "experiment admission terminal completion ref could not be published"
+        )
+    read_back = {
+        ref_name: _load_experiment_admission_terminal_completion_ref(
+            root,
+            start_object_id=start_object_id,
+        )
+        for start_object_id, ref_name in zip(identifiers, ref_names)
+    }
+    if any(existing != commit for existing in read_back.values()):
+        raise ResearchGitError(
+            "experiment admission terminal completion ref does not match its "
+            "published commit"
+        )
+    return commit
+
+
+def _publish_experiment_admission_terminal_completion_ref(
+    repo: str | Path,
+    *,
+    start_object_id: str,
+    commit: str,
+) -> str:
+    """CAS-publish one immutable terminal commit; exact retries are idempotent."""
+
+    return _publish_experiment_admission_terminal_completion_refs(
+        repo,
+        start_object_ids=[start_object_id],
+        commit=commit,
+    )
+
+
+def _decode_experiment_admission_research_object(
+    raw: str,
+    *,
+    location: str,
+    expected_kind: str,
+    expected_object_id: str,
+) -> dict[str, Any]:
+    if "\ufffd" in raw:
+        raise ResearchGitError(
+            f"experiment admission research object is not UTF-8 at {location}"
+        )
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        decoded: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate key")
+            decoded[key] = value
+        return decoded
+
+    try:
+        decoded = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+        payload = validate_research_object(decoded)
+    except (json.JSONDecodeError, ResearchObjectError, ValueError) as exc:
+        raise ResearchGitError(
+            f"experiment admission research object is invalid at {location}"
+        ) from exc
+    if (
+        payload.get("kind") != expected_kind
+        or payload.get("object_id") != expected_object_id
+    ):
+        raise ResearchGitError(
+            f"experiment admission research object identity disagrees with {location}"
+        )
+    return payload
+
+
+def _worktree_experiment_admission_research_object(
+    repo: Path,
+    *,
+    kind: str,
+    object_id: str,
+) -> dict[str, Any] | None:
+    """Read one bounded working-state object without following a path component."""
+
+    parent = repo / ".xscientist" / "objects" / kind
+    for directory in (repo / ".xscientist", repo / ".xscientist" / "objects", parent):
+        if not directory.exists() and not directory.is_symlink():
+            return None
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise ResearchGitError(
+                "experiment admission research object directory is unreadable"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ResearchGitError(
+                "experiment admission research object directory is unsafe"
+            )
+    path = parent / f"{object_id}.json"
+    if not path.exists():
+        if path.is_symlink():
+            raise ResearchGitError("experiment admission research object is unsafe")
+        return None
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ResearchGitError(
+            "experiment admission research object is unreadable"
+        ) from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > _MAX_TRAJECTORY_OBJECT_BYTES
+    ):
+        raise ResearchGitError("experiment admission research object is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ResearchGitError(
+            "experiment admission research object is unreadable"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or opened.st_size > _MAX_TRAJECTORY_OBJECT_BYTES
+        ):
+            raise ResearchGitError(
+                "experiment admission research object changed during read"
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_TRAJECTORY_OBJECT_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65_536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        len(encoded) > _MAX_TRAJECTORY_OBJECT_BYTES
+        or (after.st_dev, after.st_ino, after.st_size)
+        != (opened.st_dev, opened.st_ino, opened.st_size)
+        or getattr(after, "st_mtime_ns", None) != getattr(opened, "st_mtime_ns", None)
+        or getattr(after, "st_ctime_ns", None) != getattr(opened, "st_ctime_ns", None)
+    ):
+        raise ResearchGitError(
+            "experiment admission research object changed during read"
+        )
+    try:
+        raw = encoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ResearchGitError(
+            "experiment admission research object is not UTF-8"
+        ) from exc
+    return _decode_experiment_admission_research_object(
+        raw,
+        location=path.relative_to(repo).as_posix(),
+        expected_kind=kind,
+        expected_object_id=object_id,
+    )
+
+
+def _committed_experiment_admission_research_object(
+    repo: Path,
+    *,
+    resolved: str,
+    kind: str,
+    object_id: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Find one immutable object across the selected commit and all live refs."""
+
+    path = f".xscientist/objects/{kind}/{object_id}.json"
+    history = _run_git_bounded(
+        repo,
+        [
+            "log",
+            "--all",
+            "--full-history",
+            "--topo-order",
+            "--no-renames",
+            "--max-count=2",
+            "--format=%H",
+            resolved,
+            "--",
+            path,
+        ],
+        max_output_bytes=1024,
+    ).stdout.splitlines()
+    if any(re.fullmatch(r"[0-9a-f]{40,64}", row) is None for row in history):
+        raise ResearchGitError(
+            f"experiment admission research object history is invalid: {object_id}"
+        )
+    if len(history) > 1:
+        raise ResearchGitError(
+            f"experiment admission research object has ambiguous Git history: {object_id}"
+        )
+    if not history:
+        return None
+    introduction = history[0]
+    blob = _run_git_bounded(
+        repo,
+        ["show", f"{introduction}:{path}"],
+        max_output_bytes=_MAX_TRAJECTORY_OBJECT_BYTES,
+        check=False,
+    )
+    if blob.returncode:
+        raise ResearchGitError(
+            f"experiment admission research object is absent at its Git origin: {object_id}"
+        )
+    payload = _decode_experiment_admission_research_object(
+        blob.stdout,
+        location=f"{introduction}:{path}",
+        expected_kind=kind,
+        expected_object_id=object_id,
+    )
+    return payload, introduction
+
+
+def _bounded_experiment_admission_checkpoint(
+    repo: Path,
+    *,
+    introduction: str,
+    object_path: str,
+    expected_stage: str,
+    expected_kind: str,
+) -> dict[str, Any]:
+    """Validate an object's introducing checkpoint after bounding every Git read."""
+
+    ancestry = _run_git_bounded(
+        repo,
+        ["rev-list", "--parents", "-n", "1", introduction],
+        max_output_bytes=1024,
+    ).stdout.split()
+    if (
+        not ancestry
+        or ancestry[0] != introduction
+        or any(re.fullmatch(r"[0-9a-f]{40,64}", item) is None for item in ancestry)
+    ):
+        raise ResearchGitError(
+            "experiment admission object introduction ancestry is invalid"
+        )
+    parent = ancestry[1] if len(ancestry) > 1 else None
+    if len(ancestry) > 3:
+        raise ResearchGitError(
+            "experiment admission object introduction has too many Git parents"
+        )
+    if parent is None:
+        changed = _run_git_bounded(
+            repo,
+            ["ls-tree", "-r", "-z", "--name-only", introduction],
+            max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+        ).stdout
+    else:
+        changed = _run_git_bounded(
+            repo,
+            [
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                parent,
+                introduction,
+            ],
+            max_output_bytes=_HARD_MAX_BOUNDED_LOG_OUTPUT,
+        ).stdout
+    if "\ufffd" in changed or (changed and not changed.endswith("\x00")):
+        raise ResearchGitError(
+            "experiment admission object introduction paths are invalid"
+        )
+    changed_paths = [item for item in changed.split("\x00") if item]
+    if (
+        not changed_paths
+        or len(changed_paths) > _MAX_EXPERIMENT_ADMISSION_CHECKPOINT_PATHS
+        or len(set(changed_paths)) != len(changed_paths)
+    ):
+        raise ResearchGitError(
+            "experiment admission object introduction exceeds the path audit cap"
+        )
+    for path in changed_paths:
+        if _normalise_relative(path) != path:
+            raise ResearchGitError(
+                "experiment admission object introduction path is invalid"
+            )
+    checkpoint_candidates = sorted(
+        path
+        for path in changed_paths
+        if path.startswith("checkpoints/") and path.endswith(".json")
+    )
+    if not checkpoint_candidates or len(checkpoint_candidates) > 32:
+        raise ResearchGitError(
+            "experiment admission object introduction has no bounded checkpoint"
+        )
+    _run_git_bounded(
+        repo,
+        ["show", "-s", "--format=%(trailers:only,unfold)", introduction],
+        max_output_bytes=64 * 1024,
+    )
+    for checkpoint_path in checkpoint_candidates:
+        _run_git_bounded(
+            repo,
+            ["show", f"{introduction}:{checkpoint_path}"],
+            max_output_bytes=_MAX_TRAJECTORY_CHECKPOINT_BYTES,
+        )
+    _checkpoint_path, checkpoint = _checkpoint_at_commit(
+        repo,
+        introduction,
+        checkpoint_candidates=checkpoint_candidates,
+    )
+    material_paths = {str(path) for path in checkpoint.get("changed_paths") or []}
+    expected_prefix = f".xscientist/objects/{expected_kind}/"
+    if (
+        checkpoint.get("stage") != expected_stage
+        or object_path not in material_paths
+        or any(
+            not path.startswith(expected_prefix) or not path.endswith(".json")
+            for path in material_paths
+        )
+    ):
+        raise ResearchGitError(
+            "experiment admission object was not introduced by the required "
+            f"{expected_stage} checkpoint"
+        )
+    return checkpoint
+
+
+def _validate_experiment_admission_start_claim(
+    repo: Path,
+    *,
+    resolved: str,
+    claim: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind a durable execution claim back to its exact committed start."""
+
+    start_object_id = str(claim["start_object_id"])
+    committed = _committed_experiment_admission_research_object(
+        repo,
+        resolved=resolved,
+        kind="context_snapshot",
+        object_id=start_object_id,
+    )
+    if committed is None:
+        raise ResearchGitError(
+            f"experiment admission execution claim references no committed start: {start_object_id}"
+        )
+    start, introduction = committed
+    object_path = f".xscientist/objects/context_snapshot/{start_object_id}.json"
+    checkpoint = _bounded_experiment_admission_checkpoint(
+        repo,
+        introduction=introduction,
+        object_path=object_path,
+        expected_stage="experiment_admission_start",
+        expected_kind="context_snapshot",
+    )
+    payload = start.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    expected_fields = {
+        "protocol_kind",
+        "status",
+        "nonce",
+        "repository_id",
+        "admission_snapshot_head",
+        "plan_id",
+        "plan_hash",
+        "hypothesis_id",
+        "hypothesis_hash",
+        "preregistration_id",
+        "preregistration_hash",
+        "admission_gate_id",
+        "admission_gate_hash",
+        "execution_scope",
+        "execution_scope_hash",
+        "preflight_receipt_hash",
+        "context_hash",
+        "start_hash",
+    }
+    start_core = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"context_hash", "start_hash"}
+    }
+    scope = payload.get("execution_scope")
+    preflight_core = {
+        "protocol_kind": _EXPERIMENT_ADMISSION_PREFLIGHT_PROTOCOL,
+        "status": "authorized",
+        "experiment_authorized": True,
+        "admission_required": True,
+        "repository_id": payload.get("repository_id"),
+        "repository_head": payload.get("admission_snapshot_head"),
+        "plan_id": payload.get("plan_id"),
+        "plan_hash": payload.get("plan_hash"),
+        "hypothesis_id": payload.get("hypothesis_id"),
+        "hypothesis_hash": payload.get("hypothesis_hash"),
+        "preregistration_id": payload.get("preregistration_id"),
+        "preregistration_hash": payload.get("preregistration_hash"),
+        "admission_gate_id": payload.get("admission_gate_id"),
+        "admission_gate_hash": payload.get("admission_gate_hash"),
+        "execution_scope": scope,
+        "execution_scope_hash": payload.get("execution_scope_hash"),
+    }
+    issued_core = {
+        **preflight_core,
+        "start_object_id": start_object_id,
+        "start_object_hash": start.get("content_hash"),
+        "start_hash": payload.get("start_hash"),
+    }
+    if (
+        set(payload) != expected_fields
+        or start.get("state") != "locked"
+        or payload.get("protocol_kind") != _EXPERIMENT_ADMISSION_START_PROTOCOL
+        or payload.get("status") != "issued"
+        or not str(payload.get("nonce") or "")
+        or not isinstance(scope, Mapping)
+        or payload.get("execution_scope_hash")
+        != canonical_content_hash(dict(scope or {}))
+        or payload.get("preflight_receipt_hash")
+        != canonical_content_hash(preflight_core)
+        or payload.get("start_hash") != canonical_content_hash(start_core)
+        or payload.get("context_hash") != payload.get("start_hash")
+        or payload.get("admission_snapshot_head") != checkpoint.get("parent_commit")
+    ):
+        raise ResearchGitError(
+            f"experiment admission execution claim start is invalid: {start_object_id}"
+        )
+    final_core = {
+        "protocol_kind": _EXPERIMENT_ADMISSION_FINAL_PROTOCOL,
+        "status": "finalized",
+        "experiment_authorized": True,
+        "admission_required": True,
+        "repository_id": payload["repository_id"],
+        "admission_snapshot_head": payload["admission_snapshot_head"],
+        "repository_head": introduction,
+        "start_checkpoint": introduction,
+        "start_checkpoint_id": checkpoint.get("checkpoint_id"),
+        "start_checkpoint_hash": checkpoint.get("content_hash"),
+        "plan_id": payload["plan_id"],
+        "plan_hash": payload["plan_hash"],
+        "hypothesis_id": payload["hypothesis_id"],
+        "hypothesis_hash": payload["hypothesis_hash"],
+        "preregistration_id": payload["preregistration_id"],
+        "preregistration_hash": payload["preregistration_hash"],
+        "admission_gate_id": payload["admission_gate_id"],
+        "admission_gate_hash": payload["admission_gate_hash"],
+        "execution_scope": scope,
+        "execution_scope_hash": payload["execution_scope_hash"],
+        "preflight_receipt_hash": payload["preflight_receipt_hash"],
+        "issued_receipt_hash": canonical_content_hash(issued_core),
+        "start_object_id": start_object_id,
+        "start_object_hash": start["content_hash"],
+        "start_hash": payload["start_hash"],
+        "start_nonce": payload["nonce"],
+    }
+    if claim.get("receipt_hash") != canonical_content_hash(final_core):
+        raise ResearchGitError(
+            f"experiment admission execution claim receipt does not bind its start: {start_object_id}"
+        )
+    if claim.get("schema") == _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_V2_SCHEMA:
+        expected_batch_id = canonical_content_hash(
+            {
+                "repository_id": payload["repository_id"],
+                "start_checkpoint": introduction,
+            }
+        )
+        if (
+            claim.get("repository_id") != payload["repository_id"]
+            or claim.get("start_object_hash") != start["content_hash"]
+            or claim.get("start_checkpoint_commit") != introduction
+            or claim.get("start_checkpoint_id") != checkpoint.get("checkpoint_id")
+            or claim.get("start_checkpoint_hash") != checkpoint.get("content_hash")
+            or claim.get("execution_scope_hash") != payload["execution_scope_hash"]
+            or claim.get("ideas_hash") != scope.get("ideas_hash")
+            or claim.get("configuration_hash") != scope.get("configuration_hash")
+            or claim.get("budget_hash") != scope.get("budget_hash")
+            or claim.get("idea_index") != scope.get("idea_index")
+            or claim.get("batch_id") != expected_batch_id
+        ):
+            raise ResearchGitError(
+                "experiment admission execution claim v2 does not bind its committed start: "
+                f"{start_object_id}"
+            )
+    return start, checkpoint
+
+
+def _validate_experiment_admission_terminal_object(
+    *,
+    attempt: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> None:
+    start_object_id = str(reservation["start_object_id"])
+    attempt_object_id = str(reservation["attempt_object_id"])
+    receipt = (attempt.get("payload") or {}).get("admission_preflight_receipt")
+    receipt = receipt if isinstance(receipt, Mapping) else {}
+    consumes = {
+        str(relation.get("target") or "")
+        for relation in attempt.get("relations") or []
+        if relation.get("type") == "consumes"
+        and relation.get("role") == "experiment_admission_start"
+    }
+    receipt_core = dict(receipt)
+    receipt_hash = str(receipt_core.pop("receipt_hash", ""))
+    policy_snapshot = _validate_experiment_admission_terminal_policy_snapshot(
+        reservation
+    )
+    if (
+        attempt.get("content_hash") != reservation.get("attempt_object_hash")
+        or attempt.get("object_id") != attempt_object_id
+        or consumes != {start_object_id}
+        or receipt.get("start_object_id") != start_object_id
+        or receipt_hash != reservation.get("receipt_hash")
+        or receipt.get("protocol_kind") != _EXPERIMENT_ADMISSION_FINAL_PROTOCOL
+        or receipt.get("status") != "finalized"
+        or receipt.get("experiment_authorized") is not True
+        or receipt.get("admission_required") is not True
+        or receipt_hash != canonical_content_hash(receipt_core)
+    ):
+        raise ResearchGitError(
+            f"experiment admission terminal reservation does not bind its attempt: {attempt_object_id}"
+        )
+    if policy_snapshot is not None and any(
+        (attempt.get("payload") or {}).get(field) != policy_snapshot[field]
+        for field in (
+            "admitted_at_start",
+            "current_policy_status",
+            "quarantined",
+            "claim_promotion_allowed",
+        )
+    ):
+        raise ResearchGitError(
+            "experiment admission terminal reservation policy snapshot does not "
+            f"bind its attempt: {attempt_object_id}"
+        )
+
+
+def _validate_experiment_admission_terminal_checkpoint_status(
+    repo: Path,
+    *,
+    introduction: str,
+    checkpoint: Mapping[str, Any],
+) -> None:
+    """Enforce direct and batch terminal status semantics.
+
+    A direct, one-attempt checkpoint reports that attempt's exact terminal
+    state.  A multi-attempt project checkpoint uses the writer's aggregate
+    rule: ``completed`` when at least one attempt completed, otherwise
+    ``failed``.  The aggregate describes the batch transition; each immutable
+    attempt retains its more specific failure, timeout, cancellation, or
+    rejection state.
+    """
+
+    changed_paths = [str(path) for path in checkpoint.get("changed_paths") or []]
+    attempts: list[dict[str, Any]] = []
+    for object_path in changed_paths:
+        object_id = PurePosixPath(object_path).stem
+        raw = _run_git_bounded(
+            repo,
+            ["show", f"{introduction}:{object_path}"],
+            max_output_bytes=_MAX_TRAJECTORY_OBJECT_BYTES,
+        ).stdout
+        attempts.append(
+            _decode_experiment_admission_research_object(
+                raw,
+                location=f"{introduction}:{object_path}",
+                expected_kind="experiment_attempt",
+                expected_object_id=object_id,
+            )
+        )
+    terminal_states = {
+        "completed",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "rejected",
+    }
+    states = [str(attempt.get("state") or "") for attempt in attempts]
+    if not states or any(state not in terminal_states for state in states):
+        raise ResearchGitError(
+            "experiment admission terminal checkpoint contains a non-terminal attempt"
+        )
+    direct = len(states) == 1
+    expected_status = (
+        states[0] if direct else ("completed" if "completed" in states else "failed")
+    )
+    if checkpoint.get("status") != expected_status:
+        rule = "direct attempt state" if direct else "batch aggregate rule"
+        raise ResearchGitError(
+            "experiment admission terminal checkpoint status does not match "
+            f"the {rule}: expected {expected_status}, got "
+            f"{checkpoint.get('status')}"
+        )
+
+
+def _checkpoint_introduction_at_ref(
+    repo: Path,
+    *,
+    resolved: str,
+    checkpoint_path: str,
+) -> str:
+    """Return one checkpoint's unique introduction within a selected snapshot."""
+
+    history = _run_git_bounded(
+        repo,
+        [
+            "log",
+            "--full-history",
+            "--topo-order",
+            "--no-renames",
+            "--diff-filter=A",
+            "--max-count=2",
+            "--format=%H",
+            resolved,
+            "--",
+            checkpoint_path,
+        ],
+        max_output_bytes=1024,
+    ).stdout.splitlines()
+    if len(history) != 1 or re.fullmatch(r"[0-9a-f]{40,64}", history[0]) is None:
+        raise ResearchGitError(
+            "research checkpoint has no unique introduction at the selected revision: "
+            f"{checkpoint_path}"
+        )
+    return history[0]
+
+
+def _audit_experiment_admission_v2_outboxes(
+    repo: Path,
+    *,
+    claims: Mapping[str, Mapping[str, Any]],
+    committed_start_ids: set[str],
+) -> tuple[dict[str, int], list[str], list[str]]:
+    """Validate live v2 claims and outboxes without treating them as Git truth."""
+
+    checked = {
+        "admission_execution_claims_v2": 0,
+        "admission_bfts_terminals": 0,
+        "admission_worker_terminals": 0,
+        "admission_runtime_artifacts": 0,
+        "admission_runtime_owners_alive": 0,
+        "admission_runtime_owners_dead": 0,
+        "admission_runtime_owners_unknown": 0,
+    }
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # This import stays live-only.  Historical fsck never imports, enumerates,
+    # or interprets common-directory runtime markers.
+    from . import experiment_admission_runtime as runtime
+
+    try:
+        bfts_ids = set(runtime._enumerate_ids(repo, runtime._BFTS_DIRECTORY))
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+        bfts_ids = set()
+    try:
+        worker_ids = set(runtime._enumerate_ids(repo, runtime._WORKER_DIRECTORY))
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+        worker_ids = set()
+
+    v2_claims = {
+        start_object_id: dict(claim)
+        for start_object_id, claim in claims.items()
+        if claim.get("schema") == _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_V2_SCHEMA
+    }
+    checked["admission_execution_claims_v2"] = len(v2_claims)
+
+    for start_object_id in sorted((bfts_ids | worker_ids) - set(v2_claims)):
+        outbox_kinds = [
+            label
+            for present, label in (
+                (start_object_id in bfts_ids, "BFTS"),
+                (start_object_id in worker_ids, "worker"),
+            )
+            if present
+        ]
+        # Decode an orphan through the same strict readers used by recovery.
+        # Its contents remain untrusted because no v2 claim can bind it.
+        try:
+            if start_object_id in bfts_ids:
+                runtime.load_bfts_terminal(
+                    repo,
+                    start_object_id=start_object_id,
+                )
+            if start_object_id in worker_ids:
+                runtime.load_worker_terminal(
+                    repo,
+                    start_object_id=start_object_id,
+                )
+        except ResearchGitError as exc:
+            errors.append(str(exc))
+        errors.append(
+            "experiment admission "
+            f"{'/'.join(outbox_kinds)} terminal outbox has no matching v2 "
+            f"execution claim: {start_object_id}"
+        )
+
+    for start_object_id, claim in sorted(v2_claims.items()):
+        try:
+            strict_claim = runtime.load_execution_claim_v2(
+                repo,
+                start_object_id=start_object_id,
+                receipt_hash=str(claim["receipt_hash"]),
+            )
+            if strict_claim is None or strict_claim != claim:
+                raise ResearchGitError(
+                    "experiment admission execution claim v2 changed during audit: "
+                    f"{start_object_id}"
+                )
+            owner_state = runtime.execution_claim_owner_state(strict_claim)
+            if owner_state not in {"alive", "dead", "unknown"}:
+                raise ResearchGitError(
+                    "experiment admission execution claim owner state is invalid: "
+                    f"{start_object_id}"
+                )
+            checked[f"admission_runtime_owners_{owner_state}"] += 1
+
+            bfts = runtime.load_bfts_terminal(
+                repo,
+                start_object_id=start_object_id,
+                claim=strict_claim,
+            )
+            worker = runtime.load_worker_terminal(
+                repo,
+                start_object_id=start_object_id,
+                claim=strict_claim,
+            )
+            if bfts is not None:
+                checked["admission_bfts_terminals"] += 1
+                runtime.verify_terminal_artifacts(repo, bfts)
+                checked["admission_runtime_artifacts"] += len(bfts["artifacts"])
+            if worker is not None:
+                checked["admission_worker_terminals"] += 1
+                if worker.get("bfts_terminal_hash") is not None and bfts is None:
+                    raise ResearchGitError(
+                        "experiment admission worker terminal references a missing "
+                        f"BFTS terminal: {start_object_id}"
+                    )
+                runtime.verify_terminal_artifacts(repo, worker)
+                checked["admission_runtime_artifacts"] += len(worker["artifacts"])
+
+            if start_object_id in committed_start_ids:
+                # The immutable terminal checkpoint remains authoritative.  The
+                # runtime markers are retained process evidence, not a second
+                # historical result to reconcile into the selected snapshot.
+                continue
+            if worker is not None:
+                warnings.append(
+                    "experiment admission v2 worker terminal is validated but "
+                    "awaits durable Research VCS recording: "
+                    f"{start_object_id} (owner state: {owner_state})"
+                )
+            elif bfts is not None and owner_state == "alive":
+                warnings.append(
+                    "experiment admission v2 BFTS terminal is validated while the "
+                    "owner remains alive; worker finalization is pending: "
+                    f"{start_object_id}"
+                )
+            elif bfts is not None and owner_state == "dead":
+                warnings.append(
+                    "experiment admission v2 owner is dead with a recoverable BFTS "
+                    "terminal but no worker terminal; pipeline outcome remains "
+                    f"conservatively failed until recording: {start_object_id}"
+                )
+            elif bfts is not None:
+                warnings.append(
+                    "experiment admission v2 owner state is unknown with a validated "
+                    "BFTS terminal but no worker terminal; recovery must remain "
+                    f"conservative: {start_object_id}"
+                )
+            elif owner_state == "alive":
+                warnings.append(
+                    "experiment admission v2 execution remains in flight with a live "
+                    f"owner and no terminal outbox: {start_object_id}"
+                )
+            elif owner_state == "dead":
+                warnings.append(
+                    "experiment admission v2 owner is dead with no terminal outbox; "
+                    "conservative interrupted recovery is required: "
+                    f"{start_object_id}"
+                )
+            else:
+                warnings.append(
+                    "experiment admission v2 owner state is unknown with no terminal "
+                    "outbox; execution remains conservatively unresolved: "
+                    f"{start_object_id}"
+                )
+        except (ResearchGitError, TypeError, ValueError) as exc:
+            errors.append(str(exc))
+    return checked, errors, warnings
+
+
+def _audit_experiment_admission_runtime_state(
+    repo: Path,
+    *,
+    resolved: str,
+) -> tuple[dict[str, int], list[str], list[str]]:
+    """Audit checkout-independent admission state and recoverable terminal state."""
+
+    checked = {
+        "admission_high_water_events": 0,
+        "admission_pending_transitions": 0,
+        "admission_retention_refs": 0,
+        "admission_terminal_retention_refs": 0,
+        "admission_execution_claims": 0,
+        "admission_execution_claims_v2": 0,
+        "admission_bfts_terminals": 0,
+        "admission_worker_terminals": 0,
+        "admission_runtime_artifacts": 0,
+        "admission_runtime_owners_alive": 0,
+        "admission_runtime_owners_dead": 0,
+        "admission_runtime_owners_unknown": 0,
+        "admission_terminal_reservations": 0,
+        "admission_terminal_objects": 0,
+    }
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    state_rows: list[tuple[list[dict[str, Any]], dict[str, Any] | None]] | None = None
+    try:
+        # Local import avoids the intentional state-module dependency on this
+        # module's Git and locking primitives.
+        from .experiment_admission_state import (
+            _load_repository_experiment_admission_state,
+        )
+
+        state_rows = _load_repository_experiment_admission_state(repo)
+        checked["admission_high_water_events"] = sum(
+            len(events) for events, _pending in state_rows
+        )
+        pending = [
+            transition for _events, transition in state_rows if transition is not None
+        ]
+        checked["admission_pending_transitions"] = len(pending)
+        for transition in pending:
+            warnings.append(
+                "experiment admission decision transition is pending: "
+                + str(transition.get("subject_hash") or "unknown")
+            )
+    except (ImportError, ResearchGitError) as exc:
+        errors.append(str(exc))
+
+    retention_refs: dict[str, str] | None = None
+    try:
+        retention_refs = _experiment_admission_retention_refs(repo)
+        checked["admission_retention_refs"] = len(retention_refs)
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+    if state_rows is not None and retention_refs is not None:
+        expected_refs = {
+            str(events[-1].get("subject_hash") or ""): str(
+                events[-1].get("checkpoint_commit") or ""
+            )
+            for events, _pending in state_rows
+            if events
+        }
+        for subject_hash in sorted(set(retention_refs) - set(expected_refs)):
+            errors.append(
+                "experiment admission checkpoint retention ref has no high-water "
+                f"subject: {subject_hash}"
+            )
+        for subject_hash in sorted(set(expected_refs) - set(retention_refs)):
+            errors.append(
+                "experiment admission high-water subject has no checkpoint retention "
+                f"ref: {subject_hash}"
+            )
+        for subject_hash in sorted(set(expected_refs) & set(retention_refs)):
+            if expected_refs[subject_hash] != retention_refs[subject_hash]:
+                errors.append(
+                    "experiment admission checkpoint retention ref does not match "
+                    f"the latest high-water event: {subject_hash}"
+                )
+
+    terminal_completion_refs: dict[str, str] | None = None
+    try:
+        terminal_completion_refs = _experiment_admission_terminal_completion_refs(repo)
+        checked["admission_terminal_retention_refs"] = len(terminal_completion_refs)
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+
+    claims: dict[str, dict[str, Any]] = {}
+    try:
+        claim_ids = _experiment_admission_runtime_marker_ids(
+            repo,
+            directory_name="admission-claims",
+            label="claims",
+        )
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+        claim_ids = []
+    receipt_owners: dict[str, str] = {}
+    for start_object_id in claim_ids:
+        try:
+            claim = _load_experiment_admission_execution_claim(
+                repo,
+                start_object_id=start_object_id,
+            )
+            if claim is None:  # pragma: no cover - enumeration/read race guard
+                raise ResearchGitError(
+                    "experiment admission execution claim disappeared during audit"
+                )
+            receipt_hash = str(claim["receipt_hash"])
+            other_owner = receipt_owners.get(receipt_hash)
+            if other_owner is not None and other_owner != start_object_id:
+                raise ResearchGitError(
+                    "experiment admission execution receipt is claimed by multiple starts"
+                )
+            _validate_experiment_admission_start_claim(
+                repo,
+                resolved=resolved,
+                claim=claim,
+            )
+            claims[start_object_id] = claim
+            receipt_owners[receipt_hash] = start_object_id
+            checked["admission_execution_claims"] += 1
+        except (ResearchGitError, TypeError, ValueError) as exc:
+            errors.append(str(exc))
+
+    reservations: dict[str, dict[str, Any]] = {}
+    try:
+        reservation_ids = _experiment_admission_runtime_marker_ids(
+            repo,
+            directory_name="admission-terminal-reservations",
+            label="terminal reservations",
+        )
+    except ResearchGitError as exc:
+        errors.append(str(exc))
+        reservation_ids = []
+    attempt_owners: dict[str, str] = {}
+    expected_terminal_refs: dict[str, tuple[str, str]] = {}
+    status_validated_introductions: set[str] = set()
+    committed_terminal_starts: set[str] = set()
+    for start_object_id in reservation_ids:
+        try:
+            reservation = _load_experiment_admission_terminal_reservation(
+                repo,
+                start_object_id=start_object_id,
+            )
+            if reservation is None:  # pragma: no cover - enumeration/read race guard
+                raise ResearchGitError(
+                    "experiment admission terminal reservation disappeared during audit"
+                )
+            claim = claims.get(start_object_id)
+            if claim is None or claim.get("receipt_hash") != reservation.get(
+                "receipt_hash"
+            ):
+                raise ResearchGitError(
+                    "experiment admission terminal reservation has no matching "
+                    f"execution claim: {start_object_id}"
+                )
+            attempt_object_id = str(reservation["attempt_object_id"])
+            attempt_object_hash = str(reservation["attempt_object_hash"])
+            if attempt_object_id != (
+                "rso-" + attempt_object_hash.removeprefix("sha256:")[:16]
+            ):
+                raise ResearchGitError(
+                    "experiment admission terminal reservation attempt identity "
+                    f"is inconsistent: {attempt_object_id}"
+                )
+            other_owner = attempt_owners.get(attempt_object_id)
+            if other_owner is not None and other_owner != start_object_id:
+                raise ResearchGitError(
+                    "experiment admission terminal attempt is reserved by multiple starts"
+                )
+            attempt_owners[attempt_object_id] = start_object_id
+            reservations[start_object_id] = reservation
+            checked["admission_terminal_reservations"] += 1
+
+            committed = _committed_experiment_admission_research_object(
+                repo,
+                resolved=resolved,
+                kind="experiment_attempt",
+                object_id=attempt_object_id,
+            )
+            if committed is None:
+                attempt = _worktree_experiment_admission_research_object(
+                    repo,
+                    kind="experiment_attempt",
+                    object_id=attempt_object_id,
+                )
+                if attempt is not None:
+                    _validate_experiment_admission_terminal_object(
+                        attempt=attempt,
+                        reservation=reservation,
+                    )
+                    if (
+                        reservation.get("schema")
+                        == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+                    ):
+                        try:
+                            _experiment_admission_terminal_policy_snapshot_from_attempt(
+                                attempt
+                            )
+                        except ResearchGitError:
+                            warnings.append(
+                                "legacy v1 experiment admission terminal reservation "
+                                "has an existing attempt without a complete policy "
+                                "snapshot; manual recovery is required: "
+                                f"{attempt_object_id}"
+                            )
+                        else:
+                            warnings.append(
+                                "legacy v1 experiment admission terminal reservation "
+                                "has an existing validated attempt that can support "
+                                f"validated v2 migration: {attempt_object_id}"
+                            )
+                    else:
+                        warnings.append(
+                            "experiment admission terminal reservation has an "
+                            f"uncommitted recoverable attempt: {attempt_object_id}"
+                        )
+                else:
+                    if (
+                        reservation.get("schema")
+                        == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+                    ):
+                        warnings.append(
+                            "legacy v1 experiment admission terminal reservation has "
+                            "no object or immutable policy snapshot; manual recovery "
+                            f"is required: {attempt_object_id}"
+                        )
+                    else:
+                        warnings.append(
+                            "experiment admission terminal reservation has no object; "
+                            f"exact retry can recover it: {attempt_object_id}"
+                        )
+                continue
+            attempt, introduction = committed
+            _validate_experiment_admission_terminal_object(
+                attempt=attempt,
+                reservation=reservation,
+            )
+            checkpoint = _bounded_experiment_admission_checkpoint(
+                repo,
+                introduction=introduction,
+                object_path=(
+                    f".xscientist/objects/experiment_attempt/{attempt_object_id}.json"
+                ),
+                expected_stage="experiment_admission_terminal",
+                expected_kind="experiment_attempt",
+            )
+            if introduction not in status_validated_introductions:
+                _validate_experiment_admission_terminal_checkpoint_status(
+                    repo,
+                    introduction=introduction,
+                    checkpoint=checkpoint,
+                )
+                status_validated_introductions.add(introduction)
+            if (
+                reservation.get("schema")
+                == _EXPERIMENT_ADMISSION_TERMINAL_RESERVATION_SCHEMA
+            ):
+                try:
+                    _experiment_admission_terminal_policy_snapshot_from_attempt(attempt)
+                except ResearchGitError:
+                    warnings.append(
+                        "legacy v1 experiment admission terminal reservation has a "
+                        "committed attempt without a complete policy snapshot; manual "
+                        f"policy audit is required: {attempt_object_id}"
+                    )
+                else:
+                    warnings.append(
+                        "legacy v1 experiment admission terminal reservation has a "
+                        "committed validated attempt that can support validated v2 "
+                        f"migration: {attempt_object_id}"
+                    )
+            start_digest = hashlib.sha256(start_object_id.encode("utf-8")).hexdigest()
+            existing_expected = expected_terminal_refs.get(start_digest)
+            if existing_expected is not None and existing_expected != (
+                start_object_id,
+                introduction,
+            ):
+                raise ResearchGitError(
+                    "experiment admission terminal completion ref identity is "
+                    f"ambiguous: {start_object_id}"
+                )
+            expected_terminal_refs[start_digest] = (
+                start_object_id,
+                introduction,
+            )
+            committed_terminal_starts.add(start_object_id)
+            checked["admission_terminal_objects"] += 1
+        except (ResearchGitError, TypeError, ValueError) as exc:
+            errors.append(str(exc))
+
+    if terminal_completion_refs is not None:
+        for start_digest in sorted(
+            set(terminal_completion_refs) - set(expected_terminal_refs)
+        ):
+            errors.append(
+                "experiment admission terminal completion ref is orphaned or has "
+                f"no valid committed reservation: sha256:{start_digest}"
+            )
+        for start_digest in sorted(
+            set(expected_terminal_refs) - set(terminal_completion_refs)
+        ):
+            start_object_id, _introduction = expected_terminal_refs[start_digest]
+            errors.append(
+                "committed experiment admission terminal reservation has no "
+                f"completion ref: {start_object_id}"
+            )
+        for start_digest in sorted(
+            set(expected_terminal_refs) & set(terminal_completion_refs)
+        ):
+            start_object_id, introduction = expected_terminal_refs[start_digest]
+            if terminal_completion_refs[start_digest] != introduction:
+                errors.append(
+                    "experiment admission terminal completion ref does not match "
+                    "the unique terminal-only introduction: "
+                    f"{start_object_id}"
+                )
+
+    outbox_checked, outbox_errors, outbox_warnings = (
+        _audit_experiment_admission_v2_outboxes(
+            repo,
+            claims=claims,
+            committed_start_ids=committed_terminal_starts,
+        )
+    )
+    checked.update(outbox_checked)
+    errors.extend(outbox_errors)
+    warnings.extend(outbox_warnings)
+
+    for start_object_id in sorted(set(claims) - set(reservations)):
+        if (
+            claims[start_object_id].get("schema")
+            == _EXPERIMENT_ADMISSION_EXECUTION_CLAIM_V2_SCHEMA
+        ):
+            continue
+        warnings.append(
+            "experiment admission execution claim has no terminal reservation; "
+            f"execution may still be in flight: {start_object_id}"
+        )
+    return checked, errors, warnings
+
+
 def verify_research_repository(
     repo: str | Path,
     *,
     commit: str = "HEAD",
     verify_objects: bool = True,
+    audit_runtime: bool | None = None,
 ) -> dict[str, Any]:
-    """Verify the scientific closure visible from one Git revision."""
+    """Verify the scientific closure visible from one Git revision.
+
+    ``audit_runtime=None`` audits checkout-independent live admission state only
+    when ``commit`` is the literal ``HEAD`` selector.  Historical revisions are
+    therefore immutable snapshot audits by default.  Explicit ``True`` is
+    accepted only when the selected revision still is the repository's current
+    HEAD; ``False`` always requests a snapshot-only audit.
+    """
+
+    if audit_runtime is not None and type(audit_runtime) is not bool:
+        raise ResearchGitError("audit_runtime must be boolean or None")
 
     root = _repository_root(repo)
     store_root = _configured_store_root(root)
     resolved = _run_git(root, ["rev-parse", commit]).stdout.strip()
+    runtime_audited = commit == "HEAD" if audit_runtime is None else audit_runtime
+    if runtime_audited:
+        current_head = _run_git(root, ["rev-parse", "HEAD"]).stdout.strip()
+        if resolved != current_head:
+            raise ResearchGitError(
+                "runtime admission audit is only valid for the current HEAD"
+            )
     tree = set(
         _run_git(root, ["ls-tree", "-r", "--name-only", resolved]).stdout.splitlines()
     )
@@ -5027,6 +8067,20 @@ def verify_research_repository(
         "research_objects": 0,
         "ara_manifests": 0,
         "ara_graphs": 0,
+        "admission_high_water_events": 0,
+        "admission_pending_transitions": 0,
+        "admission_retention_refs": 0,
+        "admission_terminal_retention_refs": 0,
+        "admission_execution_claims": 0,
+        "admission_execution_claims_v2": 0,
+        "admission_bfts_terminals": 0,
+        "admission_worker_terminals": 0,
+        "admission_runtime_artifacts": 0,
+        "admission_runtime_owners_alive": 0,
+        "admission_runtime_owners_dead": 0,
+        "admission_runtime_owners_unknown": 0,
+        "admission_terminal_reservations": 0,
+        "admission_terminal_objects": 0,
     }
 
     typed_objects: dict[str, dict[str, Any]] = {}
@@ -5084,6 +8138,17 @@ def verify_research_repository(
                 checkpoint_path=f"{resolved}:{checkpoint_path}",
             )
             checkpoints.append((checkpoint_path, payload))
+            if payload.get("stage") == "experiment_admission_terminal":
+                introduction = _checkpoint_introduction_at_ref(
+                    root,
+                    resolved=resolved,
+                    checkpoint_path=checkpoint_path,
+                )
+                _validate_experiment_admission_terminal_checkpoint_status(
+                    root,
+                    introduction=introduction,
+                    checkpoint=payload,
+                )
         except (json.JSONDecodeError, ResearchGitError) as exc:
             errors.append(str(exc))
 
@@ -5267,12 +8332,20 @@ def verify_research_repository(
                         f"expected {expected_graph_hash}, got {actual_graph_hash}"
                     )
 
+    if runtime_audited:
+        admission_checked, admission_errors, admission_warnings = (
+            _audit_experiment_admission_runtime_state(root, resolved=resolved)
+        )
+        checked.update(admission_checked)
+        errors.extend(admission_errors)
+        warnings.extend(admission_warnings)
     if not verify_objects:
         warnings.append("CAS payload verification was skipped by request")
     return {
         "schema_version": "xscientist.research-fsck.v1",
         "repository": str(root),
         "commit": resolved,
+        "runtime_audited": runtime_audited,
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
@@ -5394,7 +8467,7 @@ def _trajectory_checkpoint_at_commit(
         if ": " not in line:
             continue
         key, value = line.split(": ", 1)
-        if key.startswith("Research-"):
+        if key.startswith("Research-") or key == "ARA-Manifest":
             trailers.setdefault(key, []).append(value.strip())
     required_trailers = (
         "Research-Checkpoint",
@@ -5531,6 +8604,11 @@ def _trajectory_checkpoint_at_commit(
         raise ResearchGitError(
             "structured trajectory commit/checkpoint trailer binding is invalid"
         )
+    _validate_ara_manifest_trailer_binding(
+        trailers,
+        payload,
+        context="structured trajectory commit",
+    )
     if payload.get("parent_commit") != first_parent:
         raise ResearchGitError(
             "structured trajectory checkpoint first-parent binding is invalid"
@@ -7944,6 +11022,83 @@ def _safe_worktree_control_path(worktree: Path, logical_path: str) -> Path:
     return _safe_hydration_target(worktree, relative.as_posix())
 
 
+def _parse_reproduction_command(
+    command: str,
+    *,
+    platform_name: str | None = None,
+) -> list[str]:
+    """Parse a portable POSIX-style command and bind Python aliases."""
+
+    selected_platform = platform_name or os.name
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ResearchGitError(
+            "checkpoint reproduction command has malformed quoting"
+        ) from exc
+    if not argv:
+        raise ResearchGitError("checkpoint reproduction command is empty")
+
+    quote: str | None = None
+    escaped_in_double_quotes = False
+    escaped_unquoted = False
+    for index, character in enumerate(command):
+        if escaped_unquoted:
+            escaped_unquoted = False
+            continue
+        if quote == "'":
+            if character == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if escaped_in_double_quotes:
+                escaped_in_double_quotes = False
+            elif character == "\\":
+                if selected_platform == "nt" and command[index + 1 : index + 2] == "\\":
+                    raise ResearchGitError(
+                        "checkpoint reproduction command has consecutive "
+                        "backslashes inside double quotes; single-quote literal "
+                        "backslashes or use forward slashes in paths"
+                    )
+                escaped_in_double_quotes = True
+            elif character == '"':
+                quote = None
+            continue
+        if character == "\\":
+            if selected_platform == "nt":
+                raise ResearchGitError(
+                    "checkpoint reproduction command has an unquoted backslash; "
+                    "quote literal backslashes or use forward slashes in paths"
+                )
+            escaped_unquoted = True
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "&|;<>\r\n":
+            # Otherwise a successful first program can hide skipped checks.
+            raise ResearchGitError(
+                "checkpoint reproduction command must be shell-free; "
+                "use a single verifier entry point instead of shell operators, "
+                "or quote operator characters intended as literal arguments"
+            )
+
+    executable = argv[0]
+    if selected_platform == "nt":
+        is_python_alias = executable.casefold() in {
+            "python",
+            "python3",
+            "python.exe",
+            "python3.exe",
+        }
+    else:
+        is_python_alias = executable in {"python", "python3"}
+    if is_python_alias:
+        if not sys.executable:
+            raise ResearchGitError("current Python executable is unavailable")
+        argv[0] = os.path.abspath(sys.executable)
+    return argv
+
+
 def _sanitized_reproduction_environment(worktree: Path) -> dict[str, str]:
     """Return a minimal host environment without inherited credentials.
 
@@ -8031,8 +11186,14 @@ def reproduce_checkpoint(
     destination: str | Path | None = None,
     execute: bool = False,
     timeout_seconds: int = 600,
-    environment_policy: str = "warn",
+    environment_policy: str | None = None,
 ) -> dict[str, Any]:
+    # Inspection/materialization may report drift, but an executed command is
+    # only reproducible when the launcher environment is accepted explicitly.
+    # Keep the legacy warning behavior for artifact-only inspection while making
+    # the execute default fail closed before a worktree or receipt is created.
+    if environment_policy is None:
+        environment_policy = "strict" if execute else "warn"
     if environment_policy not in {"ignore", "warn", "strict"}:
         raise ResearchGitError("environment policy must be ignore, warn, or strict")
     root = _repository_root(repo)
@@ -8152,6 +11313,7 @@ def reproduce_checkpoint(
                     "recorded_content_hash"
                 ),
                 "mismatch_fields": mismatch_fields,
+                "scope": dict(result["environment"]["scope"]),
             },
             "command_hash": (
                 content_hash(result["command"]) if result["command"] else None
@@ -8285,9 +11447,7 @@ def reproduce_checkpoint(
     if execute:
         if not command:
             raise ResearchGitError("checkpoint does not declare a reproduction command")
-        argv = shlex.split(command)
-        if not argv:
-            raise ResearchGitError("checkpoint reproduction command is empty")
+        argv = _parse_reproduction_command(command)
     worktree.parent.mkdir(parents=True, exist_ok=True)
     worktree_attempted = False
     materialized = False
@@ -8318,6 +11478,7 @@ def reproduce_checkpoint(
                     )
         dependency_mismatches = _compare_dependency_locks(worktree, environment_receipt)
         environment["mismatches"].extend(dependency_mismatches)
+        environment["scope"]["dependency_locks_checked"] = environment["recorded"]
         environment["matches"] = (
             environment["recorded"] and not environment["mismatches"]
         )

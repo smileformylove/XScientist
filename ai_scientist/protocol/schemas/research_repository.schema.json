@@ -11,6 +11,14 @@
     "name": {"type": "string"},
     "question": {"type": "string"},
     "actor": {"type": "string"},
+    "experiment_admission": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {"type": "string", "enum": ["legacy", "required"]}
+      },
+      "additionalProperties": false
+    },
     "git": {
       "type": "object",
       "required": ["mode", "checkpoint_policy", "auto_commit", "auto_push", "max_file_bytes", "track_patterns", "deny_patterns"],

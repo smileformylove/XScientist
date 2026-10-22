@@ -70,6 +70,9 @@ MAX_PLOT_FILE_BYTES = 100 * 1024 * 1024
 MAX_PARALLEL_WORKERS = 64
 JUDGMENT_MODEL_REQUIRED = "__xscientist_non_glm_judgment_model_required__"
 SUPPORTED_DETERMINISTIC_METRICS = (
+    "log_loss",
+    "brier",
+    "ece",
     "accuracy",
     "precision",
     "recall",

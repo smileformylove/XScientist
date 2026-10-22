@@ -10,6 +10,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tests.node_test_support import NODE_EXECUTABLE
+
 from ai_scientist.protocol.attestation import (
     build_in_toto_statement,
     sign_attestation,
@@ -164,12 +166,12 @@ class CanonicalJSONTests(unittest.TestCase):
         with self.assertRaises(CanonicalJSONError):
             canonical_json({"nan": float("nan")})
 
-    @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
+    @unittest.skipUnless(NODE_EXECUTABLE, "Node.js is not installed")
     def test_non_python_conformance_consumer(self) -> None:
         root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(
             [
-                "node",
+                NODE_EXECUTABLE,
                 str(
                     root
                     / "ai_scientist"

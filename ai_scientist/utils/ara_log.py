@@ -285,11 +285,14 @@ def walk_node_ancestry(ara_root: str | Path, node_id: str) -> list[dict[str, Any
         child = str(edge.get("child") or "").strip()
         if parent and child and parent not in parent_map.setdefault(child, []):
             parent_map[child].append(parent)
-    # Legacy graphs may encode topology only on the node.
-    for current_id, node in by_id.items():
-        parent = str(node.get("parent_id") or "").strip()
-        if parent and parent not in parent_map.setdefault(current_id, []):
-            parent_map[current_id].append(parent)
+    # Legacy graphs may encode topology only on the node.  Once a producer
+    # declares edges-only topology, node-local mirrors are non-authoritative and
+    # may be stale.
+    if graph.get("topology_encoding") != "edges":
+        for current_id, node in by_id.items():
+            parent = str(node.get("parent_id") or "").strip()
+            if parent and parent not in parent_map.setdefault(current_id, []):
+                parent_map[current_id].append(parent)
 
     chain: list[dict[str, Any]] = []
     seen: set[str] = set()
