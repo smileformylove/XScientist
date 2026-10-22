@@ -51,6 +51,12 @@ metrics = {"objective_score": score, "reproducibility_rate": 1.0,
            "false_discovery_rate": 0.0, "cost_per_task": 0.01, "latency_seconds": 0.001}
 if os.environ.get("MISSING_METRIC"):
     del metrics["reproducibility_rate"]
+if os.environ.get("OUT_OF_RANGE_RATE"):
+    metrics["false_discovery_rate"] = -1
+if os.environ.get("EXTREME_METRIC"):
+    metrics["objective_score"] = 1e308
+if os.environ.get("EXTREME_COST"):
+    metrics["cost_per_task"] = 1e308
 if os.environ.get("BAD_EVENTS"):
     events = [{"event_id": "incomplete"}]
 if os.environ.get("COUNTEREXAMPLE"):
@@ -280,6 +286,14 @@ class HarnessRefinementTests(unittest.TestCase):
                 self._run()
         execute.assert_not_called()
 
+    def test_single_dimension_does_not_reserve_an_impossible_composition(self) -> None:
+        self.spec["proposals"] = self.spec["proposals"][:1]
+        self.spec["policy"] = {"max_executions": 8}
+        result = self._run()
+        self.assertEqual(result["planned_max_executions"], 8)
+        self.assertEqual(result["execution_count"], 8)
+        self.assertEqual(result["composition"]["status"], "not_attempted")
+
     def test_cost_limit_stops_at_pair_boundary(self) -> None:
         self.spec["policy"] = {"max_cost": 0.02}
         result = self._run()
@@ -294,12 +308,44 @@ class HarnessRefinementTests(unittest.TestCase):
             "required_metric_missing_or_invalid", result["trials"][0]["reasons"]
         )
 
+    def test_invalid_rates_and_extreme_metrics_abstain_without_overflow(self) -> None:
+        for flag in ("OUT_OF_RANGE_RATE", "EXTREME_METRIC", "EXTREME_COST"):
+            with self.subTest(flag=flag):
+                self._environment(**{flag: "1"})
+                result = self._run()
+                self.assertEqual(result["decision"], "keep_base")
+                if flag == "EXTREME_COST":
+                    self.assertEqual(
+                        result["stop_reason"], "cost_unobserved_or_invalid"
+                    )
+                else:
+                    self.assertIn(
+                        "required_metric_missing_or_invalid",
+                        result["trials"][0]["reasons"],
+                    )
+
+    def test_policy_rejects_unbounded_numbers_without_float_conversion(self) -> None:
+        self.spec["policy"] = {"max_cost": 10**1000}
+        with self.assertRaises(EvolutionRuntimeError):
+            self._run(False)
+
     def test_invalid_events_keep_negative_execution_receipt(self) -> None:
         self._environment(BAD_EVENTS="1")
         result = self._run()
         self.assertEqual(result["decision"], "keep_base")
         receipt = result["trials"][0]["runs"][0]["run_receipts"][0]
         self.assertEqual(receipt["status"], "invalid_output")
+
+    def test_process_launch_failure_is_a_negative_receipt(self) -> None:
+        self.spec["development_suite"]["tasks"][0]["command"] = [
+            str(self.root / "missing-executable")
+        ]
+        result = self._run()
+        self.assertEqual(result["decision"], "keep_base")
+        self.assertEqual(result["execution_count"], 1)
+        receipt = result["trials"][0]["runs"][0]["run_receipts"][0]
+        self.assertEqual(receipt["status"], "launch_failed")
+        self.assertEqual(receipt["error_category"], "FileNotFoundError")
 
     def test_conflicting_paths_are_not_composed(self) -> None:
         self.spec["proposals"][1] = self._proposal(
@@ -395,6 +441,62 @@ class HarnessRefinementTests(unittest.TestCase):
         self.assertEqual(
             json.loads(output.read_text())["decision"], "shadow_candidate_selected"
         )
+
+    def test_cli_force_cannot_replace_inputs_cas_or_directories(self) -> None:
+        spec, constitution = self.root / "spec.json", self.root / "constitution.json"
+        spec.write_text(json.dumps(self.spec), encoding="utf-8")
+        constitution.write_text(json.dumps(self.constitution), encoding="utf-8")
+        blocked_parent = self.root / "file-parent"
+        blocked_parent.write_text("retain", encoding="utf-8")
+        targets = [
+            spec,
+            constitution,
+            self.store / "objects" / "fake.json",
+            self.root,
+            blocked_parent / "report.json",
+        ]
+        link = self.root / "spec-alias.json"
+        link.symlink_to(spec)
+        targets.append(link)
+        for target in targets:
+            with self.subTest(target=target):
+                with patch(
+                    "xscientist.evolution_cli.run_harness_refinement"
+                ) as execute:
+                    with redirect_stderr(StringIO()):
+                        code = main(
+                            [
+                                "refine",
+                                "--spec",
+                                str(spec),
+                                "--constitution",
+                                str(constitution),
+                                "--store",
+                                str(self.store),
+                                "--execute",
+                                "--force",
+                                "--out",
+                                str(target),
+                            ]
+                        )
+                self.assertEqual(code, 2)
+                execute.assert_not_called()
+        self.assertEqual(json.loads(spec.read_text()), self.spec)
+
+    def test_composition_build_failure_keeps_negative_evidence_and_baseline(
+        self,
+    ) -> None:
+        with patch(
+            "ai_scientist.utils.harness_refinement._compose",
+            side_effect=OSError("disk unavailable"),
+        ):
+            # A failed composition must not erase the successful proposal probes.
+            result = self._run()
+        self.assertEqual(result["decision"], "keep_base")
+        self.assertEqual(result["status"], "halted")
+        self.assertEqual(result["composition"]["status"], "failed")
+        self.assertEqual(len(result["trials"]), 2)
+        self.assertTrue(result["trials"][0]["runs"])
 
 
 if __name__ == "__main__":

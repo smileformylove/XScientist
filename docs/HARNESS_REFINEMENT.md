@@ -7,7 +7,7 @@ Implementation checklist:
 - [x] Conflict-aware composition, fresh probes, and scoped experience records.
 - [x] Held-out evaluation, execution/cost bounds, and local integration checks.
 
-Validation: 85 refinement/evolution tests pass, including real Python
+Validation: 91 refinement/evolution tests pass, including real Python
 subprocess probes. The standalone smoke example completes 16 executions and
 selects a composed shadow candidate after its held-out test. This validates
 the implementation contract, not scientific performance.
@@ -32,9 +32,9 @@ historical and holdout backtests satisfy the existing skill admission rules.
 
 ## Run
 
-The model-free smoke example creates a new directory, builds two real recovery
-components, executes them in Python subprocesses, and saves the inputs and full
-report. Use a directory that does not already exist:
+From a source checkout, the model-free smoke example creates a new directory,
+builds two real recovery components, executes them in Python subprocesses, and
+saves the inputs and full report. Use a directory that does not already exist:
 
 ```bash
 python -m scripts.evolution.harness_refinement_demo --output /tmp/xsci-refinement-demo
@@ -109,7 +109,9 @@ free contrastive editor. A candidate must satisfy all scientific gates, retain
 all five default evolution metrics, avoid per-pair metric regressions beyond
 the existing default allowances, and beat the best repeated baseline objective
 on each task by the configured margin. These conservative smoke criteria do
-not establish statistical significance.
+not establish statistical significance. Rates must be in [0, 1], latency and
+cost must be nonnegative, and required metrics must have magnitude at most
+1e12. Extreme finite values are rejected before arithmetic can overflow.
 
 The best eligible proposal in each dimension may be composed when their actual
 file changes do not overlap and their applicability domains intersect.
@@ -127,7 +129,8 @@ Without a holdout, a development winner remains advisory and `decision` stays
 Default policy is two paired repeats per task, a 0.01 objective margin, at most
 128 subprocess executions, and a reported cost limit of 100. The limits are
 configurable using `repeats`, `minimum_improvement`, `max_executions`, and
-`max_cost`. The planner reserves a composition and a final holdout in its
+`max_cost`. The planner reserves a composition when both proposal dimensions
+exist, and a final holdout in its
 execution ceiling. Every candidate draw has a matched baseline draw; the
 repeat index is supplied as `XSCIENTIST_REFINEMENT_REPEAT`. The evaluator must
 use this index for any stochastic seed policy. Artifact roots are freshly
@@ -151,3 +154,9 @@ Experience stays `quarantined`; no shared memory is updated. A selected result
 is an ordinary immutable shadow candidate. Production use still requires
 attributed ablations, sealed/prospective independent evaluation, canary,
 rollback proof, and authorization through the existing evolution gate.
+
+Output paths cannot replace the input spec, constitution, CAS files, or a
+directory, including aliases to input files. Composition build errors preserve
+all completed probes and return a halted baseline decision. Missing evaluator
+executables produce hashed `launch_failed` receipts rather than discarding the
+experiment report.

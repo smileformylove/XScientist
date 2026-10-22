@@ -214,6 +214,7 @@ def _execute_variant(
         if os.name == "nt" and os.environ.get("SystemRoot"):
             env["SystemRoot"] = os.environ["SystemRoot"]
         started = time.monotonic()
+        launch_error = None
         try:
             completed = subprocess.run(
                 argv,
@@ -231,6 +232,12 @@ def _execute_variant(
             timed_out = True
             stdout = exc.stdout or b""
             stderr = exc.stderr or b""
+        except OSError as exc:
+            completed = None
+            timed_out = False
+            stdout = b""
+            stderr = str(exc).encode("utf-8", errors="replace")
+            launch_error = type(exc).__name__
         else:
             stdout = completed.stdout
             stderr = completed.stderr
@@ -246,6 +253,14 @@ def _execute_variant(
             "stdout_hash": _bytes_hash(stdout),
             "stderr_hash": _bytes_hash(stderr),
         }
+        if launch_error:
+            receipt["status"] = "launch_failed"
+            receipt["error_category"] = launch_error
+            receipt["run_hash"] = canonical_content_hash(receipt)
+            raise EvolutionExecutionError(
+                f"benchmark task could not start: {task_id}/{variant}: {launch_error}",
+                receipt,
+            )
         if timed_out:
             receipt["status"] = "timed_out"
             receipt["run_hash"] = canonical_content_hash(receipt)

@@ -7,7 +7,6 @@ local experiments never grant production or persistent-learning authority.
 
 from __future__ import annotations
 
-import math
 import re
 import shutil
 import tempfile
@@ -35,6 +34,7 @@ from ai_scientist.utils.evolution_runtime import (
 
 SPEC_SCHEMA = "xscientist.harness-refinement-spec.v1"
 REPORT_SCHEMA = "xscientist.harness-refinement.v1"
+_MAX_METRIC = 1.0e12
 _DEFAULT_POLICY = {
     "repeats": 2,
     "minimum_improvement": 0.01,
@@ -58,8 +58,8 @@ def _policy(raw: Any) -> dict[str, Any]:
     for name in ("minimum_improvement", "max_cost"):
         value = policy[name]
         _require(
-            type(value) in (int, float) and math.isfinite(value) and value > 0,
-            f"{name} must be finite and positive",
+            type(value) in (int, float) and 0 < value <= _MAX_METRIC,
+            f"{name} must be positive and at most {_MAX_METRIC:g}",
         )
     return policy
 
@@ -290,7 +290,15 @@ def _assessment(
             if (
                 base is None
                 or changed is None
-                or (name == "cost_per_task" and min(base, changed) < 0)
+                or max(abs(base), abs(changed)) > _MAX_METRIC
+                or (
+                    name in {"cost_per_task", "latency_seconds"}
+                    and min(base, changed) < 0
+                )
+                or (
+                    name in {"false_discovery_rate", "reproducibility_rate"}
+                    and not (0 <= base <= 1 and 0 <= changed <= 1)
+                )
             ):
                 reasons.add("required_metric_missing_or_invalid")
                 continue
@@ -306,6 +314,7 @@ def _assessment(
             reasons.add("incomplete_repeats")
         if all(
             "objective_score" in row[variant]
+            and abs(row[variant]["objective_score"]) <= _MAX_METRIC
             for row in rows
             for variant in ("baseline", "candidate")
         ):
@@ -409,11 +418,14 @@ def run_harness_refinement(
         type(timeout_seconds) is int and timeout_seconds > 0, "timeout must be positive"
     )
     development, holdout = spec["development_suite"], spec.get("holdout_suite")
+    composition_slots = int(
+        {p["dimension"] for p in proposals} == {"invariant", "domain"}
+    )
     planned = (
         2
         * policy["repeats"]
         * (
-            (len(proposals) + 1) * len(development["tasks"])
+            (len(proposals) + composition_slots) * len(development["tasks"])
             + (len(holdout["tasks"]) if holdout else 0)
         )
     )
@@ -487,7 +499,7 @@ def run_harness_refinement(
                         "duration_seconds"
                     ]
                     cost = receipt.get("metrics", {}).get("cost_per_task")
-                    if cost is None or cost < 0:
+                    if cost is None or not 0 <= cost <= _MAX_METRIC:
                         report["stop_reason"] = "cost_unobserved_or_invalid"
                     else:
                         report["observed_cost"] += cost
@@ -551,24 +563,35 @@ def run_harness_refinement(
                 "reason": "overlapping_changes" if conflict else "disjoint_domains",
             }
         else:
-            candidate = _compose(
-                selected,
-                constitution,
-                artifact_store,
-                [run["report_hash"] for trial in eligible for run in trial["runs"]],
-            )
-            trial = {
-                "proposal_id": "composition",
-                "dimension": "composition",
-                **probe(candidate, development, [p["proposal_id"] for p in selected]),
-            }
-            report["trials"].append(trial)
-            report["composition"] = {
-                "status": "probed",
-                "candidate_hash": candidate["candidate_hash"],
-            }
-            if trial["eligible"]:
-                eligible.append(trial)
+            try:
+                candidate = _compose(
+                    selected,
+                    constitution,
+                    artifact_store,
+                    [run["report_hash"] for trial in eligible for run in trial["runs"]],
+                )
+            except (OSError, ValueError, EvolutionRuntimeError) as exc:
+                report["composition"] = {
+                    "status": "failed",
+                    "error_category": type(exc).__name__,
+                    "error_hash": canonical_content_hash(str(exc)),
+                }
+                report["stop_reason"] = "composition_failed"
+            else:
+                trial = {
+                    "proposal_id": "composition",
+                    "dimension": "composition",
+                    **probe(
+                        candidate, development, [p["proposal_id"] for p in selected]
+                    ),
+                }
+                report["trials"].append(trial)
+                report["composition"] = {
+                    "status": "probed",
+                    "candidate_hash": candidate["candidate_hash"],
+                }
+                if trial["eligible"]:
+                    eligible.append(trial)
     if eligible and not report["stop_reason"]:
         winner = max(eligible, key=lambda t: (t["mean_improvement"], t["proposal_id"]))
         report["development_winner"] = winner["candidate"]["candidate_hash"]

@@ -519,10 +519,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_json(args.out, result, force=args.force)
             return 0 if result["status"] == "completed" else 3
         if args.command == "refine":
-            if args.out and Path(args.out).expanduser().exists() and not args.force:
-                raise EvolutionRuntimeError(
-                    "output path exists; pass --force to replace it"
+            if args.out:
+                output = Path(args.out).expanduser().resolve()
+                store = Path(args.store).expanduser().resolve()
+                inputs = {
+                    Path(path).expanduser().resolve()
+                    for path in (args.spec, args.constitution)
+                }
+                aliases_input = output.exists() and any(
+                    source.exists() and output.samefile(source) for source in inputs
                 )
+                if (
+                    output in inputs
+                    or aliases_input
+                    or output == store
+                    or store in output.parents
+                ):
+                    raise EvolutionRuntimeError(
+                        "refinement output cannot overwrite inputs or the artifact store"
+                    )
+                if output.is_dir() or any(
+                    parent.exists() and not parent.is_dir() for parent in output.parents
+                ):
+                    raise EvolutionRuntimeError(
+                        "refinement output requires a file under a directory"
+                    )
+                if output.exists() and not args.force:
+                    raise EvolutionRuntimeError(
+                        "output path exists; pass --force to replace it"
+                    )
             result = run_harness_refinement(
                 _object(_load_json(args.spec), label="refinement spec"),
                 constitution=_object(
