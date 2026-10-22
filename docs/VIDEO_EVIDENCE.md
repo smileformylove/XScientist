@@ -12,6 +12,7 @@ research campaign or certify an observation as a scientific result.
 - [x] Interval observations with actual decoded frame timestamps and provenance.
 - [x] Bounded evidence packs, temporal locators in research context and VLM input.
 - [x] Native checkpoint retention, integrity checks and regression tests.
+- [x] Verified frame reuse, temporal frame allocation and duplicate image removal.
 
 Git stores source/evidence JSON and CAS pointers. Original videos and extracted
 PNGs remain in the configured CAS and are excluded from source-code commits.
@@ -41,6 +42,13 @@ unverified records; none of these operations promotes a scientific claim.
 Missing tools, invalid intervals, unsafe source links and corrupt CAS content
 are rejected. Failed publication rolls back new pointers and typed records
 when no checkpoint has been published; unreferenced CAS bytes can remain.
+
+`observe` reuses an existing derivation when the original content, stream,
+interval and sampling targets match. Original and frame hashes are verified
+before reuse; the original decoder version stays attached to the derivation.
+Reuse also works without FFmpeg. `--refresh` explicitly requests new decoding.
+JSON results include observed cache-hit, decoded-frame and reused-frame counts;
+these operation counters are separate from scientific observation content.
 
 ## Time and Sampling
 
@@ -75,7 +83,10 @@ they do not mean a model has inspected the corresponding images.
 
 `build_video_evidence_pack()` validates source bindings and CAS hashes and
 returns a bounded metadata view. Its frame budget is global across all supplied
-evidence IDs. Omitted frames/evidence are counted; the token budget covers the
+evidence IDs. Allocation proceeds in rounds across evidence and favors temporal
+spread within an interval. Identical source/stream/timestamp/frame references
+share one image attachment without collapsing their distinct annotations.
+Omitted frames/evidence are counted; the token budget covers the
 metadata pack, not image tokens or the caller's message. Originals shared by
 several observations are hashed once per compilation.
 

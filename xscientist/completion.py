@@ -17,7 +17,7 @@ RESEARCH_COMMANDS = (
     "experiment evidence estimand effect infer ingest review claim init status audit "
     "context decide tree dag adapter fsck checkpoint record objects stage add unstage "
     "commit branch switch restore revert tag blame merge log trajectory show diff object bundle "
-    "export reproduce"
+    "export reproduce video"
 )
 
 RESEARCH_SUBCOMMANDS = {
@@ -30,6 +30,7 @@ RESEARCH_SUBCOMMANDS = {
     "verifier-authority": "prepare finalize verify",
     "experiment-admission": "prepare ingest",
     "literature": "plan receipt source update passage",
+    "video": "add list observe context",
     "adapter": "list doctor sync",
     "object": "add",
     "bundle": "create verify restore",

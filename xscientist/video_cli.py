@@ -23,6 +23,11 @@ def add_video_commands(subparsers: Any) -> None:
     observe.add_argument("--end", required=True, type=float)
     observe.add_argument("--result", required=True)
     observe.add_argument("--max-frames", type=int, default=4)
+    observe.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Decode instead of reusing verified frames.",
+    )
     observe.add_argument("--supports", action="append", default=[])
     observe.add_argument("--refutes", action="append", default=[])
     context = commands.add_parser(
@@ -60,6 +65,7 @@ def run_video_command(args: argparse.Namespace) -> dict[str, Any]:
             max_frames=args.max_frames,
             supports=args.supports,
             refutes=args.refutes,
+            reuse_frames=not args.refresh,
             commit=not args.no_commit,
         )
     if args.video_command == "context":

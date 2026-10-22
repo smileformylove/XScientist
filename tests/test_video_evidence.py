@@ -360,6 +360,104 @@ class VideoEvidenceTests(unittest.TestCase):
             [0, 0.5],
         )
 
+    def test_new_observations_reuse_verified_frames_without_media_tools(self):
+        evidence = self._evidence()
+        asset = self.repository.get(evidence)["payload"]["source_id"]
+        arguments = dict(
+            start_seconds=0.25,
+            end_seconds=1.75,
+            max_frames=3,
+            result="An alternative interpretation of the same frames",
+        )
+        with mock.patch(
+            "xscientist.video_evidence._run_media_tool",
+            side_effect=AssertionError("cache reuse must not run FFmpeg"),
+        ):
+            saved = record_video_evidence(self.root, asset, **arguments)
+            repeated = record_video_evidence(self.root, asset, **arguments)
+        self.assertTrue(saved["operation"]["cache_hit"])
+        self.assertEqual(saved["operation"]["decoded_frames"], 0)
+        self.assertEqual(saved["operation"]["reused_frames"], 3)
+        self.assertFalse(repeated["object"].created)
+        self.assertEqual(
+            self.repository.get(saved["object"].object_id)["payload"]["frames"],
+            self.repository.get(evidence)["payload"]["frames"],
+        )
+        self.assertTrue(self.repository.fsck()["ok"])
+
+    def test_sampling_changes_and_refresh_require_decoding(self):
+        evidence = self._evidence()
+        asset = self.repository.get(evidence)["payload"]["source_id"]
+        from xscientist.video_evidence import _extract_frames
+
+        with mock.patch(
+            "xscientist.video_evidence._extract_frames", wraps=_extract_frames
+        ) as extract:
+            for count, reuse in ((2, True), (3, False)):
+                saved = record_video_evidence(
+                    self.root,
+                    asset,
+                    start_seconds=0.25,
+                    end_seconds=1.75,
+                    max_frames=count,
+                    result="Motion",
+                    reuse_frames=reuse,
+                )
+                self.assertFalse(saved["operation"]["cache_hit"])
+            self.assertEqual(extract.call_count, 2)
+
+    def test_context_shares_frames_and_covers_multiple_intervals(self):
+        evidence = self._evidence()
+        asset = self.repository.get(evidence)["payload"]["source_id"]
+        duplicate = record_video_evidence(
+            self.root,
+            asset,
+            start_seconds=0.25,
+            end_seconds=1.75,
+            max_frames=3,
+            result="A conflicting interpretation",
+        )["object"].object_id
+        pack = build_video_evidence_pack(self.root, [evidence, duplicate], max_frames=3)
+        self.assertEqual(pack["frame_count"], 3)
+        self.assertEqual([len(row["frames"]) for row in pack["items"]], [3, 3])
+        content = prepare_video_evidence_prompt(
+            self.root, [evidence, duplicate], message="Compare", max_frames=3
+        )
+        self.assertEqual(sum(row["type"] == "image_url" for row in content), 3)
+        early = record_video_evidence(
+            self.root,
+            asset,
+            start_seconds=0,
+            end_seconds=0.25,
+            result="Before motion",
+            max_frames=1,
+        )["object"].object_id
+        pack = build_video_evidence_pack(self.root, [evidence, early], max_frames=2)
+        self.assertEqual([len(row["frames"]) for row in pack["items"]], [1, 1])
+        spread = build_video_evidence_pack(self.root, [evidence], max_frames=2)
+        self.assertEqual(
+            [row["timestamp_seconds"] for row in spread["items"][0]["frames"]],
+            [0.5, 1.25],
+        )
+
+    def test_corrupt_cached_frame_is_rejected_before_reuse(self):
+        evidence = self._evidence()
+        payload = self.repository.get(evidence)["payload"]
+        path = _blob(self.repository, payload["frames"][0]["artifact_hash"])
+        raw = path.read_bytes()
+        path.write_bytes(bytes([raw[0] ^ 1]) + raw[1:])
+        with mock.patch("xscientist.video_evidence._extract_frames") as extract:
+            with self.assertRaisesRegex(ResearchGitError, "hash mismatch"):
+                record_video_evidence(
+                    self.root,
+                    payload["source_id"],
+                    start_seconds=0.25,
+                    end_seconds=1.75,
+                    max_frames=3,
+                    result="Another observation",
+                )
+        extract.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

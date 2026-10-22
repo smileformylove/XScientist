@@ -2038,9 +2038,13 @@ def main(
 
             result = run_video_command(args)
             if "object" in result:
-                _print_saved_object(
-                    "video asset/evidence", result, as_json=args.as_json
-                )
+                if args.as_json:
+                    payload = _saved_object_json(result)
+                    if "operation" in result:
+                        payload["operation"] = result["operation"]
+                    _print_json(payload)
+                else:
+                    _print_saved_object("video asset/evidence", result, as_json=False)
             elif args.as_json:
                 _print_json(result)
             elif "assets" in result:
