@@ -148,6 +148,94 @@ class DeterministicEvaluatorTests(unittest.TestCase):
                 self.assertEqual(report["status"], "verified")
                 self.assertAlmostEqual(_metric_value(report), value)
 
+    def test_world_model_probability_metrics_are_verified(self) -> None:
+        probabilities = np.array(
+            [[0.7, 0.2, 0.1], [0.1, 0.8, 0.1], [0.2, 0.3, 0.5]],
+            dtype=float,
+        )
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "ground_truth": np.array([0, 1, 2]),
+                    "probabilities": probabilities,
+                    "sample_ids": ["a", "b", "c"],
+                    "evaluation_inputs": [[0], [1], [2]],
+                }
+            },
+        )
+        expected = {
+            "log loss": float(-np.mean(np.log([0.7, 0.8, 0.5]))),
+            "brier score": (0.14 + 0.06 + 0.38) / 3.0,
+            "expected calibration error": (0.3 + 0.2 + 0.5) / 3.0,
+        }
+        for metric, value in expected.items():
+            with self.subTest(metric=metric):
+                report = evaluate_experiment_data(
+                    self.path, requested_metric=metric
+                )
+                self.assertEqual(report["status"], "verified")
+                self.assertTrue(report["comparison_ready"])
+                self.assertAlmostEqual(_metric_value(report), value)
+
+    def test_binary_probability_vector_is_supported_for_log_loss(self) -> None:
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "y_true": np.array([0, 1, 1, 0]),
+                    "probabilities": np.array([0.1, 0.8, 0.7, 0.2]),
+                }
+            },
+        )
+        report = evaluate_experiment_data(self.path, requested_metric="nll")
+        self.assertEqual(report["status"], "verified")
+        self.assertAlmostEqual(
+            _metric_value(report),
+            float(-np.mean(np.log([0.9, 0.8, 0.7, 0.8]))),
+        )
+
+    def test_probability_metrics_reject_invalid_probability_contracts(self) -> None:
+        cases = [
+            {
+                "y_true": [0, 1],
+                "probabilities": [[0.8, 0.3], [0.2, 0.8]],
+            },
+            {
+                "y_true": [0, 1],
+                "probabilities": [[-0.1, 1.1], [0.2, 0.8]],
+            },
+            {
+                "y_true": [0, 2],
+                "probabilities": [[0.8, 0.2], [0.2, 0.8]],
+            },
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                np.save(self.path, payload)
+                report = evaluate_experiment_data(
+                    self.path, requested_metric="log_loss"
+                )
+                self.assertEqual(report["status"], "invalid")
+                self.assertIsNone(report["metric"])
+
+    def test_log_loss_uses_protocol_probability_floor(self) -> None:
+        np.save(
+            self.path,
+            {
+                "test": {
+                    "y_true": np.array([0, 1]),
+                    "probabilities": np.array([[0.0, 1.0], [0.2, 0.8]]),
+                }
+            },
+        )
+        report = evaluate_experiment_data(self.path, requested_metric="log_loss")
+        self.assertEqual(report["status"], "verified")
+        self.assertAlmostEqual(
+            _metric_value(report),
+            float(-np.mean(np.log([1e-6, 0.8]))),
+        )
+
     def test_auc_requires_scores_instead_of_treating_labels_as_scores(self) -> None:
         np.save(self.path, {"y_true": [0, 0, 1, 1], "y_pred": [0, 1, 1, 1]})
         report = evaluate_experiment_data(self.path, requested_metric="roc auc")

@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - compatibility with older NumPy
 
 EVALUATOR_SCHEMA_VERSION = "deterministic_evaluation.v2"
 EVALUATOR_VERSION = "2.0.0"
+LOG_LOSS_PROBABILITY_FLOOR = 1e-6
 DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_ARRAY_ELEMENTS = 5_000_000
 DEFAULT_MAX_CONTAINER_ITEMS = 100_000
@@ -55,6 +56,9 @@ _INPUT_FINGERPRINT_KEYS = ("input_fingerprints", "sample_fingerprints")
 _EVALUATION_INPUT_KEYS = ("evaluation_inputs", "inputs", "features")
 
 _METRIC_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("log_loss", ("log loss", "logloss", "negative log likelihood", "nll")),
+    ("brier", ("brier score", "brier")),
+    ("ece", ("expected calibration error", "ece")),
     ("roc_auc", ("roc auc", "roc-auc", "roc_auc", "auc")),
     ("accuracy", ("accuracy", "accurate", "acc")),
     ("precision", ("precision",)),
@@ -828,6 +832,41 @@ def _classification_value(
     scores: Any,
     dataset: str,
 ) -> float:
+    if metric in {"log_loss", "brier", "ece"}:
+        probability_source = scores if scores is not None else predictions
+        if probability_source is None:
+            raise EvaluationInputError(
+                f"{dataset} {metric} requires probability scores"
+            )
+        probabilities, target_indices = _probability_matrix(
+            y_true, probability_source, dataset
+        )
+        rows = np.arange(y_true.size)
+        if metric == "log_loss":
+            target_probabilities = probabilities[rows, target_indices]
+            return float(
+                -np.mean(np.log(np.maximum(target_probabilities, LOG_LOSS_PROBABILITY_FLOOR)))
+            )
+        one_hot = np.zeros_like(probabilities)
+        one_hot[rows, target_indices] = 1.0
+        if metric == "brier":
+            return float(np.mean(np.sum(np.square(probabilities - one_hot), axis=1)))
+
+        confidence = np.max(probabilities, axis=1)
+        predicted = np.argmax(probabilities, axis=1)
+        correct = predicted == target_indices
+        # Fixed equal-width bins are part of the evaluator contract. The
+        # right endpoint is included in the final bin.
+        bin_indices = np.minimum((confidence * 10).astype(np.int64), 9)
+        ece = 0.0
+        for bin_index in range(10):
+            mask = bin_indices == bin_index
+            if np.any(mask):
+                ece += float(np.sum(mask)) / y_true.size * abs(
+                    float(np.mean(correct[mask])) - float(np.mean(confidence[mask]))
+                )
+        return ece
+
     if metric == "roc_auc":
         if scores is None:
             raise EvaluationInputError(f"{dataset} ROC AUC requires probability scores")
@@ -914,6 +953,73 @@ def _classification_value(
     raise EvaluationInputError(f"unsupported classification metric: {metric}")
 
 
+def _probability_matrix(
+    y_true: np.ndarray, probabilities: Any, dataset: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate probabilities and return a class-indexed matrix and targets."""
+    _validate_class_labels(y_true, field="ground truth", dataset=dataset)
+    raw = np.asarray(probabilities)
+    if raw.ndim == 1:
+        _, positive = _binary_labels(y_true, dataset)
+        values = _as_vector(raw, field="probability scores", dataset=dataset).astype(float)
+        if values.size != y_true.size:
+            raise EvaluationInputError(
+                f"{dataset} probability scores and ground truth lengths differ"
+            )
+        if np.any(values < 0.0) or np.any(values > 1.0):
+            raise EvaluationInputError(
+                f"{dataset} binary probability scores must lie in [0, 1]"
+            )
+        matrix = np.column_stack((1.0 - values, values))
+        targets = np.asarray(_labels_equal(y_true, positive), dtype=np.int64)
+    elif raw.ndim == 2:
+        if raw.shape[0] != y_true.size or raw.shape[1] < 2:
+            raise EvaluationInputError(
+                f"{dataset} probability matrix must have shape (samples, classes)"
+            )
+        try:
+            matrix = raw.astype(float)
+        except (TypeError, ValueError) as exc:
+            raise EvaluationInputError(
+                f"{dataset} probability matrix is not numeric"
+            ) from exc
+        if not np.all(np.isfinite(matrix)):
+            raise EvaluationInputError(
+                f"{dataset} probability matrix contains non-finite values"
+            )
+        if np.any(matrix < 0.0) or np.any(matrix > 1.0):
+            raise EvaluationInputError(
+                f"{dataset} probability matrix entries must lie in [0, 1]"
+            )
+        row_sums = np.sum(matrix, axis=1)
+        if not np.allclose(row_sums, 1.0, rtol=0.0, atol=1e-8):
+            raise EvaluationInputError(
+                f"{dataset} probability rows must sum to 1"
+            )
+        if y_true.dtype.kind == "b":
+            targets = y_true.astype(np.int64)
+        else:
+            try:
+                targets = y_true.astype(np.int64)
+            except (TypeError, ValueError) as exc:
+                raise EvaluationInputError(
+                    f"{dataset} matrix probabilities require integer class labels"
+                ) from exc
+            if not np.all(y_true == targets):
+                raise EvaluationInputError(
+                    f"{dataset} matrix probabilities require integer class labels"
+                )
+        if np.any(targets < 0) or np.any(targets >= matrix.shape[1]):
+            raise EvaluationInputError(
+                f"{dataset} class labels must index probability columns"
+            )
+    else:
+        raise EvaluationInputError(
+            f"{dataset} probability scores must be a vector or matrix"
+        )
+    return matrix, targets
+
+
 def _regression_value(
     metric: str, y_true: np.ndarray, predictions: Any, dataset: str
 ) -> float:
@@ -947,8 +1053,11 @@ def _regression_value(
 
 
 def _metric_payload(metric: str, values: list[dict[str, Any]]) -> dict[str, Any]:
-    lower_is_better = metric in {"mse", "rmse", "mae"}
+    lower_is_better = metric in {"log_loss", "brier", "ece", "mse", "rmse", "mae"}
     descriptions = {
+        "log_loss": "Multiclass log loss computed from validated probabilities and ground truth.",
+        "brier": "Multiclass Brier score computed from validated probabilities and ground truth.",
+        "ece": "Expected calibration error using ten fixed equal-width confidence bins.",
         "accuracy": "Classification accuracy computed directly from predictions and ground truth.",
         "precision": "Binary precision computed directly from predictions and ground truth.",
         "recall": "Binary recall computed directly from predictions and ground truth.",
@@ -1102,7 +1211,16 @@ def evaluate_experiment_data(
             y_true = _as_vector(
                 pair["ground_truth"], field="ground truth", dataset=dataset
             )
-            if selected_metric in {"accuracy", "precision", "recall", "f1", "roc_auc"}:
+            if selected_metric in {
+                "accuracy",
+                "precision",
+                "recall",
+                "f1",
+                "roc_auc",
+                "log_loss",
+                "brier",
+                "ece",
+            }:
                 value = _classification_value(
                     selected_metric,
                     y_true,
