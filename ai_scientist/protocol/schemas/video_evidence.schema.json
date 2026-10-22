@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/video_evidence.schema.json",
+  "title": "XScientist Timestamped Video Evidence",
+  "type": "object",
+  "required": ["protocol_kind", "result", "source_id", "source_content_hash", "selector", "frames", "sampling", "artifact_hashes", "verification_status", "evidence_hash"],
+  "properties": {
+    "protocol_kind": {"const": "xscientist.video-evidence.v1"},
+    "result": {"type": "string", "minLength": 1, "maxLength": 10000},
+    "source_id": {"type": "string", "pattern": "^rso-[0-9a-f]+$"},
+    "source_content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "verification_status": {"const": "unverified_observation"},
+    "selector": {
+      "type": "object",
+      "required": ["start_seconds", "end_seconds", "time_origin", "stream_index"],
+      "properties": {
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "stream_index": {"type": "integer", "minimum": 0},
+        "time_origin": {"const": "first_decoded_video_frame"}
+      },
+      "additionalProperties": false
+    },
+    "frames": {
+      "type": "array", "minItems": 1, "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["artifact_hash", "timestamp_seconds"],
+        "properties": {
+          "artifact_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "timestamp_seconds": {"type": "number", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "sampling": {
+      "type": "object",
+      "required": ["policy", "requested_seconds", "max_dimension", "decoder_version"],
+      "properties": {
+        "policy": {"const": "uniform_first_frame_at_or_after"},
+        "requested_seconds": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "number", "minimum": 0}},
+        "max_dimension": {"const": 768},
+        "decoder_version": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "artifact_hashes": {"type": "array", "minItems": 1, "maxItems": 17, "uniqueItems": true, "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+  },
+  "additionalProperties": false
+}

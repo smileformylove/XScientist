@@ -385,6 +385,10 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    from .video_cli import add_video_commands
+
+    add_video_commands(subparsers)
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check the local version-control backend and required capabilities.",
@@ -2029,6 +2033,27 @@ def main(
     parser = _build_parser(prog=prog)
     args = parser.parse_args(argv)
     try:
+        if args.command == "video":
+            from .video_cli import run_video_command
+
+            result = run_video_command(args)
+            if "object" in result:
+                _print_saved_object(
+                    "video asset/evidence", result, as_json=args.as_json
+                )
+            elif args.as_json:
+                _print_json(result)
+            elif "assets" in result:
+                for item in result["assets"]:
+                    print(
+                        f"{item['object_id']}  {_display_text(item['payload']['title'])}"
+                    )
+            else:
+                print(
+                    f"Evidence items: {len(result['items'])}; frames: {result['frame_count']}"
+                )
+                print(f"Pack: {result['pack_hash']}")
+            return 0
         if args.command == "doctor":
             from .git_support import inspect_git_backend
 

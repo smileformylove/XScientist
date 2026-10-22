@@ -1593,6 +1593,14 @@ def research_payload_issues(
             validate_json(dict(payload), load_schema("research_rollout"))
         except ValidationError as exc:
             issues.append(f"research_rollout schema invalid: {exc.message}")
+    video_protocol = payload.get("protocol_kind")
+    if (
+        video_protocol == "xscientist.video-asset.v1"
+        or video_protocol == "xscientist.video-evidence.v1"
+    ):
+        from .video import video_payload_issues
+
+        return [*issues, *video_payload_issues(normalized_kind, payload)]
     required_fields: dict[str, tuple[str, ...]] = {
         "search_plan": ("question", "queries", "search_plan_hash"),
         "search_receipt": (

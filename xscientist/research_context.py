@@ -105,6 +105,12 @@ def _is_sha256(value: Any) -> bool:
 
 def _summary(item: Mapping[str, Any]) -> str:
     payload = item.get("payload") or {}
+    if payload.get("protocol_kind") == "xscientist.video-evidence.v1":
+        selector = payload.get("selector") or {}
+        return (
+            f"Video [{selector.get('start_seconds')}, {selector.get('end_seconds')})s: "
+            + str(payload.get("result") or "")[:160]
+        )
     for key in (
         "statement",
         "result",
@@ -207,6 +213,13 @@ def _localize_evidence(
     if matches:
         result["evidence_slice"] = truncate_text_to_tokens(matches[0][2], 48)
         result["evidence_locator"] = matches[0][1]
+        payload = item.get("payload") or {}
+        if payload.get("protocol_kind") == "xscientist.video-evidence.v1":
+            selector = payload["selector"]
+            result["evidence_locator"] = (
+                f"video:{payload['source_content_hash']}"
+                f"#t={selector['start_seconds']},{selector['end_seconds']}"
+            )
     return result
 
 

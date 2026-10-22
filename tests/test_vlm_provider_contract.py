@@ -195,6 +195,58 @@ def test_vlm_create_client_preserves_route_qualified_model(monkeypatch) -> None:
     assert model == "openai_compat/glm-5.3"
 
 
+def test_video_evidence_uses_existing_provider_budget_and_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_trace(tmp_path, monkeypatch)
+    client = _client(_response(["Timestamped observation"]))
+    with (
+        mock.patch(
+            "xscientist.video_evidence.prepare_video_evidence_prompt",
+            side_effect=_prepared_prompt,
+        ) as prepare,
+        capture_llm_calls() as refs,
+    ):
+        content, _ = vlm.get_response_from_vlm(
+            "Inspect motion",
+            [],
+            client,
+            "openai_compat/glm-5.3",
+            "Review evidence",
+            max_images=3,
+            video_repo="study",
+            video_evidence_ids=["rso-video-evidence"],
+        )
+    assert content == "Timestamped observation"
+    assert prepare.call_args.kwargs["max_frames"] == 3
+    assert prepare.call_args.args == ("study", ["rso-video-evidence"])
+    assert len(refs) == 1
+    assert len(client.chat.completions.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"video_repo": "study"},
+        {"video_evidence_ids": ["rso-video"]},
+        {"video_repo": "study", "video_evidence_ids": ["rso-video"]},
+    ],
+)
+def test_video_inputs_fail_before_provider_call(options) -> None:
+    client = _client(_response(["unused"]))
+    with pytest.raises(ValueError):
+        vlm.get_response_from_vlm(
+            "Inspect",
+            ["image.png"],
+            client,
+            "openai_compat/glm-5.3",
+            "Review",
+            **options,
+        )
+    assert not client.chat.completions.calls
+
+
 def _stub_duplicate_figure_inputs(monkeypatch: pytest.MonkeyPatch) -> mock.Mock:
     monkeypatch.setattr(vlm_review, "load_paper", lambda _path: "paper")
     monkeypatch.setattr(

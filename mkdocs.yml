@@ -49,6 +49,7 @@ nav:
       - Configuration: CONFIG_REFERENCE.md
       - SDK and HTTP API: guides/SDK_AND_API.md
       - Privacy and local metrics: guides/PRIVACY_AND_METRICS.md
+      - Video assets and evidence: VIDEO_EVIDENCE.md
   - Integrate:
       - Adapter cookbook: guides/ADAPTER_COOKBOOK.md
       - Research DAG and adapters: RESEARCH_DAG_AND_ADAPTERS.md

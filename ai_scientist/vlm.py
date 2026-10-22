@@ -298,14 +298,33 @@ def get_response_from_vlm(
     msg_history: list[dict[str, Any]] | None = None,
     temperature: float = 0.7,
     max_images: int = 25,
+    video_repo: str | None = None,
+    video_evidence_ids: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Get response from vision-language model."""
     if msg_history is None:
         msg_history = []
     spec = resolve_model_provider(model)
 
+    if bool(video_repo) != bool(video_evidence_ids):
+        raise ValueError("video_repo and video_evidence_ids must be supplied together")
+
     if _is_supported_vlm_model(model):
-        content = prepare_vlm_prompt(msg, image_paths, max_images)
+        if video_evidence_ids:
+            if image_paths:
+                raise ValueError(
+                    "use image_paths or video_evidence_ids in one VLM call"
+                )
+            from xscientist.video_evidence import prepare_video_evidence_prompt
+
+            content = prepare_video_evidence_prompt(
+                video_repo,
+                video_evidence_ids,
+                message=msg,
+                max_frames=min(max_images, 16),
+            )
+        else:
+            content = prepare_vlm_prompt(msg, image_paths, max_images)
         # Construct message with all images
         new_msg_history = msg_history + [{"role": "user", "content": content}]
         request_history = list(new_msg_history)

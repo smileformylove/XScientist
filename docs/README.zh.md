@@ -1293,6 +1293,7 @@ print(result.returncode)
 | --- | --- |
 | 第一个项目与恢复 | [中文入门](GETTING_STARTED.zh.md) · [长任务指南](LONG_RUNNING_GUIDE.md) |
 | 科研历史与协议 | [本地科研 Git](LOCAL_RESEARCH_GIT.md) · [协议 v2](RESEARCH_PROTOCOL_V2.md) |
+| 视频资产与时序证据 | [资产登记、证据引用、VLM 接入与优化路线](VIDEO_EVIDENCE.md) |
 | 文献机会与分配 | [研究机会漏斗](OPPORTUNITY_FUNNEL.zh.md) · [FAR 论文](https://arxiv.org/abs/2608.16977) |
 | 研究策略 Rollout | [Rollout 契约](RESEARCH_ROLLOUTS.zh.md) · [Faraday 论文](https://arxiv.org/abs/2608.13331) |
 | 信念感知决策上下文 | [信念上下文投影](BELIEF_CONTEXT.zh.md) · [BCG 项目](https://github.com/bigai-nlco/belief-context-graph) |

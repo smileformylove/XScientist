@@ -1531,6 +1531,7 @@ print(result.returncode)
 | --- | --- |
 | First project and recovery | [Getting started](https://github.com/smileformylove/XScientist/blob/main/docs/GETTING_STARTED.md) · [Long-running guide](https://github.com/smileformylove/XScientist/blob/main/docs/LONG_RUNNING_GUIDE.md) |
 | Research history and protocol | [Local Research Git](https://github.com/smileformylove/XScientist/blob/main/docs/LOCAL_RESEARCH_GIT.md) · [Protocol v2](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_PROTOCOL_V2.md) |
+| Video assets and temporal evidence | [Video evidence commands, VLM integration and roadmap](https://github.com/smileformylove/XScientist/blob/main/docs/VIDEO_EVIDENCE.md) |
 | Literature opportunities | [Opportunity funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) · [FAR paper](https://arxiv.org/abs/2608.16977) |
 | Research policy rollouts | [Rollout contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_ROLLOUTS.md) · [Faraday paper](https://arxiv.org/abs/2608.13331) |
 | Belief-aware decision context | [Belief-context projection](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md) · [BCG project](https://github.com/bigai-nlco/belief-context-graph) |
