@@ -13,6 +13,7 @@ research campaign or certify an observation as a scientific result.
 - [x] Bounded evidence packs, temporal locators in research context and VLM input.
 - [x] Native checkpoint retention, integrity checks and regression tests.
 - [x] Verified frame reuse, temporal frame allocation and duplicate image removal.
+- [x] Content-bound timed text indexes and offline interval retrieval.
 
 Git stores source/evidence JSON and CAS pointers. Original videos and extracted
 PNGs remain in the configured CAS and are excluded from source-code commits.
@@ -109,6 +110,45 @@ response, history = get_response_from_vlm(
 without a model call. Audio and unsampled intervals are explicitly outside
 this visual evidence. User annotations remain unverified, and media text is
 source data rather than executable instructions.
+
+## Timed Text and Retrieval
+
+External transcription, OCR, captioning and shot-labeling tools can supply a
+normalized JSON file. Times must already use the selected video's first decoded
+frame as their origin; import rejects a missing or different origin.
+
+```json
+{
+  "time_origin": "first_decoded_video_frame",
+  "segments": [
+    {"start_seconds": 1.0, "end_seconds": 2.5, "text": "Object reaches the marker"}
+  ]
+}
+```
+
+```bash
+xscientist research video index-text segments.json --repo ./study \
+  --asset rso-SOURCE_ID --kind transcript \
+  --producer whisper --producer-version YOUR_VERSION --json
+xscientist research video search "reaches marker" --repo ./study \
+  --asset rso-SOURCE_ID --start 0 --end 10 --json
+xscientist research video search "object motion" --repo ./study \
+  --target rso-HYPOTHESIS_ID --limit 8 --json
+```
+
+Kinds are `transcript`, `ocr`, `caption` and `shot`. Indexes preserve the original
+video hash, stream, tool identity/version, text hash and exact segment boundaries.
+Segment text stays in CAS; Git stores a small immutable index. Inputs are limited
+to 2 MiB, 4096 ordered segments and 4000 characters per segment. Overlapping
+segments are allowed. Import runs no transcription/OCR model.
+
+Retrieval uses the existing deterministic lexical-overlap helper, including CJK
+features. It searches annotations and timed text, supports half-open time filters,
+and returns source locators, text commitments, omission counts and verification
+status. A targeted search reserves results for both explicit support and
+refutation when present; its minimum limit is two. Text matches are retrieval
+cues, not proof that a model inspected video or that a scientific claim holds.
+Search runs without FFmpeg or a model provider and makes no graph changes.
 
 ## Harness Improvement Roadmap
 

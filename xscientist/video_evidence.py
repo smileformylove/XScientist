@@ -270,6 +270,8 @@ def _asset(repository: ResearchRepository, selector: str) -> dict[str, Any]:
     payload = item["payload"]
     if payload.get("protocol_kind") != VIDEO_ASSET_PROTOCOL:
         raise ResearchGitError("source is not a registered video asset")
+    if item["state"] not in {"completed", "verified", "promoted"}:
+        raise ResearchGitError("video asset is not in an active completed state")
     issues = video_payload_issues("source_snapshot", payload)
     if issues:
         raise ResearchGitError("invalid video asset: " + "; ".join(issues))

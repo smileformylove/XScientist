@@ -1594,9 +1594,8 @@ def research_payload_issues(
         except ValidationError as exc:
             issues.append(f"research_rollout schema invalid: {exc.message}")
     video_protocol = payload.get("protocol_kind")
-    if (
-        video_protocol == "xscientist.video-asset.v1"
-        or video_protocol == "xscientist.video-evidence.v1"
+    if isinstance(video_protocol, str) and video_protocol.startswith(
+        "xscientist.video-"
     ):
         from .video import video_payload_issues
 

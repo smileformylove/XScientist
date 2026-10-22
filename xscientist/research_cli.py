@@ -2052,6 +2052,16 @@ def main(
                     print(
                         f"{item['object_id']}  {_display_text(item['payload']['title'])}"
                     )
+            elif "results" in result:
+                for item in result["results"]:
+                    print(
+                        f"{item['object_id']}  {item['locator']}  "
+                        f"{_display_text(item['text'])}"
+                    )
+                print(
+                    f"Matches: {result['match_count']}; "
+                    f"omitted: {result['omitted_count']}"
+                )
             else:
                 print(
                     f"Evidence items: {len(result['items'])}; frames: {result['frame_count']}"

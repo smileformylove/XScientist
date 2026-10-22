@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/video_text_index.schema.json",
+  "title": "XScientist Video Text Index",
+  "type": "object",
+  "required": ["protocol_kind", "title", "source_id", "source_content_hash", "content_hash", "source_hash", "text_kind", "producer", "segment_count", "time_origin", "stream_index", "artifact_hashes"],
+  "properties": {
+    "protocol_kind": {"const": "xscientist.video-text-index.v1"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+    "source_id": {"type": "string", "pattern": "^rso-[0-9a-f]+$"},
+    "source_content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "text_kind": {"enum": ["transcript", "ocr", "caption", "shot"]},
+    "producer": {
+      "type": "object", "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "additionalProperties": false
+    },
+    "segment_count": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "time_origin": {"const": "first_decoded_video_frame"},
+    "stream_index": {"type": "integer", "minimum": 0},
+    "artifact_hashes": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}
+  },
+  "additionalProperties": false
+}

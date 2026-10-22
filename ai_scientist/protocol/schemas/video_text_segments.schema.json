@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/video_text_segments.schema.json",
+  "title": "XScientist Normalized Video Text Segments",
+  "type": "object",
+  "required": ["time_origin", "segments"],
+  "properties": {
+    "time_origin": {"const": "first_decoded_video_frame"},
+    "segments": {
+      "type": "array", "minItems": 1, "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "required": ["start_seconds", "end_seconds", "text"],
+        "properties": {
+          "start_seconds": {"type": "number", "minimum": 0},
+          "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+          "text": {"type": "string", "minLength": 1, "maxLength": 4000}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

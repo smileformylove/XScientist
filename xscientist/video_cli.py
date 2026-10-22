@@ -36,10 +36,30 @@ def add_video_commands(subparsers: Any) -> None:
     context.add_argument("--evidence", action="append", required=True)
     context.add_argument("--max-frames", type=int, default=8)
     context.add_argument("--budget-tokens", type=int, default=2000)
-    for command in (add, listing, observe, context):
+    text = commands.add_parser(
+        "index-text",
+        help="Index normalized timed transcript, OCR, caption or shot text.",
+    )
+    text.add_argument("source")
+    text.add_argument("--asset", required=True)
+    text.add_argument(
+        "--kind", required=True, choices=("transcript", "ocr", "caption", "shot")
+    )
+    text.add_argument("--producer", required=True)
+    text.add_argument("--producer-version", required=True)
+    search = commands.add_parser(
+        "search", help="Retrieve content-bound video intervals offline."
+    )
+    search.add_argument("query")
+    search.add_argument("--asset", action="append", default=[])
+    search.add_argument("--target")
+    search.add_argument("--start", type=float)
+    search.add_argument("--end", type=float)
+    search.add_argument("--limit", type=int, default=8)
+    for command in (add, listing, observe, context, text, search):
         command.add_argument("--repo", default=".")
         command.add_argument("--json", action="store_true", dest="as_json")
-    for command in (add, observe):
+    for command in (add, observe, text):
         command.add_argument("--no-commit", action="store_true")
 
 
@@ -74,5 +94,29 @@ def run_video_command(args: argparse.Namespace) -> dict[str, Any]:
             args.evidence,
             max_frames=args.max_frames,
             budget_tokens=args.budget_tokens,
+        )
+    if args.video_command == "index-text":
+        from .video_retrieval import register_video_text_index
+
+        return register_video_text_index(
+            args.repo,
+            args.asset,
+            args.source,
+            text_kind=args.kind,
+            producer=args.producer,
+            producer_version=args.producer_version,
+            commit=not args.no_commit,
+        )
+    if args.video_command == "search":
+        from .video_retrieval import search_video_evidence
+
+        return search_video_evidence(
+            args.repo,
+            args.query,
+            asset_ids=args.asset,
+            target_id=args.target,
+            start_seconds=args.start,
+            end_seconds=args.end,
+            limit=args.limit,
         )
     return {"assets": list_video_assets(args.repo)}
