@@ -36,6 +36,10 @@ _FORBIDDEN_RECEIPT_FIELDS = {
     "refresh_token",
     "request_headers",
     "response_body",
+    "raw_body",
+    "raw_content",
+    "raw_html",
+    "raw_text",
     "secret",
     "token",
 }

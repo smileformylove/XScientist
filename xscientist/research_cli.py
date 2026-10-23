@@ -1025,6 +1025,47 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     literature_passage.add_argument("--no-commit", action="store_true")
     literature_passage.add_argument("--json", action="store_true", dest="as_json")
 
+    web_parser = subparsers.add_parser(
+        "web",
+        help="Discover web or video sources and record an auditable search receipt.",
+    )
+    web_subparsers = web_parser.add_subparsers(
+        dest="web_command", required=True
+    )
+    web_search = web_subparsers.add_parser(
+        "search",
+        help=(
+            "Search configured providers; results are candidates until a source "
+            "snapshot is explicitly frozen."
+        ),
+    )
+    web_search.add_argument("query")
+    web_search.add_argument(
+        "--provider",
+        action="append",
+        default=[],
+        help="Provider name (auto, brave, youtube, searxng, semantic_scholar); repeat to merge providers.",
+    )
+    web_search.add_argument(
+        "--vertical",
+        choices=["web", "video"],
+        default="web",
+        help="Discovery vertical; video marks candidates for later asset import.",
+    )
+    web_search.add_argument("--limit", type=int, default=10)
+    web_search.add_argument("--timeout", type=float, default=20.0)
+    web_search.add_argument("--include", action="append", default=[])
+    web_search.add_argument("--exclude", action="append", default=[])
+    web_search.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Lock the search plan without making a network request.",
+    )
+    web_search.add_argument("--repo", default=".")
+    web_search.add_argument("-m", "--message")
+    web_search.add_argument("--no-commit", action="store_true")
+    web_search.add_argument("--json", action="store_true", dest="as_json")
+
     preregistration_parser = subparsers.add_parser(
         "preregister",
         help="Lock a confirmatory plan and dataset split before experiments run.",
@@ -2978,6 +3019,92 @@ def main(
                 for issue in audit["issues"]:
                     print(f"  {issue}")
             return 0 if audit["verification_allowed"] else 1
+
+        if args.command == "web":
+            if args.web_command != "search":
+                raise ResearchGitError("unknown web command")
+            from .research_commands import save_search_plan, save_search_receipt
+            from .web_search import (
+                WebSearchError,
+                resolve_provider_names,
+                search_web,
+            )
+
+            try:
+                resolved_providers = resolve_provider_names(
+                    args.provider or ["auto"], vertical=args.vertical
+                )
+            except WebSearchError as exc:
+                raise ResearchGitError(str(exc)) from exc
+            provider_label = "web:" + "+".join(resolved_providers)
+            plan_result = save_search_plan(
+                args.repo,
+                question=f"Web discovery: {args.query}",
+                queries=[args.query],
+                providers=[provider_label],
+                inclusion_criteria=args.include,
+                exclusion_criteria=args.exclude,
+                message=args.message or "lock web discovery search plan",
+                commit=not args.no_commit,
+            )
+            if args.dry_run:
+                _print_saved_object(
+                    "web search plan", plan_result, as_json=args.as_json
+                )
+                return 0
+            search_result = search_web(
+                args.query,
+                providers=resolved_providers,
+                vertical=args.vertical,
+                limit=args.limit,
+                timeout=args.timeout,
+            )
+            receipt_result = save_search_receipt(
+                args.repo,
+                plan_id=plan_result["object"].object_id,
+                provider=provider_label,
+                query=args.query,
+                candidates=search_result["candidates"],
+                retrieved_at=search_result["retrieved_at"],
+                errors=search_result["errors"],
+                filters={
+                    "vertical": args.vertical,
+                    "limit": args.limit,
+                    "include": args.include,
+                    "exclude": args.exclude,
+                    "network_policy": "online",
+                },
+                retrieval_system={
+                    "protocol": search_result["protocol"],
+                    "providers": search_result["providers"],
+                    "provider_versions": search_result["provider_versions"],
+                },
+                pagination=search_result["pagination"],
+                complete=search_result["complete"],
+                message=args.message or "record web discovery search receipt",
+                commit=not args.no_commit,
+            )
+            if args.as_json:
+                payload = _saved_object_json(receipt_result)
+                payload["search"] = search_result
+                payload["plan"] = _saved_object_json(plan_result)
+                _print_json(payload)
+            else:
+                _print_saved_object(
+                    "web search receipt", receipt_result, as_json=False
+                )
+                print(
+                    f"Candidates: {len(search_result['candidates'])}; "
+                    f"complete: {search_result['complete']}"
+                )
+                for item in search_result["candidates"]:
+                    print(
+                        f"{item['rank']}. {_display_text(item['title'])} "
+                        f"<{item['url']}>"
+                    )
+                for error in search_result["errors"]:
+                    print(f"Provider warning: {_display_text(error)}")
+            return 0 if search_result["complete"] or search_result["candidates"] else 1
 
         if args.command == "literature":
             from .research_commands import (
