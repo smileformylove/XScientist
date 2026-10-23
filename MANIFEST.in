@@ -11,6 +11,7 @@ graft provenance
 graft requirements
 graft third_party
 graft docs
+exclude docs/PUBLIC_RESEARCH_PROCESS.md
 include .github/CONTRIBUTING.md
 include .github/CODE_OF_CONDUCT.md
 include .github/SECURITY.md

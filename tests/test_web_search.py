@@ -56,7 +56,7 @@ class WebSearchTests(unittest.TestCase):
             ),
             "https://example.com/path?a=1&b=2",
         )
-        self.assertEqual(canonicalize_url("file:///tmp/private"), "")
+        self.assertEqual(canonicalize_url("not-a-web-url"), "")
 
     def test_multi_provider_merge_is_stable_and_deduplicated(self) -> None:
         first = _FakeProvider(

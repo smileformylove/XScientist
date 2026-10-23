@@ -6,10 +6,14 @@ for its Python package; the ARA protocol has its own version in
 
 ## [Unreleased]
 
-## [0.1.5.dev0] - 2026-09-01
+## [0.1.5] - 2026-10-24
 
 ### Added
 
+- Added auditable web and video discovery through Brave, YouTube, Semantic
+  Scholar, and optional self-hosted SearXNG providers. Search plans and
+  receipts preserve canonical URLs, hashes, provider ranks, pagination, and
+  failure state without storing raw web bodies or credentials.
 - Added a deliberately small first-research path: `explore` records the
   question, `record` saves one experiment plus its observed result and optional
   immutable artifact, and `status` returns one next action. The recorder keeps
@@ -231,7 +235,7 @@ for its Python package; the ARA protocol has its own version in
 
 ### Changed
 
-- Identified the unreleased source tree as `0.1.5.dev0`, preventing its
+- Identified the unreleased source tree as `0.1.5`, preventing its
   executor image and readiness cache from being mistaken for published
   `0.1.4` while keeping the stable installation path explicit.
 - Made the compact guide follow one explicit current chain from attempt through
@@ -693,7 +697,7 @@ for its Python package; the ARA protocol has its own version in
 - Protocol documentation no longer duplicates a hand-maintained schema count.
 
 [Unreleased]: https://github.com/smileformylove/XScientist/compare/v0.1.4...HEAD
-[0.1.5.dev0]: https://github.com/smileformylove/XScientist/compare/v0.1.4...HEAD
+[0.1.5]: https://github.com/smileformylove/XScientist/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/smileformylove/XScientist/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/smileformylove/XScientist/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/smileformylove/XScientist/compare/v0.1.1...v0.1.2

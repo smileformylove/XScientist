@@ -1,13 +1,13 @@
 # 快速入门
 
-本指南对应 PyPI 正式版 `0.1.4`，需要 Python 3.10+ 和 Git。
+本指南对应 PyPI 正式版 `0.1.5`，需要 Python 3.10+ 和 Git。
 
 ## 1. 安装、保存想法、查看下一步
 
 第一步不需要模型、API Key、Docker 或 Provider 配置：
 
 ```bash
-python -m pip install "xscientist==0.1.4"
+python -m pip install "xscientist==0.1.5"
 xscientist explore ./my-study --lang zh
 xscientist status ./my-study --lang zh
 ```
@@ -30,7 +30,7 @@ xscientist status ./first-study --lang zh
 安装科研运行时和一个 Provider 客户端。下面使用 OpenAI；其他服务请选择对应 extra：
 
 ```bash
-python -m pip install "xscientist[research,openai]==0.1.4"
+python -m pip install "xscientist[research,openai]==0.1.5"
 export OPENAI_API_KEY="..."
 xscientist start ./my-study --prepare-only
 ```

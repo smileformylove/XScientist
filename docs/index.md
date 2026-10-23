@@ -9,7 +9,7 @@ nothing:
 
 ```bash
 python -m pip install \
-  "xscientist==0.1.4"
+  "xscientist==0.1.5"
 xscientist explore ./my-study
 ```
 
@@ -20,7 +20,7 @@ xscientist demo ./retrieval-study --autopilot --open
 xscientist status ./retrieval-study
 ```
 
-This site documents the published `0.1.4` release.
+This site documents the published `0.1.5` release.
 
 The fixture deliberately ends with a contested broad claim. A successful
 software run is therefore not misrepresented as successful scientific closure.

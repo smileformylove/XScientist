@@ -34,28 +34,28 @@
 
 ## 三条命令开始
 
-PyPI 正式版 `0.1.4` 需要 Python 3.10+ 和 Git。第一步不需要模型、API Key、Docker
+PyPI 正式版 `0.1.5` 需要 Python 3.10+ 和 Git。第一步不需要模型、API Key、Docker
 或付费服务：
 
 ```bash
-python -m pip install "xscientist==0.1.4"
+python -m pip install "xscientist==0.1.5"
 xscientist explore ./my-study --lang zh
 xscientist status ./my-study --lang zh
 ```
 
 `explore` 只保存你亲自提供的内容；`status` 只突出当前优先级最高的下一步。
 
-> **版本边界：** 明确标为 **PyPI 0.1.4** 的章节只使用正式版支持的命令。本页其余
+> **版本边界：** 明确标为 **PyPI 0.1.5** 的章节只使用正式版支持的命令。本页其余
 > 内容还会记录 `main` 分支尚未发布的协议能力；运行这些功能前需从源码安装：
 > `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"`。
-> 开发版标识为 `0.1.5.dev0`，避免误复用 `0.1.4` 的执行器镜像。需要严格复现时，
+> 开发版会使用后续开发版本标识，避免误复用 `0.1.5` 的执行器镜像。需要严格复现时，
 > 请固定源码 commit，不要跟随变化中的 `main`。
 
 > **重要：** XScientist 目前是 Alpha 科研软件，不是科学事实机器。自主运行可能调用
 > 付费模型；生成代码必须经过配置好的隔离执行器；机器生成的结论在补齐证据和独立
 > 评审门禁前都不是已验证事实。
 
-## 先选最短路径 — PyPI 0.1.4
+## 先选最短路径 — PyPI 0.1.5
 
 | 你的起点 | 先运行 | Provider 或成本 | 立即得到什么 |
 | --- | --- | --- | --- |
@@ -157,7 +157,7 @@ CAS 绑定命令放在“下一步”的首位。
 ## 开发版 main：结构化科研历史
 
 本节描述 `main` 分支尚未发布的协议能力；运行其中命令前，请先按上方版本说明安装
-源码版。从这个标题开始，除非代码块明确标为 **PyPI 0.1.4**，命令示例都以源码版
+源码版。从这个标题开始，除非代码块明确标为 **PyPI 0.1.5**，命令示例都以源码版
 为准。
 
 执行完 `explore` 建议的比较后，用一条引导命令记录实际做了什么、终止状态、观察
@@ -1235,8 +1235,8 @@ flowchart TB
 
 | 渠道 | 命令 |
 | --- | --- |
-| PyPI 正式版 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
-| 开发版 `main`（`0.1.5.dev0`） | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| PyPI 正式版 0.1.5 | `python -m pip install "xscientist==0.1.5"` |
+| 开发版 `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | 贡献者 | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 需要实验严格复现时，请固定 commit，不要跟随变化中的 `main`。

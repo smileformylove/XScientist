@@ -1,13 +1,13 @@
 # Getting started
 
-This guide follows the published `0.1.4` release. You need Python 3.10+ and Git.
+This guide follows the published `0.1.5` release. You need Python 3.10+ and Git.
 
 ## 1. Install, save your idea, and inspect it
 
 No model, API key, Docker installation, or provider configuration is needed:
 
 ```bash
-python -m pip install "xscientist==0.1.4"
+python -m pip install "xscientist==0.1.5"
 xscientist explore ./my-study
 xscientist status ./my-study
 ```
@@ -33,7 +33,7 @@ Install the research runtime plus exactly one provider client. This example uses
 OpenAI; choose the matching provider extra for another service:
 
 ```bash
-python -m pip install "xscientist[research,openai]==0.1.4"
+python -m pip install "xscientist[research,openai]==0.1.5"
 export OPENAI_API_KEY="..."
 xscientist start ./my-study --prepare-only
 ```

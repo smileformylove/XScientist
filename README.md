@@ -33,11 +33,11 @@
 
 ## Start in three commands
 
-Published `0.1.4` needs Python 3.10+ and Git. This first path uses no model,
+Published `0.1.5` needs Python 3.10+ and Git. This first path uses no model,
 API key, Docker, or paid service:
 
 ```bash
-python -m pip install "xscientist==0.1.4"
+python -m pip install "xscientist==0.1.5"
 xscientist explore ./my-study
 xscientist status ./my-study
 ```
@@ -45,11 +45,11 @@ xscientist status ./my-study
 `explore` asks plain-language questions and saves only what you provide;
 `status` shows the single highest-priority next action.
 
-> **Version boundary:** Sections explicitly labeled **Published 0.1.4** use the
+> **Version boundary:** Sections explicitly labeled **Published 0.1.5** use the
 > PyPI wheel. The rest of this `main` README also documents unreleased protocol
 > work and requires a source install:
 > `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"`.
-> Development builds identify as `0.1.5.dev0`, so they cannot reuse a `0.1.4`
+> Development builds identify as later development versions, so they cannot reuse a `0.1.5`
 > executor image by mistake. Pin a source commit instead of `main` for
 > repeatable research.
 
@@ -58,7 +58,7 @@ xscientist status ./my-study
 > isolated executor. Machine-generated claims remain unverified until their
 > evidence and independent review gates are complete.
 
-## Choose the shortest path — Published 0.1.4
+## Choose the shortest path — Published 0.1.5
 
 | Your starting point | Run first | Provider or cost | Immediate result |
 | --- | --- | --- | --- |
@@ -1469,8 +1469,8 @@ workflow in `ai_scientist/`, and versioned schemas in
 
 | Channel | Command |
 | --- | --- |
-| Published 0.1.4 | `python -m pip install "xscientist==0.1.4"` |
-| Development `main` (`0.1.5.dev0`) | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
+| Published 0.1.5 | `python -m pip install "xscientist==0.1.5"` |
+| Development `main` | `python -m pip install "xscientist @ git+https://github.com/smileformylove/XScientist.git@main"` |
 | Contributor | `python -m pip install -e ".[research,openai,dev]" -c requirements/constraints-ci.txt` |
 
 Pin a commit rather than `main` for an exactly repeatable experiment.

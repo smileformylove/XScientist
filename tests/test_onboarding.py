@@ -52,7 +52,7 @@ class OnboardingTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[1]
         for relative in ("README.md", "docs/README.zh.md"):
             text = (repository / relative).read_text(encoding="utf-8")
-            install = text.index('python -m pip install "xscientist==0.1.4"')
+            install = text.index('python -m pip install "xscientist==0.1.5"')
             explore = text.index("xscientist explore ./my-study", install)
             status = text.index("xscientist status ./my-study", explore)
             development = text.index(
@@ -72,7 +72,7 @@ class OnboardingTests(unittest.TestCase):
             "docs/GETTING_STARTED.zh.md",
         ):
             text = (repository / relative).read_text(encoding="utf-8")
-            install = text.index('python -m pip install "xscientist==0.1.4"')
+            install = text.index('python -m pip install "xscientist==0.1.5"')
             explore = text.index("xscientist explore ./my-study", install)
             status = text.index("xscientist status ./my-study", explore)
             prepare = text.index("xscientist start ./my-study --prepare-only")
