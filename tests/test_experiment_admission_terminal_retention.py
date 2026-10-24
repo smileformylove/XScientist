@@ -289,9 +289,10 @@ def test_terminal_completion_commit_probe_tolerates_platform_diagnostic(
             return real_run_git_bounded(repo, args, **kwargs)
 
         observed_limits.append(int(kwargs["max_output_bytes"]))
+        commit_output = repr(b"commit\n")
         child_script = (
             "import os; "
-            f"os.write(1, {b'commit\n'!r}); "
+            f"os.write(1, {commit_output}); "
             f"os.write(2, {diagnostic!r})"
         )
 
