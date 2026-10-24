@@ -233,7 +233,7 @@ roadmap.
 This section describes unreleased protocol work on `main`; install the source
 build shown in the version note above before running its commands. From this
 heading onward, command examples target the source build unless a block is
-explicitly labeled **Published 0.1.4**.
+explicitly labeled **Published 0.1.5**.
 
 After you run the comparison proposed by `explore`, one guided command records
 what ran, its terminal status, the observed result, and any result file or

@@ -22,7 +22,7 @@ for its Python package; the ARA protocol has its own version in
 - Simplified the English and Chinese first-run documentation around install,
   zero-cost exploration, explicit paid-run preparation, and publication
   boundaries; unreleased `main` commands are now separated from the published
-  PyPI `0.1.4` surface.
+  PyPI `0.1.5` surface.
 - Added a compact `xscientist status` research-output view that pairs the
   latest experiment with its own result contract, surfaces paper/review/repair
   readiness, distinguishes checkpointed, pending, and unbound artifacts, and
