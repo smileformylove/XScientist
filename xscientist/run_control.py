@@ -289,7 +289,7 @@ def _linux_process_identity(pid: int) -> str | None:
         return None
     fields = raw[closing + 2 :].split()
     # After the comm field, field 22 (starttime) is offset 19.
-    if len(fields) <= 19 or not fields[19].isdigit():
+    if len(fields) <= 19 or fields[0] == "Z" or not fields[19].isdigit():
         return None
     payload = _LINUX_PROCESS_IDENTITY_DOMAIN + struct.pack(">IQ", pid, int(fields[19]))
     return hashlib.sha256(payload).hexdigest()
