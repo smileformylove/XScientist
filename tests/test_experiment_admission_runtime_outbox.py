@@ -256,6 +256,19 @@ class ProcessIdentityTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         loader.assert_not_called()
 
+    def test_linux_identity_prefers_kernel_start_tick(self) -> None:
+        with (
+            mock.patch.object(run_control.sys, "platform", "linux"),
+            mock.patch.object(
+                run_control, "_linux_process_identity", return_value="linux-start"
+            ) as linux_identity,
+            mock.patch.object(run_control, "_ps_process_identity") as ps_identity,
+        ):
+            self.assertEqual(run_control._process_identity(321), "linux-start")
+
+        linux_identity.assert_called_once_with(321)
+        ps_identity.assert_not_called()
+
     @unittest.skipUnless(sys.platform == "darwin", "requires Darwin libproc")
     def test_darwin_live_and_reaped_processes_have_conservative_identities(
         self,

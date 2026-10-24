@@ -33,6 +33,7 @@ _DARWIN_PROC_BSDINFO_SIZE = 136
 _DARWIN_ZOMBIE_STATUS = 5
 _MAX_SIGNED_PID = (1 << 31) - 1
 _DARWIN_PROCESS_IDENTITY_DOMAIN = b"xscientist.darwin-process-identity.v1\0"
+_LINUX_PROCESS_IDENTITY_DOMAIN = b"xscientist.linux-process-identity.v1\0"
 _TRUSTED_PS_EXECUTABLES = (Path("/bin/ps"), Path("/usr/bin/ps"))
 
 
@@ -274,6 +275,26 @@ def _darwin_process_identity(pid: int) -> str | None:
     return hashlib.sha256(payload + command + name).hexdigest()
 
 
+def _linux_process_identity(pid: int) -> str | None:
+    """Hash Linux's kernel-owned process start tick to avoid command drift."""
+
+    if sys.platform != "linux":
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    closing = raw.rfind(")")
+    if closing < 0:
+        return None
+    fields = raw[closing + 2 :].split()
+    # After the comm field, field 22 (starttime) is offset 19.
+    if len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    payload = _LINUX_PROCESS_IDENTITY_DOMAIN + struct.pack(">IQ", pid, int(fields[19]))
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _process_identity(pid: int) -> str | None:
     """Hash OS-owned process-start metadata to guard against PID reuse."""
 
@@ -281,6 +302,10 @@ def _process_identity(pid: int) -> str | None:
         return None
     if os.name != "posix":  # pragma: no cover - Windows has no portable source
         return None
+    if sys.platform == "linux":
+        linux_identity = _linux_process_identity(pid)
+        if linux_identity is not None:
+            return linux_identity
     legacy = _ps_process_identity(pid)
     if legacy is not None or sys.platform != "darwin":
         return legacy
