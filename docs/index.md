@@ -1,8 +1,9 @@
 # XScientist
 
 XScientist turns your idea into an inspectable research history: the question,
-falsifiable expectations, experiments, failures, evidence, bounded inferences,
-reviews, claims, and next scientific action stay connected.
+falsifiable expectations, experiments, failures, web sources, video assets,
+time-localized evidence, bounded inferences, reviews, claims, and next
+scientific action stay connected.
 
 Start with your own idea. This first step uses no network or model and costs
 nothing:
@@ -31,6 +32,8 @@ software run is therefore not misrepresented as successful scientific closure.
 | --- | --- | --- |
 | Turn your idea into a testable plan | `xscientist explore DIR` | No |
 | See an evidence DAG | `xscientist demo DIR --autopilot` | No |
+| Search web or video sources | `xscientist research web search QUERY --vertical video` | Provider key may be needed |
+| Inspect a local video asset | `xscientist research video add FILE` | FFmpeg for import/extraction |
 | Audit trace/replay/verification | `xscientist audit DIR` | No |
 | Save or safely reverse history | `xscientist history` | No |
 | Diagnose a workspace | `xscientist doctor --workspace DIR` | No paid call |
@@ -41,6 +44,11 @@ software run is therefore not misrepresented as successful scientific closure.
 
 Read [Getting started](GETTING_STARTED.md) for the practical workflow or the
 [Research protocol](RESEARCH_PROTOCOL_V2.md) for the scientific model.
+
+For source discovery and multimodal work, see [Auditable Web Search](WEB_SEARCH.md)
+and [Video Assets and Evidence](VIDEO_EVIDENCE.md). Search candidates remain
+discovery leads until selected; video observations retain source hashes and
+timestamps but do not bypass evidence or review gates.
 
 For a frank current-state review, including usability, provider provenance,
 scientific-quality limits, exploration coverage, clue transparency, and

@@ -4,11 +4,12 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>From one idea to a Git-like research history: inspectable, reproducible, and reversible.</strong></p>
+<p align="center"><strong>From one idea to an inspectable research history for web, text, and video evidence.</strong></p>
 
 <p align="center">
   Bring one idea—even if you do not know models or API keys. XScientist helps
-  test it without hiding uncertainty, failed attempts, or contrary evidence.
+  test it without hiding uncertainty, failed attempts, contrary evidence, or
+  the source and time interval behind a video observation.
 </p>
 
 <p align="center">
@@ -21,6 +22,7 @@
 
 <p align="center">
   <a href="#start-in-three-commands">Quick start</a> ·
+  <a href="#search-the-web-and-use-video-evidence--published-015">Web and video evidence</a> ·
   <a href="#run-an-autonomous-study">Autonomous study</a> ·
   <a href="#far-inspired-opportunity-funnel">Opportunity funnel</a> ·
   <a href="#belief-context-projection-bcg-inspired">Belief context</a> ·
@@ -176,6 +178,55 @@ Bind `{workspace}` to the workspace supplied to the invocation. If human
 placeholders remain, `input_binding.required=true` and
 `executable_after_binding=false`; automation must not execute that template
 until those values have been supplied by a person.
+
+## Search the web and use video evidence — Published 0.1.5
+
+XScientist can search the public web and video indexes as a bounded discovery
+step, then turn selected sources and local media into auditable research inputs.
+Search results are leads until you select one and bind a source or video asset;
+they are never treated as evidence merely because a provider returned them.
+
+```bash
+xscientist research web search "video evidence for intervention X" \
+  --vertical video --provider auto --limit 20 --repo ./my-study
+
+xscientist research video add ./input.mp4 \
+  --repo ./my-study --title "Run A" --json
+xscientist research video observe --repo ./my-study \
+  --asset rso-SOURCE_ID --start 1.0 --end 3.0 \
+  --result "Object motion changes after the intervention" --max-frames 4 --json
+xscientist research video context --repo ./my-study \
+  --evidence rso-EVIDENCE_ID --max-frames 4 --budget-tokens 2000 --json
+```
+
+Discovery receipts preserve canonical URLs, hashes, provider rank, pagination,
+media hints, and failures without storing raw web bodies or credentials. The
+`auto` route can use YouTube, Brave, SearXNG, or Semantic Scholar according to
+the selected vertical and configured environment variables. Local video assets
+are content-addressed in the Research VCS CAS; source indexes record duration,
+dimensions, stream identity, audio presence, and probe version, while
+observations retain decoded frame timestamps and hashes. Original media and
+extracted frames stay in CAS and are not committed into source Git.
+
+For transcript, OCR, caption, and shot retrieval, add a content-bound timed-text
+index and query it without a model call:
+
+```bash
+xscientist research video index-text segments.json --repo ./my-study \
+  --asset rso-SOURCE_ID --kind transcript \
+  --producer whisper --producer-version YOUR_VERSION --json
+xscientist research video search "reaches marker" --repo ./my-study \
+  --asset rso-SOURCE_ID --start 0 --end 10 --json
+```
+
+Import and frame extraction require FFmpeg/ffprobe. Listing, indexing, search,
+planning, and existing-evidence retrieval do not. VLM inspection is bounded by
+explicit frame and token budgets; its response remains an unverified
+observation until the normal evidence and review gates pass. See
+[Auditable Web Search](docs/WEB_SEARCH.md) and
+[Video Assets and Evidence](docs/VIDEO_EVIDENCE.md) for provider configuration,
+privacy boundaries, temporal sampling, and the Harness2-informed improvement
+roadmap.
 
 ## Development main: structured research history
 

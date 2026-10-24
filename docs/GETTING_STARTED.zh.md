@@ -61,6 +61,29 @@ xscientist status ./my-study --lang zh
 Publication autopilot 会组织科研、写作和评审门禁，但不承诺完成论文、科学验证、
 实际投稿或被任何会议、期刊录用。
 
+## 4. 搜索来源并检查视频证据
+
+需要搜索网页或视频时，先记录一条有界搜索回执：
+
+```bash
+xscientist research web search "干预 X 的视频证据" \
+  --vertical video --provider auto --limit 20 --repo ./my-study
+```
+
+先选择候选结果，再把它作为来源使用。处理本地媒体时，先将视频导入内容寻址存储，
+再创建带时间戳的观察，只取问题需要的帧：
+
+```bash
+xscientist research video add ./input.mp4 --repo ./my-study --title "Run A"
+xscientist research video observe --repo ./my-study \
+  --asset rso-SOURCE_ID --start 1 --end 3 \
+  --result "目标物运动发生变化" --max-frames 4
+```
+
+导入和抽帧需要 FFmpeg/ffprobe；原始媒体保存在 CAS，不进入源代码 Git。Provider 配置、
+时间文本检索、VLM 检查预算和隐私边界见[可审计网页搜索](WEB_SEARCH.md)与
+[视频资产与证据](VIDEO_EVIDENCE.md)。
+
 ## 需要时再继续
 
 - [长任务指南](LONG_RUNNING_GUIDE.md)：后台运行、查看、取消与恢复。

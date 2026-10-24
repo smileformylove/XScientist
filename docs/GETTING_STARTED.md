@@ -68,6 +68,31 @@ Publication autopilot organizes research, writeup, and review gates. It does
 not promise manuscript completion, scientific verification, venue submission,
 or acceptance.
 
+## 4. Search sources and inspect video evidence
+
+For web or video discovery, record a bounded search receipt first:
+
+```bash
+xscientist research web search "video evidence for intervention X" \
+  --vertical video --provider auto --limit 20 --repo ./my-study
+```
+
+Select a candidate before treating it as a source. For local media, import the
+video into the content-addressed store, create a timestamped observation, and
+retrieve only the frames needed by the question:
+
+```bash
+xscientist research video add ./input.mp4 --repo ./my-study --title "Run A"
+xscientist research video observe --repo ./my-study \
+  --asset rso-SOURCE_ID --start 1 --end 3 \
+  --result "Object motion changes" --max-frames 4
+```
+
+Import and extraction need FFmpeg/ffprobe. Original media stays in CAS rather
+than source Git. See [Auditable Web Search](WEB_SEARCH.md) and
+[Video Assets and Evidence](VIDEO_EVIDENCE.md) for provider configuration,
+timed-text retrieval, VLM inspection budgets, and privacy boundaries.
+
 ## Continue only when needed
 
 - [Long-running guide](LONG_RUNNING_GUIDE.md): detach, watch, cancel, and resume.

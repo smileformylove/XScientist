@@ -4,11 +4,11 @@
 
 <h1 align="center">XScientist</h1>
 
-<p align="center"><strong>把一个想法变成 Git 式科研历史：可检查、可复现、可回滚。</strong></p>
+<p align="center"><strong>把一个想法变成面向网页、文本和视频证据的 Git 式科研历史。</strong></p>
 
 <p align="center">
   只带来一个想法也可以——不要求先懂模型或 API Key。XScientist 会帮助检验它，
-  但不会隐藏不确定性、失败尝试或相反证据。
+  但不会隐藏不确定性、失败尝试、相反证据，或视频观察背后的来源与时间区间。
 </p>
 
 <p align="center">
@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="#quick-start">快速开始</a> ·
+  <a href="#搜索网页并使用视频证据--pypi-015">网页与视频证据</a> ·
   <a href="#运行自主研究">自主研究</a> ·
   <a href="#far-启发的研究机会漏斗">研究机会漏斗</a> ·
   <a href="#信念上下文投影受-bcg-启发">信念上下文</a> ·
@@ -153,6 +154,47 @@ CAS 绑定命令放在“下一步”的首位。
 调用方必须把 `{workspace}` 绑定到本次命令收到的工作区。若仍有待填写的人类输入，
 则 `input_binding.required=true` 且 `executable_after_binding=false`；自动化程序
 在这些值由人提供之前不得执行该模板。
+
+## 搜索网页并使用视频证据 — PyPI 0.1.5
+
+XScientist 可以把公开网页和视频搜索作为有界的发现步骤，再把选定的来源和本地媒体
+转成可审计的科研输入。搜索结果在被选择并绑定为来源或视频资产之前只是候选线索，
+不会因为 Provider 返回了结果就自动成为证据。
+
+```bash
+xscientist research web search "干预 X 的视频证据" \
+  --vertical video --provider auto --limit 20 --repo ./my-study
+
+xscientist research video add ./input.mp4 \
+  --repo ./my-study --title "Run A" --json
+xscientist research video observe --repo ./my-study \
+  --asset rso-SOURCE_ID --start 1.0 --end 3.0 \
+  --result "干预后目标物的运动发生变化" --max-frames 4 --json
+xscientist research video context --repo ./my-study \
+  --evidence rso-EVIDENCE_ID --max-frames 4 --budget-tokens 2000 --json
+```
+
+搜索回执保存规范化 URL、哈希、Provider 排名、分页、媒体提示和失败状态，不保存原始
+网页正文或凭据。`auto` 会根据垂直领域和环境变量配置使用 YouTube、Brave、SearXNG
+或 Semantic Scholar。本地视频资产以内容寻址方式保存到 Research VCS CAS；来源索引
+记录时长、尺寸、流身份、音频存在性和探测版本，观察记录实际解码的帧时间戳与哈希。
+原始媒体和抽取帧留在 CAS，不会进入源代码 Git 提交。
+
+如需检索转录、OCR、字幕或镜头标签，可先导入带内容绑定的时间文本索引，再在不调用
+模型的情况下检索：
+
+```bash
+xscientist research video index-text segments.json --repo ./my-study \
+  --asset rso-SOURCE_ID --kind transcript \
+  --producer whisper --producer-version YOUR_VERSION --json
+xscientist research video search "到达标记" --repo ./my-study \
+  --asset rso-SOURCE_ID --start 0 --end 10 --json
+```
+
+导入和抽帧需要 FFmpeg/ffprobe；列出资产、建立索引、检索、规划和复用已有证据不需要。
+VLM 检查受明确的帧数和 Token 预算限制；返回结果在通过既有证据与评审门禁前仍是未验证
+观察。详见[可审计网页搜索](WEB_SEARCH.md)和[视频资产与证据](VIDEO_EVIDENCE.md)，
+其中包括 Provider 配置、隐私边界、时间采样以及受 Harness2 启发的改进路线。
 
 ## 开发版 main：结构化科研历史
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "xscientist"
 dynamic = ["version"]
-description = "Autonomous research with Git-like, inspectable, reproducible, and reversible evidence histories."
+description = "Local-first research with auditable web and video evidence, Git-like provenance, reproducibility, and reversible scientific history."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0 AND MIT"
@@ -25,6 +25,9 @@ keywords = [
   "reproducible-research",
   "open-science",
   "research-provenance",
+  "web-search",
+  "video-evidence",
+  "multimodal-research",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
