@@ -44,6 +44,23 @@ experiment -> evidence --------------+       |              |
                                           estimand      warrant/assumption/method
 ```
 
+### Experiment transitions and prior-result reuse
+
+An experiment that follows an earlier run can bind an additive
+`xscientist.experiment-transition.v1` payload. The payload records a transition
+kind (`follow_up`, `replication`, `extension`, or `recovery`), the terminal
+parent attempt IDs, reused Research VCS object IDs, reused CAS artifact hashes,
+and a human-readable rationale. Its integrity hash is computed over those
+fields. The lifecycle validator also emits `depends_on` relations with the
+`continues_from` role and `consumes` relations with the `prior_result` role.
+
+The validator enforces that every parent is a terminal `experiment_attempt`,
+belongs to the current plan or design, and is covered by at least one reused
+parent/evidence/asset object or one of its recorded result artifact hashes.
+This keeps follow-up work from silently discarding negative results, video
+observations, transcript passages, or prior context snapshots while preserving
+backward compatibility for first experiments and legacy objects.
+
 First-class types include `inference`, `warrant`, `assumption`, `method`,
 `estimand`, `effect_estimate`, `protocol_deviation`, `sensitivity_analysis`,
 `risk_of_bias`, `evidence_synthesis`, and `challenge`. Relevant relations

@@ -1142,6 +1142,11 @@ def save_experiment(
     interventions: Sequence[str] = (),
     boundary_condition: str = "",
     boundary_role: str = "",
+    transition_kind: str = "follow_up",
+    continues_from: Sequence[str] = (),
+    reused_object_ids: Sequence[str] = (),
+    reused_artifact_hashes: Sequence[str] = (),
+    transition_rationale: str = "",
     reproduce_command: str | None = None,
     expected_head: str | None = None,
     expected_branch: str | None = None,
@@ -1227,6 +1232,32 @@ def save_experiment(
             boundary_condition, label="experiment boundary condition"
         )
         payload["boundary_role"] = boundary_role
+    transition_parent_ids = [
+        str(value).strip() for value in continues_from if str(value).strip()
+    ]
+    transition_reuse_ids = [
+        str(value).strip() for value in reused_object_ids if str(value).strip()
+    ]
+    transition_hashes = _hashes(
+        reused_artifact_hashes,
+        label="experiment transition artifact hash",
+    )
+    if (
+        transition_parent_ids
+        or transition_reuse_ids
+        or transition_hashes
+        or transition_rationale.strip()
+    ):
+        payload["transition"] = {
+            "protocol": "xscientist.experiment-transition.v1",
+            "kind": _required_text(
+                transition_kind, label="experiment transition kind"
+            ),
+            "continues_from": transition_parent_ids,
+            "reused_object_ids": transition_reuse_ids,
+            "reused_artifact_hashes": transition_hashes,
+            "rationale": transition_rationale.strip(),
+        }
     environment = capture_environment_receipt(repository.path)
     admission_required = repository.experiment_admission_mode() == "required"
     provenance: dict[str, Any] = {

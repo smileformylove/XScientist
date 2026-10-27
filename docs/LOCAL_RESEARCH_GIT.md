@@ -462,6 +462,29 @@ pointer path. The pointer, attempt, and object reference enter the same
 checkpoint, so deleting the original result file does not remove the audited
 snapshot. A missing or damaged CAS object makes reproduction fail closed.
 
+When a new experiment is a continuation of an earlier terminal attempt, record
+the handoff explicitly. The transition contract requires a same-plan parent,
+an explanation, and reuse of the parent attempt, a derived evidence/asset
+object, or one of the parent's result artifact hashes:
+
+```bash
+xscientist research experiment "recheck video segment retrieval" \
+  --status success --plan PLAN_ID \
+  --continues-from EXPERIMENT_ID \
+  --reuse VIDEO_EVIDENCE_ID \
+  --transition-kind extension \
+  --transition-rationale "Reuse the prior timestamped observation as the baseline and test the missing boundary." \
+  --result-artifact metrics=./results/recheck.json \
+  --repo .
+```
+
+Use `--reuse-artifact-hash sha256:<64 lowercase hex>` when the prior result is
+already in CAS. A transition is optional for a first experiment, but once
+declared it fails closed for missing parents, non-terminal parents, cross-plan
+lineage, invalid hashes, or an uncovered parent. The resulting `depends_on`
+and `consumes` relations are included in Research Context closure, so later
+agents can retrieve the prior experiment and the exact assets it consumed.
+
 For a standalone artifact, use the lower-level pair:
 
 ```bash

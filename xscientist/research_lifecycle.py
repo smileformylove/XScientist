@@ -106,6 +106,28 @@ _EXPERIMENT_ADMISSION_TERMINAL_POLICY_FIELDS = (
     "claim_promotion_allowed",
 )
 _CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_EXPERIMENT_TRANSITION_PROTOCOL = "xscientist.experiment-transition.v1"
+_EXPERIMENT_TRANSITION_KINDS = {
+    "follow_up",
+    "replication",
+    "extension",
+    "recovery",
+}
+_EXPERIMENT_TRANSITION_REUSE_KINDS = {
+    "experiment_attempt",
+    "evidence",
+    "observation",
+    "source_snapshot",
+    "passage_evidence",
+    "context_snapshot",
+}
+_EXPERIMENT_TRANSITION_TERMINAL_STATES = {
+    "completed",
+    "failed",
+    "timed_out",
+    "cancelled",
+    "rejected",
+}
 _VALIDATED_EXPERIMENT_ATTEMPT_ISSUER = object()
 _RESULT_ARTIFACT_POINTER_TRANSACTION_ISSUER = object()
 
@@ -4686,6 +4708,208 @@ class ResearchLifecycle:
             allowed_new_paths=pending_result_paths,
         )
 
+    def _validate_experiment_transition(
+        self,
+        payload: dict[str, Any],
+        *,
+        plan_id: str | None,
+    ) -> tuple[list[dict[str, str]], list[str]]:
+        """Validate the explicit handoff from prior experiments.
+
+        A transition is optional for legacy/first experiments. Once supplied,
+        it becomes a strict contract: every parent must be terminal, remain in
+        the same plan lineage when both sides name a plan, and be covered by a
+        reused attempt/evidence/asset or one of its recorded artifact hashes.
+        """
+
+        raw_transition = payload.get("transition")
+        if raw_transition is None:
+            return [], []
+        if not isinstance(raw_transition, Mapping):
+            raise ResearchGitError("experiment transition must be an object")
+
+        protocol = str(raw_transition.get("protocol") or "").strip()
+        if protocol != _EXPERIMENT_TRANSITION_PROTOCOL:
+            raise ResearchGitError("experiment transition protocol is invalid")
+        transition_kind = str(raw_transition.get("kind") or "").strip().lower()
+        if transition_kind not in _EXPERIMENT_TRANSITION_KINDS:
+            raise ResearchGitError(
+                "experiment transition kind must be one of: "
+                + ", ".join(sorted(_EXPERIMENT_TRANSITION_KINDS))
+            )
+        rationale = str(raw_transition.get("rationale") or "").strip()
+        if not rationale or len(rationale) > 2000:
+            raise ResearchGitError(
+                "experiment transition requires a rationale of 1-2000 characters"
+            )
+
+        def normalize_ids(
+            value: Any,
+            *,
+            label: str,
+            maximum: int,
+            allow_empty: bool = False,
+        ) -> list[str]:
+            if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+                raise ResearchGitError(f"experiment transition {label} must be an array")
+            result: list[str] = []
+            seen: set[str] = set()
+            for raw in value:
+                selector = str(raw or "").strip()
+                if not selector:
+                    raise ResearchGitError(
+                        f"experiment transition {label} contains an empty selector"
+                    )
+                object_id = self.repository.resolve(selector)
+                if object_id in seen:
+                    raise ResearchGitError(
+                        f"experiment transition {label} contains duplicates"
+                    )
+                seen.add(object_id)
+                result.append(object_id)
+            if (not allow_empty and not result) or len(result) > maximum:
+                raise ResearchGitError(
+                    f"experiment transition {label} must contain 1-{maximum} items"
+                )
+            return result
+
+        parent_ids = normalize_ids(
+            raw_transition.get("continues_from"),
+            label="continues_from",
+            maximum=8,
+        )
+        reuse_ids = normalize_ids(
+            raw_transition.get("reused_object_ids"),
+            label="reused_object_ids",
+            maximum=32,
+            allow_empty=True,
+        )
+        raw_hashes = raw_transition.get("reused_artifact_hashes") or []
+        if isinstance(raw_hashes, (str, bytes)) or not isinstance(raw_hashes, Sequence):
+            raise ResearchGitError(
+                "experiment transition reused_artifact_hashes must be an array"
+            )
+        artifact_hashes: list[str] = []
+        for raw_hash in raw_hashes:
+            digest = str(raw_hash or "").strip()
+            if _CONTENT_HASH_RE.fullmatch(digest) is None:
+                raise ResearchGitError(
+                    "experiment transition artifact hashes must use sha256:<64 lowercase hex>"
+                )
+            if digest in artifact_hashes:
+                raise ResearchGitError(
+                    "experiment transition reused_artifact_hashes contains duplicates"
+                )
+            artifact_hashes.append(digest)
+        if len(artifact_hashes) > 64:
+            raise ResearchGitError(
+                "experiment transition may reuse at most 64 artifact hashes"
+            )
+        if not reuse_ids and not artifact_hashes:
+            raise ResearchGitError(
+                "experiment transition must declare reused objects or artifact hashes"
+            )
+
+        parents: dict[str, Mapping[str, Any]] = {}
+        for parent_id in parent_ids:
+            parent = self.repository.get(parent_id)
+            if parent.get("kind") != "experiment_attempt":
+                raise ResearchGitError(
+                    "experiment transition parent must be an experiment attempt"
+                )
+            if parent.get("state") not in _EXPERIMENT_TRANSITION_TERMINAL_STATES:
+                raise ResearchGitError(
+                    "experiment transition parent must be a terminal experiment attempt"
+                )
+            parents[parent_id] = parent
+            if plan_id:
+                parent_plan_ids = {
+                    str(relation.get("target") or "")
+                    for relation in parent.get("relations") or []
+                    if relation.get("type") == "depends_on"
+                    and relation.get("role") in {"plan", "design"}
+                }
+                if plan_id not in parent_plan_ids:
+                    raise ResearchGitError(
+                        "experiment transition parent must belong to the same plan/design"
+                    )
+
+        reused_objects: dict[str, Mapping[str, Any]] = {}
+        for object_id in reuse_ids:
+            item = self.repository.get(object_id)
+            if item.get("kind") not in _EXPERIMENT_TRANSITION_REUSE_KINDS:
+                raise ResearchGitError(
+                    "experiment transition can reuse only attempts, evidence, "
+                    "observations, sources, passages, or context snapshots"
+                )
+            reused_objects[object_id] = item
+
+        parent_artifacts: dict[str, set[str]] = {}
+        for parent_id, parent in parents.items():
+            parent_payload = parent.get("payload") or {}
+            hashes = {
+                str(value)
+                for value in (parent_payload.get("result_artifact_hashes") or {}).values()
+                if _CONTENT_HASH_RE.fullmatch(str(value))
+            }
+            bindings = parent_payload.get("result_artifacts") or {}
+            if isinstance(bindings, Mapping):
+                hashes.update(
+                    str(item.get("content_hash"))
+                    for item in bindings.values()
+                    if isinstance(item, Mapping)
+                    and _CONTENT_HASH_RE.fullmatch(str(item.get("content_hash")))
+                )
+            parent_artifacts[parent_id] = hashes
+
+        def derived_from(item: Mapping[str, Any]) -> set[str]:
+            return {
+                str(relation.get("target") or "")
+                for relation in item.get("relations") or []
+                if relation.get("type") == "derived_from"
+            }
+
+        uncovered: list[str] = []
+        for parent_id in parent_ids:
+            covered = parent_id in reused_objects
+            covered = covered or bool(parent_artifacts[parent_id] & set(artifact_hashes))
+            covered = covered or any(
+                parent_id in derived_from(item) for item in reused_objects.values()
+            )
+            if not covered:
+                uncovered.append(parent_id)
+        if uncovered:
+            raise ResearchGitError(
+                "experiment transition must reuse a result, evidence, or artifact "
+                "from every parent attempt: " + ", ".join(uncovered)
+            )
+
+        transition_core = {
+            "protocol": _EXPERIMENT_TRANSITION_PROTOCOL,
+            "kind": transition_kind,
+            "continues_from": sorted(parent_ids),
+            "reused_object_ids": sorted(reuse_ids),
+            "reused_artifact_hashes": sorted(artifact_hashes),
+            "rationale": rationale,
+        }
+        supplied_hash = str(raw_transition.get("transition_hash") or "")
+        expected_hash = canonical_content_hash(transition_core)
+        if supplied_hash and supplied_hash != expected_hash:
+            raise ResearchGitError("experiment transition integrity hash is invalid")
+        payload["transition"] = {
+            **transition_core,
+            "transition_hash": expected_hash,
+        }
+        relations = [
+            {"type": "depends_on", "target": parent_id, "role": "continues_from"}
+            for parent_id in sorted(parent_ids)
+        ]
+        relations.extend(
+            {"type": "consumes", "target": object_id, "role": "prior_result"}
+            for object_id in sorted(reuse_ids)
+        )
+        return relations, parent_ids
+
     def _prepare_experiment_attempt(
         self,
         attempt: Mapping[str, Any],
@@ -4949,6 +5173,11 @@ class ResearchLifecycle:
             raise ResearchGitError(
                 "experiment priority requires a selected plan/design"
             )
+        transition_relations, _ = self._validate_experiment_transition(
+            payload,
+            plan_id=plan_id,
+        )
+        relations.extend(transition_relations)
         validated_receipt, execution_claim = self._validated_terminal_admission_receipt(
             payload,
             raw_status=raw_status,

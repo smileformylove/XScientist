@@ -1266,6 +1266,37 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         default="",
     )
     experiment_parser.add_argument(
+        "--transition-kind",
+        choices=["follow_up", "replication", "extension", "recovery"],
+        default="follow_up",
+        help="How this experiment continues a prior terminal experiment.",
+    )
+    experiment_parser.add_argument(
+        "--continues-from",
+        action="append",
+        default=[],
+        help="Prior terminal experiment selector (repeatable).",
+    )
+    experiment_parser.add_argument(
+        "--reuse",
+        action="append",
+        default=[],
+        dest="reused_object_ids",
+        help="Prior evidence, asset, observation, or context selector (repeatable).",
+    )
+    experiment_parser.add_argument(
+        "--reuse-artifact-hash",
+        action="append",
+        default=[],
+        dest="reused_artifact_hashes",
+        help="sha256:<64 hex> result artifact from a prior experiment (repeatable).",
+    )
+    experiment_parser.add_argument(
+        "--transition-rationale",
+        default="",
+        help="Why this experiment continues and how prior results will be used.",
+    )
+    experiment_parser.add_argument(
         "--metric", action="append", default=[], help="Metric as NAME=VALUE."
     )
     experiment_parser.add_argument(
@@ -3363,6 +3394,11 @@ def main(
                 interventions=args.intervention,
                 boundary_condition=args.boundary_condition,
                 boundary_role=args.boundary_role,
+                transition_kind=args.transition_kind,
+                continues_from=args.continues_from,
+                reused_object_ids=args.reused_object_ids,
+                reused_artifact_hashes=args.reused_artifact_hashes,
+                transition_rationale=args.transition_rationale,
                 reproduce_command=args.reproduce_command,
                 message=args.message,
                 commit=not args.no_commit,

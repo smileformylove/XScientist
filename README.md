@@ -690,6 +690,19 @@ portable pointer, links the content hash to the typed experiment attempt, and
 includes both in the same checkpoint. Failed, timed-out, and cancelled runs are
 also durable experiment outcomes rather than missing history.
 
+For a follow-up experiment, bind the earlier attempt and the assets or results
+that it reuses. XScientist checks that the parent is terminal, belongs to the
+same plan, and is covered by an evidence/asset object or a prior result hash:
+
+```bash
+xscientist research experiment "recheck video evidence" \
+  --status success --plan PLAN_ID \
+  --continues-from EXPERIMENT_ID --reuse VIDEO_EVIDENCE_ID \
+  --transition-kind extension \
+  --transition-rationale "Reuse the timestamped observation as the baseline." \
+  --repo ./first-study
+```
+
 Audit answers three different questions and never conflates them:
 
 - `trace`: can every claim be traced to recorded evidence and decisions?
