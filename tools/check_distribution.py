@@ -65,6 +65,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_lifecycle.py",
             "xscientist/research_closure.py",
             "xscientist/research_rollout.py",
+            "xscientist/research_actions.py",
             "xscientist/research_belief.py",
             "xscientist/research_authority.py",
             "xscientist/research_evolution.py",
@@ -91,6 +92,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "ai_scientist/protocol/schemas/exploration_audit.schema.json",
             "ai_scientist/protocol/schemas/research_rollout.schema.json",
             "ai_scientist/protocol/schemas/research_rollout_audit.schema.json",
+            "ai_scientist/protocol/schemas/research_action.schema.json",
             "ai_scientist/protocol/schemas/belief_context.schema.json",
             "ai_scientist/protocol/schemas/belief_context_audit.schema.json",
         }
@@ -173,6 +175,7 @@ def smoke_install(wheel: Path, *, install_deps: bool = True) -> None:
 import contextlib
 import io
 import json
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -203,6 +206,13 @@ assert load_schema("manifest")["type"] == "object"
 assert "context_pack" in available_schemas()
 assert bfts_config_path("default").is_file()
 assert (latex_template_dir("icml") / "template.tex").is_file()
+if os.name != "posix":
+    print(json.dumps({
+        "platform_smoke": "import_and_inventory_only",
+        "platform": os.name,
+        "skipped": "secure descriptor-relative DAG export requires POSIX APIs",
+    }))
+    raise SystemExit(0)
 demo_root = Path.cwd() / "demo"
 demo_output = io.StringIO()
 with contextlib.redirect_stdout(demo_output):
