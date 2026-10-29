@@ -90,6 +90,16 @@ sealed/prospective benchmarks, canary, rollback, and human authorization. The
 harness audit performs no model call, network call, online reinforcement
 learning, weight update, deployment, or automatic evaluator mutation.
 
+Candidate lineage follows the same framework-owned boundary. The first
+candidate on an `evolve/*` line may be recorded without a parent. A subsequent
+candidate can declare `parent_candidate_id`; XScientist then requires the child
+base artifact to equal the parent's candidate artifact, verifies that the
+parent has an independent `verified` evaluation, and records `depends_on` and
+`consumes` edges for the parent and its evaluation. Candidate artifact hashes
+are also unique within the visible Research VCS history, so retries cannot
+silently create duplicate generations. The optional `parent_evaluation_ids`
+argument narrows the exact verified evaluations consumed by the child.
+
 Design inspiration comes from the [EvoTrainer paper](https://arxiv.org/abs/2606.03108)
 and its [official DAMO-ConvAI implementation](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/EvoTrainer).
 XScientist independently implements only the bounded audit pattern; it does not

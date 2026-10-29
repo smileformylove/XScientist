@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ai_scientist.utils.evolution_gate import (
     validate_evolution_candidate,
@@ -39,6 +39,8 @@ class ResearchEvolution:
         payload: Mapping[str, Any],
         *,
         constitution: Mapping[str, Any],
+        parent_candidate_id: str | None = None,
+        parent_evaluation_ids: Sequence[str] = (),
         commit: bool = True,
     ) -> dict[str, Any]:
         candidate_payload = dict(payload)
@@ -56,10 +58,117 @@ class ResearchEvolution:
                 "evolution candidate failed integrity validation: "
                 + ", ".join(validation["errors"])
             )
+        candidate_artifact_hash = candidate_payload.get("candidate_artifact_hash")
+        duplicate_artifacts = {
+            str(item.get("payload", {}).get("candidate_artifact_hash"))
+            for item in self.repository.objects(kind="agent_candidate")
+            if isinstance(item.get("payload"), Mapping)
+        }
+        if candidate_artifact_hash in duplicate_artifacts:
+            raise ResearchGitError(
+                "evolution candidate artifact duplicates an existing candidate; "
+                "record a genuinely new candidate or reuse the existing lineage"
+            )
+        relations: list[dict[str, str]] = []
+        if parent_candidate_id is not None:
+            parent_id = self.repository.resolve(parent_candidate_id)
+            parent = self.repository.get(parent_id)
+            if parent.get("kind") != "agent_candidate":
+                raise ResearchGitError("evolution parent must be an agent candidate")
+            parent_payload = parent.get("payload")
+            if not isinstance(parent_payload, Mapping):
+                raise ResearchGitError("evolution parent payload is invalid")
+            if parent_payload.get("component_type") != candidate_payload.get(
+                "component_type"
+            ):
+                raise ResearchGitError(
+                    "evolution parent and child must use the same component type"
+                )
+            if parent_payload.get("constitution_hash") != candidate_payload.get(
+                "constitution_hash"
+            ):
+                raise ResearchGitError(
+                    "evolution parent and child must bind the same constitution"
+                )
+            if candidate_payload.get("base_artifact_hash") != parent_payload.get(
+                "candidate_artifact_hash"
+            ):
+                raise ResearchGitError(
+                    "evolution child base artifact must equal its parent candidate artifact"
+                )
+
+            def eligible_parent_evaluation(evaluation: Mapping[str, Any]) -> bool:
+                actor = evaluation.get("actor")
+                actor = actor if isinstance(actor, Mapping) else {}
+                evaluation_payload = evaluation.get("payload")
+                evaluation_payload = (
+                    evaluation_payload
+                    if isinstance(evaluation_payload, Mapping)
+                    else {}
+                )
+                evaluated_candidate = evaluation_payload.get("candidate")
+                evaluated_candidate = (
+                    evaluated_candidate
+                    if isinstance(evaluated_candidate, Mapping)
+                    else {}
+                )
+                return bool(
+                    evaluation.get("kind") == "agent_evaluation"
+                    and evaluation.get("state") == "verified"
+                    and actor.get("authority") == "independent_evaluator"
+                    and evaluated_candidate.get("candidate_hash")
+                    == parent_payload.get("candidate_hash")
+                    and any(
+                        relation.get("type") == "evaluates"
+                        and str(relation.get("target") or "") == parent_id
+                        for relation in evaluation.get("relations") or []
+                    )
+                )
+
+            evaluations = [
+                item
+                for item in self.repository.objects(kind="agent_evaluation")
+                if eligible_parent_evaluation(item)
+            ]
+            supplied_evaluation_ids = [
+                self.repository.resolve(item) for item in parent_evaluation_ids
+            ]
+            if supplied_evaluation_ids:
+                selected_evaluations = []
+                for evaluation_id in supplied_evaluation_ids:
+                    evaluation = self.repository.get(evaluation_id)
+                    if not eligible_parent_evaluation(evaluation):
+                        raise ResearchGitError(
+                            "evolution parent evaluation must be a verified independent "
+                            "evaluation bound to the parent"
+                        )
+                    selected_evaluations.append(evaluation_id)
+            else:
+                selected_evaluations = [str(item["object_id"]) for item in evaluations]
+            if not selected_evaluations:
+                raise ResearchGitError(
+                    "evolution parent must have a verified independent evaluation"
+                )
+            relations.append(
+                {
+                    "type": "depends_on",
+                    "target": parent_id,
+                    "role": "parent_candidate",
+                }
+            )
+            relations.extend(
+                {
+                    "type": "consumes",
+                    "target": evaluation_id,
+                    "role": "parent_evaluation",
+                }
+                for evaluation_id in sorted(set(selected_evaluations))
+            )
         result = self.repository.record(
             "agent_candidate",
             candidate_payload,
             state="draft",
+            relations=relations,
             actor={
                 "actor_id": str(candidate_payload["proposed_by"]),
                 "authority": "research_agent",

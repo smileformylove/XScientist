@@ -13,6 +13,8 @@ from ai_scientist.protocol.canonical_json import canonical_content_hash
 from ai_scientist.utils.evolution_deployment import DEPLOYMENT_RECEIPT_SCHEMA
 from ai_scientist.utils.evolution_gate import (
     EvolutionGateError,
+    _candidate_core,
+    _canonical_hash,
     approve_production_promotion,
     build_ablation_report,
     build_canary_report,
@@ -436,6 +438,115 @@ class EvolutionGateTests(unittest.TestCase):
                 ResearchEvolution(repository).candidate(
                     _candidate(),
                     constitution=_constitution(),
+                )
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_child_candidate_requires_verified_parent_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                question="Can the agent improve without weakening integrity?",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+            evolution = ResearchEvolution(repository)
+            evolution.candidate_line("search-policy-v2")
+            first_payload = _candidate()
+            first = evolution.candidate(
+                first_payload,
+                constitution=_constitution(),
+            )["candidate"]
+            child_payload = _candidate()
+            child_payload["candidate_id"] = "search-policy-v3"
+            child_payload["base_artifact_hash"] = first_payload[
+                "candidate_artifact_hash"
+            ]
+            child_payload["candidate_artifact_hash"] = _digest("child")
+            child_payload["candidate_version"] = "1.2.0"
+            child_payload["candidate_hash"] = _canonical_hash(
+                _candidate_core(child_payload)
+            )
+            with self.assertRaisesRegex(
+                ResearchGitError, "verified independent evaluation"
+            ):
+                evolution.candidate(
+                    child_payload,
+                    constitution=_constitution(),
+                    parent_candidate_id=first.object_id,
+                )
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
+    def test_child_candidate_binds_verified_parent_and_rejects_duplicate_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repository = ResearchRepository.init(
+                Path(td) / "research",
+                question="Can the agent improve without weakening integrity?",
+                git_user_name="Evolution Test",
+                git_user_email="evolution@example.invalid",
+            )
+            evolution = ResearchEvolution(repository)
+            evolution.candidate_line("search-policy-v2")
+            first_payload = _candidate()
+            first = evolution.candidate(
+                first_payload,
+                constitution=_constitution(),
+            )["candidate"]
+            gate_payload = _gate(candidate=first_payload)
+            evaluation = evolution.evaluate(
+                gate_payload,
+                constitution=_constitution(),
+                candidate_id=first.object_id,
+                evaluator_id="service:independent-evaluator",
+            )["evaluation"]
+            child_payload = _candidate()
+            child_payload["candidate_id"] = "search-policy-v3"
+            child_payload["base_artifact_hash"] = first_payload[
+                "candidate_artifact_hash"
+            ]
+            child_payload["candidate_artifact_hash"] = _digest("child")
+            child_payload["candidate_version"] = "1.2.0"
+            child_payload["candidate_hash"] = _canonical_hash(
+                _candidate_core(child_payload)
+            )
+            child = evolution.candidate(
+                child_payload,
+                constitution=_constitution(),
+                parent_candidate_id=first.object_id,
+                parent_evaluation_ids=[evaluation.object_id],
+            )["candidate"]
+            child_object = repository.get(child.object_id)
+            self.assertIn(
+                {
+                    "type": "depends_on",
+                    "target": first.object_id,
+                    "role": "parent_candidate",
+                },
+                child_object["relations"],
+            )
+            self.assertIn(
+                {
+                    "type": "consumes",
+                    "target": evaluation.object_id,
+                    "role": "parent_evaluation",
+                },
+                child_object["relations"],
+            )
+            duplicate_payload = dict(child_payload)
+            duplicate_payload["candidate_id"] = "search-policy-v4"
+            duplicate_payload["candidate_version"] = "1.3.0"
+            duplicate_payload["candidate_hash"] = _canonical_hash(
+                _candidate_core(duplicate_payload)
+            )
+            with self.assertRaisesRegex(
+                ResearchGitError, "duplicates an existing candidate"
+            ):
+                evolution.candidate(
+                    duplicate_payload,
+                    constitution=_constitution(),
+                    parent_candidate_id=child.object_id,
+                    parent_evaluation_ids=[evaluation.object_id],
                 )
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for Research VCS")
