@@ -103,6 +103,7 @@ if TYPE_CHECKING:
     )
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
+    from .research_actions import ACTION_PROTOCOL, ResearchActionLedger
     from .workspace_history import (
         compare_workspace_history,
         inspect_workspace_checkpoint,
@@ -182,6 +183,8 @@ _ROLLOUT_EXPORTS = {
     "save_research_rollout",
 }
 
+_ACTION_EXPORTS = {"ACTION_PROTOCOL", "ResearchActionLedger"}
+
 _BELIEF_CONTEXT_EXPORTS = {
     "BELIEF_CONTEXT_POLICY",
     "BELIEF_CONTEXT_SEMANTICS",
@@ -207,6 +210,10 @@ def __getattr__(name: str) -> Any:
         from .research_vcs import ResearchRepository
 
         value = ResearchRepository
+    elif name in _ACTION_EXPORTS:
+        from . import research_actions
+
+        value = getattr(research_actions, name)
     elif name == "ResearchLifecycle":
         from .research_lifecycle import ResearchLifecycle
 
@@ -332,6 +339,8 @@ __all__ = [
     "ResearchEvolution",
     "ResearchLifecycle",
     "ResearchRepository",
+    "ResearchActionLedger",
+    "ACTION_PROTOCOL",
     "ServiceSettings",
     "XScientist",
     "audit_research_closure",

@@ -228,6 +228,23 @@ observation until the normal evidence and review gates pass. See
 privacy boundaries, temporal sampling, and the Harness2-informed improvement
 roadmap.
 
+See [Research Action Ledger](docs/RESEARCH_ACTIONS.md) for the full receipt
+contract and recovery rules.
+
+Research-agent actions are also durable and resumable. The append-only
+`xscientist.research-action.v1` ledger gives each search, inspection, or
+experiment action a stable ID, input/output hashes, budget accounting, and
+explicit `consumes`/`produces` links to video assets and evidence. Repeating an
+action with the same input is idempotent; interrupted work can be recovered
+without rewriting its prior receipt. Use the Python API or:
+
+```bash
+xscientist research action begin video-search-01 video.search \
+  --input-hash sha256:... --consume rso-SOURCE_ID --budget 60 --repo ./my-study
+xscientist research action finish video-search-01 --status completed \
+  --output-hash sha256:... --produce rso-EVIDENCE_ID --repo ./my-study
+```
+
 ## Development main: structured research history
 
 This section describes unreleased protocol work on `main`; install the source

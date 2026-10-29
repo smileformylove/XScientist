@@ -140,6 +140,13 @@ class ResearchRepository:
                 semantic_profile=semantic_profile,
             )
 
+    def actions(self):
+        """Return the append-only action ledger bound to this repository."""
+
+        from .research_actions import ResearchActionLedger
+
+        return ResearchActionLedger(self)
+
     def _record(
         self,
         kind: str,

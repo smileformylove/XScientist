@@ -66,6 +66,7 @@ from .opportunity_funnel import (
 )
 from .research_belief import audit_belief_context_projection
 from .research_rollout import audit_research_rollout, save_research_rollout
+from .research_actions import ACTION_STATUSES, ResearchActionLedger
 from .research_vcs import ResearchRepository
 
 
@@ -1749,6 +1750,52 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
         help="Scientific relation as TYPE:TARGET[:ROLE].",
     )
     record_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    action_parser = subparsers.add_parser(
+        "action",
+        help="Record an idempotent, hash-bound research-agent action receipt.",
+    )
+    action_subparsers = action_parser.add_subparsers(
+        dest="action_command", required=True
+    )
+    action_begin = action_subparsers.add_parser(
+        "begin", help="Start or resume one logical action."
+    )
+    action_begin.add_argument("action_id")
+    action_begin.add_argument("action_type")
+    action_begin.add_argument(
+        "--input-hash", required=True,
+        help="sha256 digest of the private action input; raw prompts are never stored.",
+    )
+    action_begin.add_argument("--consume", action="append", default=[])
+    action_begin.add_argument("--parent-action-id")
+    action_begin.add_argument("--budget", type=float)
+    action_begin.add_argument("--retry", action="store_true")
+    action_begin.add_argument("--recover", action="store_true")
+    action_begin.add_argument("--actor", default="agent:xscientist")
+    action_begin.add_argument("--repo", default=".")
+    action_begin.add_argument("--json", action="store_true", dest="as_json")
+
+    action_finish = action_subparsers.add_parser(
+        "finish", help="Append a terminal or interrupted action receipt."
+    )
+    action_finish.add_argument("action_id")
+    action_finish.add_argument("--status", choices=ACTION_STATUSES, required=True)
+    action_finish.add_argument("--output-hash")
+    action_finish.add_argument("--produce", action="append", default=[])
+    action_finish.add_argument("--consume", action="append", default=[])
+    action_finish.add_argument("--consumed-seconds", type=float)
+    action_finish.add_argument("--error-code")
+    action_finish.add_argument("--actor", default="agent:xscientist")
+    action_finish.add_argument("--repo", default=".")
+    action_finish.add_argument("--json", action="store_true", dest="as_json")
+
+    action_list = action_subparsers.add_parser(
+        "list", help="Show one action's append-only history."
+    )
+    action_list.add_argument("action_id")
+    action_list.add_argument("--repo", default=".")
+    action_list.add_argument("--json", action="store_true", dest="as_json")
 
     objects_parser = subparsers.add_parser(
         "objects", help="List or inspect typed scientific objects."
@@ -4104,6 +4151,55 @@ def main(
                 print(f"{action}: {result.object_id}")
                 print(f"Kind/state: {result.kind} / {result.state}")
                 print(f"Path:       {_display_path(result.path)}")
+            return 0
+
+        if args.command == "action":
+            ledger = ResearchActionLedger(args.repo)
+            if args.action_command == "begin":
+                result = ledger.begin(
+                    args.action_id,
+                    args.action_type,
+                    args.input_hash,
+                    parent_action_id=args.parent_action_id,
+                    consumes=args.consume,
+                    budget_seconds=args.budget,
+                    retry=args.retry,
+                    recovery=args.recover,
+                    actor_id=args.actor,
+                )
+            elif args.action_command == "finish":
+                output_value = args.output_hash
+                if args.status == "completed" and not output_value:
+                    raise ResearchGitError(
+                        "action finish --status completed requires --output-hash"
+                    )
+                result = ledger.finish(
+                    args.action_id,
+                    args.status,
+                    output_value,
+                    produces=args.produce,
+                    consumes=args.consume,
+                    consumed_seconds=args.consumed_seconds,
+                    error_code=args.error_code,
+                    actor_id=args.actor,
+                )
+            else:
+                result = ledger.history(args.action_id)
+            if args.as_json:
+                _print_json(result)
+            elif isinstance(result, list):
+                for item in result:
+                    payload = item.get("payload") or {}
+                    print(
+                        f"{item['object_id']} sequence={payload.get('sequence')} "
+                        f"attempt={payload.get('attempt')} status={payload.get('status')}"
+                    )
+            else:
+                payload = result.get("payload") or {}
+                print(
+                    f"{result['object_id']} action={payload.get('action_id')} "
+                    f"status={payload.get('status')} attempt={payload.get('attempt')}"
+                )
             return 0
 
         if args.command == "objects":

@@ -99,6 +99,7 @@
         "completed",
         "failed",
         "timed_out",
+        "interrupted",
         "cancelled",
         "rejected",
         "superseded",

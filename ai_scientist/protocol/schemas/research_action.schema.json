@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_action.schema.json",
+  "title": "XScientist Research Action Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_kind", "action_id", "action_type", "status", "attempt",
+    "sequence", "input_hash", "output_hash", "parent_action_id", "retry_of",
+    "recovery_of", "consumes", "produces", "budget_seconds", "consumed_seconds",
+    "cumulative_consumed_seconds", "remaining_seconds",
+    "action_hash"
+  ],
+  "properties": {
+    "protocol_kind": {"const": "xscientist.research-action.v1"},
+    "action_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "action_type": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "status": {"enum": ["proposed", "running", "completed", "failed", "timed_out", "cancelled", "interrupted"]},
+    "attempt": {"type": "integer", "minimum": 0},
+    "sequence": {"type": "integer", "minimum": 0},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "output_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "parent_action_id": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "retry_of": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "recovery_of": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "consumes": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "produces": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "budget_seconds": {"type": ["number", "null"], "minimum": 0},
+    "consumed_seconds": {"type": ["number", "null"], "minimum": 0},
+    "cumulative_consumed_seconds": {"type": ["number", "null"], "minimum": 0},
+    "remaining_seconds": {"type": ["number", "null"], "minimum": 0},
+    "error_code": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "action_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

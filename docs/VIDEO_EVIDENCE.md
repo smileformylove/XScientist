@@ -22,6 +22,41 @@ PNGs remain in the configured CAS and are excluded from source-code commits.
 Identical bytes share CAS objects, including frames reused by observations.
 The default source title contains no original filename or host path.
 
+## Durable action receipts
+
+Video search, indexing, inspection, and experiment orchestration can share the
+append-only action ledger in `xscientist.research-action.v1`. An action has a
+stable logical ID and records only hashes plus Research Object references.
+Repeating a pending or terminal action with the same input hash is idempotent;
+changing the input under the same ID is rejected. A worker crash can be
+represented as `interrupted` and resumed explicitly, preserving attempt and
+recovery lineage.
+
+```python
+from xscientist import ResearchActionLedger, ResearchRepository
+
+repo = ResearchRepository("./my-study")
+ledger = ResearchActionLedger(repo)
+ledger.begin(
+    "video-search-run-01",
+    "video.search",
+    {"query": "reaches marker", "scope": "registered-assets"},
+    consumes=["rso-VIDEO_ASSET_ID"],
+    budget_seconds=60,
+)
+ledger.finish(
+    "video-search-run-01",
+    "completed",
+    {"evidence_ids": ["rso-VIDEO_EVIDENCE_ID"]},
+    produces=["rso-VIDEO_EVIDENCE_ID"],
+)
+```
+
+The receipt does not contain the private query, model prompt, raw media, or
+local path. Bind assets, text indexes, observations, and experiment results
+through `consumes`/`produces` relations and content hashes. The same API is
+available through `xscientist research action begin|finish|list`.
+
 ## Native Commands
 
 FFmpeg and ffprobe must be installed on the machine performing import and

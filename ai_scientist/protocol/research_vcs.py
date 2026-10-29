@@ -86,12 +86,14 @@ STRATEGY_RESEARCH_OBJECT_KINDS = (
     "posterior_update",
 )
 ROLLOUT_RESEARCH_OBJECT_KINDS = ("research_rollout",)
+ACTION_RESEARCH_OBJECT_KINDS = ("research_action",)
 RESEARCH_OBJECT_KINDS = (
     *CORE_RESEARCH_OBJECT_KINDS,
     *EPISTEMIC_RESEARCH_OBJECT_KINDS,
     *AUTONOMOUS_RESEARCH_OBJECT_KINDS,
     *STRATEGY_RESEARCH_OBJECT_KINDS,
     *ROLLOUT_RESEARCH_OBJECT_KINDS,
+    *ACTION_RESEARCH_OBJECT_KINDS,
 )
 RESEARCH_OBJECT_STATES = (
     "draft",
@@ -100,6 +102,7 @@ RESEARCH_OBJECT_STATES = (
     "completed",
     "failed",
     "timed_out",
+    "interrupted",
     "cancelled",
     "rejected",
     "superseded",
@@ -210,6 +213,12 @@ _ROLLOUT_PROFILE = _profile_descriptor(
     ROLLOUT_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
+_ACTION_PROFILE = _profile_descriptor(
+    "https://xscientist.io/profiles/research-action/v1",
+    "1.0.0",
+    ACTION_RESEARCH_OBJECT_KINDS,
+    RESEARCH_RELATION_TYPES,
+)
 BUILTIN_RESEARCH_PROFILES = {
     profile["uri"]: profile
     for profile in (
@@ -219,6 +228,7 @@ BUILTIN_RESEARCH_PROFILES = {
         _STRATEGY_PROFILE_V1,
         _STRATEGY_PROFILE,
         _ROLLOUT_PROFILE,
+        _ACTION_PROFILE,
     )
 }
 
@@ -234,6 +244,8 @@ def _default_profile_for_kind(kind: str) -> dict[str, Any] | None:
         return deepcopy(_STRATEGY_PROFILE)
     if kind in ROLLOUT_RESEARCH_OBJECT_KINDS:
         return deepcopy(_ROLLOUT_PROFILE)
+    if kind in ACTION_RESEARCH_OBJECT_KINDS:
+        return deepcopy(_ACTION_PROFILE)
     return None
 
 
@@ -395,6 +407,7 @@ _PAYLOAD_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "novelty_check": ("verdict", "summary", "check_hash"),
     "evaluation_blinding": ("policy", "summary", "blinding_hash"),
     "human_escalation": ("reason", "question", "escalation_hash"),
+    "research_action": ("action_id", "action_type", "status", "sequence"),
     "hypothesis_portfolio": ("question", "portfolio_hash"),
     "discriminating_prediction": ("expected_outcome", "prediction_hash"),
     "experiment_priority": ("selected_candidate_id", "priority_hash"),
@@ -1583,6 +1596,103 @@ def research_payload_issues(
         "transferable",
     }:
         issues.append("claim depth_level is invalid")
+    if normalized_kind == "research_action":
+        required = (
+            "protocol_kind",
+            "action_id",
+            "action_type",
+            "status",
+            "attempt",
+            "sequence",
+            "input_hash",
+            "action_hash",
+        )
+        for field in required:
+            if field not in payload or payload.get(field) in (None, ""):
+                issues.append(f"research_action requires {field}")
+        if payload.get("protocol_kind") != "xscientist.research-action.v1":
+            issues.append("research_action protocol_kind is invalid")
+        if not isinstance(payload.get("action_id"), str) or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", str(payload.get("action_id") or "")
+        ) is None:
+            issues.append("research_action action_id is invalid")
+        if not isinstance(payload.get("action_type"), str) or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", str(payload.get("action_type") or "")
+        ) is None:
+            issues.append("research_action action_type is invalid")
+        if payload.get("status") not in {
+            "proposed",
+            "running",
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled",
+            "interrupted",
+        }:
+            issues.append("research_action status is invalid")
+        for field in ("attempt", "sequence"):
+            value = payload.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                issues.append(f"research_action {field} must be a non-negative integer")
+        for field in ("input_hash", "output_hash", "action_hash"):
+            value = payload.get(field)
+            if value not in (None, "") and not _is_sha256(value):
+                issues.append(f"research_action {field} must use sha256:<64 hex>")
+        for field in (
+            "budget_seconds",
+            "consumed_seconds",
+            "cumulative_consumed_seconds",
+            "remaining_seconds",
+        ):
+            value = payload.get(field)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                issues.append(
+                    f"research_action {field} must be a finite non-negative number"
+                )
+        if (
+            payload.get("budget_seconds") is not None
+            and payload.get("remaining_seconds") is not None
+            and payload.get("cumulative_consumed_seconds") is not None
+            and abs(
+                float(payload["budget_seconds"])
+                - float(payload["cumulative_consumed_seconds"])
+                - float(payload["remaining_seconds"])
+            )
+            > 1e-6
+        ):
+            issues.append("research_action budget accounting is inconsistent")
+        for field in ("consumes", "produces"):
+            value = payload.get(field, [])
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                issues.append(f"research_action {field} must be an array of references")
+        for field in ("parent_action_id", "retry_of", "recovery_of"):
+            value = payload.get(field)
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", value) is None
+            ):
+                issues.append(f"research_action {field} is invalid")
+        if payload.get("status") in {"completed", "failed", "timed_out", "cancelled"}:
+            if not payload.get("output_hash") and payload.get("status") == "completed":
+                issues.append("completed research_action requires output_hash")
+        action_hash = payload.get("action_hash")
+        if action_hash:
+            expected = canonical_content_hash(
+                {key: value for key, value in payload.items() if key != "action_hash"}
+            )
+            if action_hash != expected:
+                issues.append("research_action action_hash mismatch")
+        try:
+            validate_json(dict(payload), load_schema("research_action"))
+        except ValidationError as exc:
+            issues.append(f"research_action schema invalid: {exc.message}")
     issues.extend(_discovery_protocol_issues(normalized_kind, payload))
     if normalized_kind in STRATEGY_RESEARCH_OBJECT_KINDS:
         issues.extend(
@@ -1736,6 +1846,7 @@ def research_payload_issues(
         "tool_trace_hash",
         "evaluation_hash",
         "rubric_hash",
+        "action_hash",
     ):
         value = payload.get(field)
         if value not in (None, "") and not _is_sha256(value):
@@ -2040,6 +2151,7 @@ def validate_research_object(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "AUTONOMOUS_RESEARCH_OBJECT_KINDS",
+    "ACTION_RESEARCH_OBJECT_KINDS",
     "BUILTIN_RESEARCH_PROFILES",
     "CORE_RESEARCH_OBJECT_KINDS",
     "EPISTEMIC_RESEARCH_OBJECT_KINDS",
