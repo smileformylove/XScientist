@@ -57,6 +57,13 @@ local path. Bind assets, text indexes, observations, and experiment results
 through `consumes`/`produces` relations and content hashes. The same API is
 available through `xscientist research action begin|finish|list`.
 
+When one video task spans search, inspection, repair, and a follow-up
+experiment, bind those receipts into the privacy-safe [research run index](RESEARCH_RUNS.md).
+Its `context_refs` are explicitly context-only, so reusing an existing asset or
+frame observation does not silently grant new experiment authority. The
+attention-first summary lets a resumed worker see whether the next step is
+waiting for a person, blocked, or ready to continue.
+
 ## Native Commands
 
 FFmpeg and ffprobe must be installed on the machine performing import and

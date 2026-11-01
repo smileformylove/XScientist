@@ -87,6 +87,7 @@ STRATEGY_RESEARCH_OBJECT_KINDS = (
 )
 ROLLOUT_RESEARCH_OBJECT_KINDS = ("research_rollout",)
 ACTION_RESEARCH_OBJECT_KINDS = ("research_action",)
+RUN_RESEARCH_OBJECT_KINDS = ("research_run",)
 RESEARCH_OBJECT_KINDS = (
     *CORE_RESEARCH_OBJECT_KINDS,
     *EPISTEMIC_RESEARCH_OBJECT_KINDS,
@@ -94,6 +95,7 @@ RESEARCH_OBJECT_KINDS = (
     *STRATEGY_RESEARCH_OBJECT_KINDS,
     *ROLLOUT_RESEARCH_OBJECT_KINDS,
     *ACTION_RESEARCH_OBJECT_KINDS,
+    *RUN_RESEARCH_OBJECT_KINDS,
 )
 RESEARCH_OBJECT_STATES = (
     "draft",
@@ -219,6 +221,12 @@ _ACTION_PROFILE = _profile_descriptor(
     ACTION_RESEARCH_OBJECT_KINDS,
     RESEARCH_RELATION_TYPES,
 )
+_RUN_PROFILE = _profile_descriptor(
+    "https://xscientist.io/profiles/research-run/v1",
+    "1.0.0",
+    RUN_RESEARCH_OBJECT_KINDS,
+    RESEARCH_RELATION_TYPES,
+)
 BUILTIN_RESEARCH_PROFILES = {
     profile["uri"]: profile
     for profile in (
@@ -229,6 +237,7 @@ BUILTIN_RESEARCH_PROFILES = {
         _STRATEGY_PROFILE,
         _ROLLOUT_PROFILE,
         _ACTION_PROFILE,
+        _RUN_PROFILE,
     )
 }
 
@@ -246,6 +255,8 @@ def _default_profile_for_kind(kind: str) -> dict[str, Any] | None:
         return deepcopy(_ROLLOUT_PROFILE)
     if kind in ACTION_RESEARCH_OBJECT_KINDS:
         return deepcopy(_ACTION_PROFILE)
+    if kind in RUN_RESEARCH_OBJECT_KINDS:
+        return deepcopy(_RUN_PROFILE)
     return None
 
 
@@ -2167,6 +2178,7 @@ __all__ = [
     "STRATEGY_RESEARCH_OBJECT_KINDS",
     "SUPPORTED_RESEARCH_OBJECT_IDENTITY_PROFILES",
     "ROLLOUT_RESEARCH_OBJECT_KINDS",
+    "RUN_RESEARCH_OBJECT_KINDS",
     "ResearchObjectError",
     "build_research_object",
     "research_object_order_key",

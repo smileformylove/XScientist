@@ -214,6 +214,7 @@ class DistributionBuildTests(unittest.TestCase):
                 "ai_scientist/protocol/schemas/exploration_audit.schema.json",
                 "ai_scientist/protocol/schemas/research_rollout.schema.json",
                 "ai_scientist/protocol/schemas/research_rollout_audit.schema.json",
+                "ai_scientist/protocol/schemas/research_run.schema.json",
                 "ai_scientist/protocol/schemas/belief_context.schema.json",
                 "ai_scientist/protocol/schemas/belief_context_audit.schema.json",
                 "ai_scientist/protocol/schemas/latent_trajectory.schema.json",

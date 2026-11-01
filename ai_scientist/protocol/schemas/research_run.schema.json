@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xscientist.io/protocol/research-vcs.v1/research_run.schema.json",
+  "title": "XScientist Research Run Step",
+  "description": "A privacy-safe lifecycle index for one resumable research run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_kind", "run_id", "sequence", "step_id", "step_type", "status",
+    "input_hash", "output_hash", "action_ref", "context_refs", "requires_human",
+    "next_action", "step_hash"
+  ],
+  "properties": {
+    "protocol_kind": {"const": "xscientist.research-run.v1"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "sequence": {"type": "integer", "minimum": 0, "maximum": 4095},
+    "step_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "step_type": {"enum": ["plan", "delegate", "execute", "inspect", "repair", "judge", "stop"]},
+    "status": {"enum": ["proposed", "running", "waiting", "ready", "blocked", "completed", "failed", "timed_out", "cancelled", "interrupted"]},
+    "input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "output_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "action_ref": {"type": ["string", "null"], "pattern": "^rso-[0-9a-f]{16}$"},
+    "context_refs": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^rso-[0-9a-f]{16}$"}},
+    "requires_human": {"type": "boolean"},
+    "next_action": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "error_code": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "step_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

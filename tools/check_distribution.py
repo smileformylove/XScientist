@@ -66,6 +66,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "xscientist/research_closure.py",
             "xscientist/research_rollout.py",
             "xscientist/research_actions.py",
+            "xscientist/research_run.py",
             "xscientist/research_belief.py",
             "xscientist/research_authority.py",
             "xscientist/research_evolution.py",
@@ -93,6 +94,7 @@ def inspect_distribution(dist_dir: Path) -> tuple[Path, Path]:
             "ai_scientist/protocol/schemas/research_rollout.schema.json",
             "ai_scientist/protocol/schemas/research_rollout_audit.schema.json",
             "ai_scientist/protocol/schemas/research_action.schema.json",
+            "ai_scientist/protocol/schemas/research_run.schema.json",
             "ai_scientist/protocol/schemas/belief_context.schema.json",
             "ai_scientist/protocol/schemas/belief_context_audit.schema.json",
         }

@@ -104,6 +104,15 @@ if TYPE_CHECKING:
     from .research_tools import ingest_tool_evidence
     from .research_vcs import ResearchRepository
     from .research_actions import ACTION_PROTOCOL, ResearchActionLedger
+    from .research_run import (
+        RUN_PROTOCOL,
+        RUN_STEP_STATUSES,
+        RUN_STEP_TYPES,
+        ResearchRunLedger,
+        list_research_run,
+        list_research_runs,
+        summarize_research_run,
+    )
     from .workspace_history import (
         compare_workspace_history,
         inspect_workspace_checkpoint,
@@ -185,6 +194,16 @@ _ROLLOUT_EXPORTS = {
 
 _ACTION_EXPORTS = {"ACTION_PROTOCOL", "ResearchActionLedger"}
 
+_RUN_EXPORTS = {
+    "RUN_PROTOCOL",
+    "RUN_STEP_STATUSES",
+    "RUN_STEP_TYPES",
+    "ResearchRunLedger",
+    "list_research_run",
+    "list_research_runs",
+    "summarize_research_run",
+}
+
 _BELIEF_CONTEXT_EXPORTS = {
     "BELIEF_CONTEXT_POLICY",
     "BELIEF_CONTEXT_SEMANTICS",
@@ -214,6 +233,10 @@ def __getattr__(name: str) -> Any:
         from . import research_actions
 
         value = getattr(research_actions, name)
+    elif name in _RUN_EXPORTS:
+        from . import research_run
+
+        value = getattr(research_run, name)
     elif name == "ResearchLifecycle":
         from .research_lifecycle import ResearchLifecycle
 

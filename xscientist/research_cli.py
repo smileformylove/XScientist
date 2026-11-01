@@ -67,6 +67,14 @@ from .opportunity_funnel import (
 from .research_belief import audit_belief_context_projection
 from .research_rollout import audit_research_rollout, save_research_rollout
 from .research_actions import ACTION_STATUSES, ResearchActionLedger
+from .research_run import (
+    RUN_STEP_STATUSES,
+    RUN_STEP_TYPES,
+    ResearchRunLedger,
+    list_research_run,
+    list_research_runs,
+    summarize_research_run,
+)
 from .research_vcs import ResearchRepository
 
 
@@ -1796,6 +1804,41 @@ def _build_parser(*, prog: str = "xscientist research") -> argparse.ArgumentPars
     action_list.add_argument("action_id")
     action_list.add_argument("--repo", default=".")
     action_list.add_argument("--json", action="store_true", dest="as_json")
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Inspect the privacy-safe lifecycle index for agent research runs.",
+    )
+    run_subparsers = run_parser.add_subparsers(dest="run_command", required=True)
+    run_step = run_subparsers.add_parser(
+        "step", help="Append one hash-bound lifecycle step."
+    )
+    run_step.add_argument("run_id")
+    run_step.add_argument("step_id")
+    run_step.add_argument("--type", choices=RUN_STEP_TYPES, required=True, dest="step_type")
+    run_step.add_argument("--status", choices=RUN_STEP_STATUSES, required=True)
+    run_step.add_argument(
+        "--input-hash",
+        required=True,
+        help="sha256 digest of private step input; raw prompts and tool output are never stored.",
+    )
+    run_step.add_argument("--output-hash")
+    run_step.add_argument("--action-ref")
+    run_step.add_argument("--context-ref", action="append", default=[])
+    run_step.add_argument("--requires-human", action="store_true")
+    run_step.add_argument("--next-action")
+    run_step.add_argument("--error-code")
+    run_step.add_argument("--sequence", type=int)
+    run_step.add_argument("--actor", default="agent:xscientist")
+    run_step.add_argument("--repo", default=".")
+    run_step.add_argument("--json", action="store_true", dest="as_json")
+    run_list = run_subparsers.add_parser("list", help="List run summaries.")
+    run_list.add_argument("--repo", default=".")
+    run_list.add_argument("--json", action="store_true", dest="as_json")
+    run_show = run_subparsers.add_parser("show", help="Show one run summary and steps.")
+    run_show.add_argument("run_id")
+    run_show.add_argument("--repo", default=".")
+    run_show.add_argument("--json", action="store_true", dest="as_json")
 
     objects_parser = subparsers.add_parser(
         "objects", help="List or inspect typed scientific objects."
@@ -4200,6 +4243,69 @@ def main(
                     f"{result['object_id']} action={payload.get('action_id')} "
                     f"status={payload.get('status')} attempt={payload.get('attempt')}"
                 )
+            return 0
+
+        if args.command == "run":
+            if args.run_command == "step":
+                if args.status == "completed" and not args.output_hash:
+                    raise ResearchGitError(
+                        "run step --status completed requires --output-hash"
+                    )
+                result = ResearchRunLedger(args.repo).append(
+                    args.run_id,
+                    args.step_id,
+                    args.step_type,
+                    args.status,
+                    args.input_hash,
+                    output_value=args.output_hash,
+                    action_ref=args.action_ref,
+                    context_refs=args.context_ref,
+                    requires_human=args.requires_human,
+                    next_action=args.next_action,
+                    error_code=args.error_code,
+                    sequence=args.sequence,
+                    actor_id=args.actor,
+                )
+                if args.as_json:
+                    _print_json(result)
+                else:
+                    payload = result["payload"]
+                    print(
+                        f"{result['object_id']} run={payload['run_id']} "
+                        f"sequence={payload['sequence']} status={payload['status']}"
+                    )
+                return 0
+            if args.run_command == "list":
+                result = list_research_runs(args.repo)
+                if args.as_json:
+                    _print_json(result)
+                else:
+                    for item in result:
+                        attention = " attention" if item["attention_required"] else ""
+                        print(
+                            f"{item['run_id']}  {item['status']}  "
+                            f"steps={item['step_count']}{attention}"
+                        )
+                return 0
+            summary = summarize_research_run(args.repo, args.run_id)
+            if args.as_json:
+                _print_json(
+                    {
+                        "summary": summary,
+                        "steps": list_research_run(args.repo, args.run_id),
+                    }
+                )
+            else:
+                print(f"Run:       {summary['run_id']}")
+                print(f"Status:    {summary['status']}")
+                print(f"Steps:     {summary['step_count']}")
+                if summary["attention_required"]:
+                    print("Attention:")
+                    for item in summary["attention"]:
+                        print(
+                            f"  {item['step_id']} {item['status']} "
+                            f"next={item['next_action'] or 'none'}"
+                        )
             return 0
 
         if args.command == "objects":

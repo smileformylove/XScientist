@@ -245,6 +245,25 @@ xscientist research action finish video-search-01 --status completed \
   --output-hash sha256:... --produce rso-EVIDENCE_ID --repo ./my-study
 ```
 
+For a run that spans several actions, inspections, or follow-up experiments,
+the privacy-safe `research_run` index records one ordered lifecycle envelope.
+Its steps (`plan`, `delegate`, `execute`, `inspect`, `repair`, `judge`, and
+`stop`) link existing action receipts and prior evidence as context-only
+inputs. It stores hashes and object IDs only, surfaces `waiting`/`blocked`
+steps that need a person, and rejects skipped or conflicting sequences:
+
+```bash
+xscientist research run step video-followup-01 inspect-01 \
+  --type inspect --status waiting --input-hash sha256:... \
+  --context-ref rso-EVIDENCE_ID --requires-human \
+  --next-action video.inspect --repo ./my-study
+xscientist research run show video-followup-01 --repo ./my-study --json
+```
+
+This is the coordination layer for existing action, video, evidence, and
+experiment protocols; it does not bypass experiment admission or evidence
+verification. See [Research run index](docs/RESEARCH_RUNS.md).
+
 ## Development main: structured research history
 
 This section describes unreleased protocol work on `main`; install the source
@@ -1615,6 +1634,7 @@ print(result.returncode)
 | Video assets and temporal evidence | [Video evidence commands, VLM integration and roadmap](https://github.com/smileformylove/XScientist/blob/main/docs/VIDEO_EVIDENCE.md) |
 | Literature opportunities | [Opportunity funnel](https://github.com/smileformylove/XScientist/blob/main/docs/OPPORTUNITY_FUNNEL.md) · [FAR paper](https://arxiv.org/abs/2608.16977) |
 | Research policy rollouts | [Rollout contract](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_ROLLOUTS.md) · [Faraday paper](https://arxiv.org/abs/2608.13331) |
+| Resumable cross-action runs | [Research run index](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_RUNS.md) |
 | Belief-aware decision context | [Belief-context projection](https://github.com/smileformylove/XScientist/blob/main/docs/BELIEF_CONTEXT.md) · [BCG project](https://github.com/bigai-nlco/belief-context-graph) |
 | Research/code lineage and licenses | [Research lineage](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_LINEAGE.md) · [Third-party notices](https://github.com/smileformylove/XScientist/blob/main/THIRD_PARTY_NOTICES.md) |
 | Integrity and scientific strategy | [Research integrity](https://github.com/smileformylove/XScientist/blob/main/docs/RESEARCH_INTEGRITY.md) · [Science constitution](https://github.com/smileformylove/XScientist/blob/main/docs/SCIENCE_CONSTITUTION.md) |
