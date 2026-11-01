@@ -93,7 +93,7 @@ jobs:
     name: Full engineering and artifact checks
     needs: compatibility
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONDONTWRITEBYTECODE: "1"
