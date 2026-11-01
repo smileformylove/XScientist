@@ -9,54 +9,54 @@
 #   pip install -r requirements.txt -c requirements/constraints-ci.txt
 
 # LLM APIs
-anthropic>=0.25,<1
-backoff>=2,<3
-openai>=1.40,<3
-zhipuai>=2,<3
+anthropic>=2.3.0,<3
+backoff>=2.2.1,<3
+openai>=3.41.0,<4
+zhipuai>=2.1.5.20250825,<3
 
 # Viz / document processing
-matplotlib>=3.8,<4
-pillow>=10,<12
-pandas>=2,<3
-pypdf>=4,<7
-pymupdf>=1.24,<2
-pymupdf4llm>=0.0.20,<1
-seaborn>=0.13,<1
+matplotlib>=3.10.9,<4
+pillow>=12.3.0,<13
+pandas>=2.3.3,<3
+pypdf>=6.21.4,<7
+pymupdf>=1.28.2,<2
+pymupdf4llm>=2.0,<3
+seaborn>=0.13.2,<1
 
 # Common dependencies
-numpy>=1.26,<3
-psutil>=5.9,<8
-PyYAML>=6,<7
-requests>=2.31,<3
-scikit-learn>=1.4,<2
-transformers>=4.40,<5
-datasets>=2.19,<5
-tiktoken>=0.7,<1
-tomli>=2,<3
-tqdm>=4.66,<5
-rich>=13,<15
-humanize>=4,<5
-dataclasses-json>=0.6,<1
-black>=24,<26
-genson>=1.2,<2
-shutup>=0.2,<1
-python-igraph>=0.11,<1
-coolname>=2,<3
-cryptography>=42,<47
-jsonschema>=4.22,<5
-omegaconf>=2.3,<3
-botocore>=1.34,<2
-boto3>=1.34,<2
-huggingface-hub>=0.23,<2
+numpy>=2.2.6,<3
+psutil>=7.2.2,<8
+PyYAML>=6.0.3,<7
+requests>=2.34.2,<3
+scikit-learn>=1.7.2,<2
+transformers>=5.20.2,<6
+datasets>=5.1.0,<6
+tiktoken>=0.14.0,<1
+tomli>=2.5.0,<3
+tqdm>=4.70.1,<5
+rich>=15.0.0,<16
+humanize>=4.16.0,<5
+dataclasses-json>=0.6.7,<1
+black>=26.10.1,<27
+genson>=1.4.0,<2
+shutup>=0.3.0,<1
+python-igraph>=1.0.0,<2
+coolname>=5.0.0,<6
+cryptography>=50.0.2,<51
+jsonschema>=4.26.0,<5
+omegaconf>=2.4.0,<3
+botocore>=1.43.121,<2
+boto3>=1.43.121,<2
+huggingface-hub>=2.3.0,<3
 
 # Engineering / service extras
-build>=1.2,<2
-coverage>=7.6,<8
-fastapi>=0.115,<1
-httpx>=0.27,<1
-mkdocs>=1.6,<2
-mkdocs-material>=9.5,<10
-pydantic>=2.5,<3
-pytest>=8,<10
-twine>=6,<7
-uvicorn>=0.30,<1
+build>=1.6.1,<2
+coverage>=7.16.2,<8
+fastapi>=0.162.0,<1
+httpx>=0.28.1,<1
+mkdocs>=1.6.1,<2
+mkdocs-material>=9.7.7,<10
+pydantic>=2.14.1,<3
+pytest>=9.2.0,<10
+twine>=7.0.0,<8
+uvicorn>=0.54.0,<1
